@@ -1784,9 +1784,9 @@ If no fixes were required, skip this commit.
 Run from the repo root after tests pass:
 
 ```bash
-ssh root@192.168.5.28 'mkdir -p /mnt/user/appdata/cms-tg-ingest/backups && cd /mnt/user/appdata/cms-tg-ingest && tar -czf backups/app-before-taskstore-engine-$(date +%Y%m%d-%H%M%S).tgz --exclude=backups .'
-rsync -az --exclude='.git/' --exclude='.env' --exclude='docker-compose.yml' --exclude='data/' --exclude='backups/' --exclude='__pycache__/' --exclude='.pytest_cache/' --exclude='.worktrees/' ./ root@192.168.5.28:/mnt/user/appdata/cms-tg-ingest/
-ssh root@192.168.5.28 'cd /mnt/user/appdata/cms-tg-ingest && docker compose up -d --build'
+ssh root@<unraid-host> 'mkdir -p /mnt/user/appdata/cms-tg-ingest/backups && cd /mnt/user/appdata/cms-tg-ingest && tar -czf backups/app-before-taskstore-engine-$(date +%Y%m%d-%H%M%S).tgz --exclude=backups .'
+rsync -az --exclude='.git/' --exclude='.env' --exclude='docker-compose.yml' --exclude='data/' --exclude='backups/' --exclude='__pycache__/' --exclude='.pytest_cache/' --exclude='.worktrees/' ./ root@<unraid-host>:/mnt/user/appdata/cms-tg-ingest/
+ssh root@<unraid-host> 'cd /mnt/user/appdata/cms-tg-ingest && docker compose up -d --build'
 ```
 
 Expected: container rebuilds and starts without overwriting remote `.env`, `data/`, `docker-compose.yml`, or backups.
@@ -1796,7 +1796,7 @@ Expected: container rebuilds and starts without overwriting remote `.env`, `data
 Run:
 
 ```bash
-ssh root@192.168.5.28 'docker ps --filter name=cms-tg-ingest --format "{{.Names}} {{.Status}}" && docker exec cms-tg-ingest python3 -m py_compile /app/bridge.py /app/doctor.py /app/app/task_runner.py && docker exec cms-tg-ingest python3 /app/doctor.py --quiet'
+ssh root@<unraid-host> 'docker ps --filter name=cms-tg-ingest --format "{{.Names}} {{.Status}}" && docker exec cms-tg-ingest python3 -m py_compile /app/bridge.py /app/doctor.py /app/app/task_runner.py && docker exec cms-tg-ingest python3 /app/doctor.py --quiet'
 ```
 
 Expected: container is running/healthy, py_compile exits 0, doctor exits 0.
@@ -1806,8 +1806,8 @@ Expected: container is running/healthy, py_compile exits 0, doctor exits 0.
 Ask the user to send one new 115 link to the Telegram bot. Then check:
 
 ```bash
-ssh root@192.168.5.28 'docker logs --tail=200 cms-tg-ingest'
-ssh root@192.168.5.28 'docker exec cms-tg-ingest python3 - <<"PY"
+ssh root@<unraid-host> 'docker logs --tail=200 cms-tg-ingest'
+ssh root@<unraid-host> 'docker exec cms-tg-ingest python3 - <<"PY"
 from app.task_store import TaskStore
 s=TaskStore("/data/tasks.db")
 for t in s.list_recent_tasks(5):
