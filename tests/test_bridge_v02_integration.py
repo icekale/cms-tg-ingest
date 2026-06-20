@@ -73,6 +73,43 @@ class BridgeV02IntegrationTests(unittest.TestCase):
 
                 self.assertIsNone(server)
 
+    def test_run_forever_passes_task_store_to_handle_update(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):
+            cfg = bridge.Config.from_env()
+            seen = []
+
+            class OneUpdateTelegram:
+                def __init__(self, token, timeout=60):
+                    self.calls = 0
+
+                def get_updates(self, offset=None, timeout=30):
+                    if self.calls:
+                        raise KeyboardInterrupt()
+                    self.calls += 1
+                    return [{"update_id": 1, "message": {"chat": {"id": 464100862}, "from": {"id": 464100862}, "text": "/help"}}]
+
+                def send_message(self, *args, **kwargs):
+                    return {"ok": True}
+
+            def fake_handle_update(*args, **kwargs):
+                seen.append(kwargs.get("task_store"))
+
+            with patch.object(bridge, "TelegramClient", OneUpdateTelegram), \
+                 patch.object(bridge, "CmsClient", lambda config: object()), \
+                 patch.object(bridge, "EmbyClient", lambda *args, **kwargs: None), \
+                 patch.object(bridge, "OpenAIClassifier", lambda config: None), \
+                 patch.object(bridge, "TmdbWebResolver", lambda timeout=20: None), \
+                 patch.object(bridge, "maybe_start_web_server", lambda config, task_store: None), \
+                 patch.object(bridge, "start_status_repair_loop", lambda *args, **kwargs: None), \
+                 patch.object(bridge, "write_metrics_snapshot", lambda *args, **kwargs: None), \
+                 patch.object(bridge, "normalize_emby_parents", lambda *args, **kwargs: 0), \
+                 patch.object(bridge, "handle_update", fake_handle_update):
+                with self.assertRaises(KeyboardInterrupt):
+                    bridge.run_forever(cfg)
+
+            self.assertEqual(len(seen), 1)
+            self.assertIsNotNone(seen[0])
+
 
 class FakeTelegram:
     def __init__(self):

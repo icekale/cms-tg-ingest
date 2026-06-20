@@ -3738,6 +3738,7 @@ def run_forever(config: Config) -> None:
                     tmdb_resolver=tmdb_resolver,
                     self_share_workflow=self_share_workflow,
                     cleanup_client=p115 if self_share_config.cleanup_after_emby else None,
+                    task_store=task_store,
                 )
         except Exception as exc:
             log_polling_error(telegram, exc)
