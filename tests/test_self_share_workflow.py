@@ -829,6 +829,40 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertIn("STRM 不是预期的分享链接", updated["move_error"])
             self.assertFalse((dest / "movie.strm").exists())
 
+    def test_merge_self_share_folder_rejects_tmdb_mismatched_folder_before_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Z-长安的荔枝-2025-[tmdb=1356587]"
+            dest = root / "library" / "Z-长安的荔枝-2025-[tmdb=1356587]"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            (source / "movie.strm").write_text("http://cms/s/ownshare_1212_file.mp4", encoding="utf-8")
+            store = bridge.SubmissionStore(root / "db.sqlite")
+            row = store.upsert_submission(
+                bridge.ShareKey("abc", "1234"),
+                "https://115cdn.com/s/abc?password=1234",
+                "received",
+                title="S 沙尘暴(2025)",
+            )
+            row = store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_code="ownshare",
+            ) or row
+            row = store.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": "沙尘暴", "tmdb_id": "299165", "category": "外国电视", "type": "tv"},
+                "confident",
+            ) or row
+            plan = bridge.MovePlan("conflict", "ready", source, dest, "外国电视")
+
+            updated = bridge.merge_self_share_strm_folder(plan, store, row)
+
+            self.assertEqual(updated["move_status"], "error")
+            self.assertIn("任务 TMDB 299165", updated["move_error"])
+            self.assertIn("文件夹 TMDB 1356587", updated["move_error"])
+            self.assertFalse((dest / "movie.strm").exists())
+
     def test_cleanup_pending_self_share_sources_after_move_and_emby_confirmed(self):
         class FakeP115:
             def __init__(self):

@@ -980,6 +980,10 @@ def validate_self_share_strm_source(source: Path, row: dict[str, Any]) -> str:
         return ""
     if not source.exists() or not source.is_dir():
         return ""
+    expected_tmdb = expected_task_tmdb_id(parse_recognition_json(row), row)
+    folder_tmdb = extract_tmdb_id_from_name(str(source))
+    if expected_tmdb and folder_tmdb and expected_tmdb != folder_tmdb:
+        return f"任务 TMDB {expected_tmdb} 与文件夹 TMDB {folder_tmdb} 不一致，阻止移动 STRM"
     own_share_code = str(row.get("own_share_code") or "").strip()
     if not own_share_code:
         return "等待自有分享码，暂不移动 STRM"
