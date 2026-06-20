@@ -1052,6 +1052,8 @@ class SelfShareWorkflow:
                 own_share_receive_code=share.get("receive_code"),
                 own_share_url=share.get("share_url"),
             ) or row
+        if self.config.cleanup_after_emby and str(row.get("cleanup_status") or "").lower() not in {"deleted", "pending"}:
+            row, _line = cleanup_own_share_source(self.store, row, self.p115)
         if row.get("share_sync_status") != "submitted":
             self.cms.add_share115_sync_task(
                 str(row.get("own_share_code") or ""),
@@ -1175,15 +1177,6 @@ def cleanup_own_share_source(store: SubmissionStore, row: dict[str, Any], cleanu
     file_id = str(row.get("own_share_file_id") or "").strip()
     if not file_id:
         return row, ""
-    if str(row.get("move_status") or "").lower() != "moved":
-        updated = store.update_cleanup(int(row["id"]), "pending", file_id=file_id, error="等待 STRM 移动完成") or row
-        return updated, "等待 STRM 移动完成后再删除 115 转存源。"
-    dest_path = str(row.get("dest_path") or "").strip()
-    if dest_path:
-        dest = Path(dest_path)
-        if not dest.exists() or not has_strm_file(dest):
-            updated = store.update_cleanup(int(row["id"]), "pending", file_id=file_id, error="等待 STRM 文件确认") or row
-            return updated, "等待 STRM 文件确认后再删除 115 转存源。"
     share_code = str(row.get("own_share_code") or "").strip()
     if not share_code:
         updated = store.update_cleanup(int(row["id"]), "pending", file_id=file_id, error="等待自有分享创建完成") or row

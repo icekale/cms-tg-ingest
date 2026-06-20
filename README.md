@@ -13,7 +13,7 @@
 - 可选 OpenAI 兼容接口作为分类兜底。
 - 自分享 STRM 工作流：转存、等待 CMS 自动整理、创建自己的 115 永久分享、调用 CMS 分享同步、移动生成的 STRM。
 - Emby 入库确认，并返回命中的媒体库名称。
-- 可选在 Emby 确认入库后删除 115 转存源文件，同时保留自己的 115 分享不取消。
+- 可选在自有分享创建成功后删除 115 转存源文件，同时保留自己的 115 分享不取消。
 - `doctor.py` 离线诊断配置和挂载路径。
 
 ## v0.2 Alpha：任务引擎和 Web 管理页
@@ -95,7 +95,7 @@ MOVE_CONFLICT_POLICY=merge
 6. CMS 把 STRM 写入 `SELF_SHARE_STRM_ROOT`。
 7. 外挂把 STRM 文件夹移动或合并到目标媒体库目录。
 8. 外挂通过 Emby API 确认媒体已入库，并返回媒体库名称。
-9. 如果启用清理，外挂只删除 115 转存源文件或源文件夹，不取消你自己的永久分享。
+9. 如果启用清理，外挂会在自有分享创建成功后删除 115 转存源文件或源文件夹，不取消你自己的永久分享。
 
 ## 路径映射
 
@@ -172,7 +172,7 @@ python /app/doctor.py
 - 不要公开 `.env`、115 cookie、Telegram token、Emby API key、OpenAI API key。
 - 生产环境建议固定版本号，不建议盲目使用 `latest`。
 - 批量使用前，先用一个小体量链接测试完整流程。
-- `SELF_SHARE_CLEANUP_AFTER_EMBY=true` 只会在 STRM 已移动且 Emby 确认入库后删除 115 转存源，不会取消你自己的永久分享。
+- `SELF_SHARE_CLEANUP_AFTER_EMBY=true` 会在自有分享创建成功后删除 115 转存源，不会取消你自己的永久分享；变量名保留历史兼容。
 - 本项目依赖 CMS、115、Telegram、Emby 等第三方接口，这些服务的行为可能变化。
 
 ## 开发

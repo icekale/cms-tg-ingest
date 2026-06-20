@@ -41,6 +41,12 @@ class V02DocsTests(unittest.TestCase):
         self.assertIn("0.2.0-alpha.2", changelog)
         self.assertIn("真实工作流进度写入 TaskStore", changelog)
 
+    def test_readme_documents_cleanup_after_own_share(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("自有分享创建成功后删除 115 转存源", readme)
+        self.assertNotIn("只会在 STRM 已移动且 Emby 确认入库后删除", readme)
+
 
 if __name__ == "__main__":
     unittest.main()

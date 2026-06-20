@@ -218,6 +218,60 @@ class SelfShareWorkflowTests(unittest.TestCase):
         self.assertIsNone(source_path)
 
 
+
+    def test_prepare_deletes_115_source_immediately_after_own_share_created(self):
+        events = []
+
+        class FakeStore:
+            def __init__(self):
+                self.row = {"id": 8, "created_at": 1}
+                self.cleanup = None
+            def update_self_share(self, row_id, **fields):
+                self.row.update(fields)
+                return dict(self.row)
+            def update_cleanup(self, row_id, status, file_id=None, error=None):
+                self.cleanup = {"row_id": row_id, "status": status, "file_id": file_id, "error": error}
+                self.row.update({"cleanup_status": status, "cleanup_file_id": file_id, "cleanup_error": error})
+                return dict(self.row)
+
+        class FakeCms:
+            def run_auto_organize(self):
+                events.append("organize")
+                return {"code": 200}
+            def add_share115_sync_task(self, share_code, receive_code, cid="0", local_path="/media/share"):
+                events.append(f"sync:{share_code}")
+                return {"code": 200}
+
+        class FakeP115:
+            def find_organized_folder(self, recognition, share_name, excluded_parent_ids=None, min_update_time=0):
+                return {"file_id": "fid-final", "file_name": "G-高地战-2011-[tmdb=79553]"}
+            def create_long_share(self, file_id):
+                events.append(f"share:{file_id}")
+                return {"share_code": "dummyown", "receive_code": "1212", "share_url": "https://115cdn.com/s/dummyown"}
+            def delete_file(self, file_id):
+                events.append(f"delete:{file_id}")
+                return {"state": True}
+
+        store = FakeStore()
+        workflow = bridge.SelfShareWorkflow(
+            bridge.SelfShareConfig(
+                enabled=True,
+                strm_root=Path("/tmp/no-such-root"),
+                cms_local_path="/media/share",
+                cms_cid="0",
+                cleanup_after_emby=True,
+            ),
+            FakeCms(),
+            FakeP115(),
+            store,
+        )
+
+        row, _source_path = workflow.prepare(dict(store.row), {"title": "高地战", "tmdb_id": "79553"}, "高地战 (2011) {tmdb-79553}")
+
+        self.assertEqual(events, ["organize", "share:fid-final", "delete:fid-final", "sync:dummyown"])
+        self.assertEqual(row["cleanup_status"], "deleted")
+        self.assertEqual(store.cleanup["file_id"], "fid-final")
+
     def test_prepare_sets_category_from_organized_folder_parent_cid(self):
         class FakeStore:
             def __init__(self):
@@ -468,7 +522,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
         self.assertEqual(store.cleanup["status"], "deleted")
         self.assertIn("115转存源已删除", telegram.messages[0])
 
-    def test_cleanup_waits_until_strm_move_is_done(self):
+    def test_cleanup_waits_until_own_share_is_created(self):
         class FakeStore:
             def __init__(self):
                 self.cleanup = None
@@ -491,10 +545,10 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
         self.assertEqual(p115.deleted, [])
         self.assertEqual(store.cleanup["status"], "pending")
-        self.assertIn("等待 STRM 移动完成", line)
+        self.assertIn("等待自有分享创建完成", line)
 
 
-    def test_cleanup_waits_when_moved_dest_has_no_strm_file(self):
+    def test_cleanup_deletes_after_own_share_even_when_dest_has_no_strm_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp) / "Movie" / "X-新·驯龙高手-2025-[tmdb=1087192]"
 
@@ -524,9 +578,9 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
             _updated, line = bridge.cleanup_own_share_source(store, row, p115)
 
-            self.assertEqual(p115.deleted, [])
-            self.assertEqual(store.cleanup["status"], "pending")
-            self.assertIn("等待 STRM 文件确认", line)
+            self.assertEqual(p115.deleted, ["fid-final"])
+            self.assertEqual(store.cleanup["status"], "deleted")
+            self.assertIn("115转存源已删除", line)
 
     def test_move_notification_reports_merged_conflict_as_moved(self):
         class FakeTelegram:
