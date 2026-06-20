@@ -149,6 +149,23 @@ class OrganizedFolderSelectionTests(unittest.TestCase):
 
         self.assertEqual(selected["file_id"], "target")
 
+    def test_select_source_residue_files_matches_recent_receive_file_by_title_year(self):
+        items = [
+            {"fid": "recent-file", "n": "银行家.2020.1080p.BluRay.REMUX.TrueHD.7.1.mkv", "cid": "recent", "tu": "1781962470"},
+            {"fid": "old-file", "n": "银行家.2020.1080p.BluRay.REMUX.TrueHD.7.1.mkv", "cid": "recent", "tu": "1780000000"},
+            {"fid": "wrong-file", "n": "我是余欢水.2020.S01E01.mkv", "cid": "recent", "tu": "1781962470"},
+        ]
+
+        selected = bridge.select_source_residue_115_files(
+            items,
+            {"title": "银行家", "tmdb_id": "627725"},
+            "The.Banker.2020.1080p.BluRay.REMUX.AVC.DTS-HD.MA.TrueHD.7.1-FGT.mkv",
+            excluded_file_ids={"organized-folder"},
+            min_update_time=1781962277,
+        )
+
+        self.assertEqual([item["file_id"] for item in selected], ["recent-file"])
+
 
 class SelfShareWorkflowTests(unittest.TestCase):
     def test_self_share_skipped_move_is_retryable(self):
@@ -271,6 +288,70 @@ class SelfShareWorkflowTests(unittest.TestCase):
         self.assertEqual(events, ["organize", "share:fid-final", "delete:fid-final", "sync:dummyown"])
         self.assertEqual(row["cleanup_status"], "deleted")
         self.assertEqual(store.cleanup["file_id"], "fid-final")
+
+    def test_prepare_deletes_receive_residue_immediately_after_own_share_created(self):
+        events = []
+
+        class FakeStore:
+            def __init__(self):
+                self.row = {"id": 8, "created_at": 1781962277}
+            def update_self_share(self, row_id, **fields):
+                self.row.update(fields)
+                return dict(self.row)
+            def update_cleanup(self, row_id, status, file_id=None, error=None):
+                self.row.update({"cleanup_status": status, "cleanup_file_id": file_id, "cleanup_error": error})
+                return dict(self.row)
+
+        class FakeCms:
+            def run_auto_organize(self):
+                events.append("organize")
+                return {"code": 200}
+            def add_share115_sync_task(self, share_code, receive_code, cid="0", local_path="/media/share"):
+                events.append(f"sync:{share_code}")
+                return {"code": 200}
+
+        class FakeP115:
+            def find_organized_folder(self, recognition, share_name, excluded_parent_ids=None, min_update_time=0):
+                return {"file_id": "fid-final", "file_name": "Y-银行家-2020-[tmdb=627725]"}
+            def create_long_share(self, file_id):
+                events.append(f"share:{file_id}")
+                return {"share_code": "dummyown", "receive_code": "1212", "share_url": "https://115cdn.com/s/dummyown"}
+            def find_source_residue_files(self, recognition, share_name, parent_ids, excluded_file_ids=None, min_update_time=0):
+                events.append(f"find_residue:{','.join(sorted(parent_ids))}:{min_update_time}")
+                return [{"file_id": "fid-recent", "file_name": "银行家.2020.1080p.mkv", "parent_id": "recent"}]
+            def delete_file(self, file_id):
+                events.append(f"delete:{file_id}")
+                return {"state": True}
+
+        store = FakeStore()
+        config = bridge.SelfShareConfig(
+            enabled=True,
+            strm_root=Path("/tmp/no-such-root"),
+            cms_local_path="/media/share",
+            cms_cid="0",
+            cleanup_after_emby=True,
+        )
+        config.source_cleanup_parent_ids = {"recent"}
+        workflow = bridge.SelfShareWorkflow(config, FakeCms(), FakeP115(), store)
+
+        row, _source_path = workflow.prepare(
+            dict(store.row),
+            {"title": "银行家", "tmdb_id": "627725"},
+            "The.Banker.2020.1080p.BluRay.REMUX.AVC.DTS-HD.MA.TrueHD.7.1-FGT.mkv",
+        )
+
+        self.assertEqual(
+            events,
+            [
+                "organize",
+                "share:fid-final",
+                "find_residue:recent:1781962277.0",
+                "delete:fid-recent",
+                "delete:fid-final",
+                "sync:dummyown",
+            ],
+        )
+        self.assertEqual(row["cleanup_status"], "deleted")
 
     def test_prepare_sets_category_from_organized_folder_parent_cid(self):
         class FakeStore:

@@ -82,6 +82,7 @@ P115_COOKIE_PATH=/config/115-cookies.txt
 SELF_SHARE_STRM_ROOT=/mnt/user/Unraid/strm/share
 SELF_SHARE_CMS_LOCAL_PATH=/media/share
 SELF_SHARE_CLEANUP_AFTER_EMBY=true
+SELF_SHARE_SOURCE_CLEANUP_PARENT_IDS=
 MOVE_CONFLICT_POLICY=merge
 ```
 
@@ -96,6 +97,7 @@ MOVE_CONFLICT_POLICY=merge
 7. 外挂把 STRM 文件夹移动或合并到目标媒体库目录。
 8. 外挂通过 Emby API 确认媒体已入库，并返回媒体库名称。
 9. 如果启用清理，外挂会在自有分享创建成功后删除 115 转存源文件或源文件夹，不取消你自己的永久分享。
+10. 如果配置了 `SELF_SHARE_SOURCE_CLEANUP_PARENT_IDS`，外挂还会在这些 115 父目录中删除同一任务的接收阶段残留文件。
 
 ## 路径映射
 
@@ -173,6 +175,7 @@ python /app/doctor.py
 - 生产环境建议固定版本号，不建议盲目使用 `latest`。
 - 批量使用前，先用一个小体量链接测试完整流程。
 - `SELF_SHARE_CLEANUP_AFTER_EMBY=true` 会在自有分享创建成功后删除 115 转存源，不会取消你自己的永久分享；变量名保留历史兼容。
+- `SELF_SHARE_SOURCE_CLEANUP_PARENT_IDS` 是额外清理白名单，只会扫描你显式配置的 115 父目录 CID；不要配置整个媒体库根目录。
 - 本项目依赖 CMS、115、Telegram、Emby 等第三方接口，这些服务的行为可能变化。
 
 ## 开发

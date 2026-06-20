@@ -125,6 +125,7 @@ class Config:
     self_share_cms_local_path: str = "/media/share"
     self_share_cms_cid: str = "0"
     self_share_cleanup_after_emby: bool = False
+    self_share_source_cleanup_parent_ids: str = ""
     self_share_auto_organize_retry_seconds: int = 90
     status_repair_enabled: bool = True
     status_repair_interval_seconds: int = 300
@@ -180,6 +181,7 @@ class Config:
             self_share_cms_local_path=os.environ.get("SELF_SHARE_CMS_LOCAL_PATH", "/media/share"),
             self_share_cms_cid=os.environ.get("SELF_SHARE_CMS_CID", "0"),
             self_share_cleanup_after_emby=parse_bool_env(os.environ.get("SELF_SHARE_CLEANUP_AFTER_EMBY"), False),
+            self_share_source_cleanup_parent_ids=os.environ.get("SELF_SHARE_SOURCE_CLEANUP_PARENT_IDS", ""),
             self_share_auto_organize_retry_seconds=int(os.environ.get("SELF_SHARE_AUTO_ORGANIZE_RETRY_SECONDS", "90")),
             status_repair_enabled=parse_bool_env(os.environ.get("STATUS_REPAIR_ENABLED"), True),
             status_repair_interval_seconds=int(os.environ.get("STATUS_REPAIR_INTERVAL_SECONDS", "300")),
@@ -663,6 +665,7 @@ class SelfShareConfig:
     cms_cid: str = "0"
     excluded_parent_ids: set[str] | None = None
     cleanup_after_emby: bool = False
+    source_cleanup_parent_ids: set[str] | None = None
     auto_organize_retry_seconds: int = 90
     parent_cid_category_map: dict[str, str] | None = None
 
@@ -681,6 +684,7 @@ class SelfShareConfig:
             cms_cid=config.self_share_cms_cid,
             excluded_parent_ids=excluded,
             cleanup_after_emby=config.self_share_cleanup_after_emby,
+            source_cleanup_parent_ids=set(split_env_list(config.self_share_source_cleanup_parent_ids)),
             auto_organize_retry_seconds=max(0, int(config.self_share_auto_organize_retry_seconds)),
             parent_cid_category_map=parse_parent_cid_category_map(config.cms_parent_cid_category_map),
         )
@@ -1053,6 +1057,13 @@ class SelfShareWorkflow:
                 own_share_url=share.get("share_url"),
             ) or row
         if self.config.cleanup_after_emby and str(row.get("cleanup_status") or "").lower() not in {"deleted", "pending"}:
+            cleanup_self_share_source_residue(
+                self.p115,
+                row,
+                recognition,
+                share_name,
+                self.config.source_cleanup_parent_ids,
+            )
             row, _line = cleanup_own_share_source(self.store, row, self.p115)
         if row.get("share_sync_status") != "submitted":
             self.cms.add_share115_sync_task(
@@ -1188,6 +1199,34 @@ def cleanup_own_share_source(store: SubmissionStore, row: dict[str, Any], cleanu
         return updated, f"115转存源删除失败：{exc}"
     updated = store.update_cleanup(int(row["id"]), "deleted", file_id=file_id) or row
     return updated, "115转存源已删除；自有分享保留。"
+
+
+def cleanup_self_share_source_residue(
+    cleanup_client: Any | None,
+    row: dict[str, Any],
+    recognition: dict[str, Any],
+    share_name: str,
+    parent_ids: set[str] | None,
+) -> int:
+    if not cleanup_client or not parent_ids or not hasattr(cleanup_client, "find_source_residue_files"):
+        return 0
+    files = cleanup_client.find_source_residue_files(
+        recognition,
+        share_name,
+        parent_ids,
+        excluded_file_ids={str(row.get("own_share_file_id") or "").strip()},
+        min_update_time=float(row.get("created_at") or 0),
+    )
+    deleted = 0
+    for item in files:
+        file_id = str(item.get("file_id") or "").strip()
+        if not file_id:
+            continue
+        cleanup_client.delete_file(file_id)
+        deleted += 1
+    if deleted:
+        LOG.info("Deleted %s receive-stage 115 residue files for row_id=%s", deleted, row.get("id"))
+    return deleted
 
 
 def category_for_self_share_row(row: dict[str, Any]) -> str:
@@ -1701,6 +1740,14 @@ def p115_parent_id(item: dict[str, Any]) -> str:
     return str(item.get("pid") or item.get("parent_id") or "").strip()
 
 
+def p115_residue_file_id(item: dict[str, Any]) -> str:
+    return str(item.get("fid") or item.get("file_id") or item.get("cid") or "").strip()
+
+
+def p115_residue_parent_id(item: dict[str, Any]) -> str:
+    return str(item.get("cid") or item.get("pid") or item.get("parent_id") or "").strip()
+
+
 def parse_parent_cid_category_map(value: str) -> dict[str, str]:
     result: dict[str, str] = {}
     for item in split_env_list(value):
@@ -1800,6 +1847,48 @@ def select_recent_tmdb_115_folder(
     return matches[0][1]
 
 
+def select_source_residue_115_files(
+    items: list[dict[str, Any]],
+    recognition: dict[str, Any],
+    share_name: str,
+    excluded_file_ids: set[str] | None = None,
+    min_update_time: float = 0,
+) -> list[dict[str, str]]:
+    excluded = {str(value) for value in (excluded_file_ids or set()) if str(value)}
+    tokens = candidate_tokens(recognition, share_name)
+    year = extract_year_from_name(share_name) or extract_year_from_name(str(recognition.get("title") or ""))
+    matches: list[tuple[int, float, dict[str, str]]] = []
+    for item in items:
+        file_id = p115_residue_file_id(item)
+        name = p115_file_name(item)
+        if not file_id or not name or file_id in excluded:
+            continue
+        update_time = as_float(item.get("tu") or item.get("t") or item.get("te"), 0.0)
+        if min_update_time and update_time and update_time < min_update_time:
+            continue
+        norm_name = normalize_text(name)
+        score = 0
+        if any(token and token in norm_name for token in tokens):
+            score += 5
+        if year and year in name:
+            score += 2
+        if score < 5:
+            continue
+        matches.append(
+            (
+                score,
+                update_time,
+                {
+                    "file_id": file_id,
+                    "file_name": name,
+                    "parent_id": p115_residue_parent_id(item),
+                },
+            )
+        )
+    matches.sort(key=lambda value: (value[0], value[1]), reverse=True)
+    return [match[2] for match in matches]
+
+
 class P115WebClient:
     def __init__(self, cookie: str, http: Any | None = None, timeout: int = 60):
         self.cookie = load_cookie_value(cookie)
@@ -1833,6 +1922,35 @@ class P115WebClient:
         )
         self._ensure_state(resp, "115 search failed")
         return iter_items(resp.get("data") or resp)
+
+    def list_files(self, parent_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        resp = self._request(
+            "https://webapi.115.com/files",
+            params={"cid": str(parent_id), "limit": limit, "offset": 0, "show_dir": 1, "fc_mix": 1},
+        )
+        self._ensure_state(resp, "115 list files failed")
+        return iter_items(resp.get("data") or resp)
+
+    def find_source_residue_files(
+        self,
+        recognition: dict[str, Any],
+        share_name: str,
+        parent_ids: set[str],
+        excluded_file_ids: set[str] | None = None,
+        min_update_time: float = 0,
+    ) -> list[dict[str, str]]:
+        items: list[dict[str, Any]] = []
+        for parent_id in parent_ids:
+            parent_id = str(parent_id or "").strip()
+            if parent_id:
+                items.extend(self.list_files(parent_id, limit=100))
+        return select_source_residue_115_files(
+            items,
+            recognition,
+            share_name,
+            excluded_file_ids=excluded_file_ids,
+            min_update_time=min_update_time,
+        )
 
     def find_organized_folder(
         self,
