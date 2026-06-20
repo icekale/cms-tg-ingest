@@ -3169,6 +3169,168 @@ def format_task_label(row: dict[str, Any]) -> str:
     return f"{title} #{task_id}" if task_id else str(title)
 
 
+def sync_cms_status_task_event(task_store: TaskStore | None, row: dict[str, Any], status: str, title: str | None = None):
+    row_for_task = dict(row)
+    if title:
+        row_for_task["title"] = title
+    normalized = str(status or "").lower()
+    task_status = TaskStatus.SUCCEEDED if is_terminal_status(normalized) and normalized not in {"failed", "error"} else TaskStatus.RUNNING
+    if normalized in {"failed", "error"}:
+        task_status = TaskStatus.FAILED
+    return best_effort_task_sync(
+        "cms_status",
+        record_submission_event,
+        task_store,
+        row_for_task,
+        TaskStage.ORGANIZED,
+        task_status,
+        f"CMS 状态：{status or 'unknown'}",
+        error_summary=str(row.get("last_error") or "") if task_status == TaskStatus.FAILED else "",
+    )
+
+
+def sync_needs_action_task_event(task_store: TaskStore | None, row: dict[str, Any], reason: str):
+    return best_effort_task_sync(
+        "needs_action",
+        record_submission_event,
+        task_store,
+        row,
+        TaskStage.NEEDS_ACTION,
+        TaskStatus.NEEDS_ACTION,
+        reason,
+        error_summary=reason,
+    )
+
+
+def sync_self_share_task_events(task_store: TaskStore | None, row: dict[str, Any]) -> None:
+    if not task_store:
+        return
+    if row.get("own_share_code"):
+        best_effort_task_sync(
+            "own_share_created",
+            record_submission_event,
+            task_store,
+            row,
+            TaskStage.OWN_SHARE_CREATED,
+            TaskStatus.SUCCEEDED,
+            "已创建自有 115 分享",
+        )
+    if str(row.get("share_sync_status") or "").lower() in {"submitted", "restore_submitted"}:
+        best_effort_task_sync(
+            "share_sync_submitted",
+            record_submission_event,
+            task_store,
+            row,
+            TaskStage.SHARE_SYNC_SUBMITTED,
+            TaskStatus.RUNNING,
+            "已提交 CMS 分享同步",
+        )
+
+
+def sync_strm_ready_task_event(task_store: TaskStore | None, row: dict[str, Any], move_plan: MovePlan) -> None:
+    if not task_store:
+        return
+    if move_plan.status in {"pending", "conflict"}:
+        best_effort_task_sync(
+            "strm_ready",
+            record_submission_event,
+            task_store,
+            row,
+            TaskStage.STRM_READY,
+            TaskStatus.RUNNING,
+            "已找到 STRM 源目录",
+        )
+    elif move_plan.status == "error":
+        best_effort_task_sync(
+            "strm_ready_failed",
+            record_submission_event,
+            task_store,
+            row,
+            TaskStage.STRM_READY,
+            TaskStatus.FAILED,
+            move_plan.reason,
+            error_summary=move_plan.reason,
+        )
+
+
+def sync_move_task_event(task_store: TaskStore | None, row: dict[str, Any]):
+    move_status = str(row.get("move_status") or "").lower()
+    if move_status == "moved":
+        return best_effort_task_sync(
+            "moved",
+            record_submission_event,
+            task_store,
+            row,
+            TaskStage.MOVED,
+            TaskStatus.SUCCEEDED,
+            f"STRM 已移动：{row.get('dest_path') or '-'}",
+        )
+    if move_status in {"error", "failed"}:
+        reason = str(row.get("move_error") or "STRM 移动失败")
+        return best_effort_task_sync(
+            "move_failed",
+            record_submission_event,
+            task_store,
+            row,
+            TaskStage.MOVED,
+            TaskStatus.FAILED,
+            reason,
+            error_summary=reason,
+        )
+    return None
+
+
+def sync_emby_task_event(task_store: TaskStore | None, row: dict[str, Any]):
+    emby_status = str(row.get("emby_status") or "").lower()
+    if emby_status == "confirmed":
+        return best_effort_task_sync(
+            "emby_confirmed",
+            record_submission_event,
+            task_store,
+            row,
+            TaskStage.EMBY_CONFIRMED,
+            TaskStatus.SUCCEEDED,
+            f"Emby 已确认：{row.get('emby_title') or row.get('title') or row.get('share_code')}",
+        )
+    if emby_status == "timeout":
+        return best_effort_task_sync(
+            "emby_timeout",
+            record_submission_event,
+            task_store,
+            row,
+            TaskStage.EMBY_CONFIRMED,
+            TaskStatus.FAILED,
+            "Emby 确认超时",
+            error_summary="Emby 确认超时",
+        )
+    if emby_status == "disabled":
+        return best_effort_task_sync(
+            "emby_disabled",
+            record_submission_event,
+            task_store,
+            row,
+            TaskStage.EMBY_CONFIRMED,
+            TaskStatus.NEEDS_ACTION,
+            "Emby 确认未启用",
+            error_summary="Emby 确认未启用",
+        )
+    return None
+
+
+def sync_cleanup_task_event(task_store: TaskStore | None, row: dict[str, Any]):
+    if str(row.get("cleanup_status") or "").lower() != "deleted":
+        return None
+    return best_effort_task_sync(
+        "cleaned",
+        record_submission_event,
+        task_store,
+        row,
+        TaskStage.CLEANED,
+        TaskStatus.SUCCEEDED,
+        "115 转存源已删除，自有分享保留",
+    )
+
+
 def format_status(rows: list[dict[str, Any]]) -> str:
     if not rows:
         return "暂无记录。直接发送 115 分享链接即可创建任务。"
