@@ -2014,6 +2014,9 @@ class P115WebClient:
         selected = select_organized_115_folder(items, recognition, share_name, excluded_parent_ids=excluded_parent_ids)
         if selected:
             return selected
+        # If CMS/TMDB already identified the item, do not guess by year; wait for the exact TMDB folder.
+        if tmdb_id:
+            return None
         year = extract_year_from_name(share_name)
         if year:
             fallback_items: list[dict[str, Any]] = []

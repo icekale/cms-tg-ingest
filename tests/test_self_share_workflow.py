@@ -180,6 +180,37 @@ class OrganizedFolderSelectionTests(unittest.TestCase):
 
         self.assertEqual(selected["file_id"], "target")
 
+    def test_find_organized_folder_with_tmdb_does_not_fallback_to_unrelated_year_match(self):
+        class FakeHttp:
+            def __init__(self):
+                self.queries = []
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                query = (params or {}).get("search_value", "")
+                self.queries.append(query)
+                if query in {"1570664", "双喜", "doublehappiness20252160pnfwebdlddp51h265hivewebmkv"}:
+                    return {"state": True, "data": []}
+                if query in {"2025 tmdb", "2025"}:
+                    return {
+                        "state": True,
+                        "data": [
+                            {"cid": "wrong", "n": "D-得闲谨制-2025-[tmdb=1356454]", "pid": "movie_root", "t": "1781967089"},
+                        ],
+                    }
+                return {"state": True, "data": []}
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        selected = client.find_organized_folder(
+            {"ok": True, "title": "双喜", "tmdb_id": "1570664", "share_name": "Double.Happiness.2025.2160p.NF.WEB-DL.DDP5.1.H.265-HiveWeb.mkv"},
+            "Double.Happiness.2025.2160p.NF.WEB-DL.DDP5.1.H.265-HiveWeb.mkv",
+            min_update_time=1781967000,
+        )
+
+        self.assertIsNone(selected)
+        self.assertNotIn("2025 tmdb", http.queries)
+        self.assertNotIn("2025", http.queries)
+
     def test_select_source_residue_files_matches_recent_receive_file_by_title_year(self):
         items = [
             {"fid": "recent-file", "n": "银行家.2020.1080p.BluRay.REMUX.TrueHD.7.1.mkv", "cid": "recent", "tu": "1781962470"},
