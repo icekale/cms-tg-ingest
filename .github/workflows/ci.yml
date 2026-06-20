@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile
+        run: python -m py_compile bridge.py doctor.py
+      - name: Unit tests
+        run: python -W error::ResourceWarning -m unittest discover -s tests -v
+      - name: Docker build
+        run: docker build -t cms-tg-ingest:test .

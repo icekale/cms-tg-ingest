@@ -1,0 +1,20 @@
+services:
+  cms-tg-ingest:
+    build: .
+    image: cms-tg-ingest:local
+    container_name: cms-tg-ingest
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+      # Map your STRM root. Keep container paths aligned with STRM_SOURCE_ROOTS, SELF_SHARE_STRM_ROOT, and STRM_LIBRARY_MAP.
+      - /mnt/user/Unraid/strm:/mnt/user/Unraid/strm:rw
+      # 115 cookie file exported from your CMS/115 environment.
+      - /mnt/user/appdata/cloud-media-sync/config/115-cookies.txt:/config/115-cookies.txt:ro
+    healthcheck:
+      test: ["CMD", "python", "/app/doctor.py", "--quiet"]
+      interval: 5m
+      timeout: 20s
+      retries: 2
+      start_period: 30s
