@@ -3,6 +3,8 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -190,6 +192,50 @@ class DoctorConfigTests(unittest.TestCase):
             doctor.audit_submission_db(db_path)
 
         self.assertTrue(fake.closed)
+
+    def test_audit_summary_groups_counts_and_limits_samples(self):
+        issues = [
+            doctor.AuditIssue(1, "direct_strm", "one"),
+            doctor.AuditIssue(1, "direct_strm", "two"),
+            doctor.AuditIssue(2, "tmdb_mismatch", "three"),
+        ]
+
+        text = doctor.format_audit_summary(issues, sample_limit=2)
+
+        self.assertIn("issues=3", text)
+        self.assertIn("affected_rows=2", text)
+        self.assertIn("direct_strm: 2", text)
+        self.assertIn("tmdb_mismatch: 1", text)
+        self.assertIn("direct_strm row=1: one", text)
+        self.assertIn("direct_strm row=1: two", text)
+        self.assertNotIn("tmdb_mismatch row=2: three", text)
+
+    def test_main_audit_summary_prints_condensed_report(self):
+        report = doctor.DoctorReport([
+            doctor.CheckItem("required_env", True, "ok"),
+            doctor.CheckItem("optional_env", True, "ok"),
+            doctor.CheckItem("filesystem", True, "ok"),
+        ])
+        issues = [
+            doctor.AuditIssue(1, "direct_strm", "one"),
+            doctor.AuditIssue(2, "direct_strm", "two"),
+            doctor.AuditIssue(3, "tmdb_mismatch", "three"),
+        ]
+        output = StringIO()
+
+        with (
+            patch("doctor.run_checks", return_value=report),
+            patch("doctor.audit_submission_db", return_value=issues),
+            redirect_stdout(output),
+        ):
+            exit_code = doctor.main(["--audit-db", "/tmp/submissions.db", "--audit-summary"])
+
+        text = output.getvalue()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("issues=3", text)
+        self.assertIn("direct_strm: 2", text)
+        self.assertIn("tmdb_mismatch: 1", text)
+        self.assertNotIn("FAIL direct_strm row=2: two", text)
 
 
 if __name__ == "__main__":

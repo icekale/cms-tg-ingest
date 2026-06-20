@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sqlite3
+from collections import Counter
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -257,10 +258,31 @@ def audit_submission_db(db_path: str | Path) -> list[AuditIssue]:
     return issues
 
 
+def format_audit_summary(issues: list[AuditIssue], sample_limit: int = 10) -> str:
+    if not issues:
+        return "cms-tg-ingest DB audit summary\nOK no quality issues found"
+    counts = Counter(issue.issue_type for issue in issues)
+    row_ids = {issue.row_id for issue in issues if issue.row_id}
+    lines = [
+        "cms-tg-ingest DB audit summary",
+        f"issues={len(issues)} affected_rows={len(row_ids)}",
+    ]
+    for issue_type, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+        lines.append(f"{issue_type}: {count}")
+    limit = max(0, int(sample_limit))
+    if limit:
+        lines.append(f"samples(first {min(limit, len(issues))})")
+        for issue in issues[:limit]:
+            lines.append(issue.to_text())
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run offline cms-tg-ingest deployment checks.")
     parser.add_argument("--quiet", action="store_true", help="print only failing checks")
     parser.add_argument("--audit-db", help="audit submissions.db for TMDB and STRM quality issues")
+    parser.add_argument("--audit-summary", action="store_true", help="print condensed audit counts instead of every issue")
+    parser.add_argument("--audit-sample-limit", type=int, default=10, help="number of audit samples to show in summary mode")
     args = parser.parse_args(argv)
     report = run_checks()
     if args.quiet:
@@ -271,7 +293,9 @@ def main(argv: list[str] | None = None) -> int:
     audit_issues: list[AuditIssue] = []
     if args.audit_db:
         audit_issues = audit_submission_db(args.audit_db)
-        if audit_issues:
+        if args.audit_summary:
+            print(format_audit_summary(audit_issues, sample_limit=args.audit_sample_limit))
+        elif audit_issues:
             print("cms-tg-ingest DB audit")
             for issue in audit_issues:
                 print("FAIL " + issue.to_text())
