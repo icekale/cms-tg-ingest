@@ -5,6 +5,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 COPY bridge.py doctor.py /app/
+COPY app/ /app/app/
 COPY scripts/ /app/scripts/
 
 VOLUME ["/data"]
