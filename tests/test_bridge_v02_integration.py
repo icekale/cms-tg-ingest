@@ -291,6 +291,32 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(p115.received, [("abc", "1234", "pending-cid")])
             self.assertIn("已存在", telegram.messages[-1][1])
 
+    def test_duplicate_self_share_numeric_completed_status_does_not_receive_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            key = bridge.ShareKey("abc", "1234")
+            row = submission_store.upsert_submission(key, "https://115cdn.com/s/abc?password=1234", "1", title="已完成影片")
+            submission_store.update_self_share(row["id"], workflow_mode="self_share_sync", workflow_phase="share_sync_submitted")
+            cms = FakeCmsSubmit()
+            telegram = FakeTelegram()
+            p115 = FakeP115Receive()
+
+            bridge.handle_update(
+                self.update("https://115cdn.com/s/abc?password=1234"),
+                cms,
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                self_share_workflow=object(),
+                cleanup_client=p115,
+                self_share_receive_cid="pending-cid",
+            )
+
+            self.assertEqual(cms.submitted, [])
+            self.assertEqual(p115.received, [])
+            self.assertIn("已存在", telegram.messages[-1][1])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3502,6 +3502,12 @@ def is_terminal_status(status: str) -> bool:
     return any(word in low for word in TERMINAL_STATUS_KEYWORDS)
 
 
+def should_skip_existing_submission(row: dict[str, Any] | None) -> bool:
+    if not row:
+        return False
+    return str(row.get("status") or "").strip().lower() not in {"failed", "error"}
+
+
 def start_status_poll(
     cms: CmsClient,
     telegram: TelegramClient,
@@ -3824,7 +3830,7 @@ def handle_update(
                 link,
             )
             existing = store.find_by_key(key)
-            if existing and existing.get("status") in {"received", "submitted", "pending", "done", "success", "completed", "unknown"}:
+            if should_skip_existing_submission(existing):
                 best_effort_task_sync("existing_submission", sync_task_from_submission, task_store, existing, "链接已存在")
                 result_lines.append(f"{index}. 已存在：{format_task_label(existing)}")
                 continue
