@@ -3505,10 +3505,26 @@ def is_terminal_status(status: str) -> bool:
     return any(word in low for word in TERMINAL_STATUS_KEYWORDS)
 
 
-def should_skip_existing_submission(row: dict[str, Any] | None) -> bool:
+def should_skip_existing_submission(row: dict[str, Any] | None, self_share_enabled: bool = False) -> bool:
     if not row:
         return False
-    return str(row.get("status") or "").strip().lower() not in {"failed", "error"}
+    if str(row.get("status") or "").strip().lower() in {"failed", "error"}:
+        return False
+    if not self_share_enabled:
+        return True
+    if str(row.get("workflow_mode") or "") == "self_share_sync":
+        return True
+    progress_keys = (
+        "own_share_file_id",
+        "own_share_code",
+        "share_sync_status",
+        "move_status",
+        "emby_status",
+        "cleanup_status",
+        "source_path",
+        "dest_path",
+    )
+    return any(row.get(key) for key in progress_keys)
 
 
 def start_status_poll(
@@ -3833,7 +3849,7 @@ def handle_update(
                 link,
             )
             existing = store.find_by_key(key)
-            if should_skip_existing_submission(existing):
+            if should_skip_existing_submission(existing, self_share_enabled=bool(self_share_workflow)):
                 best_effort_task_sync("existing_submission", sync_task_from_submission, task_store, existing, "链接已存在")
                 result_lines.append(f"{index}. 已存在：{format_task_label(existing)}")
                 continue
