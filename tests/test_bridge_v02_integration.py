@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import bridge
+from app.models import TaskStage, TaskStatus
+from app.task_store import TaskStore
 
 
 class BridgeV02IntegrationTests(unittest.TestCase):
@@ -70,6 +72,118 @@ class BridgeV02IntegrationTests(unittest.TestCase):
                 server = bridge.maybe_start_web_server(cfg, task_store, starter=lambda *args, **kwargs: "server")
 
                 self.assertIsNone(server)
+
+
+class FakeTelegram:
+    def __init__(self):
+        self.messages = []
+
+    def send_message(self, chat_id, text, reply_markup=None):
+        self.messages.append((chat_id, text, reply_markup))
+        return {"ok": True}
+
+
+class FakeCmsSubmit:
+    def __init__(self):
+        self.submitted = []
+
+    def add_share_down(self, link):
+        self.submitted.append(link)
+        return {"id": "cms-1", "name": "示例电影"}
+
+
+class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
+    def update(self, text):
+        return {
+            "message": {
+                "chat": {"id": 464100862},
+                "from": {"id": 464100862},
+                "text": text,
+            }
+        }
+
+    def test_handle_update_records_received_and_cms_submitted_task_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            cms = FakeCmsSubmit()
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("https://115cdn.com/s/abc?password=1234"),
+                cms,
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+            )
+
+            tasks = task_store.list_recent_tasks(limit=10)
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0].share_code, "abc")
+            self.assertEqual(tasks[0].receive_code, "1234")
+            self.assertEqual(tasks[0].current_stage, TaskStage.CMS_SUBMITTED)
+            self.assertEqual(tasks[0].status, TaskStatus.RUNNING)
+            events = task_store.list_events(tasks[0].id)
+            self.assertEqual([event["stage"] for event in events], ["received", "cms_submitted"])
+            self.assertEqual(cms.submitted, ["https://115cdn.com/s/abc?password=1234"])
+
+    def test_duplicate_link_does_not_resubmit_but_keeps_taskstore_consistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            cms = FakeCmsSubmit()
+            telegram = FakeTelegram()
+            update = self.update("https://115cdn.com/s/abc")
+
+            bridge.handle_update(update, cms, telegram, "464100862", submission_store, poll_status=False, task_store=task_store)
+            bridge.handle_update(update, cms, telegram, "464100862", submission_store, poll_status=False, task_store=task_store)
+
+            tasks = task_store.list_recent_tasks(limit=10)
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(len(cms.submitted), 1)
+            self.assertIn("cms_submitted", [event["stage"] for event in task_store.list_events(tasks[0].id)])
+
+    def test_handle_update_without_task_store_preserves_existing_behavior(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            cms = FakeCmsSubmit()
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("https://115cdn.com/s/abc"),
+                cms,
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+            )
+
+            self.assertEqual(len(cms.submitted), 1)
+            self.assertEqual(submission_store.recent(limit=1)[0]["share_code"], "abc")
+
+    def test_handle_update_with_polling_accepts_task_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            cms = FakeCmsSubmit()
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("https://115cdn.com/s/abc"),
+                cms,
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=True,
+                status_poll_seconds=0,
+                task_store=task_store,
+            )
+
+            self.assertEqual(len(cms.submitted), 1)
+            self.assertNotIn("失败", telegram.messages[-1][1])
+            self.assertEqual(submission_store.recent(limit=1)[0]["status"], "submitted")
 
 
 if __name__ == "__main__":

@@ -20,6 +20,8 @@ from pathlib import Path
 from contextlib import contextmanager
 from typing import Any
 
+from app.models import TaskStage, TaskStatus
+from app.task_bridge import ensure_task_for_link, record_failure, record_submission_event, sync_task_from_submission
 from app.task_store import TaskStore
 from app.web import start_web_server
 
@@ -203,6 +205,14 @@ def maybe_start_web_server(config: Config, task_store: TaskStore, starter=start_
     server = starter(task_store, config.web_host, config.web_port, web_token=config.web_token)
     LOG.info("v0.2 web admin started host=%s port=%s", config.web_host, config.web_port)
     return server
+
+
+def best_effort_task_sync(action: str, func, *args, **kwargs):
+    try:
+        return func(*args, **kwargs)
+    except Exception:
+        LOG.debug("TaskStore sync failed during %s", action, exc_info=True)
+        return None
 
 
 class SubmissionStore:
@@ -3193,6 +3203,7 @@ def start_status_poll(
     tmdb_resolver: Any | None = None,
     self_share_workflow: SelfShareWorkflow | None = None,
     cleanup_client: Any | None = None,
+    task_store: TaskStore | None = None,
 ) -> None:
     task_id = row.get("cms_task_id")
     if max_seconds <= 0:
@@ -3346,6 +3357,7 @@ def handle_update(
     tmdb_resolver: Any | None = None,
     self_share_workflow: SelfShareWorkflow | None = None,
     cleanup_client: Any | None = None,
+    task_store: TaskStore | None = None,
 ) -> None:
     if update.get("callback_query"):
         handle_callback_query(update.get("callback_query") or {}, telegram, allowed_chat_id, store, emby=emby)
@@ -3413,13 +3425,31 @@ def handle_update(
     for index, link in enumerate(links, 1):
         try:
             key = normalize_share_link(link)
+            best_effort_task_sync(
+                "received",
+                ensure_task_for_link,
+                task_store,
+                key.share_code,
+                key.receive_code,
+                link,
+            )
             existing = store.find_by_key(key)
             if existing and existing.get("status") in {"submitted", "pending", "done", "success", "completed", "unknown"}:
+                best_effort_task_sync("existing_submission", sync_task_from_submission, task_store, existing, "链接已存在")
                 result_lines.append(f"{index}. 已存在：{format_task_label(existing)}")
                 continue
             resp = cms.add_share_down(link)
             task_id, title = extract_task_info(resp)
             row = store.upsert_submission(key, link, "submitted", cms_task_id=task_id, title=title)
+            best_effort_task_sync(
+                "cms_submitted",
+                record_submission_event,
+                task_store,
+                row,
+                TaskStage.CMS_SUBMITTED,
+                TaskStatus.RUNNING,
+                "已提交 CMS",
+            )
             result_lines.append(f"{index}. 已提交：{format_task_label(row)}")
             LOG.info("Submitted share link to CMS: share_code=%s task_id=%s", key.share_code, task_id)
             if poll_status:
@@ -3437,6 +3467,7 @@ def handle_update(
                     tmdb_resolver=tmdb_resolver,
                     self_share_workflow=self_share_workflow,
                     cleanup_client=cleanup_client,
+                    task_store=task_store,
                 )
         except Exception as exc:  # keep bot alive and report the failed link
             LOG.exception("Failed to submit link")
@@ -3444,6 +3475,16 @@ def handle_update(
             try:
                 key = normalize_share_link(link)
                 store.upsert_submission(key, link, "failed", last_error=category)
+                best_effort_task_sync(
+                    "submit_failed",
+                    record_failure,
+                    task_store,
+                    {"share_code": key.share_code, "receive_code": key.receive_code, "url": link},
+                    TaskStage.CMS_SUBMITTED,
+                    category,
+                    error_type="cms_submit_failed",
+                    error_detail=str(exc),
+                )
             except Exception:
                 LOG.debug("Failed to record failed submission", exc_info=True)
             result_lines.append(f"{index}. 失败：{category}")
