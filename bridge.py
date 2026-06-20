@@ -975,7 +975,38 @@ def execute_strm_move(plan: MovePlan, store: SubmissionStore, row: dict[str, Any
     ) or row
 
 
+def validate_self_share_strm_source(source: Path, row: dict[str, Any]) -> str:
+    if str(row.get("workflow_mode") or "") != "self_share_sync":
+        return ""
+    if not source.exists() or not source.is_dir():
+        return ""
+    own_share_code = str(row.get("own_share_code") or "").strip()
+    if not own_share_code:
+        return "等待自有分享码，暂不移动 STRM"
+    receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+    expected_marker = f"/s/{own_share_code}_{receive_code}_"
+    for path in sorted(source.rglob("*.strm")):
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+        if "/d/" in text:
+            return f"发现直链 STRM：{path}"
+        if expected_marker not in text:
+            return f"STRM 不是预期的分享链接：{path}"
+    return ""
+
+
 def merge_self_share_strm_folder(plan: MovePlan, store: SubmissionStore, row: dict[str, Any]) -> dict[str, Any]:
+    if plan.status in {"pending", "conflict"} and plan.source_path and plan.dest_path:
+        source = safe_resolve(plan.source_path)
+        issue = validate_self_share_strm_source(source, row)
+        if issue:
+            return store.update_move(
+                int(row["id"]),
+                "error",
+                source_path=str(source),
+                dest_path=str(safe_resolve(plan.dest_path)),
+                category_final=plan.category,
+                error=issue,
+            ) or row
     if plan.status != "conflict" or not plan.source_path or not plan.dest_path:
         return execute_strm_move(plan, store, row)
     source = safe_resolve(plan.source_path)

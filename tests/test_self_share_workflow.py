@@ -775,6 +775,60 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertEqual(selected.source_roots, [share_root])
             self.assertEqual(selected.library_roots, config.library_roots)
 
+    def test_merge_self_share_folder_rejects_direct_strm_before_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            dest = root / "library" / "Movie"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            (source / "movie.strm").write_text("http://cms/d/direct.mkv", encoding="utf-8")
+            store = bridge.SubmissionStore(root / "db.sqlite")
+            row = store.upsert_submission(
+                bridge.ShareKey("abc", "1234"),
+                "https://115cdn.com/s/abc?password=1234",
+                "received",
+            )
+            row = store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_code="ownshare",
+            ) or row
+            plan = bridge.MovePlan("conflict", "ready", source, dest, "欧美电影")
+
+            updated = bridge.merge_self_share_strm_folder(plan, store, row)
+
+            self.assertEqual(updated["move_status"], "error")
+            self.assertIn("发现直链 STRM", updated["move_error"])
+            self.assertFalse((dest / "movie.strm").exists())
+
+    def test_merge_self_share_folder_rejects_unexpected_share_code_before_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            dest = root / "library" / "Movie"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            (source / "movie.strm").write_text("http://cms/s/othershare_1212_file.mkv", encoding="utf-8")
+            store = bridge.SubmissionStore(root / "db.sqlite")
+            row = store.upsert_submission(
+                bridge.ShareKey("abc", "1234"),
+                "https://115cdn.com/s/abc?password=1234",
+                "received",
+            )
+            row = store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_code="ownshare",
+            ) or row
+            plan = bridge.MovePlan("conflict", "ready", source, dest, "欧美电影")
+
+            updated = bridge.merge_self_share_strm_folder(plan, store, row)
+
+            self.assertEqual(updated["move_status"], "error")
+            self.assertIn("STRM 不是预期的分享链接", updated["move_error"])
+            self.assertFalse((dest / "movie.strm").exists())
+
     def test_cleanup_pending_self_share_sources_after_move_and_emby_confirmed(self):
         class FakeP115:
             def __init__(self):
@@ -815,13 +869,17 @@ class SelfShareWorkflowTests(unittest.TestCase):
             tv_root = root / "TV"
             source = share_root / "M-梦魇绝镇-2022-[tmdb=124364]"
             (source / "Season 01").mkdir(parents=True)
-            (source / "Season 01" / "梦魇绝镇.strm").write_text("http://example", encoding="utf-8")
+            (source / "Season 01" / "梦魇绝镇.strm").write_text(
+                "http://cms/s/swswrepair_1212_1.mkv",
+                encoding="utf-8",
+            )
             store = bridge.SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(bridge.ShareKey("dummyshare002", "pass002"), "https://115cdn.com/s/dummyshare002?password=pass002", "submitted", title="梦魇绝镇 (2022)")
             store.update_self_share(
                 int(row["id"]),
                 workflow_mode="self_share_sync",
                 own_share_file_name="M-梦魇绝镇-2022-[tmdb=124364]",
+                own_share_code="swswrepair",
             )
             store.update_category(int(row["id"]), "外国电视", "selected")
             store.update_move(
@@ -856,7 +914,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             source.mkdir(parents=True)
             dest.mkdir(parents=True)
             strm_name = "长安的荔枝.strm"
-            (source / strm_name).write_text("http://cms/s/own-share.mp4", encoding="utf-8")
+            (source / strm_name).write_text("http://cms/s/swswmerge_1212_1.mp4", encoding="utf-8")
             (dest / strm_name).write_text("http://cms/d/direct.mp4", encoding="utf-8")
             store = bridge.SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(bridge.ShareKey("dummyshare003", "pass003"), "https://115cdn.com/s/dummyshare003?password=pass003", "submitted", title="长安的荔枝")
@@ -864,6 +922,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 int(row["id"]),
                 workflow_mode="self_share_sync",
                 own_share_file_name="Z-长安的荔枝-2025-[tmdb=1356587]",
+                own_share_code="swswmerge",
             )
             store.update_category(int(row["id"]), "华语电影", "selected")
             store.update_move(
@@ -885,7 +944,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
             self.assertEqual(repaired, 1)
             self.assertFalse(source.exists())
-            self.assertEqual((dest / strm_name).read_text(encoding="utf-8"), "http://cms/s/own-share.mp4")
+            self.assertEqual((dest / strm_name).read_text(encoding="utf-8"), "http://cms/s/swswmerge_1212_1.mp4")
             self.assertEqual(updated["move_status"], "moved")
 
     def test_restore_missing_self_share_library_folder_resubmits_share_sync(self):
