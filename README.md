@@ -16,6 +16,21 @@
 - 可选在 Emby 确认入库后删除 115 转存源文件，同时保留自己的 115 分享不取消。
 - `doctor.py` 离线诊断配置和挂载路径。
 
+## v0.2 Alpha：任务引擎和 Web 管理页
+
+v0.2 引入任务引擎基础：每条链接会记录阶段、错误摘要、事件时间线和重试建议。启用 Web 管理页后，可以在浏览器查看任务列表、任务详情和从失败阶段触发重试。
+
+```env
+TASK_DB_PATH=/data/tasks.db
+WEB_ENABLED=true
+WEB_HOST=0.0.0.0
+WEB_PORT=8787
+WEB_TOKEN=
+TASK_MAX_RETRIES=3
+```
+
+访问地址示例：`http://<unraid-ip>:8787/`。
+
 ## 快速开始
 
 ```sh
