@@ -1442,6 +1442,9 @@ def parse_recognition_json(row: dict[str, Any]) -> dict[str, Any]:
 
 def expected_task_tmdb_id(recognition: dict[str, Any], row: dict[str, Any] | None = None) -> str:
     row = row or {}
+    explicit = str(recognition.get("tmdb_id") or "").strip()
+    if explicit:
+        return explicit
     for value in (
         row.get("title"),
         recognition.get("share_name"),
@@ -1454,7 +1457,7 @@ def expected_task_tmdb_id(recognition: dict[str, Any], row: dict[str, Any] | Non
         tmdb_id = extract_tmdb_id_from_name(str(value or ""))
         if tmdb_id:
             return tmdb_id
-    return str(recognition.get("tmdb_id") or "").strip()
+    return ""
 
 
 def item_tmdb_id(item: dict[str, Any]) -> str:

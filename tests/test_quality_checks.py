@@ -21,6 +21,35 @@ class CategoryAliasTests(unittest.TestCase):
         )
 
 
+class ExpectedTmdbPriorityTests(unittest.TestCase):
+    def test_recognition_tmdb_wins_over_wrong_self_share_folder_marker(self):
+        row = {
+            "title": "Double.Happiness.2025.2160p.NF.WEB-DL.DDP5.1.H.265-HiveWeb.mkv",
+            "recognition_json": '{"title":"双喜","tmdb_id":"1570664","share_name":"Double.Happiness.2025.2160p.NF.WEB-DL.DDP5.1.H.265-HiveWeb.mkv"}',
+            "own_share_file_name": "D-得闲谨制-2025-[tmdb=1356454]",
+            "dest_path": "/media/D-得闲谨制-2025-[tmdb=1356454]",
+            "emby_path": "/media/D-得闲谨制-2025-[tmdb=1356454]/x.strm",
+        }
+
+        self.assertEqual(bridge.expected_task_tmdb_id(bridge.parse_recognition_json(row), row), "1570664")
+
+    def test_quality_issue_flags_wrong_folder_against_recognition_tmdb(self):
+        row = {
+            "title": "Double.Happiness.2025.2160p.NF.WEB-DL.DDP5.1.H.265-HiveWeb.mkv",
+            "emby_status": "confirmed",
+            "emby_title": "得闲谨制",
+            "recognition_json": '{"title":"双喜","tmdb_id":"1570664","share_name":"Double.Happiness.2025.2160p.NF.WEB-DL.DDP5.1.H.265-HiveWeb.mkv"}',
+            "own_share_file_name": "D-得闲谨制-2025-[tmdb=1356454]",
+            "dest_path": "/media/D-得闲谨制-2025-[tmdb=1356454]",
+            "emby_path": "/media/D-得闲谨制-2025-[tmdb=1356454]/x.strm",
+        }
+
+        issue = bridge.quality_issue_for_row(row)
+
+        self.assertIn("任务 TMDB 1570664", issue)
+        self.assertIn("路径 TMDB 1356454", issue)
+
+
 class EmbyQualityMatchTests(unittest.TestCase):
     def test_match_emby_item_rejects_different_task_tmdb(self):
         item = {
@@ -29,8 +58,7 @@ class EmbyQualityMatchTests(unittest.TestCase):
             "ProviderIds": {"Tmdb": "101588"},
         }
         recognition = {
-            "title": "W-我是余欢水-2020-[tmdb=101588]",
-            "tmdb_id": "101588",
+            "title": "航海王",
             "share_name": "航海王 (1999) {tmdb=37854}",
         }
         row = {"title": "航海王 (1999) {tmdb=37854}"}
