@@ -13,8 +13,11 @@ class TaskStoreTests(unittest.TestCase):
             db_path = Path(tmp) / "tasks.db"
             store = TaskStore(db_path)
 
-            with sqlite3.connect(db_path) as conn:
+            conn = sqlite3.connect(db_path)
+            try:
                 tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            finally:
+                conn.close()
 
             self.assertIn("tasks", tables)
             self.assertIn("task_events", tables)

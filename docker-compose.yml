@@ -6,6 +6,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    ports:
+      - "8787:8787"
     volumes:
       - ./data:/data
       # Map your STRM root. Keep container paths aligned with STRM_SOURCE_ROOTS, SELF_SHARE_STRM_ROOT, and STRM_LIBRARY_MAP.

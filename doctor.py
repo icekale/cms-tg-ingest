@@ -110,6 +110,13 @@ def _check_optional_env(env: Mapping[str, str]) -> CheckItem:
         warnings.append("OPENAI_API_KEY is required when OpenAI fallback is enabled")
     if _env_value(env, "EMBY_BASE_URL") and not _env_value(env, "EMBY_API_KEY"):
         warnings.append("EMBY_API_KEY is required when EMBY_BASE_URL is set")
+    if _env_value(env, "WEB_ENABLED").lower() in {"1", "true", "yes", "on"}:
+        try:
+            port = int(_env_value(env, "WEB_PORT") or "8787")
+            if port <= 0 or port > 65535:
+                warnings.append("WEB_PORT must be between 1 and 65535")
+        except ValueError:
+            warnings.append("WEB_PORT must be an integer")
     if warnings:
         return CheckItem("optional_env", False, "; ".join(warnings))
     return CheckItem("optional_env", True, "optional feature variables are consistent")
@@ -120,6 +127,9 @@ def _check_filesystem(env: Mapping[str, str], filesystem: Filesystem) -> CheckIt
     db_path = Path(_env_value(env, "DB_PATH") or "/data/submissions.db")
     if not filesystem.exists(db_path.parent):
         problems.append(f"DB directory does not exist: {db_path.parent}")
+    task_db_path = Path(_env_value(env, "TASK_DB_PATH") or "/data/tasks.db")
+    if not filesystem.exists(task_db_path.parent):
+        problems.append(f"TASK_DB directory does not exist: {task_db_path.parent}")
     workflow = _env_value(env, "WORKFLOW_MODE") or "direct"
     if workflow == "self_share_sync":
         cookie = Path(_env_value(env, "P115_COOKIE_PATH") or "/config/115-cookies.txt")

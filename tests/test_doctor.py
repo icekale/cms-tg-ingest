@@ -42,6 +42,7 @@ class DoctorConfigTests(unittest.TestCase):
                 "CMS_USERNAME": "user",
                 "CMS_PASSWORD": "secret-password",
                 "DB_PATH": str(data / "submissions.db"),
+                "TASK_DB_PATH": str(data / "tasks.db"),
                 "WORKFLOW_MODE": "self_share_sync",
                 "P115_COOKIE_PATH": str(cookie),
                 "SELF_SHARE_STRM_ROOT": str(share),
@@ -64,6 +65,25 @@ class DoctorConfigTests(unittest.TestCase):
     def test_main_returns_nonzero_when_required_config_missing(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(1, doctor.main([]))
+
+    def test_web_enabled_requires_valid_port_and_task_db_directory(self):
+        env = {
+            "TG_BOT_TOKEN": "123456:secret-token",
+            "TG_ALLOWED_CHAT_ID": "464100862",
+            "CMS_BASE_URL": "http://cms:9527",
+            "CMS_USERNAME": "user",
+            "CMS_PASSWORD": "secret-password",
+            "WEB_ENABLED": "true",
+            "WEB_PORT": "not-a-port",
+            "TASK_DB_PATH": "/missing/tasks.db",
+        }
+
+        report = doctor.run_checks(env=env, filesystem=doctor.MemoryFilesystem(existing_paths={"/data"}))
+
+        self.assertFalse(report.ok)
+        text = report.to_text()
+        self.assertIn("WEB_PORT", text)
+        self.assertIn("TASK_DB directory does not exist", text)
 
 
 if __name__ == "__main__":

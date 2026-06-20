@@ -20,6 +20,8 @@ from pathlib import Path
 from contextlib import contextmanager
 from typing import Any
 
+from app.task_store import TaskStore
+
 LINK_RE = re.compile(r"https?://(?:www\.)?(?:115cdn|115|anxia)\.com/s/[^\s<>'\"]+", re.I)
 TRAILING_PUNCT = ".,;)。），]】》>"
 LOG = logging.getLogger("cms-tg-ingest")
@@ -125,6 +127,13 @@ class Config:
     status_repair_interval_seconds: int = 300
     status_repair_limit: int = 50
     cms_parent_cid_category_map: str = ""
+    task_db_path: str = "/data/tasks.db"
+    web_enabled: bool = False
+    web_host: str = "0.0.0.0"
+    web_port: int = 8787
+    web_token: str = ""
+    task_worker_interval_seconds: int = 5
+    task_max_retries: int = 3
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -173,7 +182,18 @@ class Config:
             status_repair_interval_seconds=int(os.environ.get("STATUS_REPAIR_INTERVAL_SECONDS", "300")),
             status_repair_limit=int(os.environ.get("STATUS_REPAIR_LIMIT", "50")),
             cms_parent_cid_category_map=os.environ.get("CMS_PARENT_CID_CATEGORY_MAP", ""),
+            task_db_path=os.environ.get("TASK_DB_PATH", "/data/tasks.db"),
+            web_enabled=parse_bool_env(os.environ.get("WEB_ENABLED"), False),
+            web_host=os.environ.get("WEB_HOST", "0.0.0.0"),
+            web_port=int(os.environ.get("WEB_PORT", "8787")),
+            web_token=os.environ.get("WEB_TOKEN", ""),
+            task_worker_interval_seconds=int(os.environ.get("TASK_WORKER_INTERVAL_SECONDS", "5")),
+            task_max_retries=int(os.environ.get("TASK_MAX_RETRIES", "3")),
         )
+
+
+def create_task_store(config: Config) -> TaskStore:
+    return TaskStore(config.task_db_path)
 
 
 class SubmissionStore:
