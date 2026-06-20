@@ -31,6 +31,12 @@ TASK_MAX_RETRIES=3
 
 访问地址示例：`http://<unraid-ip>:8787/`。
 
+## v0.2 Alpha.2：真实工作流任务时间线
+
+v0.2 Alpha.2 将真实 Telegram/CMS 工作流进度写入 TaskStore。新的链接提交、CMS 状态、创建自有分享、分享同步、STRM 移动、Emby 确认和清理结果会出现在 Web 管理页中。
+
+TaskStore 仍是旁路时间线，当前生产执行仍由既有稳定工作流和 SubmissionStore 驱动。Web 重试仍然是非破坏性操作：它记录重试意图和当前阶段，不会自动重复转存、删除、分享或移动文件。
+
 ## 快速开始
 
 ```sh
