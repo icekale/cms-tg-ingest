@@ -115,10 +115,11 @@ Only paths under configured source and library roots are moved.
 
 ## Published images
 
-Release tags publish multi-arch Docker images to GHCR automatically:
+Release tags publish multi-arch Docker images to GHCR automatically. This repository also publishes Docker Hub images under `icekale/cms-tg-ingest`:
 
 ```sh
-docker pull ghcr.io/your-name/cms-tg-ingest:0.1.0
+docker pull ghcr.io/icekale/cms-tg-ingest:0.1.0
+docker pull icekale/cms-tg-ingest:0.1.0
 ```
 
 Docker Hub publishing is optional. To enable it, add these GitHub repository secrets:
