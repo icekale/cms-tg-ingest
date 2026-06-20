@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -85,6 +86,75 @@ class DoctorConfigTests(unittest.TestCase):
         text = report.to_text()
         self.assertIn("WEB_PORT", text)
         self.assertIn("TASK_DB directory does not exist", text)
+
+    def test_audit_db_reports_tmdb_mismatch_direct_and_unexpected_strm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "submissions.db"
+            mismatch_dest = root / "library" / "D-得闲谨制-2025-[tmdb=1356454]"
+            direct_dest = root / "library" / "direct"
+            unexpected_dest = root / "library" / "unexpected"
+            for path in (mismatch_dest, direct_dest, unexpected_dest):
+                path.mkdir(parents=True)
+            (direct_dest / "direct.strm").write_text("http://cms/d/direct.mkv", encoding="utf-8")
+            (unexpected_dest / "wrong.strm").write_text("http://cms/s/othershare_1212_file.mkv", encoding="utf-8")
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE submissions (
+                        id INTEGER PRIMARY KEY,
+                        title TEXT,
+                        recognition_json TEXT,
+                        dest_path TEXT,
+                        source_path TEXT,
+                        emby_path TEXT,
+                        own_share_code TEXT,
+                        own_share_receive_code TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO submissions
+                    (id, title, recognition_json, dest_path, source_path, emby_path, own_share_code, own_share_receive_code)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        1,
+                        "双喜",
+                        '{"tmdb_id":"1570664"}',
+                        str(mismatch_dest),
+                        "",
+                        str(mismatch_dest / "x.strm"),
+                        "ownshare",
+                        "1212",
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO submissions
+                    (id, title, recognition_json, dest_path, source_path, emby_path, own_share_code, own_share_receive_code)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (2, "直链", "{}", str(direct_dest), "", "", "ownshare", "1212"),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO submissions
+                    (id, title, recognition_json, dest_path, source_path, emby_path, own_share_code, own_share_receive_code)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (3, "错分享", "{}", str(unexpected_dest), "", "", "ownshare", "1212"),
+                )
+
+            issues = doctor.audit_submission_db(db_path)
+            text = "\n".join(issue.to_text() for issue in issues)
+
+            self.assertIn("tmdb_mismatch", text)
+            self.assertIn("任务 TMDB 1570664", text)
+            self.assertIn("路径 TMDB 1356454", text)
+            self.assertIn("direct_strm", text)
+            self.assertIn("unexpected_strm", text)
 
 
 if __name__ == "__main__":

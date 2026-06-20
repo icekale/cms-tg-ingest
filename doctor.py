@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Protocol
@@ -65,6 +68,16 @@ class DoctorReport:
             status = "OK" if item.ok else "FAIL"
             lines.append(f"{status} {item.name}: {item.message}")
         return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class AuditIssue:
+    row_id: int
+    issue_type: str
+    message: str
+
+    def to_text(self) -> str:
+        return f"{self.issue_type} row={self.row_id}: {self.message}"
 
 
 def _env_value(env: Mapping[str, str], name: str) -> str:
@@ -161,9 +174,92 @@ def run_checks(env: Mapping[str, str] | None = None, filesystem: Filesystem | No
     ])
 
 
+def _extract_tmdb_id(value: str) -> str:
+    match = re.search(r"tmdb(?:id)?[=_\-](\d+)", str(value or ""), re.I)
+    return match.group(1) if match else ""
+
+
+def _parse_recognition(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _iter_strm_files(path_value: str | None) -> list[Path]:
+    if not path_value:
+        return []
+    path = Path(path_value)
+    if not path.exists():
+        return []
+    if path.is_file() and path.suffix.lower() == ".strm":
+        return [path]
+    if path.is_dir():
+        return sorted(path.rglob("*.strm"))
+    return []
+
+
+def audit_submission_db(db_path: str | Path) -> list[AuditIssue]:
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return [AuditIssue(0, "db_missing", f"database does not exist: {db_path}")]
+    issues: list[AuditIssue] = []
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'submissions'"
+        ).fetchone()
+        if not table:
+            return [AuditIssue(0, "db_missing", "submissions table does not exist")]
+        rows = conn.execute("SELECT * FROM submissions ORDER BY id").fetchall()
+    for sqlite_row in rows:
+        row = dict(sqlite_row)
+        row_id = int(row.get("id") or 0)
+        title = str(row.get("title") or row.get("url") or "").strip()
+        recognition = _parse_recognition(row.get("recognition_json"))
+        expected_tmdb = str(recognition.get("tmdb_id") or "").strip()
+        if expected_tmdb:
+            seen_path_tmdb: set[str] = set()
+            for key in ("dest_path", "source_path", "emby_path"):
+                value = str(row.get(key) or "")
+                path_tmdb = _extract_tmdb_id(value)
+                if not path_tmdb or path_tmdb in seen_path_tmdb:
+                    continue
+                seen_path_tmdb.add(path_tmdb)
+                if path_tmdb != expected_tmdb:
+                    issues.append(
+                        AuditIssue(
+                            row_id,
+                            "tmdb_mismatch",
+                            f"{title} 任务 TMDB {expected_tmdb}，路径 TMDB {path_tmdb}，字段 {key}",
+                        )
+                    )
+        own_share_code = str(row.get("own_share_code") or "").strip()
+        receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+        expected_marker = f"/s/{own_share_code}_{receive_code}_" if own_share_code else ""
+        for strm_path in _iter_strm_files(row.get("dest_path")):
+            text = strm_path.read_text(encoding="utf-8", errors="replace")
+            if "/d/" in text:
+                issues.append(AuditIssue(row_id, "direct_strm", f"{title} 发现直链 STRM：{strm_path}"))
+                continue
+            if expected_marker and expected_marker not in text:
+                issues.append(
+                    AuditIssue(
+                        row_id,
+                        "unexpected_strm",
+                        f"{title} STRM 不是预期的分享链接：{strm_path}",
+                    )
+                )
+    return issues
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run offline cms-tg-ingest deployment checks.")
     parser.add_argument("--quiet", action="store_true", help="print only failing checks")
+    parser.add_argument("--audit-db", help="audit submissions.db for TMDB and STRM quality issues")
     args = parser.parse_args(argv)
     report = run_checks()
     if args.quiet:
@@ -171,7 +267,16 @@ def main(argv: list[str] | None = None) -> int:
         print("\n".join(lines))
     else:
         print(report.to_text())
-    return 0 if report.ok else 1
+    audit_issues: list[AuditIssue] = []
+    if args.audit_db:
+        audit_issues = audit_submission_db(args.audit_db)
+        if audit_issues:
+            print("cms-tg-ingest DB audit")
+            for issue in audit_issues:
+                print("FAIL " + issue.to_text())
+        elif not args.quiet:
+            print("cms-tg-ingest DB audit\nOK no quality issues found")
+    return 0 if report.ok and not audit_issues else 1
 
 
 if __name__ == "__main__":
