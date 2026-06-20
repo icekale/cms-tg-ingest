@@ -3393,12 +3393,22 @@ def start_status_poll(
                             cms_task_id=task_id,
                             title=found_task.get("share_name") or found_task.get("name") or row.get("title"),
                         )
+                        best_effort_task_sync(
+                            "late_cms_task_id",
+                            record_submission_event,
+                            task_store,
+                            row,
+                            TaskStage.CMS_SUBMITTED,
+                            TaskStatus.RUNNING,
+                            "已找到 CMS 任务 ID",
+                        )
                     else:
                         continue
                 detail = cms.get_share_down_detail(str(task_id))
                 status = str(detail.get("status") or detail.get("state") or detail.get("task_status") or last_status)
                 title = detail.get("name") or detail.get("title") or detail.get("share_name") or row.get("title")
                 updated = store.update_status(int(row["id"]), status, title=title) or row
+                sync_cms_status_task_event(task_store, updated, status, title=str(title or ""))
                 if title and not recognition_checked:
                     recognition_checked = True
                     try:
@@ -3410,6 +3420,7 @@ def start_status_poll(
                     recognition["share_name"] = str(title)
                     recognition, should_prompt = decide_category_prompt(store, updated, recognition, move_config, str(title))
                     if should_prompt:
+                        sync_needs_action_task_event(task_store, updated, "等待人工确认分类")
                         recognition, _should_prompt = resolve_category_or_existing_import(
                             telegram,
                             chat_id,
@@ -3430,6 +3441,7 @@ def start_status_poll(
                             if not should_prompt:
                                 row = current_row
                                 continue
+                            sync_needs_action_task_event(task_store, current_row, "等待人工确认分类")
                             recognition, _should_prompt = resolve_category_or_existing_import(
                                 telegram,
                                 chat_id,
@@ -3463,6 +3475,7 @@ def start_status_poll(
                                 self_share_workflow,
                                 source_dir,
                             )
+                            sync_self_share_task_events(task_store, current_row)
                         else:
                             category = final_category_for_move(current_row, recognition)
                         if not source_dir:
@@ -3473,10 +3486,12 @@ def start_status_poll(
                             self_share_workflow.config if self_share_workflow else None,
                         )
                         move_plan = plan_strm_move(source_dir, category, active_move_config)
+                        sync_strm_ready_task_event(task_store, current_row, move_plan)
                         if is_move_plan_retryable(move_plan):
                             row = current_row
                             continue
                         moved_row = merge_self_share_strm_folder(move_plan, store, current_row) if self_share_workflow else execute_strm_move(move_plan, store, current_row)
+                        sync_move_task_event(task_store, moved_row)
                         send_move_result(telegram, chat_id, move_plan, moved_row)
                         row = moved_row
                         if moved_row.get("dest_path"):
@@ -3485,7 +3500,11 @@ def start_status_poll(
                     try:
                         match = find_emby_match(emby, recognition, store.find_by_id(int(row["id"])) or updated, recent_limit=30)
                         if match:
-                            send_emby_confirmed(telegram, chat_id, store, store.find_by_id(int(row["id"])) or updated, match, emby, cleanup_client=cleanup_client)
+                            confirmed_row = store.find_by_id(int(row["id"])) or updated
+                            send_emby_confirmed(telegram, chat_id, store, confirmed_row, match, emby, cleanup_client=cleanup_client)
+                            latest_row = store.find_by_id(int(row["id"])) or confirmed_row
+                            sync_emby_task_event(task_store, latest_row)
+                            sync_cleanup_task_event(task_store, latest_row)
                             return
                     except Exception:
                         LOG.debug("Emby confirmation probe failed", exc_info=True)
@@ -3497,8 +3516,10 @@ def start_status_poll(
         updated = store.update_status(int(row["id"]), last_status) or row
         if emby and emby.enabled:
             send_emby_timeout(telegram, chat_id, store, updated)
+            sync_emby_task_event(task_store, store.find_by_id(int(row["id"])) or updated)
         else:
-            store.update_emby(int(row["id"]), "disabled")
+            disabled_row = store.update_emby(int(row["id"]), "disabled") or row
+            sync_emby_task_event(task_store, disabled_row)
             telegram.send_message(chat_id, f"CMS 已提交：{format_task_label(updated)}。Emby 确认未启用，后续请看 CMS/Emby 后台状态。")
 
     threading.Thread(target=worker, daemon=True).start()

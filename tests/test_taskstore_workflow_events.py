@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import bridge
 from app.models import TaskStage, TaskStatus
@@ -79,6 +80,62 @@ class TaskStoreWorkflowEventTests(unittest.TestCase):
             self.assertEqual(task.current_stage, TaskStage.CLEANED)
             self.assertEqual(task.status, TaskStatus.SUCCEEDED)
             self.assertEqual(stages[-2:], ["emby_confirmed", "cleaned"])
+
+
+class InlineThread:
+    def __init__(self, target=None, daemon=None, name=None):
+        self.target = target
+        self.daemon = daemon
+        self.name = name
+
+    def start(self):
+        if self.target:
+            self.target()
+
+
+class FakePollCms:
+    def get_share_down_detail(self, task_id):
+        return {"status": "done", "name": "示例电影"}
+
+    def recognize_media(self, title):
+        return {"code": 0, "data": {"title": title, "type": "movie", "category": "欧美电影", "tmdb_id": "123"}}
+
+
+class FakePollTelegram:
+    def __init__(self):
+        self.messages = []
+
+    def send_message(self, chat_id, text, reply_markup=None):
+        self.messages.append((chat_id, text, reply_markup))
+
+
+class PollTaskStoreIntegrationTests(unittest.TestCase):
+    def test_status_poll_records_cms_status_and_emby_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            key = bridge.ShareKey("abc", "")
+            row = submission_store.upsert_submission(key, "https://115cdn.com/s/abc", "submitted", cms_task_id="cms-1", title="示例电影")
+            ensure_task_for_link(task_store, "abc", "", "https://115cdn.com/s/abc")
+
+            with patch.object(bridge.time, "sleep", lambda seconds: None), patch.object(bridge.threading, "Thread", InlineThread):
+                bridge.start_status_poll(
+                    FakePollCms(),
+                    FakePollTelegram(),
+                    464100862,
+                    submission_store,
+                    row,
+                    max_seconds=1,
+                    interval=1,
+                    task_store=task_store,
+                )
+
+            task = task_store.list_recent_tasks(limit=1)[0]
+            stages = [event["stage"] for event in task_store.list_events(task.id)]
+            self.assertIn("organized", stages)
+            self.assertIn("emby_confirmed", stages)
+            self.assertEqual(task.current_stage, TaskStage.EMBY_CONFIRMED)
+            self.assertEqual(task.status, TaskStatus.NEEDS_ACTION)
 
 
 if __name__ == "__main__":
