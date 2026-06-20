@@ -13,3 +13,4 @@ data/
 *.log
 .DS_Store
 .worktrees/
+.superpowers/
