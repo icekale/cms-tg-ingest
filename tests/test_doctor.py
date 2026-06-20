@@ -237,6 +237,24 @@ class DoctorConfigTests(unittest.TestCase):
         self.assertIn("tmdb_mismatch: 1", text)
         self.assertNotIn("FAIL direct_strm row=2: two", text)
 
+    def test_audit_summary_can_group_samples_by_row(self):
+        issues = [
+            doctor.AuditIssue(6, "direct_strm", "first episode"),
+            doctor.AuditIssue(6, "direct_strm", "second episode"),
+            doctor.AuditIssue(22, "tmdb_mismatch", "wrong folder"),
+            doctor.AuditIssue(22, "direct_strm", "direct file"),
+            doctor.AuditIssue(24, "direct_strm", "another movie"),
+        ]
+
+        text = doctor.format_audit_summary(issues, sample_limit=2, group_by_row=True)
+
+        self.assertIn("issues=5", text)
+        self.assertIn("affected_rows=3", text)
+        self.assertIn("row_samples(first 2)", text)
+        self.assertIn("row=6 issues=2 direct_strm=2 sample=first episode", text)
+        self.assertIn("row=22 issues=2 direct_strm=1, tmdb_mismatch=1 sample=wrong folder", text)
+        self.assertNotIn("row=24", text)
+
 
 if __name__ == "__main__":
     unittest.main()

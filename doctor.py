@@ -258,7 +258,7 @@ def audit_submission_db(db_path: str | Path) -> list[AuditIssue]:
     return issues
 
 
-def format_audit_summary(issues: list[AuditIssue], sample_limit: int = 10) -> str:
+def format_audit_summary(issues: list[AuditIssue], sample_limit: int = 10, group_by_row: bool = False) -> str:
     if not issues:
         return "cms-tg-ingest DB audit summary\nOK no quality issues found"
     counts = Counter(issue.issue_type for issue in issues)
@@ -271,9 +271,26 @@ def format_audit_summary(issues: list[AuditIssue], sample_limit: int = 10) -> st
         lines.append(f"{issue_type}: {count}")
     limit = max(0, int(sample_limit))
     if limit:
-        lines.append(f"samples(first {min(limit, len(issues))})")
-        for issue in issues[:limit]:
-            lines.append(issue.to_text())
+        if group_by_row:
+            grouped: dict[int, list[AuditIssue]] = {}
+            for issue in issues:
+                grouped.setdefault(issue.row_id, []).append(issue)
+            row_items = sorted(
+                grouped.items(),
+                key=lambda item: (-len(item[1]), item[0]),
+            )
+            lines.append(f"row_samples(first {min(limit, len(row_items))})")
+            for row_id, row_issues in row_items[:limit]:
+                row_counts = Counter(issue.issue_type for issue in row_issues)
+                count_text = ", ".join(
+                    f"{issue_type}={count}"
+                    for issue_type, count in sorted(row_counts.items(), key=lambda item: (-item[1], item[0]))
+                )
+                lines.append(f"row={row_id} issues={len(row_issues)} {count_text} sample={row_issues[0].message}")
+        else:
+            lines.append(f"samples(first {min(limit, len(issues))})")
+            for issue in issues[:limit]:
+                lines.append(issue.to_text())
     return "\n".join(lines)
 
 
@@ -283,6 +300,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--audit-db", help="audit submissions.db for TMDB and STRM quality issues")
     parser.add_argument("--audit-summary", action="store_true", help="print condensed audit counts instead of every issue")
     parser.add_argument("--audit-sample-limit", type=int, default=10, help="number of audit samples to show in summary mode")
+    parser.add_argument("--audit-group-by-row", action="store_true", help="group audit summary samples by submission row")
     args = parser.parse_args(argv)
     report = run_checks()
     if args.quiet:
@@ -294,7 +312,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.audit_db:
         audit_issues = audit_submission_db(args.audit_db)
         if args.audit_summary:
-            print(format_audit_summary(audit_issues, sample_limit=args.audit_sample_limit))
+            print(format_audit_summary(
+                audit_issues,
+                sample_limit=args.audit_sample_limit,
+                group_by_row=args.audit_group_by_row,
+            ))
         elif audit_issues:
             print("cms-tg-ingest DB audit")
             for issue in audit_issues:
