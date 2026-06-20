@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Protocol
@@ -207,7 +208,7 @@ def audit_submission_db(db_path: str | Path) -> list[AuditIssue]:
     if not db_path.exists():
         return [AuditIssue(0, "db_missing", f"database does not exist: {db_path}")]
     issues: list[AuditIssue] = []
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
         table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'submissions'"

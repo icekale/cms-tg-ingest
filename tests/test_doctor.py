@@ -2,6 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -98,7 +99,7 @@ class DoctorConfigTests(unittest.TestCase):
                 path.mkdir(parents=True)
             (direct_dest / "direct.strm").write_text("http://cms/d/direct.mkv", encoding="utf-8")
             (unexpected_dest / "wrong.strm").write_text("http://cms/s/othershare_1212_file.mkv", encoding="utf-8")
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn:
                 conn.execute(
                     """
                     CREATE TABLE submissions (
@@ -146,6 +147,7 @@ class DoctorConfigTests(unittest.TestCase):
                     """,
                     (3, "错分享", "{}", str(unexpected_dest), "", "", "ownshare", "1212"),
                 )
+                conn.commit()
 
             issues = doctor.audit_submission_db(db_path)
             text = "\n".join(issue.to_text() for issue in issues)
@@ -155,6 +157,39 @@ class DoctorConfigTests(unittest.TestCase):
             self.assertIn("路径 TMDB 1356454", text)
             self.assertIn("direct_strm", text)
             self.assertIn("unexpected_strm", text)
+
+    def test_audit_db_closes_sqlite_connection(self):
+        class FakeCursor:
+            def __init__(self, row=None):
+                self.row = row
+
+            def fetchone(self):
+                return self.row
+
+            def fetchall(self):
+                return []
+
+        class FakeConnection:
+            def __init__(self):
+                self.closed = False
+                self.row_factory = None
+
+            def execute(self, sql):
+                if "sqlite_master" in sql:
+                    return FakeCursor({"name": "submissions"})
+                return FakeCursor()
+
+            def close(self):
+                self.closed = True
+
+        fake = FakeConnection()
+        with tempfile.TemporaryDirectory() as tmp, patch("doctor.sqlite3.connect", return_value=fake):
+            db_path = Path(tmp) / "submissions.db"
+            db_path.write_text("", encoding="utf-8")
+
+            doctor.audit_submission_db(db_path)
+
+        self.assertTrue(fake.closed)
 
 
 if __name__ == "__main__":
