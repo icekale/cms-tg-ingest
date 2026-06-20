@@ -123,10 +123,24 @@ class FakeTelegram:
 class FakeCmsSubmit:
     def __init__(self):
         self.submitted = []
+        self.auto_runs = 0
 
     def add_share_down(self, link):
         self.submitted.append(link)
         return {"id": "cms-1", "name": "示例电影"}
+
+    def run_auto_organize(self):
+        self.auto_runs += 1
+        return {"code": 200}
+
+
+class FakeP115Receive:
+    def __init__(self):
+        self.received = []
+
+    def receive_share_to_cid(self, share_code, receive_code, target_cid):
+        self.received.append((share_code, receive_code, target_cid))
+        return {"title": "示例电影", "file_ids": ["fid-source"]}
 
 
 class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
@@ -221,6 +235,61 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(len(cms.submitted), 1)
             self.assertNotIn("失败", telegram.messages[-1][1])
             self.assertEqual(submission_store.recent(limit=1)[0]["status"], "submitted")
+
+    def test_self_share_update_receives_115_share_without_cms_plain_submit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            cms = FakeCmsSubmit()
+            telegram = FakeTelegram()
+            p115 = FakeP115Receive()
+
+            bridge.handle_update(
+                self.update("https://115cdn.com/s/abc?password=1234"),
+                cms,
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                cleanup_client=p115,
+                self_share_receive_cid="pending-cid",
+            )
+
+            row = submission_store.recent(limit=1)[0]
+            self.assertEqual(cms.submitted, [])
+            self.assertEqual(p115.received, [("abc", "1234", "pending-cid")])
+            self.assertEqual(row["status"], "received")
+            self.assertEqual(row["workflow_mode"], "self_share_sync")
+            self.assertEqual(row["workflow_phase"], "received_to_pending")
+            self.assertEqual(row["title"], "示例电影")
+            self.assertIn("已接收", telegram.messages[-1][1])
+
+    def test_duplicate_self_share_received_link_does_not_receive_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            cms = FakeCmsSubmit()
+            telegram = FakeTelegram()
+            p115 = FakeP115Receive()
+            update = self.update("https://115cdn.com/s/abc?password=1234")
+
+            for _ in range(2):
+                bridge.handle_update(
+                    update,
+                    cms,
+                    telegram,
+                    "464100862",
+                    submission_store,
+                    poll_status=False,
+                    self_share_workflow=object(),
+                    cleanup_client=p115,
+                    self_share_receive_cid="pending-cid",
+                )
+
+            self.assertEqual(cms.submitted, [])
+            self.assertEqual(p115.received, [("abc", "1234", "pending-cid")])
+            self.assertIn("已存在", telegram.messages[-1][1])
 
 
 if __name__ == "__main__":

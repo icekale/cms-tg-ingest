@@ -79,6 +79,7 @@ python3 -W error::ResourceWarning -m unittest discover -s tests -v
 ```env
 WORKFLOW_MODE=self_share_sync
 P115_COOKIE_PATH=/config/115-cookies.txt
+SELF_SHARE_RECEIVE_CID=
 SELF_SHARE_STRM_ROOT=/mnt/user/Unraid/strm/share
 SELF_SHARE_CMS_LOCAL_PATH=/media/share
 SELF_SHARE_CLEANUP_AFTER_EMBY=true
@@ -89,8 +90,8 @@ MOVE_CONFLICT_POLICY=merge
 完整流程：
 
 1. 你把 115 分享链接发给 Telegram bot。
-2. CMS 转存到你配置的待整理目录，并执行自动整理。
-3. 外挂找到整理后的 115 文件夹。
+2. 外挂用 115 接口把外部分享接收到 `SELF_SHARE_RECEIVE_CID` 指定的待整理目录，不提交 CMS 普通同步。
+3. 外挂触发 CMS 自动整理，并找到整理后的 115 文件夹。
 4. 外挂为该文件夹创建你自己的 115 永久分享，提取码默认 `1212`。
 5. 外挂调用 CMS 分享同步，使用你自己的分享链接生成 STRM。
 6. CMS 把 STRM 写入 `SELF_SHARE_STRM_ROOT`。
@@ -111,6 +112,8 @@ volumes:
 ```
 
 `CMS_PARENT_CID_CATEGORY_MAP` 用于把 CMS 整理后的 115 父目录 CID 映射到分类。这个值和个人 115 目录强相关；不配置时禁用父目录分类推断。
+
+`SELF_SHARE_RECEIVE_CID` 是 CMS 自动整理监听的 115 待整理目录 CID；必须配置为你自己的待整理目录，不要配置媒体库或根目录。
 
 ```env
 CMS_PARENT_CID_CATEGORY_MAP=3260485903797190075=欧美电影,3254119954860998447=外国电视

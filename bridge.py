@@ -121,6 +121,7 @@ class Config:
     openai_suggest_confidence: float = 0.45
     workflow_mode: str = "direct"
     p115_cookie_path: str = "/config/115-cookies.txt"
+    self_share_receive_cid: str = ""
     self_share_strm_root: str = "/mnt/user/Unraid/strm/share"
     self_share_cms_local_path: str = "/media/share"
     self_share_cms_cid: str = "0"
@@ -177,6 +178,7 @@ class Config:
             openai_suggest_confidence=env_float("OPENAI_SUGGEST_CONFIDENCE", 0.45),
             workflow_mode=os.environ.get("WORKFLOW_MODE", "direct").strip().lower() or "direct",
             p115_cookie_path=os.environ.get("P115_COOKIE_PATH", "/config/115-cookies.txt"),
+            self_share_receive_cid=os.environ.get("SELF_SHARE_RECEIVE_CID", ""),
             self_share_strm_root=os.environ.get("SELF_SHARE_STRM_ROOT", "/mnt/user/Unraid/strm/share"),
             self_share_cms_local_path=os.environ.get("SELF_SHARE_CMS_LOCAL_PATH", "/media/share"),
             self_share_cms_cid=os.environ.get("SELF_SHARE_CMS_CID", "0"),
@@ -1923,6 +1925,44 @@ class P115WebClient:
         self._ensure_state(resp, "115 search failed")
         return iter_items(resp.get("data") or resp)
 
+    def share_snap(self, share_code: str, receive_code: str, cid: str = "0", limit: int = 100) -> dict[str, Any]:
+        resp = self._request(
+            "https://webapi.115.com/share/snap",
+            params={
+                "share_code": share_code,
+                "receive_code": receive_code,
+                "cid": cid,
+                "offset": 0,
+                "limit": limit,
+            },
+        )
+        self._ensure_state(resp, "115 share snap failed")
+        return resp
+
+    def receive_share_to_cid(self, share_code: str, receive_code: str, target_cid: str) -> dict[str, Any]:
+        snap = self.share_snap(share_code, receive_code, cid="0", limit=100)
+        data = snap.get("data") if isinstance(snap.get("data"), dict) else {}
+        items = iter_items(data.get("list") or data)
+        file_ids = [str(item.get("fid") or item.get("cid") or item.get("file_id") or "").strip() for item in items]
+        file_ids = [file_id for file_id in file_ids if file_id]
+        if not file_ids:
+            raise RuntimeError("115 share snap did not return file ids")
+        resp = self._request(
+            "https://webapi.115.com/share/receive",
+            method="POST",
+            data={
+                "share_code": share_code,
+                "receive_code": receive_code,
+                "file_id": ",".join(file_ids),
+                "cid": str(target_cid),
+            },
+        )
+        self._ensure_state(resp, "115 receive share failed")
+        info = data.get("shareinfo") if isinstance(data.get("shareinfo"), dict) else {}
+        receive_data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
+        title = str(receive_data.get("receive_title") or info.get("share_title") or (items[0].get("n") if items else "") or "").strip()
+        return {"title": title, "file_ids": file_ids, "response": resp}
+
     def list_files(self, parent_id: str, limit: int = 100) -> list[dict[str, Any]]:
         resp = self._request(
             "https://webapi.115.com/files",
@@ -3491,6 +3531,61 @@ def start_status_poll(
         while time.time() < deadline:
             time.sleep(max(1, interval))
             try:
+                if self_share_workflow and not task_id:
+                    title = row.get("title") or row.get("share_code") or ""
+                    updated = store.update_status(int(row["id"]), "organizing", title=str(title or "")) or row
+                    sync_cms_status_task_event(task_store, updated, "organizing", title=str(title or ""))
+                    recognition = normalize_recognition({"code": 500, "msg": "waiting for CMS organize"})
+                    recognition["share_name"] = str(title or "")
+                    recognition_checked = True
+                    current_row = store.find_by_id(int(row["id"])) or updated
+                    if move_config and should_attempt_strm_move(current_row, self_share_enabled=True):
+                        current_row, recognition = resolve_self_share_recognition_before_prepare(
+                            store,
+                            current_row,
+                            recognition,
+                            str(title or ""),
+                            openai_classifier=openai_classifier,
+                            tmdb_resolver=tmdb_resolver,
+                        )
+                        source_dir = safe_resolve(Path(str(recognition.get("source_path")))) if recognition.get("source_path") else None
+                        current_row, source_dir, category = prepare_self_share_move_inputs(
+                            current_row,
+                            recognition,
+                            str(title or ""),
+                            self_share_workflow,
+                            source_dir,
+                        )
+                        sync_self_share_task_events(task_store, current_row)
+                        if not source_dir:
+                            row = current_row
+                            continue
+                        active_move_config = move_config_for_workflow_source(move_config, source_dir, self_share_workflow.config)
+                        move_plan = plan_strm_move(source_dir, category, active_move_config)
+                        sync_strm_ready_task_event(task_store, current_row, move_plan)
+                        if is_move_plan_retryable(move_plan):
+                            row = current_row
+                            continue
+                        moved_row = merge_self_share_strm_folder(move_plan, store, current_row)
+                        sync_move_task_event(task_store, moved_row)
+                        send_move_result(telegram, chat_id, move_plan, moved_row)
+                        row = moved_row
+                        if moved_row.get("dest_path"):
+                            recognition["dest_path"] = moved_row.get("dest_path")
+                    if emby and emby.enabled:
+                        try:
+                            match = find_emby_match(emby, recognition, store.find_by_id(int(row["id"])) or updated, recent_limit=30)
+                            if match:
+                                confirmed_row = store.find_by_id(int(row["id"])) or updated
+                                send_emby_confirmed(telegram, chat_id, store, confirmed_row, match, emby, cleanup_client=cleanup_client)
+                                latest_row = store.find_by_id(int(row["id"])) or confirmed_row
+                                sync_emby_task_event(task_store, latest_row)
+                                sync_cleanup_task_event(task_store, latest_row)
+                                return
+                        except Exception:
+                            LOG.debug("Emby confirmation probe failed", exc_info=True)
+                    last_status = "organizing"
+                    continue
                 if not task_id:
                     key = ShareKey(str(row.get("share_code") or ""), str(row.get("receive_code") or ""))
                     found_task = cms.get_share_down_by_key(key)
@@ -3651,6 +3746,7 @@ def handle_update(
     tmdb_resolver: Any | None = None,
     self_share_workflow: SelfShareWorkflow | None = None,
     cleanup_client: Any | None = None,
+    self_share_receive_cid: str = "",
     task_store: TaskStore | None = None,
 ) -> None:
     if update.get("callback_query"):
@@ -3728,9 +3824,46 @@ def handle_update(
                 link,
             )
             existing = store.find_by_key(key)
-            if existing and existing.get("status") in {"submitted", "pending", "done", "success", "completed", "unknown"}:
+            if existing and existing.get("status") in {"received", "submitted", "pending", "done", "success", "completed", "unknown"}:
                 best_effort_task_sync("existing_submission", sync_task_from_submission, task_store, existing, "链接已存在")
                 result_lines.append(f"{index}. 已存在：{format_task_label(existing)}")
+                continue
+            if self_share_workflow:
+                if not cleanup_client or not hasattr(cleanup_client, "receive_share_to_cid"):
+                    raise RuntimeError("self_share_sync requires P115 receive client")
+                if not str(self_share_receive_cid or "").strip():
+                    raise RuntimeError("SELF_SHARE_RECEIVE_CID is required for self_share_sync")
+                received = cleanup_client.receive_share_to_cid(key.share_code, key.receive_code, str(self_share_receive_cid).strip())
+                row = store.upsert_submission(key, link, "received", title=received.get("title"))
+                row = store.update_self_share(row["id"], workflow_mode="self_share_sync", workflow_phase="received_to_pending") or row
+                best_effort_task_sync(
+                    "self_share_received",
+                    record_submission_event,
+                    task_store,
+                    row,
+                    TaskStage.RECEIVED,
+                    TaskStatus.RUNNING,
+                    "已接收 115 分享到待整理",
+                )
+                result_lines.append(f"{index}. 已接收：{format_task_label(row)}")
+                LOG.info("Received 115 share without CMS plain submit: share_code=%s cid=%s", key.share_code, self_share_receive_cid)
+                if poll_status:
+                    start_status_poll(
+                        cms,
+                        telegram,
+                        chat_id,
+                        store,
+                        row,
+                        status_poll_seconds,
+                        status_poll_interval,
+                        emby=emby,
+                        move_config=move_config,
+                        openai_classifier=openai_classifier,
+                        tmdb_resolver=tmdb_resolver,
+                        self_share_workflow=self_share_workflow,
+                        cleanup_client=cleanup_client,
+                        task_store=task_store,
+                    )
                 continue
             resp = cms.add_share_down(link)
             task_id, title = extract_task_info(resp)
@@ -3848,7 +3981,8 @@ def run_forever(config: Config) -> None:
                     openai_classifier=openai_classifier,
                     tmdb_resolver=tmdb_resolver,
                     self_share_workflow=self_share_workflow,
-                    cleanup_client=p115 if self_share_config.cleanup_after_emby else None,
+                    cleanup_client=p115 if self_share_config.enabled else None,
+                    self_share_receive_cid=config.self_share_receive_cid,
                     task_store=task_store,
                 )
         except Exception as exc:

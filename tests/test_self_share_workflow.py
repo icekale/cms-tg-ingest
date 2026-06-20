@@ -35,6 +35,37 @@ class P115WebClientTests(unittest.TestCase):
         self.assertEqual(http.calls[1][2]["share_duration"], -1)
         self.assertNotIn("action", http.calls[1][2])
 
+    def test_receive_share_to_cid_gets_snap_file_ids_then_receives_to_target_cid(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, method, dict(data or {}), dict(params or {})))
+                if url.endswith("/share/snap"):
+                    return {
+                        "state": True,
+                        "data": {
+                            "shareinfo": {"share_title": "示例电影"},
+                            "list": [{"fid": "fid-1", "n": "示例电影.mkv"}],
+                        },
+                    }
+                if url.endswith("/share/receive"):
+                    return {"state": True, "data": {"receive_title": "示例电影"}}
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1;CID=2;SEID=3;KID=4", http=http, timeout=3)
+
+        result = client.receive_share_to_cid("abc", "1234", "pending-cid")
+
+        self.assertEqual(result["title"], "示例电影")
+        self.assertEqual(result["file_ids"], ["fid-1"])
+        self.assertEqual(http.calls[0][0], "https://webapi.115.com/share/snap")
+        self.assertEqual(http.calls[0][3]["share_code"], "abc")
+        self.assertEqual(http.calls[1][0], "https://webapi.115.com/share/receive")
+        self.assertEqual(http.calls[1][2]["file_id"], "fid-1")
+        self.assertEqual(http.calls[1][2]["cid"], "pending-cid")
+
 
 class OrganizedFolderSelectionTests(unittest.TestCase):
     def test_selects_tmdb_folder_outside_pending_redundant_and_exists_bins(self):

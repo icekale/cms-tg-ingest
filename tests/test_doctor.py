@@ -45,6 +45,7 @@ class DoctorConfigTests(unittest.TestCase):
                 "TASK_DB_PATH": str(data / "tasks.db"),
                 "WORKFLOW_MODE": "self_share_sync",
                 "P115_COOKIE_PATH": str(cookie),
+                "SELF_SHARE_RECEIVE_CID": "pending-cid",
                 "SELF_SHARE_STRM_ROOT": str(share),
                 "STRM_SOURCE_ROOTS": str(strm),
                 "STRM_LIBRARY_MAP": "欧美电影=" + str(movie),

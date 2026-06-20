@@ -106,6 +106,8 @@ def _check_optional_env(env: Mapping[str, str]) -> CheckItem:
         warnings.append("WORKFLOW_MODE should be direct or self_share_sync")
     if workflow == "self_share_sync" and not _env_value(env, "P115_COOKIE_PATH"):
         warnings.append("P115_COOKIE_PATH is required for self_share_sync")
+    if workflow == "self_share_sync" and not _env_value(env, "SELF_SHARE_RECEIVE_CID"):
+        warnings.append("SELF_SHARE_RECEIVE_CID is required for self_share_sync")
     if _env_value(env, "OPENAI_CLASSIFY_ENABLED").lower() in {"1", "true", "yes", "on"} and not _env_value(env, "OPENAI_API_KEY"):
         warnings.append("OPENAI_API_KEY is required when OpenAI fallback is enabled")
     if _env_value(env, "EMBY_BASE_URL") and not _env_value(env, "EMBY_API_KEY"):
