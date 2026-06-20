@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from app.task_store import TaskStore
+from app.web import start_web_server
 
 LINK_RE = re.compile(r"https?://(?:www\.)?(?:115cdn|115|anxia)\.com/s/[^\s<>'\"]+", re.I)
 TRAILING_PUNCT = ".,;)。），]】》>"
@@ -194,6 +195,14 @@ class Config:
 
 def create_task_store(config: Config) -> TaskStore:
     return TaskStore(config.task_db_path)
+
+
+def maybe_start_web_server(config: Config, task_store: TaskStore, starter=start_web_server):
+    if not config.web_enabled:
+        return None
+    server = starter(task_store, config.web_host, config.web_port, web_token=config.web_token)
+    LOG.info("v0.2 web admin started host=%s port=%s", config.web_host, config.web_port)
+    return server
 
 
 class SubmissionStore:
@@ -3452,6 +3461,8 @@ def run_forever(config: Config) -> None:
     openai_classifier = OpenAIClassifier(config)
     tmdb_resolver = TmdbWebResolver(timeout=min(config.http_timeout, 20))
     store = SubmissionStore(config.db_path)
+    task_store = create_task_store(config)
+    maybe_start_web_server(config, task_store)
     self_share_config = SelfShareConfig.from_config(config, cms)
     p115 = P115WebClient(config.p115_cookie_path, timeout=config.http_timeout) if self_share_config.enabled else None
     self_share_workflow = SelfShareWorkflow(self_share_config, cms, p115, store) if p115 else None

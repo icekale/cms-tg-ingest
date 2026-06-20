@@ -44,6 +44,33 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             self.assertEqual(task.share_code, "abc")
             self.assertTrue(Path(cfg.task_db_path).exists())
 
+    def test_maybe_start_web_server_only_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):
+            cfg = bridge.Config.from_env()
+            task_store = bridge.create_task_store(cfg)
+            calls = []
+
+            def fake_start(store, host, port, web_token=""):
+                calls.append((store, host, port, web_token))
+                return "server"
+
+            server = bridge.maybe_start_web_server(cfg, task_store, starter=fake_start)
+
+            self.assertEqual(server, "server")
+            self.assertEqual(calls, [(task_store, "127.0.0.1", 8787, "secret")])
+
+    def test_maybe_start_web_server_returns_none_when_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            env["WEB_ENABLED"] = "false"
+            with patch.dict(os.environ, env, clear=True):
+                cfg = bridge.Config.from_env()
+                task_store = bridge.create_task_store(cfg)
+
+                server = bridge.maybe_start_web_server(cfg, task_store, starter=lambda *args, **kwargs: "server")
+
+                self.assertIsNone(server)
+
 
 if __name__ == "__main__":
     unittest.main()
