@@ -161,7 +161,7 @@ class TaskStore:
         submission_id: int | None = None,
         metadata_patch: dict[str, Any] | None = None,
         next_run_at: float | None = None,
-        clear_claim: bool = True,
+        clear_claim: bool = False,
     ) -> TaskSnapshot:
         now = time.time()
         with self._lock, self._connection() as conn:
@@ -232,13 +232,13 @@ class TaskStore:
         self,
         worker_id: str,
         now: float | None = None,
-        stale_after_seconds: int = 900,
+        stale_after_seconds: int = 21600,
     ) -> TaskSnapshot | None:
         current_time = time.time() if now is None else float(now)
         stale_before = current_time - max(1, int(stale_after_seconds))
         runnable_statuses = (TaskStatus.PENDING.value, TaskStatus.RUNNING.value)
         with self._lock, self._connection() as conn:
-            row = conn.execute(
+            rows = conn.execute(
                 """
                 SELECT * FROM tasks
                 WHERE status IN (?, ?)
@@ -246,7 +246,7 @@ class TaskStore:
                   AND next_run_at <= ?
                   AND (claimed_by = '' OR claimed_at <= ?)
                 ORDER BY updated_at ASC, id ASC
-                LIMIT 1
+                LIMIT 10
                 """,
                 (
                     runnable_statuses[0],
@@ -257,16 +257,36 @@ class TaskStore:
                     current_time,
                     stale_before,
                 ),
-            ).fetchone()
-            if row is None:
+            ).fetchall()
+            for row in rows:
+                cursor = conn.execute(
+                    """
+                    UPDATE tasks
+                    SET status = ?, claimed_by = ?, claimed_at = ?, updated_at = ?
+                    WHERE id = ?
+                      AND status IN (?, ?)
+                      AND current_stage NOT IN (?, ?, ?)
+                      AND next_run_at <= ?
+                      AND (claimed_by = '' OR claimed_at <= ?)
+                    """,
+                    (
+                        TaskStatus.RUNNING.value,
+                        worker_id,
+                        current_time,
+                        current_time,
+                        int(row["id"]),
+                        runnable_statuses[0],
+                        runnable_statuses[1],
+                        TaskStage.CLEANED.value,
+                        TaskStage.NEEDS_ACTION.value,
+                        TaskStage.FAILED.value,
+                        current_time,
+                        stale_before,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    continue
+                claimed = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(row["id"]),)).fetchone()
+                return self._snapshot(claimed) if claimed else None
+            else:
                 return None
-            conn.execute(
-                """
-                UPDATE tasks
-                SET status = ?, claimed_by = ?, claimed_at = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (TaskStatus.RUNNING.value, worker_id, current_time, current_time, int(row["id"])),
-            )
-            claimed = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(row["id"]),)).fetchone()
-        return self._snapshot(claimed) if claimed else None

@@ -139,3 +139,134 @@ class TaskStoreTests(unittest.TestCase):
             claimed = store.claim_next_runnable("worker-1", now=10.0)
             self.assertIsNotNone(claimed)
             self.assertEqual(claimed.current_stage, TaskStage.STRM_READY)
+
+    def test_cross_instance_claim_does_not_double_claim_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "tasks.db"
+            first_store = TaskStore(db_path)
+            second_store = TaskStore(db_path)
+            task = first_store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            first_store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
+
+            first_claim = first_store.claim_next_runnable("worker-1", now=1.0)
+            second_claim = second_store.claim_next_runnable("worker-2", now=1.0)
+
+            self.assertIsNotNone(first_claim)
+            self.assertIsNone(second_claim)
+
+    def test_default_stale_claim_timeout_is_conservative(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
+
+            first_claim = store.claim_next_runnable("worker-1", now=1.0)
+            second_claim = store.claim_next_runnable("worker-2", now=1000.0)
+
+            self.assertIsNotNone(first_claim)
+            self.assertIsNone(second_claim)
+
+    def test_record_event_preserves_claim_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            claimed = store.claim_next_runnable("worker-1", now=1.0)
+
+            updated = store.record_event(claimed.id, TaskStage.ORGANIZING, TaskStatus.RUNNING, "处理中")
+
+            self.assertEqual(updated.claimed_by, "worker-1")
+            self.assertEqual(updated.claimed_at, 1.0)
+
+    def test_record_event_clear_claim_false_preserves_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            claimed = store.claim_next_runnable("worker-1", now=1.0)
+
+            updated = store.record_event(
+                claimed.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "处理中",
+                clear_claim=False,
+            )
+
+            self.assertEqual(updated.claimed_by, "worker-1")
+            self.assertEqual(updated.claimed_at, 1.0)
+
+    def test_metadata_merge_preserves_existing_keys_and_ignores_none_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(task.id, TaskStage.RECEIVED, TaskStatus.RUNNING, "收到", metadata_patch={"keep": "yes"})
+
+            updated = store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "整理",
+                metadata_patch={"new": "value", "keep": None},
+            )
+
+            self.assertEqual(updated.metadata["keep"], "yes")
+            self.assertEqual(updated.metadata["new"], "value")
+
+    def test_legacy_schema_migrates_runtime_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "tasks.db"
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE tasks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        share_code TEXT NOT NULL,
+                        receive_code TEXT NOT NULL DEFAULT '',
+                        url TEXT NOT NULL,
+                        title TEXT NOT NULL DEFAULT '',
+                        tmdb_id TEXT NOT NULL DEFAULT '',
+                        category TEXT NOT NULL DEFAULT '',
+                        current_stage TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        error_type TEXT NOT NULL DEFAULT '',
+                        error_summary TEXT NOT NULL DEFAULT '',
+                        retry_count INTEGER NOT NULL DEFAULT 0,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        UNIQUE(share_code, receive_code)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE task_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        task_id INTEGER NOT NULL,
+                        stage TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        message TEXT NOT NULL DEFAULT '',
+                        error_type TEXT NOT NULL DEFAULT '',
+                        error_detail TEXT NOT NULL DEFAULT '',
+                        created_at REAL NOT NULL,
+                        FOREIGN KEY(task_id) REFERENCES tasks(id)
+                    )
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            store = TaskStore(db_path)
+            conn = sqlite3.connect(db_path)
+            try:
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+            finally:
+                conn.close()
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc", chat_id="464100862")
+            updated = store.record_event(task.id, TaskStage.RECEIVED, TaskStatus.RUNNING, "收到", submission_id=7)
+
+            self.assertTrue({"chat_id", "submission_id", "next_run_at", "claimed_by", "claimed_at", "metadata_json"} <= columns)
+            self.assertEqual(updated.chat_id, "464100862")
+            self.assertEqual(updated.submission_id, 7)
