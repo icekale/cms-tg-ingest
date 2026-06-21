@@ -335,6 +335,78 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(p115.received, [])
             self.assertIn("CMS 整理", telegram.messages[-1][1])
 
+    def test_task_engine_requeues_sentinel_needs_action_to_claimable_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
+            task = task_store.record_event(
+                task.id,
+                TaskStage.NEEDS_ACTION,
+                TaskStatus.NEEDS_ACTION,
+                "等待人工处理",
+                metadata_patch={"retry_stage": TaskStage.RECOGNIZING.value},
+            )
+            cms = FakeCmsSubmit()
+            telegram = FakeTelegram()
+            p115 = FakeP115Receive()
+
+            bridge.handle_update(
+                self.update("https://115cdn.com/s/abc?password=1234"),
+                cms,
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                cleanup_client=p115,
+                self_share_receive_cid="pending-cid",
+                task_engine_enabled=True,
+            )
+
+            updated = task_store.find_task(task.id)
+            claimed = task_store.claim_next_runnable("worker", now=9999999999.0)
+            self.assertEqual(cms.submitted, [])
+            self.assertEqual(p115.received, [])
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.current_stage, TaskStage.RECOGNIZING)
+            self.assertEqual(claimed.id, task.id)
+            self.assertEqual(claimed.current_stage, TaskStage.RECOGNIZING)
+
+    def test_task_engine_requeues_sentinel_failed_to_received_fallback_when_no_retry_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
+            task = task_store.record_event(task.id, TaskStage.FAILED, TaskStatus.FAILED, "兼容同步失败")
+            cms = FakeCmsSubmit()
+            telegram = FakeTelegram()
+            p115 = FakeP115Receive()
+
+            bridge.handle_update(
+                self.update("https://115cdn.com/s/abc?password=1234"),
+                cms,
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                cleanup_client=p115,
+                self_share_receive_cid="pending-cid",
+                task_engine_enabled=True,
+            )
+
+            updated = task_store.find_task(task.id)
+            claimed = task_store.claim_next_runnable("worker", now=9999999999.0)
+            self.assertEqual(cms.submitted, [])
+            self.assertEqual(p115.received, [])
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(claimed.id, task.id)
+            self.assertEqual(claimed.current_stage, TaskStage.RECEIVED)
+
     def test_duplicate_self_share_received_link_does_not_receive_again(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")

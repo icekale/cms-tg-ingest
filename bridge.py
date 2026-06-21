@@ -3901,6 +3901,35 @@ def format_task_label(row: dict[str, Any]) -> str:
     return f"{title} #{task_id}" if task_id else str(title)
 
 
+RUNNABLE_TASK_STAGES = {
+    TaskStage.RECEIVED,
+    TaskStage.ORGANIZING,
+    TaskStage.RECOGNIZING,
+    TaskStage.OWN_SHARE_CREATED,
+    TaskStage.SHARE_SYNC_SUBMITTED,
+    TaskStage.STRM_READY,
+    TaskStage.MOVED,
+    TaskStage.EMBY_CONFIRMED,
+    TaskStage.CLEANED,
+}
+RETRY_STAGE_METADATA_KEYS = ("retry_stage", "last_actionable_stage", "failed_stage", "retry_from_stage")
+
+
+def retry_stage_for_intake(task) -> TaskStage:
+    if task.current_stage in RUNNABLE_TASK_STAGES:
+        return task.current_stage
+    for key in RETRY_STAGE_METADATA_KEYS:
+        raw = task.metadata.get(key)
+        if not raw:
+            continue
+        try:
+            stage = TaskStage(str(raw))
+        except ValueError:
+            continue
+        if stage in RUNNABLE_TASK_STAGES:
+            return stage
+    return TaskStage.RECEIVED
+
 def format_task_snapshot(task) -> str:
     title = task.title or task.metadata.get("received_title") or task.share_code
     return f"#{task.id} {title}｜{stage_display_name(task.current_stage)}｜{task.status.value}"
@@ -3914,6 +3943,8 @@ def format_task_intake_reply(task) -> str:
         return f"任务已完成：{format_task_snapshot(task)}{suffix}"
     if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION}:
         return f"任务需要处理：{format_task_snapshot(task)}\n原因：{task.error_summary or '无详细错误'}"
+    if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+        return f"任务处理中/已在队列中：{format_task_snapshot(task)}"
     return f"任务已接收：{format_task_snapshot(task)}"
 
 
@@ -4438,7 +4469,15 @@ def handle_update(
             if self_share_workflow and task_engine_enabled and task_store is not None:
                 task = task_store.upsert_task(key.share_code, key.receive_code, link, chat_id=str(chat_id or ""))
                 if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {TaskStage.FAILED, TaskStage.NEEDS_ACTION}:
-                    task = task_store.enqueue_task(task.id, task.current_stage, message="重新入队")
+                    retry_stage = retry_stage_for_intake(task)
+                    task = task_store.record_event(
+                        task.id,
+                        retry_stage,
+                        task.status,
+                        "准备重新入队",
+                        metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": retry_stage.value},
+                    )
+                    task = task_store.enqueue_task(task.id, retry_stage, message="重新入队")
                 elif task.current_stage == TaskStage.RECEIVED and task.status == TaskStatus.PENDING and not task_store.list_events(task.id):
                     task = task_store.enqueue_task(task.id, TaskStage.RECEIVED, message="等待执行")
                 result_lines.append(f"{index}. {format_task_intake_reply(task)}")
