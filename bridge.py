@@ -1449,8 +1449,8 @@ class BridgeSelfShareTaskWorkflow:
         recognition = self._recognition_from_row(row)
         share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
         recognition.setdefault("share_name", share_name)
-        match = find_emby_match(self.emby, recognition, row, recent_limit=30)
-        if not match or not self._emby_match_in_moved_dest(match, row, task.metadata):
+        match = self._find_emby_match_for_moved_dest(recognition, row, task.metadata)
+        if not match:
             return StageResult.defer(
                 "等待 Emby 确认入库",
                 self.self_share_config.auto_organize_retry_seconds or 30,
@@ -1589,6 +1589,46 @@ class BridgeSelfShareTaskWorkflow:
         expected_path = safe_resolve(Path(expected))
         actual_path = safe_resolve(Path(actual))
         return actual_path == expected_path or is_relative_to(actual_path, expected_path)
+
+    def _find_emby_match_for_moved_dest(
+        self,
+        recognition: dict[str, Any],
+        row: dict[str, Any],
+        task_metadata: dict[str, Any] | None = None,
+    ) -> dict | None:
+        expected = str(row.get("dest_path") or (task_metadata or {}).get("dest_path") or "").strip()
+        if not expected:
+            return find_emby_match(self.emby, recognition, row, recent_limit=30)
+        tmdb_id = expected_task_tmdb_id(recognition, row)
+        candidates: list[dict] = []
+        if tmdb_id and hasattr(self.emby, "find_items_by_tmdb"):
+            try:
+                items = self.emby.find_items_by_tmdb(tmdb_id)
+            except Exception:
+                LOG.debug("Failed to query Emby duplicate TMDB candidates", exc_info=True)
+                items = []
+            if isinstance(items, list):
+                candidates.extend(item for item in items if isinstance(item, dict))
+        if tmdb_id and hasattr(self.emby, "find_item_by_tmdb"):
+            match = self.emby.find_item_by_tmdb(tmdb_id)
+            if isinstance(match, dict):
+                candidates.append(match)
+        if hasattr(self.emby, "recent_items"):
+            candidates.extend(item for item in self.emby.recent_items(limit=100) if isinstance(item, dict))
+        seen: set[str] = set()
+        for item in candidates:
+            key = str(item.get("Id") or item.get("Path") or id(item))
+            if key in seen:
+                continue
+            seen.add(key)
+            if tmdb_id:
+                if item_tmdb_id(item) != tmdb_id:
+                    continue
+            elif not match_emby_item([item], recognition, row):
+                continue
+            if self._emby_match_in_moved_dest(item, row, task_metadata):
+                return item
+        return None
 
     def _emby_metadata(self, row: dict[str, Any]) -> dict[str, Any]:
         return {

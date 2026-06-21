@@ -643,6 +643,47 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(stored_after_inside["emby_status"], "confirmed")
             self.assertEqual(stored_after_inside["emby_item_id"], "new-item")
 
+    def test_emby_confirmed_stage_selects_in_dest_duplicate_tmdb_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            emby = FakeEmby()
+            workflow = self._workflow(tmp, emby=emby)
+            row = self._self_share_row()
+            dest_a = Path(tmp) / "library" / "A" / "S-双喜-2025-[tmdb=123456]"
+            dest_b = Path(tmp) / "library" / "B" / "S-双喜-2025-[tmdb=123456]"
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(self.config.strm_root / row["own_share_file_name"]),
+                dest_path=str(dest_a),
+                category_final="华语电影",
+            ) or row
+            outside = {
+                "Id": "old-item",
+                "Name": "双喜",
+                "Path": str(dest_b),
+                "ParentId": "parent-old",
+                "LibraryName": "旧库",
+                "ProviderIds": {"Tmdb": "123456"},
+            }
+            inside = {
+                "Id": "new-item",
+                "Name": "双喜",
+                "Path": str(dest_a / "movie.strm"),
+                "ParentId": "parent-new",
+                "LibraryName": "电影库",
+                "ProviderIds": {"Tmdb": "123456"},
+            }
+            emby.items_by_tmdb["123456"] = outside
+            emby.recent = [outside, inside]
+            task = self._claim_task("abc", "1234", TaskStage.EMBY_CONFIRMED, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(stored["emby_item_id"], "new-item")
+            self.assertEqual(stored["emby_parent"], "电影库")
+
     def test_cleaned_stage_requires_emby_confirmed_and_own_share_before_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:
             cleanup = FakeCleanupClient()
