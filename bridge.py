@@ -1164,13 +1164,14 @@ class BridgeSelfShareTaskWorkflow:
             return self._stage_own_share_created(task)
         if task.current_stage == TaskStage.SHARE_SYNC_SUBMITTED:
             return self._stage_share_sync_submitted(task)
-        if task.current_stage in {
-            TaskStage.STRM_READY,
-            TaskStage.MOVED,
-            TaskStage.EMBY_CONFIRMED,
-            TaskStage.CLEANED,
-        }:
-            return StageResult.failed("阶段尚未实现", error_type="unsupported_stage")
+        if task.current_stage == TaskStage.STRM_READY:
+            return self._stage_strm_ready(task)
+        if task.current_stage == TaskStage.MOVED:
+            return self._stage_moved(task)
+        if task.current_stage == TaskStage.EMBY_CONFIRMED:
+            return self._stage_emby_confirmed(task)
+        if task.current_stage == TaskStage.CLEANED:
+            return self._stage_cleaned(task)
         return StageResult.failed("阶段尚未实现", error_type="unsupported_stage")
 
     def _submission_row(self, task) -> dict[str, Any] | None:
@@ -1369,6 +1370,114 @@ class BridgeSelfShareTaskWorkflow:
             {"submission_id": int(row["id"]), "share_sync_status": row.get("share_sync_status") or "submitted"},
         )
 
+    def _stage_strm_ready(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        recognition = self._recognition_from_row(row)
+        share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
+        source = find_self_share_strm_source_dir(self.self_share_config, row, recognition, share_name)
+        metadata = {
+            "submission_id": int(row["id"]),
+            "category": final_category_for_move(row, recognition),
+            "recognition": recognition,
+        }
+        if not source:
+            return StageResult.defer(
+                "等待自有分享 STRM 源目录生成",
+                self.self_share_config.auto_organize_retry_seconds or 30,
+                metadata,
+            )
+        metadata["source_path"] = str(source)
+        return StageResult.complete("已找到自有分享 STRM 源目录", metadata)
+
+    def _stage_moved(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        recognition = self._recognition_from_row(row)
+        share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
+        source = find_self_share_strm_source_dir(self.self_share_config, row, recognition, share_name)
+        category = final_category_for_move(row, recognition)
+        move_config = move_config_for_workflow_source(self.move_config, source, self.self_share_config)
+        plan = plan_strm_move(source, category, move_config)
+        metadata = {
+            "submission_id": int(row["id"]),
+            "source_path": str(plan.source_path) if plan.source_path else "",
+            "dest_path": str(plan.dest_path) if plan.dest_path else "",
+            "category": category,
+        }
+        if is_move_plan_retryable(plan):
+            return StageResult.defer(
+                plan.reason,
+                self.self_share_config.auto_organize_retry_seconds or 30,
+                metadata,
+            )
+        moved_row = merge_self_share_strm_folder(plan, self.store, row)
+        move_status = str(moved_row.get("move_status") or "").lower()
+        metadata.update(
+            {
+                "source_path": str(moved_row.get("source_path") or metadata["source_path"]),
+                "dest_path": str(moved_row.get("dest_path") or metadata["dest_path"]),
+                "category": str(moved_row.get("category_final") or category),
+            }
+        )
+        if move_status == "moved":
+            send_move_result(self.telegram, self.chat_id, plan, moved_row)
+            return StageResult.complete("STRM 已移动到媒体库", metadata)
+        error = str(moved_row.get("move_error") or plan.reason or "STRM 移动失败")
+        return StageResult.failed(error, error_type="strm_move_failed", metadata=metadata)
+
+    def _stage_emby_confirmed(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        if str(row.get("emby_status") or "").lower() == "confirmed":
+            return StageResult.complete("Emby 已确认入库", self._emby_metadata(row))
+        if not self.emby or not getattr(self.emby, "enabled", False):
+            return StageResult.needs_action("Emby 确认未启用", {"submission_id": int(row["id"])})
+        recognition = self._recognition_from_row(row)
+        share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
+        recognition.setdefault("share_name", share_name)
+        match = find_emby_match(self.emby, recognition, row, recent_limit=30)
+        if not match:
+            return StageResult.defer(
+                "等待 Emby 确认入库",
+                self.self_share_config.auto_organize_retry_seconds or 30,
+                {"submission_id": int(row["id"]), "recognition": recognition},
+            )
+        send_emby_confirmed(self.telegram, self.chat_id, self.store, row, match, self.emby, cleanup_client=None)
+        updated = self.store.find_by_id(int(row["id"])) or row
+        return StageResult.complete("Emby 已确认入库", self._emby_metadata(updated))
+
+    def _stage_cleaned(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        if str(row.get("cleanup_status") or "").lower() == "deleted":
+            return StageResult.complete("115 转存源已删除，自有分享保留", self._cleanup_metadata(row))
+        if str(row.get("move_status") or "").lower() != "moved":
+            return StageResult.needs_action("等待 STRM 移动确认后再清理", {"submission_id": int(row["id"])})
+        if str(row.get("emby_status") or "").lower() != "confirmed":
+            return StageResult.needs_action("等待 Emby 确认后再清理", {"submission_id": int(row["id"])})
+        if not str(row.get("own_share_code") or "").strip():
+            return StageResult.failed("缺少自有分享码，拒绝清理 115 转存源", error_type="own_share_missing")
+        if not str(row.get("own_share_file_id") or "").strip():
+            return StageResult.failed("缺少自有分享文件夹 ID", error_type="own_share_file_missing")
+        if not self.cleanup_client:
+            return StageResult.needs_action("缺少 115 清理客户端", {"submission_id": int(row["id"])})
+        updated, line = cleanup_own_share_source(self.store, row, self.cleanup_client)
+        cleanup_status = str(updated.get("cleanup_status") or "").lower()
+        if cleanup_status == "deleted":
+            return StageResult.complete(line or "115 转存源已删除，自有分享保留", self._cleanup_metadata(updated))
+        if cleanup_status == "error":
+            return StageResult.failed(
+                str(updated.get("cleanup_error") or line or "115 转存源删除失败"),
+                error_type="cleanup_failed",
+                metadata=self._cleanup_metadata(updated),
+            )
+        return StageResult.needs_action(line or "等待 115 转存源清理", self._cleanup_metadata(updated))
+
     def _recognition_from_row(self, row: dict[str, Any]) -> dict[str, Any]:
         try:
             recognition = json.loads(row.get("recognition_json") or "{}")
@@ -1430,6 +1539,25 @@ class BridgeSelfShareTaskWorkflow:
             "own_share_code": row.get("own_share_code"),
             "own_share_receive_code": row.get("own_share_receive_code"),
             "own_share_url": row.get("own_share_url"),
+        }
+
+    def _emby_metadata(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "submission_id": int(row["id"]),
+            "emby_status": row.get("emby_status"),
+            "item_id": row.get("emby_item_id"),
+            "title": row.get("emby_title"),
+            "path": row.get("emby_path"),
+            "parent": row.get("emby_parent"),
+            "library": row.get("emby_parent"),
+        }
+
+    def _cleanup_metadata(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "submission_id": int(row["id"]),
+            "cleanup_status": row.get("cleanup_status"),
+            "cleanup_file_id": row.get("cleanup_file_id"),
+            "cleanup_error": row.get("cleanup_error"),
         }
 
 
