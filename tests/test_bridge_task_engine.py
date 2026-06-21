@@ -801,6 +801,35 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["cleanup_status"], "skipped")
             self.assertEqual(result.metadata["cleanup_error"], "disabled")
 
+    def test_cleaned_stage_skips_disabled_cleanup_before_own_share_prechecks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, cleanup_client=None)
+            row = self._self_share_row()
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path="/share/source",
+                dest_path="/library/dest",
+                category_final="华语电影",
+            ) or row
+            row = self.submissions.update_emby(int(row["id"]), "confirmed") or row
+            with self.submissions._connection() as conn:
+                conn.execute(
+                    "UPDATE submissions SET own_share_code = '', own_share_file_id = '' WHERE id = ?",
+                    (row["id"],),
+                )
+            task = self._claim_task("abc", "1234", TaskStage.CLEANED, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertIn("清理已跳过", result.message)
+            self.assertEqual(stored["cleanup_status"], "skipped")
+            self.assertEqual(stored["cleanup_error"], "disabled")
+            self.assertEqual(result.metadata["cleanup_status"], "skipped")
+            self.assertEqual(result.metadata["cleanup_error"], "disabled")
+
     def test_cleaned_stage_deletes_source_after_emby_confirmed_and_own_share_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
             cleanup = FakeCleanupClient()

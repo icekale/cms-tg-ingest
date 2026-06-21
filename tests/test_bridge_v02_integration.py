@@ -597,6 +597,52 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(claimed.current_stage, TaskStage.RECOGNIZING)
             self.assertEqual(telegram.answers[-1][1], "已记录分类：华语电影")
 
+    def test_category_callback_skip_marks_authoritative_task_terminal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            row = submission_store.upsert_submission(
+                bridge.ShareKey("abc", "1234"),
+                "https://115cdn.com/s/abc?password=1234",
+                "received",
+                title="Suggest.Show.S01.2025",
+            )
+            task = task_store.upsert_task("abc", "1234", row["url"], chat_id="464100862")
+            task_store.record_event(
+                task.id,
+                TaskStage.RECOGNIZING,
+                TaskStatus.NEEDS_ACTION,
+                "等待人工确认分类",
+                submission_id=int(row["id"]),
+                metadata_patch={"submission_id": int(row["id"])},
+            )
+            telegram = FakeTelegram()
+            update = {
+                "callback_query": {
+                    "id": "callback-skip",
+                    "from": {"id": 464100862},
+                    "message": {"chat": {"id": 464100862}},
+                    "data": f"cat:{row['id']}:skip",
+                }
+            }
+
+            bridge.handle_update(update, object(), telegram, "464100862", submission_store, task_store=task_store)
+
+            stored_row = submission_store.find_by_id(int(row["id"]))
+            updated = task_store.find_task(task.id)
+            claimed = task_store.claim_next_runnable("worker", now=9999999999.0)
+            events = task_store.list_events(task.id)
+            self.assertIsNone(stored_row["category_choice"])
+            self.assertEqual(stored_row["category_status"], "skipped")
+            self.assertEqual(updated.status, TaskStatus.FAILED)
+            self.assertEqual(updated.current_stage, TaskStage.FAILED)
+            self.assertEqual(updated.error_type, "category_skipped")
+            self.assertEqual(updated.error_summary, "已跳过分类，任务停止")
+            self.assertEqual(updated.metadata["submission_id"], int(row["id"]))
+            self.assertIsNone(claimed)
+            self.assertIn("已跳过分类，任务停止", [event["message"] for event in events])
+            self.assertEqual(telegram.answers[-1][1], "已记录分类：跳过")
+
     def test_task_engine_requeues_sentinel_needs_action_to_claimable_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")

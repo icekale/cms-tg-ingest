@@ -1478,10 +1478,6 @@ class BridgeSelfShareTaskWorkflow:
             return StageResult.needs_action("等待 STRM 移动确认后再清理", {"submission_id": int(row["id"])})
         if str(row.get("emby_status") or "").lower() != "confirmed":
             return StageResult.needs_action("等待 Emby 确认后再清理", {"submission_id": int(row["id"])})
-        if not str(row.get("own_share_code") or "").strip():
-            return StageResult.failed("缺少自有分享码，拒绝清理 115 转存源", error_type="own_share_missing")
-        if not str(row.get("own_share_file_id") or "").strip():
-            return StageResult.failed("缺少自有分享文件夹 ID", error_type="own_share_file_missing")
         if not self.cleanup_client:
             updated = row
             if hasattr(self.store, "update_cleanup"):
@@ -1490,6 +1486,10 @@ class BridgeSelfShareTaskWorkflow:
             metadata["cleanup_status"] = "skipped"
             metadata["cleanup_error"] = "disabled"
             return StageResult.complete("清理已跳过（未启用）", metadata)
+        if not str(row.get("own_share_code") or "").strip():
+            return StageResult.failed("缺少自有分享码，拒绝清理 115 转存源", error_type="own_share_missing")
+        if not str(row.get("own_share_file_id") or "").strip():
+            return StageResult.failed("缺少自有分享文件夹 ID", error_type="own_share_file_missing")
         updated, line = cleanup_own_share_source(self.store, row, self.cleanup_client)
         cleanup_status = str(updated.get("cleanup_status") or "").lower()
         if cleanup_status == "deleted":
@@ -3710,6 +3710,23 @@ def handle_callback_query(
     label = CATEGORY_LABELS[category_key]
     status = "skipped" if category_key == "skip" else "selected"
     updated = store.update_category(row_id, None if category_key == "skip" else label, status)
+    if updated and task_store and category_key == "skip":
+        task = task_store.upsert_task(
+            str(updated.get("share_code") or ""),
+            str(updated.get("receive_code") or ""),
+            str(updated.get("url") or ""),
+        )
+        task_store.record_event(
+            task.id,
+            TaskStage.FAILED,
+            TaskStatus.FAILED,
+            "已跳过分类，任务停止",
+            error_type="category_skipped",
+            error_summary="已跳过分类，任务停止",
+            submission_id=int(updated["id"]),
+            metadata_patch={"submission_id": int(updated["id"])},
+            clear_claim=True,
+        )
     if updated and task_store and category_key != "skip":
         task = task_store.upsert_task(
             str(updated.get("share_code") or ""),
