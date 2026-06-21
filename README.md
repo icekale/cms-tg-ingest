@@ -16,26 +16,24 @@
 - 可选在自有分享创建成功后删除 115 转存源文件，同时保留自己的 115 分享不取消。
 - `doctor.py` 离线诊断配置和挂载路径。
 
-## v0.2 Alpha：任务引擎和 Web 管理页
+## v0.2 Alpha.2：TaskStore 接管新链接
 
-v0.2 引入任务引擎基础：每条链接会记录阶段、错误摘要、事件时间线和重试建议。启用 Web 管理页后，可以在浏览器查看任务列表、任务详情和从失败阶段触发重试。
+v0.2 authoritative 任务引擎让真实 Telegram/CMS 工作流的新自分享链接默认由 TaskStore authoritative runner 执行：Telegram 收到链接后创建 task 并返回 task ID，随后 TaskRunner 推进完整阶段：接收、整理、识别、建分享、生成 STRM、移动、Emby、清理。
+
+Web 管理页和 Telegram 状态命令读取同一个 TaskStore 状态，因此卡在哪个阶段、最近错误和重试结果都能在两端看到。SubmissionStore 仍保留为兼容、审计和修复元数据，不再作为新自分享链接的主执行路径。
 
 ```env
+TASK_ENGINE_ENABLED=true
 TASK_DB_PATH=/data/tasks.db
 WEB_ENABLED=true
 WEB_HOST=0.0.0.0
 WEB_PORT=8787
 WEB_TOKEN=
+TASK_WORKER_INTERVAL_SECONDS=5
 TASK_MAX_RETRIES=3
 ```
 
-访问地址示例：`http://<unraid-ip>:8787/`。
-
-## v0.2 Alpha.2：真实工作流任务时间线
-
-v0.2 Alpha.2 将真实 Telegram/CMS 工作流进度写入 TaskStore。新的链接提交、CMS 状态、创建自有分享、分享同步、STRM 移动、Emby 确认和清理结果会出现在 Web 管理页中。
-
-TaskStore 仍是旁路时间线，当前生产执行仍由既有稳定工作流和 SubmissionStore 驱动。Web 重试仍然是非破坏性操作：它记录重试意图和当前阶段，不会自动重复转存、删除、分享或移动文件。
+访问地址示例：`http://<unraid-ip>:8787/`。如需回滚到旧的 SubmissionStore + 轮询路径，设置 `TASK_ENGINE_ENABLED=false`。
 
 ## 快速开始
 

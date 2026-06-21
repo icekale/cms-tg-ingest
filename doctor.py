@@ -22,6 +22,7 @@ class Filesystem(Protocol):
     def exists(self, path: Path) -> bool: ...
     def is_file(self, path: Path) -> bool: ...
     def is_dir(self, path: Path) -> bool: ...
+    def is_writable(self, path: Path) -> bool: ...
 
 
 class RealFilesystem:
@@ -33,6 +34,9 @@ class RealFilesystem:
 
     def is_dir(self, path: Path) -> bool:
         return path.is_dir()
+
+    def is_writable(self, path: Path) -> bool:
+        return os.access(path, os.W_OK)
 
 
 class MemoryFilesystem:
@@ -46,6 +50,9 @@ class MemoryFilesystem:
         return self.exists(path)
 
     def is_dir(self, path: Path) -> bool:
+        return self.exists(path)
+
+    def is_writable(self, path: Path) -> bool:
         return self.exists(path)
 
 
@@ -86,6 +93,10 @@ def _env_value(env: Mapping[str, str], name: str) -> str:
     return str(env.get(name, "")).strip()
 
 
+def _env_bool(env: Mapping[str, str], name: str) -> bool:
+    return _env_value(env, name).lower() in {"1", "true", "yes", "on"}
+
+
 def _split_env_list(value: str) -> list[str]:
     parts: list[str] = []
     for raw in value.replace("|", ",").split(","):
@@ -117,23 +128,33 @@ def _check_required_env(env: Mapping[str, str]) -> CheckItem:
 def _check_optional_env(env: Mapping[str, str]) -> CheckItem:
     warnings: list[str] = []
     workflow = _env_value(env, "WORKFLOW_MODE") or "direct"
+    task_engine_enabled = _env_bool(env, "TASK_ENGINE_ENABLED")
     if workflow not in {"direct", "self_share_sync"}:
         warnings.append("WORKFLOW_MODE should be direct or self_share_sync")
+    if task_engine_enabled and workflow != "self_share_sync":
+        warnings.append("Task engine currently requires WORKFLOW_MODE=self_share_sync")
     if workflow == "self_share_sync" and not _env_value(env, "P115_COOKIE_PATH"):
         warnings.append("P115_COOKIE_PATH is required for self_share_sync")
     if workflow == "self_share_sync" and not _env_value(env, "SELF_SHARE_RECEIVE_CID"):
         warnings.append("SELF_SHARE_RECEIVE_CID is required for self_share_sync")
-    if _env_value(env, "OPENAI_CLASSIFY_ENABLED").lower() in {"1", "true", "yes", "on"} and not _env_value(env, "OPENAI_API_KEY"):
+    if _env_bool(env, "OPENAI_CLASSIFY_ENABLED") and not _env_value(env, "OPENAI_API_KEY"):
         warnings.append("OPENAI_API_KEY is required when OpenAI fallback is enabled")
     if _env_value(env, "EMBY_BASE_URL") and not _env_value(env, "EMBY_API_KEY"):
         warnings.append("EMBY_API_KEY is required when EMBY_BASE_URL is set")
-    if _env_value(env, "WEB_ENABLED").lower() in {"1", "true", "yes", "on"}:
+    if _env_bool(env, "WEB_ENABLED"):
         try:
             port = int(_env_value(env, "WEB_PORT") or "8787")
             if port <= 0 or port > 65535:
                 warnings.append("WEB_PORT must be between 1 and 65535")
         except ValueError:
             warnings.append("WEB_PORT must be an integer")
+    if task_engine_enabled and _env_value(env, "TASK_WORKER_INTERVAL_SECONDS"):
+        try:
+            interval = float(_env_value(env, "TASK_WORKER_INTERVAL_SECONDS"))
+            if interval <= 0:
+                warnings.append("TASK_WORKER_INTERVAL_SECONDS must be a positive number")
+        except ValueError:
+            warnings.append("TASK_WORKER_INTERVAL_SECONDS must be a positive number")
     if warnings:
         return CheckItem("optional_env", False, "; ".join(warnings))
     return CheckItem("optional_env", True, "optional feature variables are consistent")
@@ -147,6 +168,8 @@ def _check_filesystem(env: Mapping[str, str], filesystem: Filesystem) -> CheckIt
     task_db_path = Path(_env_value(env, "TASK_DB_PATH") or "/data/tasks.db")
     if not filesystem.exists(task_db_path.parent):
         problems.append(f"TASK_DB directory does not exist: {task_db_path.parent}")
+    elif _env_bool(env, "TASK_ENGINE_ENABLED") and not filesystem.is_writable(task_db_path.parent):
+        problems.append(f"TASK_DB directory is not writable: {task_db_path.parent}")
     workflow = _env_value(env, "WORKFLOW_MODE") or "direct"
     if workflow == "self_share_sync":
         cookie = Path(_env_value(env, "P115_COOKIE_PATH") or "/config/115-cookies.txt")
