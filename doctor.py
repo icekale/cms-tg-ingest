@@ -94,7 +94,7 @@ def _env_value(env: Mapping[str, str], name: str) -> str:
 
 
 def _env_bool(env: Mapping[str, str], name: str) -> bool:
-    return _env_value(env, name).lower() in {"1", "true", "yes", "on"}
+    return _env_value(env, name).lower() in {"1", "true", "yes", "on", "enabled", "enable"}
 
 
 def _split_env_list(value: str) -> list[str]:

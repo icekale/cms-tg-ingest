@@ -111,6 +111,27 @@ class DoctorConfigTests(unittest.TestCase):
         self.assertNotIn("secret-token", text)
         self.assertNotIn("secret-password", text)
 
+    def test_task_engine_enabled_alias_requires_self_share_workflow_without_leaking_secrets(self):
+        env = {
+            "TG_BOT_TOKEN": "123456:secret-token",
+            "TG_ALLOWED_CHAT_ID": "464100862",
+            "CMS_BASE_URL": "http://cms:9527",
+            "CMS_USERNAME": "user",
+            "CMS_PASSWORD": "secret-password",
+            "DB_PATH": "/data/submissions.db",
+            "TASK_DB_PATH": "/data/tasks.db",
+            "TASK_ENGINE_ENABLED": "enabled",
+            "WORKFLOW_MODE": "direct",
+        }
+
+        report = doctor.run_checks(env=env, filesystem=doctor.MemoryFilesystem(existing_paths={"/data"}))
+
+        self.assertFalse(report.ok)
+        text = report.to_text()
+        self.assertIn("Task engine currently requires WORKFLOW_MODE=self_share_sync", text)
+        self.assertNotIn("secret-token", text)
+        self.assertNotIn("secret-password", text)
+
     def test_task_engine_requires_positive_worker_interval(self):
         env = {
             "TG_BOT_TOKEN": "123456:secret-token",

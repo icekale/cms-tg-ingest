@@ -3,7 +3,7 @@
 ## 0.2.0-alpha.2 - Unreleased
 
 - 启用 TaskStore authoritative runner：真实工作流进度写入 TaskStore，新自分享链接由 TaskStore 创建任务并由 TaskRunner 推进真实工作流。
-- Web 管理页和 Telegram 状态读取同一 TaskStore 状态，失败阶段可见，Web 重试会重新排队实际任务。
+- Web 管理页读取 TaskStore，失败阶段可见，Web 重试会重新排队实际任务；Telegram 新链接接收回复在 authoritative 模式下可返回 TaskStore task ID 和当前阶段，现有 `/status` 仍保留 SubmissionStore 兼容语义。
 - SubmissionStore 保留为兼容、审计和修复元数据；可用 `TASK_ENGINE_ENABLED=false` 回滚到旧执行路径。
 
 ## 0.2.0-alpha.1 - Unreleased
