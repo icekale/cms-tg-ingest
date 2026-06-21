@@ -5,6 +5,8 @@ from .models import RetryAction, RetryDecision, TaskSnapshot, TaskStage, TaskSta
 _STAGE_NAMES = {
     TaskStage.RECEIVED: "收到链接",
     TaskStage.CMS_SUBMITTED: "提交 CMS",
+    TaskStage.ORGANIZING: "CMS 整理",
+    TaskStage.RECOGNIZING: "识别分类",
     TaskStage.ORGANIZED: "CMS 整理",
     TaskStage.OWN_SHARE_CREATED: "创建自有分享",
     TaskStage.SHARE_SYNC_SUBMITTED: "分享同步",
@@ -18,6 +20,8 @@ _STAGE_NAMES = {
 
 _RETRYABLE_STAGES = {
     TaskStage.CMS_SUBMITTED,
+    TaskStage.ORGANIZING,
+    TaskStage.RECOGNIZING,
     TaskStage.ORGANIZED,
     TaskStage.OWN_SHARE_CREATED,
     TaskStage.SHARE_SYNC_SUBMITTED,

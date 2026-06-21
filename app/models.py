@@ -8,6 +8,8 @@ from typing import Any
 class TaskStage(str, Enum):
     RECEIVED = "received"
     CMS_SUBMITTED = "cms_submitted"
+    ORGANIZING = "organizing"
+    RECOGNIZING = "recognizing"
     ORGANIZED = "organized"
     OWN_SHARE_CREATED = "own_share_created"
     SHARE_SYNC_SUBMITTED = "share_sync_submitted"
@@ -85,7 +87,9 @@ class TaskSnapshot:
 
 
 _SUCCESS_FLOW = {
-    TaskStage.RECEIVED: TaskStage.CMS_SUBMITTED,
+    TaskStage.RECEIVED: TaskStage.ORGANIZING,
+    TaskStage.ORGANIZING: TaskStage.RECOGNIZING,
+    TaskStage.RECOGNIZING: TaskStage.OWN_SHARE_CREATED,
     TaskStage.CMS_SUBMITTED: TaskStage.ORGANIZED,
     TaskStage.ORGANIZED: TaskStage.OWN_SHARE_CREATED,
     TaskStage.OWN_SHARE_CREATED: TaskStage.SHARE_SYNC_SUBMITTED,
