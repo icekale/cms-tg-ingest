@@ -213,6 +213,19 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(updated.metadata["keep"], "yes")
             self.assertEqual(updated.metadata["new"], "value")
 
+    def test_cross_instance_metadata_patches_preserve_existing_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "tasks.db"
+            first_store = TaskStore(db_path)
+            second_store = TaskStore(db_path)
+            task = first_store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+
+            first_store.record_event(task.id, TaskStage.RECEIVED, TaskStatus.RUNNING, "收到", metadata_patch={"first": "1"})
+            updated = second_store.record_event(task.id, TaskStage.ORGANIZING, TaskStatus.RUNNING, "整理", metadata_patch={"second": "2"})
+
+            self.assertEqual(updated.metadata["first"], "1")
+            self.assertEqual(updated.metadata["second"], "2")
+
     def test_legacy_schema_migrates_runtime_columns(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "tasks.db"
@@ -258,15 +271,30 @@ class TaskStoreTests(unittest.TestCase):
             finally:
                 conn.close()
 
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO tasks (share_code, receive_code, url, current_stage, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    ("legacy", "", "https://115cdn.com/s/legacy", TaskStage.RECEIVED.value, TaskStatus.PENDING.value, 1.0, 1.0),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
             store = TaskStore(db_path)
             conn = sqlite3.connect(db_path)
             try:
                 columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
             finally:
                 conn.close()
+            legacy_claim = store.claim_next_runnable("worker-1", now=10.0)
             task = store.upsert_task("abc", "", "https://115cdn.com/s/abc", chat_id="464100862")
             updated = store.record_event(task.id, TaskStage.RECEIVED, TaskStatus.RUNNING, "收到", submission_id=7)
 
             self.assertTrue({"chat_id", "submission_id", "next_run_at", "claimed_by", "claimed_at", "metadata_json"} <= columns)
+            self.assertIsNone(legacy_claim)
             self.assertEqual(updated.chat_id, "464100862")
             self.assertEqual(updated.submission_id, 7)

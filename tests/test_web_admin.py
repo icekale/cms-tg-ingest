@@ -48,6 +48,9 @@ class WebAdminTests(unittest.TestCase):
             store = TaskStore(Path(tmp) / "tasks.db")
             task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
             store.record_event(task.id, TaskStage.STRM_READY, TaskStatus.FAILED, "STRM missing", error_summary="未找到 STRM")
+            store.enqueue_task(task.id, TaskStage.STRM_READY, next_run_at=1.0)
+            store.claim_next_runnable("stale-worker", now=1.0)
+            store.record_event(task.id, TaskStage.STRM_READY, TaskStatus.FAILED, "STRM missing", error_summary="未找到 STRM")
             app = WebApp(store, web_token="")
 
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/retry", {}, b"")
@@ -57,6 +60,8 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(status, 303)
             self.assertEqual(headers["Location"], f"/task/{task.id}")
             self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.claimed_by, "")
+            self.assertEqual(updated.next_run_at, 0)
             self.assertEqual(updated.retry_count, 1)
             self.assertTrue(any(event["message"] == "手动触发重试" for event in events))
             self.assertEqual(body, b"")

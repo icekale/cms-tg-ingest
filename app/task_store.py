@@ -82,7 +82,7 @@ class TaskStore:
         columns = {
             "chat_id": "TEXT NOT NULL DEFAULT ''",
             "submission_id": "INTEGER",
-            "next_run_at": "REAL NOT NULL DEFAULT 0",
+            "next_run_at": "REAL NOT NULL DEFAULT -1",
             "claimed_by": "TEXT NOT NULL DEFAULT ''",
             "claimed_at": "REAL NOT NULL DEFAULT 0",
             "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
@@ -165,6 +165,8 @@ class TaskStore:
     ) -> TaskSnapshot:
         now = time.time()
         with self._lock, self._connection() as conn:
+            # Acquire the write lock before reading metadata so concurrent patches do not lose updates.
+            conn.execute("BEGIN IMMEDIATE")
             current = conn.execute("SELECT metadata_json FROM tasks WHERE id = ?", (task_id,)).fetchone()
             merged_metadata = self._merge_metadata(current["metadata_json"] if current else "{}", metadata_patch)
             conn.execute(
@@ -243,6 +245,7 @@ class TaskStore:
                 SELECT * FROM tasks
                 WHERE status IN (?, ?)
                   AND current_stage NOT IN (?, ?, ?)
+                  AND next_run_at >= 0
                   AND next_run_at <= ?
                   AND (claimed_by = '' OR claimed_at <= ?)
                 ORDER BY updated_at ASC, id ASC
@@ -266,6 +269,7 @@ class TaskStore:
                     WHERE id = ?
                       AND status IN (?, ?)
                       AND current_stage NOT IN (?, ?, ?)
+                      AND next_run_at >= 0
                       AND next_run_at <= ?
                       AND (claimed_by = '' OR claimed_at <= ?)
                     """,

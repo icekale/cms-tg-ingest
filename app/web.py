@@ -117,7 +117,15 @@ class WebApp:
             task_id = int(parsed.path.split("/")[2])
             task = self.store.find_task(task_id)
             if task:
-                self.store.record_event(task_id, task.current_stage, TaskStatus.PENDING, "手动触发重试", increment_retry=True)
+                self.store.record_event(
+                    task_id,
+                    task.current_stage,
+                    TaskStatus.PENDING,
+                    "手动触发重试",
+                    increment_retry=True,
+                    next_run_at=0,
+                    clear_claim=True,
+                )
             return 303, {"Location": f"/task/{task_id}"}, b""
         return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"Not Found"
 
