@@ -43,7 +43,7 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn(f'action="/task/{task.id}/retry"', html)
             self.assertIn("重试当前阶段", html)
 
-    def test_retry_endpoint_records_retry_event(self):
+    def test_retry_endpoint_enqueues_failed_stage_for_worker_claim(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
             task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
@@ -56,14 +56,20 @@ class WebAdminTests(unittest.TestCase):
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/retry", {}, b"")
             updated = store.find_task(task.id)
             events = store.list_events(task.id)
+            claimed = store.claim_next_runnable("worker", now=0)
 
             self.assertEqual(status, 303)
             self.assertEqual(headers["Location"], f"/task/{task.id}")
             self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.current_stage, TaskStage.STRM_READY)
             self.assertEqual(updated.claimed_by, "")
             self.assertEqual(updated.next_run_at, 0)
             self.assertEqual(updated.retry_count, 1)
             self.assertTrue(any(event["message"] == "手动触发重试" for event in events))
+            self.assertTrue(any(event["message"] == "手动重试已入队" for event in events))
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed.id, task.id)
+            self.assertEqual(claimed.current_stage, TaskStage.STRM_READY)
             self.assertEqual(body, b"")
 
     def test_web_token_blocks_requests_without_token(self):

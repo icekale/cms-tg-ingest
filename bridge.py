@@ -4611,6 +4611,25 @@ def run_forever(config: Config) -> None:
             conflict_policy=move_config.conflict_policy,
             stable_seconds=move_config.stable_seconds,
         )
+    if config.task_engine_enabled and self_share_config.enabled and p115:
+        task_workflow = BridgeSelfShareTaskWorkflow(
+            cms=cms,
+            telegram=telegram,
+            chat_id=config.tg_allowed_chat_id,
+            store=store,
+            task_store=task_store,
+            p115=p115,
+            self_share_config=self_share_config,
+            move_config=move_config,
+            emby=emby,
+            openai_classifier=openai_classifier,
+            tmdb_resolver=tmdb_resolver,
+            cleanup_client=p115 if self_share_config.cleanup_after_emby else p115,
+            receive_cid=config.self_share_receive_cid,
+        )
+        task_runner = TaskRunner(task_store, task_workflow, interval_seconds=config.task_worker_interval_seconds)
+        task_runner.start()
+        LOG.info("Task engine worker started interval_seconds=%s", config.task_worker_interval_seconds)
     offset = None
     LOG.info("cms-tg-ingest started db_path=%s", config.db_path)
     try:
