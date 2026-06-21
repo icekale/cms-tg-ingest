@@ -24,6 +24,7 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             "WEB_PORT": "8787",
             "WEB_TOKEN": "secret",
             "TASK_MAX_RETRIES": "5",
+            "TASK_ENGINE_ENABLED": "true",
         }
 
     def test_config_reads_v02_web_and_task_settings(self):
@@ -36,6 +37,12 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             self.assertEqual(cfg.web_port, 8787)
             self.assertEqual(cfg.web_token, "secret")
             self.assertEqual(cfg.task_max_retries, 5)
+
+    def test_config_reads_task_engine_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):
+            cfg = bridge.Config.from_env()
+
+            self.assertTrue(cfg.task_engine_enabled)
 
     def test_create_task_store_uses_task_db_path(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):
@@ -92,7 +99,10 @@ class BridgeV02IntegrationTests(unittest.TestCase):
                     return {"ok": True}
 
             def fake_handle_update(*args, **kwargs):
-                seen.append(kwargs.get("task_store"))
+                seen.append({
+                    "task_store": kwargs.get("task_store"),
+                    "task_engine_enabled": kwargs.get("task_engine_enabled"),
+                })
 
             with patch.object(bridge, "TelegramClient", OneUpdateTelegram), \
                  patch.object(bridge, "CmsClient", lambda config: object()), \
@@ -108,7 +118,8 @@ class BridgeV02IntegrationTests(unittest.TestCase):
                     bridge.run_forever(cfg)
 
             self.assertEqual(len(seen), 1)
-            self.assertIsNotNone(seen[0])
+            self.assertIsNotNone(seen[0]["task_store"])
+            self.assertTrue(seen[0]["task_engine_enabled"])
 
 
 class FakeTelegram:
@@ -265,6 +276,64 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(row["workflow_phase"], "received_to_pending")
             self.assertEqual(row["title"], "示例电影")
             self.assertIn("已接收", telegram.messages[-1][1])
+
+    def test_task_engine_self_share_intake_enqueues_without_receiving_immediately(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            cms = FakeCmsSubmit()
+            telegram = FakeTelegram()
+            p115 = FakeP115Receive()
+
+            bridge.handle_update(
+                self.update("https://115cdn.com/s/abc?password=1234"),
+                cms,
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                cleanup_client=p115,
+                self_share_receive_cid="pending-cid",
+                task_engine_enabled=True,
+            )
+
+            self.assertEqual(cms.submitted, [])
+            self.assertEqual(p115.received, [])
+            tasks = task_store.list_recent_tasks(limit=10)
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0].current_stage, TaskStage.RECEIVED)
+            self.assertEqual(tasks[0].status, TaskStatus.PENDING)
+            self.assertIn("任务", telegram.messages[-1][1])
+
+    def test_task_engine_duplicate_running_link_reports_current_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
+            task_store.record_event(task.id, TaskStage.ORGANIZING, TaskStatus.RUNNING, "CMS 整理中")
+            cms = FakeCmsSubmit()
+            telegram = FakeTelegram()
+            p115 = FakeP115Receive()
+
+            bridge.handle_update(
+                self.update("https://115cdn.com/s/abc?password=1234"),
+                cms,
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                cleanup_client=p115,
+                self_share_receive_cid="pending-cid",
+                task_engine_enabled=True,
+            )
+
+            self.assertEqual(cms.submitted, [])
+            self.assertEqual(p115.received, [])
+            self.assertIn("CMS 整理", telegram.messages[-1][1])
 
     def test_duplicate_self_share_received_link_does_not_receive_again(self):
         with tempfile.TemporaryDirectory() as tmp:

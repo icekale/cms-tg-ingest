@@ -22,6 +22,7 @@ from typing import Any
 
 from app.models import TaskStage, TaskStatus
 from app.task_bridge import ensure_task_for_link, record_failure, record_submission_event, sync_task_from_submission
+from app.task_engine import stage_display_name
 from app.task_runner import StageResult, TaskRunner
 from app.task_store import TaskStore
 from app.web import start_web_server
@@ -134,6 +135,7 @@ class Config:
     status_repair_limit: int = 50
     cms_parent_cid_category_map: str = ""
     task_db_path: str = "/data/tasks.db"
+    task_engine_enabled: bool = False
     web_enabled: bool = False
     web_host: str = "0.0.0.0"
     web_port: int = 8787
@@ -191,6 +193,7 @@ class Config:
             status_repair_limit=int(os.environ.get("STATUS_REPAIR_LIMIT", "50")),
             cms_parent_cid_category_map=os.environ.get("CMS_PARENT_CID_CATEGORY_MAP", ""),
             task_db_path=os.environ.get("TASK_DB_PATH", "/data/tasks.db"),
+            task_engine_enabled=parse_bool_env(os.environ.get("TASK_ENGINE_ENABLED"), False),
             web_enabled=parse_bool_env(os.environ.get("WEB_ENABLED"), False),
             web_host=os.environ.get("WEB_HOST", "0.0.0.0"),
             web_port=int(os.environ.get("WEB_PORT", "8787")),
@@ -3898,6 +3901,22 @@ def format_task_label(row: dict[str, Any]) -> str:
     return f"{title} #{task_id}" if task_id else str(title)
 
 
+def format_task_snapshot(task) -> str:
+    title = task.title or task.metadata.get("received_title") or task.share_code
+    return f"#{task.id} {title}｜{stage_display_name(task.current_stage)}｜{task.status.value}"
+
+
+def format_task_intake_reply(task) -> str:
+    if task.status == TaskStatus.SUCCEEDED and task.current_stage == TaskStage.CLEANED:
+        dest = task.metadata.get("dest_path") or ""
+        parent = task.metadata.get("emby_parent") or ""
+        suffix = f"\n媒体库：{parent}\n路径：{dest}" if parent or dest else ""
+        return f"任务已完成：{format_task_snapshot(task)}{suffix}"
+    if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION}:
+        return f"任务需要处理：{format_task_snapshot(task)}\n原因：{task.error_summary or '无详细错误'}"
+    return f"任务已接收：{format_task_snapshot(task)}"
+
+
 def sync_cms_status_task_event(task_store: TaskStore | None, row: dict[str, Any], status: str, title: str | None = None):
     row_for_task = dict(row)
     if title:
@@ -4348,6 +4367,7 @@ def handle_update(
     cleanup_client: Any | None = None,
     self_share_receive_cid: str = "",
     task_store: TaskStore | None = None,
+    task_engine_enabled: bool = False,
 ) -> None:
     if update.get("callback_query"):
         handle_callback_query(update.get("callback_query") or {}, telegram, allowed_chat_id, store, emby=emby)
@@ -4415,6 +4435,15 @@ def handle_update(
     for index, link in enumerate(links, 1):
         try:
             key = normalize_share_link(link)
+            if self_share_workflow and task_engine_enabled and task_store is not None:
+                task = task_store.upsert_task(key.share_code, key.receive_code, link, chat_id=str(chat_id or ""))
+                if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {TaskStage.FAILED, TaskStage.NEEDS_ACTION}:
+                    task = task_store.enqueue_task(task.id, task.current_stage, message="重新入队")
+                elif task.current_stage == TaskStage.RECEIVED and task.status == TaskStatus.PENDING and not task_store.list_events(task.id):
+                    task = task_store.enqueue_task(task.id, TaskStage.RECEIVED, message="等待执行")
+                result_lines.append(f"{index}. {format_task_intake_reply(task)}")
+                LOG.info("Enqueued self-share link in TaskStore: share_code=%s task_id=%s stage=%s status=%s", key.share_code, task.id, task.current_stage.value, task.status.value)
+                continue
             best_effort_task_sync(
                 "received",
                 ensure_task_for_link,
@@ -4584,6 +4613,7 @@ def run_forever(config: Config) -> None:
                     cleanup_client=p115 if self_share_config.enabled else None,
                     self_share_receive_cid=config.self_share_receive_cid,
                     task_store=task_store,
+                    task_engine_enabled=config.task_engine_enabled,
                 )
         except Exception as exc:
             log_polling_error(telegram, exc)
