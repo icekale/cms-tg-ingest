@@ -1185,6 +1185,10 @@ class BridgeSelfShareTaskWorkflow:
         if not self.receive_cid:
             return StageResult.failed("缺少 115 接收目录 ID", error_type="missing_receive_cid")
 
+        existing = self.store.find_by_key(ShareKey(task.share_code, task.receive_code))
+        if self._has_received_self_share_state(existing):
+            return StageResult.complete("已接收 115 分享到待整理", self._received_metadata(existing))
+
         received = self.p115.receive_share_to_cid(task.share_code, task.receive_code, self.receive_cid)
         title = str(received.get("title") or task.title or task.share_code).strip()
         row = self.store.upsert_submission(
@@ -1282,6 +1286,13 @@ class BridgeSelfShareTaskWorkflow:
                 "parent_id": parent_id,
             }
         )
+        if category:
+            recognition = enrich_recognition_from_self_share_folder(recognition, folder, category, share_name)
+            recognition["organized_parent_id"] = parent_id
+            recognition["parent_id"] = parent_id
+            tmdb_id = str(recognition.get("tmdb_id") or tmdb_id).strip()
+        if not category and self._has_persisted_category_suggestion(recognition):
+            return self._needs_action_recognition_result(row, recognition)
         if not category:
             recognition, should_prompt = resolve_category_with_fallbacks(
                 recognition,
@@ -1291,12 +1302,14 @@ class BridgeSelfShareTaskWorkflow:
             )
             category = str(recognition.get("category") or "").strip()
             tmdb_id = str(recognition.get("tmdb_id") or tmdb_id).strip()
+            if should_prompt and category:
+                return self._needs_action_recognition_result(row, recognition)
             if should_prompt or not category:
                 recognition, should_prompt = decide_category_prompt(self.store, row, recognition, self.move_config, share_name)
                 category = str(recognition.get("category") or "").strip()
                 tmdb_id = str(recognition.get("tmdb_id") or tmdb_id).strip()
                 if should_prompt or not category:
-                    return StageResult.needs_action("等待人工确认分类", {"recognition": recognition})
+                    return self._needs_action_recognition_result(row, recognition)
         if category and hasattr(self.store, "update_category"):
             row = self.store.update_category(int(row["id"]), category, "selected") or row
         if hasattr(self.store, "update_recognition"):
@@ -1362,6 +1375,33 @@ class BridgeSelfShareTaskWorkflow:
         except Exception:
             recognition = {}
         return recognition if isinstance(recognition, dict) else {}
+
+    def _has_received_self_share_state(self, row: dict[str, Any] | None) -> bool:
+        if not row or row.get("workflow_mode") != "self_share_sync":
+            return False
+        phase = str(row.get("workflow_phase") or "").strip()
+        if phase in {"received", "received_to_pending", "auto_organize_submitted", "organized_found", "own_share_created", "share_sync_submitted"}:
+            return True
+        return any(row.get(key) for key in ("own_share_file_id", "own_share_code", "share_sync_status"))
+
+    def _received_metadata(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "submission_id": int(row["id"]),
+            "received_title": str(row.get("title") or ""),
+            "received_file_ids": [],
+        }
+
+    def _has_persisted_category_suggestion(self, recognition: dict[str, Any]) -> bool:
+        status = str(recognition.get("category_status") or "").strip()
+        if status == "openai_suggested":
+            return True
+        return bool(recognition.get("category_suggestion") and status not in {"selected", "self_share_resolved", "tmdb_resolved", "tmdb_search_resolved", "openai_confident"})
+
+    def _needs_action_recognition_result(self, row: dict[str, Any], recognition: dict[str, Any]):
+        status = str(recognition.get("category_status") or "needs_action").strip()
+        if hasattr(self.store, "update_recognition"):
+            self.store.update_recognition(int(row["id"]), recognition, status)
+        return StageResult.needs_action("等待人工确认分类", {"recognition": recognition})
 
     def _organized_parent_id(
         self,

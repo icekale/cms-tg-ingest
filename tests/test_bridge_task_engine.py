@@ -55,18 +55,19 @@ class FakeClassifier:
     high_confidence = 0.75
     suggest_confidence = 0.45
 
-    def __init__(self):
+    def __init__(self, confidence=0.92):
         self.calls = []
+        self.confidence = confidence
 
     def classify_media(self, recognition, share_name):
         self.calls.append((dict(recognition), share_name))
         return {
             "category": "外国电视",
-            "confidence": 0.92,
+            "confidence": self.confidence,
             "media_type": "tv",
             "title": "Fallback Show",
             "tmdb_id": "654321",
-            "reason": "fake high confidence",
+            "reason": "fake confidence",
         }
 
 
@@ -151,6 +152,24 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.cms.plain_share_down_calls, [])
             self.assertEqual(row["workflow_mode"], "self_share_sync")
             self.assertEqual(result.metadata["submission_id"], row["id"])
+
+    def test_received_stage_reuses_existing_self_share_row_without_receiving_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="received_to_pending",
+            ) or row
+            task = self._claim_task("abc", "1234", TaskStage.RECEIVED)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(self.p115.received, [])
+            self.assertEqual(result.metadata["submission_id"], row["id"])
+            self.assertEqual(result.metadata["received_title"], "received title")
 
     def test_organizing_stage_defers_when_folder_not_found(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -272,6 +291,50 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
             self.assertEqual(result.metadata["category"], "华语电影")
             self.assertEqual(classifier.calls, [])
+
+    def test_recognizing_stage_persists_openai_suggestion_and_reuses_without_recalling_openai(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            classifier = FakeClassifier(confidence=0.5)
+            tmdb = FakeTmdbResolver()
+            workflow = self._workflow(tmp, openai_classifier=classifier, tmdb_resolver=tmdb)
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="Suggest.Show.S01.2025") or row
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="Suggest.Show.S01.2025",
+            ) or row
+            first_task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECOGNIZING,
+                {
+                    "submission_id": row["id"],
+                    "organized_folder": {
+                        "file_id": "folder-id",
+                        "file_name": "Suggest.Show.S01.2025",
+                        "parent_id": "unmapped-parent",
+                    },
+                },
+                row["id"],
+            )
+
+            first = workflow.run_stage(first_task)
+            second_task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECOGNIZING,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+            second = workflow.run_stage(second_task)
+
+            self.assertEqual(first.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(second.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(len(classifier.calls), 1)
+            self.assertEqual(second.metadata["recognition"]["category_status"], "openai_suggested")
+            self.assertEqual(second.metadata["recognition"]["category_suggestion"], "外国电视")
 
     def test_own_share_stage_creates_share_and_share_sync_stage_submits_cms_share_sync(self):
         with tempfile.TemporaryDirectory() as tmp:
