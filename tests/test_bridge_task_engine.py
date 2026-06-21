@@ -484,6 +484,57 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["category"], "华语电影")
             self.assertEqual(len(self.telegram.messages), 1)
 
+    def test_moved_stage_reuses_persisted_moved_row_when_dest_strm_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            library_root = Path(tmp) / "library" / "movies"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"华语电影": library_root}),
+            )
+            row = self._self_share_row()
+            source = self.config.strm_root / row["own_share_file_name"]
+            dest = library_root / row["own_share_file_name"]
+            self._write_strm(dest)
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(source),
+                dest_path=str(dest),
+                category_final="华语电影",
+            ) or row
+            task = self._claim_task("abc", "1234", TaskStage.MOVED, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["dest_path"], str(bridge.safe_resolve(dest)))
+            self.assertEqual(result.metadata["source_path"], str(bridge.safe_resolve(source)))
+            self.assertEqual(result.metadata["category"], "华语电影")
+            self.assertFalse(source.exists())
+            self.assertEqual(self.telegram.messages, [])
+
+    def test_moved_stage_fails_when_source_folder_tmdb_mismatches_recognition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            library_root = Path(tmp) / "library" / "movies"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"华语电影": library_root}),
+            )
+            row = self._self_share_row(title="S-双喜-2025-[tmdb=123456]", tmdb_id="123456")
+            source = self.config.strm_root / "S-错片-2025-[tmdb=999999]"
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                own_share_file_name=source.name,
+            ) or row
+            self._write_strm(source)
+            task = self._claim_task("abc", "1234", TaskStage.MOVED, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.FAILED)
+            self.assertIn("TMDB", result.message)
+            self.assertTrue(source.exists())
+
     def test_moved_stage_rejects_direct_link_and_wrong_marker_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
             library_root = Path(tmp) / "library" / "movies"
@@ -550,6 +601,47 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(stored["emby_parent"], "电影库")
             self.assertEqual(confirmed.metadata["library"], "电影库")
             self.assertEqual(stored["cleanup_status"], None)
+
+    def test_emby_confirmed_stage_defers_same_tmdb_match_outside_moved_dest_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            emby = FakeEmby()
+            workflow = self._workflow(tmp, emby=emby)
+            row = self._self_share_row()
+            dest_a = Path(tmp) / "library" / "A" / "S-双喜-2025-[tmdb=123456]"
+            dest_b = Path(tmp) / "library" / "B" / "S-双喜-2025-[tmdb=123456]"
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(self.config.strm_root / row["own_share_file_name"]),
+                dest_path=str(dest_a),
+                category_final="华语电影",
+            ) or row
+            task = self._claim_task("abc", "1234", TaskStage.EMBY_CONFIRMED, {"submission_id": row["id"]}, row["id"])
+
+            emby.items_by_tmdb["123456"] = {
+                "Id": "old-item",
+                "Name": "双喜",
+                "Path": str(dest_b),
+                "ParentId": "parent-old",
+                "LibraryName": "旧库",
+            }
+            outside = workflow.run_stage(task)
+            stored_after_outside = self.submissions.find_by_id(int(row["id"]))
+            emby.items_by_tmdb["123456"] = {
+                "Id": "new-item",
+                "Name": "双喜",
+                "Path": str(dest_a / "movie.strm"),
+                "ParentId": "parent-new",
+                "LibraryName": "电影库",
+            }
+            inside = workflow.run_stage(task)
+            stored_after_inside = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(outside.outcome, StageOutcome.DEFER)
+            self.assertNotEqual(stored_after_outside["emby_status"], "confirmed")
+            self.assertEqual(inside.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(stored_after_inside["emby_status"], "confirmed")
+            self.assertEqual(stored_after_inside["emby_item_id"], "new-item")
 
     def test_cleaned_stage_requires_emby_confirmed_and_own_share_before_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:

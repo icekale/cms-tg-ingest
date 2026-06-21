@@ -1395,6 +1395,16 @@ class BridgeSelfShareTaskWorkflow:
         row = self._submission_row(task)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        if str(row.get("move_status") or "").lower() == "moved":
+            metadata = self._move_metadata(row, task.metadata)
+            dest_path = str(metadata.get("dest_path") or "").strip()
+            if self._strm_destination_ready(dest_path):
+                return StageResult.complete("STRM 已移动到媒体库", metadata)
+            return StageResult.defer(
+                "等待已移动 STRM 目标目录可用",
+                self.self_share_config.auto_organize_retry_seconds or 30,
+                metadata,
+            )
         recognition = self._recognition_from_row(row)
         share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
         source = find_self_share_strm_source_dir(self.self_share_config, row, recognition, share_name)
@@ -1440,7 +1450,7 @@ class BridgeSelfShareTaskWorkflow:
         share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
         recognition.setdefault("share_name", share_name)
         match = find_emby_match(self.emby, recognition, row, recent_limit=30)
-        if not match:
+        if not match or not self._emby_match_in_moved_dest(match, row, task.metadata):
             return StageResult.defer(
                 "等待 Emby 确认入库",
                 self.self_share_config.auto_organize_retry_seconds or 30,
@@ -1540,6 +1550,45 @@ class BridgeSelfShareTaskWorkflow:
             "own_share_receive_code": row.get("own_share_receive_code"),
             "own_share_url": row.get("own_share_url"),
         }
+
+    def _move_metadata(self, row: dict[str, Any], task_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        task_metadata = task_metadata or {}
+        source_path = str(row.get("source_path") or task_metadata.get("source_path") or "")
+        dest_path = str(row.get("dest_path") or task_metadata.get("dest_path") or "")
+        return {
+            "submission_id": int(row["id"]),
+            "source_path": str(safe_resolve(Path(source_path))) if source_path else "",
+            "dest_path": str(safe_resolve(Path(dest_path))) if dest_path else "",
+            "category": str(row.get("category_final") or task_metadata.get("category") or ""),
+        }
+
+    def _strm_destination_ready(self, dest_path: str) -> bool:
+        if not dest_path:
+            return False
+        dest = safe_resolve(Path(dest_path))
+        if not dest.exists():
+            return False
+        if dest.is_file():
+            return dest.suffix.lower() == ".strm"
+        if not dest.is_dir():
+            return False
+        return has_strm_file(dest)
+
+    def _emby_match_in_moved_dest(
+        self,
+        match: dict[str, Any],
+        row: dict[str, Any],
+        task_metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        expected = str(row.get("dest_path") or (task_metadata or {}).get("dest_path") or "").strip()
+        if not expected:
+            return True
+        actual = str(match.get("Path") or "").strip()
+        if not actual:
+            return False
+        expected_path = safe_resolve(Path(expected))
+        actual_path = safe_resolve(Path(actual))
+        return actual_path == expected_path or is_relative_to(actual_path, expected_path)
 
     def _emby_metadata(self, row: dict[str, Any]) -> dict[str, Any]:
         return {
