@@ -242,13 +242,113 @@ class BridgeV02IntegrationTests(unittest.TestCase):
                 self.assertEqual(len(seen), 1)
                 self.assertIs(seen[0]["workflow"].cleanup_client, p115)
 
+    def test_run_forever_skips_status_repair_when_task_engine_authoritative(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            env.update({
+                "WORKFLOW_MODE": "self_share_sync",
+                "TASK_ENGINE_ENABLED": "true",
+                "STATUS_REPAIR_ENABLED": "true",
+                "SELF_SHARE_RECEIVE_CID": "pending-cid",
+            })
+            with patch.dict(os.environ, env, clear=True):
+                cfg = bridge.Config.from_env()
+                task_runner_started = []
+                repair_calls = []
+                p115 = object()
+
+                class OneUpdateTelegram:
+                    def __init__(self, token, timeout=60):
+                        self.calls = 0
+
+                    def get_updates(self, offset=None, timeout=30):
+                        if self.calls:
+                            raise KeyboardInterrupt()
+                        self.calls += 1
+                        return []
+
+                    def send_message(self, *args, **kwargs):
+                        return {"ok": True}
+
+                class FakeTaskRunner:
+                    def __init__(self, *args, **kwargs):
+                        pass
+
+                    def start(self):
+                        task_runner_started.append(True)
+                        return "task-thread"
+
+                with patch.object(bridge, "TelegramClient", OneUpdateTelegram), \
+                     patch.object(bridge, "CmsClient", lambda config: object()), \
+                     patch.object(bridge, "EmbyClient", lambda *args, **kwargs: object()), \
+                     patch.object(bridge, "OpenAIClassifier", lambda config: object()), \
+                     patch.object(bridge, "TmdbWebResolver", lambda timeout=20: object()), \
+                     patch.object(bridge, "P115WebClient", lambda *args, **kwargs: p115), \
+                     patch.object(bridge, "maybe_start_web_server", lambda config, task_store: None), \
+                     patch.object(bridge, "start_status_repair_loop", lambda *args, **kwargs: repair_calls.append((args, kwargs))), \
+                     patch.object(bridge, "write_metrics_snapshot", lambda *args, **kwargs: None), \
+                     patch.object(bridge, "normalize_emby_parents", lambda *args, **kwargs: 0), \
+                     patch.object(bridge, "TaskRunner", FakeTaskRunner):
+                    with self.assertRaises(KeyboardInterrupt):
+                        bridge.run_forever(cfg)
+
+                self.assertEqual(task_runner_started, [True])
+                self.assertEqual(repair_calls, [])
+
+    def test_run_forever_starts_status_repair_when_task_engine_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            env.update({
+                "WORKFLOW_MODE": "self_share_sync",
+                "TASK_ENGINE_ENABLED": "false",
+                "STATUS_REPAIR_ENABLED": "true",
+                "SELF_SHARE_RECEIVE_CID": "pending-cid",
+            })
+            with patch.dict(os.environ, env, clear=True):
+                cfg = bridge.Config.from_env()
+                repair_calls = []
+                p115 = object()
+
+                class OneUpdateTelegram:
+                    def __init__(self, token, timeout=60):
+                        self.calls = 0
+
+                    def get_updates(self, offset=None, timeout=30):
+                        if self.calls:
+                            raise KeyboardInterrupt()
+                        self.calls += 1
+                        return []
+
+                    def send_message(self, *args, **kwargs):
+                        return {"ok": True}
+
+                with patch.object(bridge, "TelegramClient", OneUpdateTelegram), \
+                     patch.object(bridge, "CmsClient", lambda config: object()), \
+                     patch.object(bridge, "EmbyClient", lambda *args, **kwargs: object()), \
+                     patch.object(bridge, "OpenAIClassifier", lambda config: object()), \
+                     patch.object(bridge, "TmdbWebResolver", lambda timeout=20: object()), \
+                     patch.object(bridge, "P115WebClient", lambda *args, **kwargs: p115), \
+                     patch.object(bridge, "maybe_start_web_server", lambda config, task_store: None), \
+                     patch.object(bridge, "start_status_repair_loop", lambda *args, **kwargs: repair_calls.append((args, kwargs))), \
+                     patch.object(bridge, "write_metrics_snapshot", lambda *args, **kwargs: None), \
+                     patch.object(bridge, "normalize_emby_parents", lambda *args, **kwargs: 0):
+                    with self.assertRaises(KeyboardInterrupt):
+                        bridge.run_forever(cfg)
+
+                self.assertEqual(len(repair_calls), 1)
+
 
 class FakeTelegram:
     def __init__(self):
         self.messages = []
+        self.answers = []
 
     def send_message(self, chat_id, text, reply_markup=None):
         self.messages.append((chat_id, text, reply_markup))
+        return {"ok": True}
+
+    def answer_callback_query(self, callback_id, text=None, show_alert=False):
+        self.answers.append((callback_id, text, show_alert))
         return {"ok": True}
 
 
@@ -455,6 +555,47 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(cms.submitted, [])
             self.assertEqual(p115.received, [])
             self.assertIn("CMS 整理", telegram.messages[-1][1])
+
+    def test_category_callback_requeues_authoritative_recognizing_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            row = submission_store.upsert_submission(
+                bridge.ShareKey("abc", "1234"),
+                "https://115cdn.com/s/abc?password=1234",
+                "received",
+                title="Suggest.Show.S01.2025",
+            )
+            task = task_store.upsert_task("abc", "1234", row["url"], chat_id="464100862")
+            task_store.record_event(
+                task.id,
+                TaskStage.RECOGNIZING,
+                TaskStatus.NEEDS_ACTION,
+                "等待人工确认分类",
+                submission_id=int(row["id"]),
+            )
+            telegram = FakeTelegram()
+            update = {
+                "callback_query": {
+                    "id": "callback-1",
+                    "from": {"id": 464100862},
+                    "message": {"chat": {"id": 464100862}},
+                    "data": f"cat:{row['id']}:cn_movie",
+                }
+            }
+
+            bridge.handle_update(update, object(), telegram, "464100862", submission_store, task_store=task_store)
+
+            stored_row = submission_store.find_by_id(int(row["id"]))
+            updated = task_store.find_task(task.id)
+            claimed = task_store.claim_next_runnable("worker", now=9999999999.0)
+            self.assertEqual(stored_row["category_choice"], "华语电影")
+            self.assertEqual(stored_row["category_status"], "selected")
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.current_stage, TaskStage.RECOGNIZING)
+            self.assertEqual(claimed.id, task.id)
+            self.assertEqual(claimed.current_stage, TaskStage.RECOGNIZING)
+            self.assertEqual(telegram.answers[-1][1], "已记录分类：华语电影")
 
     def test_task_engine_requeues_sentinel_needs_action_to_claimable_stage(self):
         with tempfile.TemporaryDirectory() as tmp:

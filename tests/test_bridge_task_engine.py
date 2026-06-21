@@ -406,6 +406,76 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(second.metadata["recognition"]["category_status"], "openai_suggested")
             self.assertEqual(second.metadata["recognition"]["category_suggestion"], "外国电视")
 
+    def test_recognizing_stage_prompts_telegram_category_keyboard_for_openai_suggestion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            classifier = FakeClassifier(confidence=0.5)
+            workflow = self._workflow(tmp, openai_classifier=classifier, tmdb_resolver=FakeTmdbResolver())
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="Suggest.Show.S01.2025") or row
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="Suggest.Show.S01.2025",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECOGNIZING,
+                {
+                    "submission_id": row["id"],
+                    "organized_folder": {
+                        "file_id": "folder-id",
+                        "file_name": "Suggest.Show.S01.2025",
+                        "parent_id": "unmapped-parent",
+                    },
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(len(self.telegram.messages), 1)
+            chat_id, text, reply_markup = self.telegram.messages[0]
+            self.assertEqual(chat_id, "chat-id")
+            self.assertIn("OpenAI建议：外国电视", text)
+            self.assertIn("请选择建议分类", text)
+            self.assertEqual(reply_markup, bridge.category_keyboard(int(row["id"])))
+
+    def test_recognizing_stage_uses_manually_selected_category_after_callback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, openai_classifier=FakeClassifier(confidence=0.5), tmdb_resolver=FakeTmdbResolver())
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="Manual.Show.S01.2025") or row
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="Manual.Show.S01.2025",
+            ) or row
+            row = self.submissions.update_category(int(row["id"]), "国产电视", "selected") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECOGNIZING,
+                {
+                    "submission_id": row["id"],
+                    "organized_folder": {
+                        "file_id": "folder-id",
+                        "file_name": "Manual.Show.S01.2025",
+                        "parent_id": "unmapped-parent",
+                    },
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["category"], "国产电视")
+            self.assertEqual(self.telegram.messages, [])
+
     def test_own_share_stage_creates_share_and_share_sync_stage_submits_cms_share_sync(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
@@ -707,6 +777,29 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(not_confirmed.outcome, StageOutcome.NEEDS_ACTION)
             self.assertEqual(missing_share.outcome, StageOutcome.FAILED)
             self.assertEqual(cleanup.deleted, [])
+
+    def test_cleaned_stage_completes_as_skipped_when_cleanup_client_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, cleanup_client=None)
+            row = self._self_share_row()
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path="/share/source",
+                dest_path="/library/dest",
+                category_final="华语电影",
+            ) or row
+            row = self.submissions.update_emby(int(row["id"]), "confirmed") or row
+            task = self._claim_task("abc", "1234", TaskStage.CLEANED, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertIn("清理已跳过", result.message)
+            self.assertEqual(stored["cleanup_status"], "skipped")
+            self.assertEqual(result.metadata["cleanup_status"], "skipped")
+            self.assertEqual(result.metadata["cleanup_error"], "disabled")
 
     def test_cleaned_stage_deletes_source_after_emby_confirmed_and_own_share_exists(self):
         with tempfile.TemporaryDirectory() as tmp:

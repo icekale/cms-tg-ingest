@@ -1274,6 +1274,11 @@ class BridgeSelfShareTaskWorkflow:
             parent_id,
             self.self_share_config.parent_cid_category_map,
         )
+        manual_category = ""
+        if str(row.get("category_status") or "").strip() == "selected":
+            manual_category = str(row.get("category_choice") or "").strip()
+        if manual_category:
+            category = manual_category
         tmdb_id = str(
             extract_tmdb_id_from_name(folder_name)
             or extract_tmdb_id_from_name(share_name)
@@ -1478,7 +1483,13 @@ class BridgeSelfShareTaskWorkflow:
         if not str(row.get("own_share_file_id") or "").strip():
             return StageResult.failed("缺少自有分享文件夹 ID", error_type="own_share_file_missing")
         if not self.cleanup_client:
-            return StageResult.needs_action("缺少 115 清理客户端", {"submission_id": int(row["id"])})
+            updated = row
+            if hasattr(self.store, "update_cleanup"):
+                updated = self.store.update_cleanup(int(row["id"]), "skipped", error="disabled") or row
+            metadata = self._cleanup_metadata(updated)
+            metadata["cleanup_status"] = "skipped"
+            metadata["cleanup_error"] = "disabled"
+            return StageResult.complete("清理已跳过（未启用）", metadata)
         updated, line = cleanup_own_share_source(self.store, row, self.cleanup_client)
         cleanup_status = str(updated.get("cleanup_status") or "").lower()
         if cleanup_status == "deleted":
@@ -1522,8 +1533,25 @@ class BridgeSelfShareTaskWorkflow:
     def _needs_action_recognition_result(self, row: dict[str, Any], recognition: dict[str, Any]):
         status = str(recognition.get("category_status") or "needs_action").strip()
         if hasattr(self.store, "update_recognition"):
-            self.store.update_recognition(int(row["id"]), recognition, status)
-        return StageResult.needs_action("等待人工确认分类", {"recognition": recognition})
+            row = self.store.update_recognition(int(row["id"]), recognition, status) or row
+        message = f"CMS 识别不确定：{format_task_label(row)}\n"
+        suggestion = str(recognition.get("category_suggestion") or recognition.get("category") or "").strip()
+        if suggestion:
+            confidence = as_float(recognition.get("openai_confidence"), 0.0)
+            message += f"OpenAI建议：{suggestion}（置信度 {confidence:.2f}）\n"
+        reason = str(recognition.get("openai_reason") or "").strip()
+        if reason:
+            message += f"理由：{reason[:80]}\n"
+        message += "请选择建议分类："
+        self.telegram.send_message(
+            self.chat_id,
+            message,
+            reply_markup=category_keyboard(int(row["id"])),
+        )
+        return StageResult.needs_action(
+            "等待人工确认分类",
+            {"submission_id": int(row["id"]), "recognition": recognition},
+        )
 
     def _organized_parent_id(
         self,
@@ -3635,7 +3663,14 @@ def parse_category_callback(data: str) -> tuple[int, str] | None:
         return None
 
 
-def handle_callback_query(callback_query: dict, telegram: TelegramClient, allowed_chat_id: str, store: SubmissionStore, emby: EmbyClient | None = None) -> None:
+def handle_callback_query(
+    callback_query: dict,
+    telegram: TelegramClient,
+    allowed_chat_id: str,
+    store: SubmissionStore,
+    emby: EmbyClient | None = None,
+    task_store: TaskStore | None = None,
+) -> None:
     sender_id = ((callback_query.get("from") or {}).get("id"))
     message = callback_query.get("message") or {}
     chat_id = ((message.get("chat") or {}).get("id"))
@@ -3675,6 +3710,23 @@ def handle_callback_query(callback_query: dict, telegram: TelegramClient, allowe
     label = CATEGORY_LABELS[category_key]
     status = "skipped" if category_key == "skip" else "selected"
     updated = store.update_category(row_id, None if category_key == "skip" else label, status)
+    if updated and task_store and category_key != "skip":
+        task = task_store.upsert_task(
+            str(updated.get("share_code") or ""),
+            str(updated.get("receive_code") or ""),
+            str(updated.get("url") or ""),
+        )
+        task_store.record_event(
+            task.id,
+            TaskStage.RECOGNIZING,
+            TaskStatus.PENDING,
+            "已选择分类，重新识别",
+            category=label,
+            submission_id=int(updated["id"]),
+            metadata_patch={"submission_id": int(updated["id"])},
+            next_run_at=time.time(),
+            clear_claim=True,
+        )
     telegram.answer_callback_query(callback_id, f"已记录分类：{label}", show_alert=False)
     if updated:
         telegram.send_message(chat_id, f"已记录分类：{label}\n{format_task_label(updated)}")
@@ -4401,7 +4453,7 @@ def handle_update(
     task_engine_enabled: bool = False,
 ) -> None:
     if update.get("callback_query"):
-        handle_callback_query(update.get("callback_query") or {}, telegram, allowed_chat_id, store, emby=emby)
+        handle_callback_query(update.get("callback_query") or {}, telegram, allowed_chat_id, store, emby=emby, task_store=task_store)
         return
 
     message = update.get("message") or {}
@@ -4639,7 +4691,7 @@ def run_forever(config: Config) -> None:
         write_metrics_snapshot(store, metrics_path_for_store(store))
     except Exception:
         LOG.debug("Failed to write startup metrics snapshot", exc_info=True)
-    if config.status_repair_enabled:
+    if config.status_repair_enabled and not (config.task_engine_enabled and self_share_config.enabled):
         start_status_repair_loop(
             store,
             emby,
