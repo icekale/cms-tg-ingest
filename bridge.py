@@ -4624,7 +4624,7 @@ def run_forever(config: Config) -> None:
             emby=emby,
             openai_classifier=openai_classifier,
             tmdb_resolver=tmdb_resolver,
-            cleanup_client=p115 if self_share_config.cleanup_after_emby else p115,
+            cleanup_client=p115 if self_share_config.cleanup_after_emby else None,
             receive_cid=config.self_share_receive_cid,
         )
         task_runner = TaskRunner(task_store, task_workflow, interval_seconds=config.task_worker_interval_seconds)

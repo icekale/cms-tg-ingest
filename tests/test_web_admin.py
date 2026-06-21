@@ -72,6 +72,46 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(claimed.current_stage, TaskStage.STRM_READY)
             self.assertEqual(body, b"")
 
+    def test_retry_endpoint_ignores_completed_cleaned_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "cleanup complete")
+            before = store.find_task(task.id)
+            app = WebApp(store, web_token="")
+
+            status, headers, body = app.handle_request("POST", f"/task/{task.id}/retry", {}, b"")
+            updated = store.find_task(task.id)
+            claimed = store.claim_next_runnable("worker", now=0)
+
+            self.assertEqual(status, 303)
+            self.assertEqual(headers["Location"], f"/task/{task.id}")
+            self.assertEqual(updated.status, before.status)
+            self.assertEqual(updated.current_stage, before.current_stage)
+            self.assertEqual(updated.retry_count, before.retry_count)
+            self.assertIsNone(claimed)
+            self.assertEqual(body, b"")
+
+    def test_retry_endpoint_ignores_manual_action_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(task.id, TaskStage.NEEDS_ACTION, TaskStatus.NEEDS_ACTION, "needs manual choice")
+            before = store.find_task(task.id)
+            app = WebApp(store, web_token="")
+
+            status, headers, body = app.handle_request("POST", f"/task/{task.id}/retry", {}, b"")
+            updated = store.find_task(task.id)
+            claimed = store.claim_next_runnable("worker", now=0)
+
+            self.assertEqual(status, 303)
+            self.assertEqual(headers["Location"], f"/task/{task.id}")
+            self.assertEqual(updated.status, before.status)
+            self.assertEqual(updated.current_stage, before.current_stage)
+            self.assertEqual(updated.retry_count, before.retry_count)
+            self.assertIsNone(claimed)
+            self.assertEqual(body, b"")
+
     def test_web_token_blocks_requests_without_token(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

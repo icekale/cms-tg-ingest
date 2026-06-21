@@ -133,6 +133,7 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=True):
                 cfg = bridge.Config.from_env()
                 seen = []
+                p115 = object()
 
                 class OneUpdateTelegram:
                     def __init__(self, token, timeout=60):
@@ -166,7 +167,7 @@ class BridgeV02IntegrationTests(unittest.TestCase):
                      patch.object(bridge, "EmbyClient", lambda *args, **kwargs: object()), \
                      patch.object(bridge, "OpenAIClassifier", lambda config: object()), \
                      patch.object(bridge, "TmdbWebResolver", lambda timeout=20: object()), \
-                     patch.object(bridge, "P115WebClient", lambda *args, **kwargs: object()), \
+                     patch.object(bridge, "P115WebClient", lambda *args, **kwargs: p115), \
                      patch.object(bridge, "maybe_start_web_server", lambda config, task_store: None), \
                      patch.object(bridge, "start_status_repair_loop", lambda *args, **kwargs: None), \
                      patch.object(bridge, "write_metrics_snapshot", lambda *args, **kwargs: None), \
@@ -180,8 +181,66 @@ class BridgeV02IntegrationTests(unittest.TestCase):
                 self.assertIsInstance(seen[0]["workflow"], bridge.BridgeSelfShareTaskWorkflow)
                 self.assertIs(seen[0]["workflow"].task_store, seen[0]["task_store"])
                 self.assertEqual(seen[0]["workflow"].receive_cid, "pending-cid")
+                self.assertIsNone(seen[0]["workflow"].cleanup_client)
                 self.assertEqual(seen[0]["interval_seconds"], 7)
                 self.assertTrue(seen[0]["started"])
+
+    def test_run_forever_passes_cleanup_client_to_task_workflow_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            env.update({
+                "WORKFLOW_MODE": "self_share_sync",
+                "TASK_ENGINE_ENABLED": "true",
+                "SELF_SHARE_CLEANUP_AFTER_EMBY": "true",
+            })
+            with patch.dict(os.environ, env, clear=True):
+                cfg = bridge.Config.from_env()
+                seen = []
+                p115 = object()
+
+                class OneUpdateTelegram:
+                    def __init__(self, token, timeout=60):
+                        self.calls = 0
+
+                    def get_updates(self, offset=None, timeout=30):
+                        if self.calls:
+                            raise KeyboardInterrupt()
+                        self.calls += 1
+                        return []
+
+                    def send_message(self, *args, **kwargs):
+                        return {"ok": True}
+
+                class FakeTaskRunner:
+                    def __init__(self, task_store, workflow, *, interval_seconds=5, **kwargs):
+                        seen.append({
+                            "task_store": task_store,
+                            "workflow": workflow,
+                            "interval_seconds": interval_seconds,
+                            "kwargs": kwargs,
+                            "started": False,
+                        })
+
+                    def start(self):
+                        seen[-1]["started"] = True
+                        return "task-thread"
+
+                with patch.object(bridge, "TelegramClient", OneUpdateTelegram), \
+                     patch.object(bridge, "CmsClient", lambda config: object()), \
+                     patch.object(bridge, "EmbyClient", lambda *args, **kwargs: object()), \
+                     patch.object(bridge, "OpenAIClassifier", lambda config: object()), \
+                     patch.object(bridge, "TmdbWebResolver", lambda timeout=20: object()), \
+                     patch.object(bridge, "P115WebClient", lambda *args, **kwargs: p115), \
+                     patch.object(bridge, "maybe_start_web_server", lambda config, task_store: None), \
+                     patch.object(bridge, "start_status_repair_loop", lambda *args, **kwargs: None), \
+                     patch.object(bridge, "write_metrics_snapshot", lambda *args, **kwargs: None), \
+                     patch.object(bridge, "normalize_emby_parents", lambda *args, **kwargs: 0), \
+                     patch.object(bridge, "TaskRunner", FakeTaskRunner):
+                    with self.assertRaises(KeyboardInterrupt):
+                        bridge.run_forever(cfg)
+
+                self.assertEqual(len(seen), 1)
+                self.assertIs(seen[0]["workflow"].cleanup_client, p115)
 
 
 class FakeTelegram:

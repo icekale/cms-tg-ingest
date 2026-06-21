@@ -118,18 +118,19 @@ class WebApp:
             task = self.store.find_task(task_id)
             if task:
                 decision = decide_retry(task)
-                target_stage = decision.stage if decision.action == RetryAction.RETRY_CURRENT_STAGE else task.current_stage
-                if target_stage in {TaskStage.NEEDS_ACTION, TaskStage.FAILED}:
-                    target_stage = TaskStage.RECEIVED
-                self.store.record_event(
-                    task_id,
-                    task.current_stage,
-                    TaskStatus.PENDING,
-                    "手动触发重试",
-                    increment_retry=True,
-                    clear_claim=True,
-                )
-                self.store.enqueue_task(task_id, target_stage, message="手动重试已入队", next_run_at=0)
+                if decision.action == RetryAction.RETRY_CURRENT_STAGE:
+                    target_stage = decision.stage or task.current_stage
+                    if target_stage in {TaskStage.NEEDS_ACTION, TaskStage.FAILED}:
+                        target_stage = TaskStage.RECEIVED
+                    self.store.record_event(
+                        task_id,
+                        task.current_stage,
+                        TaskStatus.PENDING,
+                        "手动触发重试",
+                        increment_retry=True,
+                        clear_claim=True,
+                    )
+                    self.store.enqueue_task(task_id, target_stage, message="手动重试已入队", next_run_at=0)
             return 303, {"Location": f"/task/{task_id}"}, b""
         return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"Not Found"
 
