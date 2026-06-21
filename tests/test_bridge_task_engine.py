@@ -50,8 +50,44 @@ class FakeTelegram:
     pass
 
 
+class FakeClassifier:
+    enabled = True
+    high_confidence = 0.75
+    suggest_confidence = 0.45
+
+    def __init__(self):
+        self.calls = []
+
+    def classify_media(self, recognition, share_name):
+        self.calls.append((dict(recognition), share_name))
+        return {
+            "category": "外国电视",
+            "confidence": 0.92,
+            "media_type": "tv",
+            "title": "Fallback Show",
+            "tmdb_id": "654321",
+            "reason": "fake high confidence",
+        }
+
+
+class FakeTmdbResolver:
+    enabled = True
+
+    def __init__(self):
+        self.lookups = []
+        self.searches = []
+
+    def lookup(self, tmdb_id, media_type, share_name):
+        self.lookups.append((tmdb_id, media_type, share_name))
+        return {"ok": False}
+
+    def search(self, query, media_type):
+        self.searches.append((query, media_type))
+        return {"ok": False}
+
+
 class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
-    def _workflow(self, root, receive_cid="pending-cid"):
+    def _workflow(self, root, receive_cid="pending-cid", openai_classifier=None, tmdb_resolver=None):
         self.cms = FakeCms()
         self.p115 = FakeP115()
         self.submissions = bridge.SubmissionStore(Path(root) / "submissions.db")
@@ -73,8 +109,8 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.config,
             bridge.MoveConfig(source_roots=[], library_roots={}),
             None,
-            None,
-            None,
+            openai_classifier,
+            tmdb_resolver,
             receive_cid=receive_cid,
         )
 
@@ -152,6 +188,90 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
             self.assertEqual(result.metadata["category"], "华语电影")
             self.assertEqual(result.metadata["tmdb_id"], "123456")
+
+    def test_recognizing_stage_uses_openai_tmdb_fallback_for_unmapped_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            classifier = FakeClassifier()
+            tmdb = FakeTmdbResolver()
+            workflow = self._workflow(tmp, openai_classifier=classifier, tmdb_resolver=tmdb)
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="Fallback.Show.S01.2025") or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            organized_folder = {
+                "file_id": "folder-id",
+                "file_name": "Fallback.Show.S01.2025",
+                "parent_id": "unmapped-parent",
+            }
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECOGNIZING,
+                {"submission_id": row["id"], "organized_folder": organized_folder},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["category"], "外国电视")
+            self.assertEqual(result.metadata["tmdb_id"], "654321")
+            self.assertEqual(len(classifier.calls), 1)
+            self.assertNotEqual(tmdb.searches, [])
+
+    def test_recognizing_stage_mapped_parent_category_skips_openai(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            classifier = FakeClassifier()
+            workflow = self._workflow(tmp, openai_classifier=classifier, tmdb_resolver=FakeTmdbResolver())
+            row = self._row()
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            organized_folder = {
+                "file_id": "folder-id",
+                "file_name": "S-双喜-2025-[tmdb=123456]",
+                "parent_id": "movie-parent",
+            }
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECOGNIZING,
+                {"submission_id": row["id"], "organized_folder": organized_folder},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["category"], "华语电影")
+            self.assertEqual(classifier.calls, [])
+
+    def test_recognizing_stage_uses_parent_id_from_recognition_metadata_when_folder_metadata_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            classifier = FakeClassifier()
+            workflow = self._workflow(tmp, openai_classifier=classifier)
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="S-双喜-2025-[tmdb=123456]",
+            ) or row
+            self.submissions.update_recognition(
+                int(row["id"]),
+                {"organized_parent_id": "movie-parent", "share_name": "S-双喜-2025-[tmdb=123456]"},
+                "organized_found",
+            )
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECOGNIZING,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["category"], "华语电影")
+            self.assertEqual(classifier.calls, [])
 
     def test_own_share_stage_creates_share_and_share_sync_stage_submits_cms_share_sync(self):
         with tempfile.TemporaryDirectory() as tmp:

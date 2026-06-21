@@ -1130,6 +1130,10 @@ class BridgeSelfShareTaskWorkflow:
         tmdb_resolver,
         cleanup_client=None,
         receive_cid="",
+        organized_parent_id="",
+        pending_title_prefix="",
+        fallback_category="",
+        task_db_path=None,
     ):
         self.cms = cms
         self.telegram = telegram
@@ -1144,6 +1148,10 @@ class BridgeSelfShareTaskWorkflow:
         self.tmdb_resolver = tmdb_resolver
         self.cleanup_client = cleanup_client
         self.receive_cid = str(receive_cid or "").strip()
+        self.organized_parent_id = str(organized_parent_id or "").strip()
+        self.pending_title_prefix = str(pending_title_prefix or "").strip()
+        self.fallback_category = str(fallback_category or "").strip()
+        self.task_db_path = task_db_path
 
     def run_stage(self, task):
         if task.current_stage == TaskStage.RECEIVED:
@@ -1224,6 +1232,14 @@ class BridgeSelfShareTaskWorkflow:
             own_share_file_id=folder.get("file_id"),
             own_share_file_name=folder.get("file_name"),
         ) or row
+        recognition.update(
+            {
+                "organized_parent_id": str(folder.get("parent_id") or ""),
+                "parent_id": str(folder.get("parent_id") or ""),
+            }
+        )
+        if hasattr(self.store, "update_recognition"):
+            row = self.store.update_recognition(int(row["id"]), recognition, "organized_found") or row
         return StageResult.complete(
             "已找到 CMS 整理后的 115 文件夹",
             {"submission_id": int(row["id"]), "organized_folder": folder},
@@ -1233,35 +1249,54 @@ class BridgeSelfShareTaskWorkflow:
         row = self._submission_row(task)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        recognition = self._recognition_from_row(row)
         folder = task.metadata.get("organized_folder")
         if not isinstance(folder, dict):
+            parent_id = self._organized_parent_id(task, recognition)
             folder = {
                 "file_id": row.get("own_share_file_id"),
                 "file_name": row.get("own_share_file_name"),
-                "parent_id": task.metadata.get("parent_id") or row.get("parent_id"),
+                "parent_id": parent_id,
             }
         file_id = str(folder.get("file_id") or "").strip()
         folder_name = str(folder.get("file_name") or row.get("own_share_file_name") or task.title or "").strip()
         share_name = str(row.get("title") or task.title or folder_name or task.share_code).strip()
+        parent_id = self._organized_parent_id(task, recognition, folder)
         category = category_for_115_parent_id(
-            str(folder.get("parent_id") or ""),
+            parent_id,
             self.self_share_config.parent_cid_category_map,
         )
-        tmdb_id = str(extract_tmdb_id_from_name(folder_name) or extract_tmdb_id_from_name(share_name) or "").strip()
-        recognition = self._recognition_from_row(row)
+        tmdb_id = str(
+            extract_tmdb_id_from_name(folder_name)
+            or extract_tmdb_id_from_name(share_name)
+            or recognition.get("tmdb_id")
+            or ""
+        ).strip()
         recognition.update(
             {
                 "title": recognition.get("title") or folder_name or share_name,
                 "share_name": recognition.get("share_name") or share_name,
                 "tmdb_id": tmdb_id,
                 "category": category or str(recognition.get("category") or ""),
+                "organized_parent_id": parent_id,
+                "parent_id": parent_id,
             }
         )
         if not category:
-            recognition, should_prompt = decide_category_prompt(self.store, row, recognition, self.move_config, share_name)
+            recognition, should_prompt = resolve_category_with_fallbacks(
+                recognition,
+                share_name,
+                openai_classifier=self.openai_classifier,
+                tmdb_resolver=self.tmdb_resolver,
+            )
             category = str(recognition.get("category") or "").strip()
-            if should_prompt:
-                return StageResult.needs_action("等待人工确认分类", {"recognition": recognition})
+            tmdb_id = str(recognition.get("tmdb_id") or tmdb_id).strip()
+            if should_prompt or not category:
+                recognition, should_prompt = decide_category_prompt(self.store, row, recognition, self.move_config, share_name)
+                category = str(recognition.get("category") or "").strip()
+                tmdb_id = str(recognition.get("tmdb_id") or tmdb_id).strip()
+                if should_prompt or not category:
+                    return StageResult.needs_action("等待人工确认分类", {"recognition": recognition})
         if category and hasattr(self.store, "update_category"):
             row = self.store.update_category(int(row["id"]), category, "selected") or row
         if hasattr(self.store, "update_recognition"):
@@ -1327,6 +1362,25 @@ class BridgeSelfShareTaskWorkflow:
         except Exception:
             recognition = {}
         return recognition if isinstance(recognition, dict) else {}
+
+    def _organized_parent_id(
+        self,
+        task,
+        recognition: dict[str, Any],
+        folder: dict[str, Any] | None = None,
+    ) -> str:
+        if folder:
+            value = folder.get("parent_id") or folder.get("pid")
+            if value:
+                return str(value).strip()
+        return str(
+            task.metadata.get("organized_parent_id")
+            or task.metadata.get("parent_id")
+            or recognition.get("organized_parent_id")
+            or recognition.get("parent_id")
+            or self.organized_parent_id
+            or ""
+        ).strip()
 
     def _own_share_metadata(self, row: dict[str, Any]) -> dict[str, Any]:
         return {
