@@ -244,7 +244,7 @@ class TaskStore:
                 """
                 SELECT * FROM tasks
                 WHERE status IN (?, ?)
-                  AND current_stage NOT IN (?, ?, ?)
+                  AND current_stage NOT IN (?, ?)
                   AND next_run_at >= 0
                   AND next_run_at <= ?
                   AND (claimed_by = '' OR claimed_at <= ?)
@@ -254,7 +254,6 @@ class TaskStore:
                 (
                     runnable_statuses[0],
                     runnable_statuses[1],
-                    TaskStage.CLEANED.value,
                     TaskStage.NEEDS_ACTION.value,
                     TaskStage.FAILED.value,
                     current_time,
@@ -268,7 +267,7 @@ class TaskStore:
                     SET status = ?, claimed_by = ?, claimed_at = ?, updated_at = ?
                     WHERE id = ?
                       AND status IN (?, ?)
-                      AND current_stage NOT IN (?, ?, ?)
+                      AND current_stage NOT IN (?, ?)
                       AND next_run_at >= 0
                       AND next_run_at <= ?
                       AND (claimed_by = '' OR claimed_at <= ?)
@@ -281,7 +280,6 @@ class TaskStore:
                         int(row["id"]),
                         runnable_statuses[0],
                         runnable_statuses[1],
-                        TaskStage.CLEANED.value,
                         TaskStage.NEEDS_ACTION.value,
                         TaskStage.FAILED.value,
                         current_time,

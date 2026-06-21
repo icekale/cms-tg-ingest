@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from app.models import TaskStage, TaskStatus
-from app.task_runner import StageOutcome, StageResult, TaskRunner
+from app.task_runner import StageResult, TaskRunner
 from app.task_store import TaskStore
 
 
@@ -33,6 +33,7 @@ class TaskRunnerTests(unittest.TestCase):
 
             self.assertEqual(updated.current_stage, TaskStage.ORGANIZING)
             self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.claimed_by, "")
             self.assertEqual(events[-2]["stage"], "received")
             self.assertEqual(events[-2]["status"], "succeeded")
             self.assertEqual(events[-1]["stage"], "organizing")
@@ -66,6 +67,7 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.current_stage, TaskStage.RECOGNIZING)
             self.assertEqual(updated.status, TaskStatus.NEEDS_ACTION)
             self.assertEqual(updated.error_summary, "请选择分类")
+            self.assertEqual(updated.claimed_by, "")
 
     def test_run_once_records_failure_from_exception(self):
         class ExplodingWorkflow:
@@ -78,13 +80,37 @@ class TaskRunnerTests(unittest.TestCase):
             store.enqueue_task(task.id, TaskStage.STRM_READY, next_run_at=1.0)
             runner = TaskRunner(store, ExplodingWorkflow(), worker_id="worker-1", now=lambda: 1.0)
 
-            self.assertTrue(runner.run_once())
+            with self.assertLogs("app.task_runner", level="ERROR") as logs:
+                self.assertTrue(runner.run_once())
             updated = store.find_task(task.id)
 
             self.assertEqual(updated.current_stage, TaskStage.STRM_READY)
             self.assertEqual(updated.status, TaskStatus.FAILED)
             self.assertEqual(updated.error_type, "stage_exception")
             self.assertIn("boom", updated.error_summary)
+            self.assertEqual(updated.claimed_by, "")
+            self.assertIn("Task stage failed task_id=1 stage=strm_ready", logs.output[0])
+
+    def test_run_once_records_explicit_failure_and_clears_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.STRM_READY, next_run_at=1.0)
+            runner = TaskRunner(
+                store,
+                FakeWorkflow([StageResult.failed("STRM missing", error_type="strm_missing")]),
+                worker_id="worker-1",
+                now=lambda: 1.0,
+            )
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(updated.current_stage, TaskStage.STRM_READY)
+            self.assertEqual(updated.status, TaskStatus.FAILED)
+            self.assertEqual(updated.error_type, "strm_missing")
+            self.assertEqual(updated.error_summary, "STRM missing")
+            self.assertEqual(updated.claimed_by, "")
 
 
 if __name__ == "__main__":

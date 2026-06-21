@@ -140,6 +140,32 @@ class TaskStoreTests(unittest.TestCase):
             self.assertIsNotNone(claimed)
             self.assertEqual(claimed.current_stage, TaskStage.STRM_READY)
 
+    def test_pending_cleaned_task_is_claimable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.CLEANED, message="等待清理", next_run_at=1.0)
+
+            claimed = store.claim_next_runnable("worker-1", now=1.0)
+
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed.current_stage, TaskStage.CLEANED)
+            self.assertEqual(claimed.status, TaskStatus.RUNNING)
+
+    def test_succeeded_cleaned_task_is_not_claimable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "清理完成",
+                next_run_at=1.0,
+            )
+
+            self.assertIsNone(store.claim_next_runnable("worker-1", now=1.0))
+
     def test_cross_instance_claim_does_not_double_claim_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "tasks.db"
