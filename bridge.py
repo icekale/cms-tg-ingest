@@ -22,6 +22,7 @@ from typing import Any
 
 from app.models import TaskStage, TaskStatus
 from app.task_bridge import ensure_task_for_link, record_failure, record_submission_event, sync_task_from_submission
+from app.task_runner import StageResult, TaskRunner
 from app.task_store import TaskStore
 from app.web import start_web_server
 
@@ -1111,6 +1112,231 @@ class SelfShareWorkflow:
             )
             row = self.store.update_self_share(row_id, workflow_phase="share_sync_submitted", share_sync_status="submitted") or row
         return row, find_self_share_strm_source_dir(self.config, row, recognition, share_name)
+
+
+class BridgeSelfShareTaskWorkflow:
+    def __init__(
+        self,
+        cms,
+        telegram,
+        chat_id,
+        store,
+        task_store,
+        p115,
+        self_share_config,
+        move_config,
+        emby,
+        openai_classifier,
+        tmdb_resolver,
+        cleanup_client=None,
+        receive_cid="",
+    ):
+        self.cms = cms
+        self.telegram = telegram
+        self.chat_id = chat_id
+        self.store = store
+        self.task_store = task_store
+        self.p115 = p115
+        self.self_share_config = self_share_config
+        self.move_config = move_config
+        self.emby = emby
+        self.openai_classifier = openai_classifier
+        self.tmdb_resolver = tmdb_resolver
+        self.cleanup_client = cleanup_client
+        self.receive_cid = str(receive_cid or "").strip()
+
+    def run_stage(self, task):
+        if task.current_stage == TaskStage.RECEIVED:
+            return self._stage_received(task)
+        if task.current_stage == TaskStage.ORGANIZING:
+            return self._stage_organizing(task)
+        if task.current_stage == TaskStage.RECOGNIZING:
+            return self._stage_recognizing(task)
+        if task.current_stage == TaskStage.OWN_SHARE_CREATED:
+            return self._stage_own_share_created(task)
+        if task.current_stage == TaskStage.SHARE_SYNC_SUBMITTED:
+            return self._stage_share_sync_submitted(task)
+        if task.current_stage in {
+            TaskStage.STRM_READY,
+            TaskStage.MOVED,
+            TaskStage.EMBY_CONFIRMED,
+            TaskStage.CLEANED,
+        }:
+            return StageResult.failed("阶段尚未实现", error_type="unsupported_stage")
+        return StageResult.failed("阶段尚未实现", error_type="unsupported_stage")
+
+    def _submission_row(self, task) -> dict[str, Any] | None:
+        submission_id = task.metadata.get("submission_id") or task.submission_id
+        if submission_id not in (None, ""):
+            return self.store.find_by_id(int(submission_id))
+        return self.store.find_by_key(ShareKey(task.share_code, task.receive_code))
+
+    def _stage_received(self, task):
+        if not self.self_share_config.enabled:
+            return StageResult.failed("自分享工作流未启用", error_type="self_share_disabled")
+        if not self.receive_cid:
+            return StageResult.failed("缺少 115 接收目录 ID", error_type="missing_receive_cid")
+
+        received = self.p115.receive_share_to_cid(task.share_code, task.receive_code, self.receive_cid)
+        title = str(received.get("title") or task.title or task.share_code).strip()
+        row = self.store.upsert_submission(
+            ShareKey(task.share_code, task.receive_code),
+            task.url,
+            "received",
+            title=title,
+        )
+        row = self.store.update_self_share(
+            int(row["id"]),
+            workflow_mode="self_share_sync",
+            workflow_phase="received_to_pending",
+        ) or row
+        return StageResult.complete(
+            "已接收 115 分享到待整理",
+            {
+                "submission_id": int(row["id"]),
+                "received_title": title,
+                "received_file_ids": received.get("file_ids") or [],
+            },
+        )
+
+    def _stage_organizing(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        self.cms.run_auto_organize()
+        recognition = self._recognition_from_row(row)
+        title = str(row.get("title") or task.title or task.share_code)
+        folder = self.p115.find_organized_folder(
+            recognition,
+            title,
+            excluded_parent_ids=self.self_share_config.excluded_parent_ids or set(),
+            min_update_time=float(row.get("created_at") or 0),
+        )
+        if not folder:
+            return StageResult.defer(
+                "等待 CMS 整理完成",
+                self.self_share_config.auto_organize_retry_seconds or 30,
+                {"submission_id": int(row["id"])},
+            )
+        row = self.store.update_self_share(
+            int(row["id"]),
+            workflow_phase="organized_found",
+            own_share_file_id=folder.get("file_id"),
+            own_share_file_name=folder.get("file_name"),
+        ) or row
+        return StageResult.complete(
+            "已找到 CMS 整理后的 115 文件夹",
+            {"submission_id": int(row["id"]), "organized_folder": folder},
+        )
+
+    def _stage_recognizing(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        folder = task.metadata.get("organized_folder")
+        if not isinstance(folder, dict):
+            folder = {
+                "file_id": row.get("own_share_file_id"),
+                "file_name": row.get("own_share_file_name"),
+                "parent_id": task.metadata.get("parent_id") or row.get("parent_id"),
+            }
+        file_id = str(folder.get("file_id") or "").strip()
+        folder_name = str(folder.get("file_name") or row.get("own_share_file_name") or task.title or "").strip()
+        share_name = str(row.get("title") or task.title or folder_name or task.share_code).strip()
+        category = category_for_115_parent_id(
+            str(folder.get("parent_id") or ""),
+            self.self_share_config.parent_cid_category_map,
+        )
+        tmdb_id = str(extract_tmdb_id_from_name(folder_name) or extract_tmdb_id_from_name(share_name) or "").strip()
+        recognition = self._recognition_from_row(row)
+        recognition.update(
+            {
+                "title": recognition.get("title") or folder_name or share_name,
+                "share_name": recognition.get("share_name") or share_name,
+                "tmdb_id": tmdb_id,
+                "category": category or str(recognition.get("category") or ""),
+            }
+        )
+        if not category:
+            recognition, should_prompt = decide_category_prompt(self.store, row, recognition, self.move_config, share_name)
+            category = str(recognition.get("category") or "").strip()
+            if should_prompt:
+                return StageResult.needs_action("等待人工确认分类", {"recognition": recognition})
+        if category and hasattr(self.store, "update_category"):
+            row = self.store.update_category(int(row["id"]), category, "selected") or row
+        if hasattr(self.store, "update_recognition"):
+            row = self.store.update_recognition(int(row["id"]), recognition, "self_share_resolved") or row
+        return StageResult.complete(
+            "已识别整理后的 115 文件夹",
+            {
+                "submission_id": int(row["id"]),
+                "recognition": recognition,
+                "category": category,
+                "tmdb_id": tmdb_id,
+                "own_share_file_id": file_id,
+            },
+        )
+
+    def _stage_own_share_created(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        file_id = str(task.metadata.get("own_share_file_id") or row.get("own_share_file_id") or "").strip()
+        if not file_id:
+            return StageResult.failed("缺少自有分享文件夹 ID", error_type="own_share_file_missing")
+        if row.get("own_share_code"):
+            return StageResult.complete("已存在自有 115 分享", self._own_share_metadata(row))
+        share = self.p115.create_long_share(file_id)
+        row = self.store.update_self_share(
+            int(row["id"]),
+            workflow_phase="own_share_created",
+            own_share_code=share.get("share_code"),
+            own_share_receive_code=share.get("receive_code"),
+            own_share_url=share.get("share_url"),
+        ) or row
+        return StageResult.complete("已创建自有 115 分享", self._own_share_metadata(row))
+
+    def _stage_share_sync_submitted(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        own_code = str(task.metadata.get("own_share_code") or row.get("own_share_code") or "").strip()
+        own_pwd = str(task.metadata.get("own_share_receive_code") or row.get("own_share_receive_code") or "").strip()
+        if not own_code:
+            return StageResult.failed("缺少自有分享码", error_type="own_share_missing")
+        if row.get("share_sync_status") != "submitted":
+            self.cms.add_share115_sync_task(
+                own_code,
+                own_pwd,
+                cid=self.self_share_config.cms_cid,
+                local_path=self.self_share_config.cms_local_path,
+            )
+            row = self.store.update_self_share(
+                int(row["id"]),
+                workflow_phase="share_sync_submitted",
+                share_sync_status="submitted",
+            ) or row
+        return StageResult.complete(
+            "已提交 CMS 分享同步",
+            {"submission_id": int(row["id"]), "share_sync_status": row.get("share_sync_status") or "submitted"},
+        )
+
+    def _recognition_from_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        try:
+            recognition = json.loads(row.get("recognition_json") or "{}")
+        except Exception:
+            recognition = {}
+        return recognition if isinstance(recognition, dict) else {}
+
+    def _own_share_metadata(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "submission_id": int(row["id"]),
+            "own_share_file_id": row.get("own_share_file_id"),
+            "own_share_file_name": row.get("own_share_file_name"),
+            "own_share_code": row.get("own_share_code"),
+            "own_share_receive_code": row.get("own_share_receive_code"),
+            "own_share_url": row.get("own_share_url"),
+        }
 
 
 def enrich_recognition_from_self_share_folder(
