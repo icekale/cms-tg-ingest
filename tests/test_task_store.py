@@ -89,3 +89,53 @@ class TaskStoreTests(unittest.TestCase):
             recent = store.list_recent_tasks(limit=2)
 
             self.assertEqual([task.id for task in recent], [two.id, one.id])
+
+    def test_task_store_persists_runtime_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
+
+            updated = store.record_event(
+                task.id,
+                TaskStage.RECEIVED,
+                TaskStatus.RUNNING,
+                "已接收",
+                submission_id=7,
+                metadata_patch={"own_share_file_id": "fid-1", "emby_parent": "电影"},
+            )
+
+            self.assertEqual(updated.chat_id, "464100862")
+            self.assertEqual(updated.submission_id, 7)
+            self.assertEqual(updated.metadata["own_share_file_id"], "fid-1")
+            self.assertEqual(updated.metadata["emby_parent"], "电影")
+
+    def test_enqueue_and_claim_next_runnable_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, message="等待整理", next_run_at=1.0)
+
+            early = store.claim_next_runnable("worker-1", now=0.5)
+            claimed = store.claim_next_runnable("worker-1", now=1.0)
+            second = store.claim_next_runnable("worker-2", now=1.0)
+
+            self.assertIsNone(early)
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed.id, task.id)
+            self.assertEqual(claimed.current_stage, TaskStage.ORGANIZING)
+            self.assertEqual(claimed.status, TaskStatus.RUNNING)
+            self.assertEqual(claimed.claimed_by, "worker-1")
+            self.assertIsNone(second)
+
+    def test_failed_task_is_not_claimed_until_requeued(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(task.id, TaskStage.STRM_READY, TaskStatus.FAILED, "失败", error_summary="未找到 STRM")
+
+            self.assertIsNone(store.claim_next_runnable("worker-1", now=10.0))
+
+            store.enqueue_task(task.id, TaskStage.STRM_READY, message="手动重试", next_run_at=10.0)
+            claimed = store.claim_next_runnable("worker-1", now=10.0)
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed.current_stage, TaskStage.STRM_READY)
