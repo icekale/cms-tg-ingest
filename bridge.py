@@ -309,6 +309,17 @@ class SubmissionStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS parent_category_memory (
+                    parent_id TEXT PRIMARY KEY,
+                    category TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
 
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(submissions)")}
@@ -423,6 +434,36 @@ class SubmissionStore:
             )
             row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
         return self._row_to_dict(row)
+
+    def remember_parent_category(self, parent_id: str, category: str, source: str = "manual") -> None:
+        parent_id = str(parent_id or "").strip()
+        category = str(category or "").strip()
+        if not parent_id or not category:
+            return
+        now = time.time()
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO parent_category_memory (parent_id, category, source, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(parent_id) DO UPDATE SET
+                    category = excluded.category,
+                    source = excluded.source,
+                    updated_at = excluded.updated_at
+                """,
+                (parent_id, category, str(source or "").strip(), now, now),
+            )
+
+    def category_for_parent_id(self, parent_id: str) -> str:
+        parent_id = str(parent_id or "").strip()
+        if not parent_id:
+            return ""
+        with self._lock, self._connection() as conn:
+            row = conn.execute(
+                "SELECT category FROM parent_category_memory WHERE parent_id = ?",
+                (parent_id,),
+            ).fetchone()
+        return str(row["category"] or "").strip() if row else ""
 
     def update_recognition(self, row_id: int, recognition: dict[str, Any], category_status: str) -> dict[str, Any] | None:
         with self._lock, self._connection() as conn:
@@ -1460,6 +1501,8 @@ class BridgeSelfShareTaskWorkflow:
             parent_id,
             self.self_share_config.parent_cid_category_map,
         )
+        if not category and hasattr(self.store, "category_for_parent_id"):
+            category = self.store.category_for_parent_id(parent_id)
         manual_category = ""
         if str(row.get("category_status") or "").strip() == "selected":
             manual_category = str(row.get("category_choice") or "").strip()
@@ -4326,6 +4369,20 @@ def parse_category_callback(data: str) -> tuple[int, str] | None:
         return None
 
 
+def remember_manual_parent_category(store: SubmissionStore, row: dict[str, Any], category: str) -> None:
+    if not hasattr(store, "remember_parent_category"):
+        return
+    try:
+        recognition = json.loads(row.get("recognition_json") or "{}")
+    except Exception:
+        recognition = {}
+    if not isinstance(recognition, dict):
+        recognition = {}
+    parent_id = str(recognition.get("organized_parent_id") or recognition.get("parent_id") or "").strip()
+    if parent_id:
+        store.remember_parent_category(parent_id, category, source="manual")
+
+
 def handle_callback_query(
     callback_query: dict,
     telegram: TelegramClient,
@@ -4378,6 +4435,8 @@ def handle_callback_query(
     label = CATEGORY_LABELS[category_key]
     status = "skipped" if category_key == "skip" else "selected"
     updated = store.update_category(row_id, None if category_key == "skip" else label, status)
+    if updated and category_key != "skip":
+        remember_manual_parent_category(store, updated, label)
     if updated and task_store and category_key == "skip":
         task = task_store.upsert_task(
             str(updated.get("share_code") or ""),

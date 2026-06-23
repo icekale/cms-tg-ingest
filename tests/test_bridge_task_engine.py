@@ -406,6 +406,37 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["category"], "华语电影")
             self.assertEqual(classifier.calls, [])
 
+    def test_recognizing_stage_uses_remembered_manual_parent_category(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            classifier = FakeClassifier()
+            workflow = self._workflow(tmp, openai_classifier=classifier, tmdb_resolver=FakeTmdbResolver())
+            self.submissions.remember_parent_category("unmapped-parent", "国产电视", source="manual")
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="太行谣 (2026) {tmdb-323682}") or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            organized_folder = {
+                "file_id": "folder-id",
+                "file_name": "T-太行谣-2026-[tmdb=323682]",
+                "parent_id": "unmapped-parent",
+            }
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECOGNIZING,
+                {"submission_id": row["id"], "organized_folder": organized_folder},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["category"], "国产电视")
+            self.assertEqual(stored["category_choice"], "国产电视")
+            self.assertEqual(stored["category_status"], "self_share_resolved")
+            self.assertEqual(classifier.calls, [])
+            self.assertEqual(self.telegram.messages, [])
+
     def test_recognizing_stage_uses_parent_id_from_recognition_metadata_when_folder_metadata_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             classifier = FakeClassifier()

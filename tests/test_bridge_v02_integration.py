@@ -992,6 +992,60 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(claimed.current_stage, TaskStage.RECOGNIZING)
             self.assertEqual(telegram.answers[-1][1], "已记录分类：华语电影")
 
+    def test_category_callback_remembers_organized_parent_category(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            row = submission_store.upsert_submission(
+                bridge.ShareKey("abc", "1234"),
+                "https://115cdn.com/s/abc?password=1234",
+                "received",
+                title="太行谣 (2026) {tmdb-323682}",
+            )
+            recognition = {
+                "title": "T-太行谣-2026-[tmdb=323682]",
+                "organized_parent_id": "parent-tvcn",
+                "parent_id": "parent-tvcn",
+                "category_status": "needs_action",
+            }
+            row = submission_store.update_recognition(int(row["id"]), recognition, "needs_action") or row
+            task = task_store.upsert_task("abc", "1234", row["url"], chat_id="464100862")
+            task_store.record_event(
+                task.id,
+                TaskStage.RECOGNIZING,
+                TaskStatus.NEEDS_ACTION,
+                "等待人工确认分类",
+                submission_id=int(row["id"]),
+                metadata_patch={"submission_id": int(row["id"])},
+            )
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                {
+                    "callback_query": {
+                        "id": "callback-remember",
+                        "from": {"id": 464100862},
+                        "message": {"chat": {"id": 464100862}},
+                        "data": f"cat:{row['id']}:cn_tv",
+                    }
+                },
+                object(),
+                telegram,
+                "464100862",
+                submission_store,
+                task_store=task_store,
+            )
+
+            remembered = submission_store.category_for_parent_id("parent-tvcn")
+            updated = task_store.find_task(task.id)
+            claimed = task_store.claim_next_runnable("worker", now=9999999999.0)
+
+            self.assertEqual(remembered, "国产电视")
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.current_stage, TaskStage.RECOGNIZING)
+            self.assertEqual(claimed.id, task.id)
+            self.assertEqual(telegram.answers[-1][1], "已记录分类：国产电视")
+
     def test_category_callback_skip_marks_authoritative_task_terminal(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
