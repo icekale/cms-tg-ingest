@@ -131,6 +131,24 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertTrue(updated.metadata["_lock_waiting"])
             self.assertEqual(updated.metadata["_lock_owner_task_id"], holder.id)
 
+    def test_run_once_releases_previous_same_worker_claim_before_claiming(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            claimed = store.claim_next_runnable("task-runner", now=1.0)
+            self.assertEqual(claimed.claimed_by, "task-runner")
+            workflow = FakeWorkflow([StageResult.defer("等待 CMS 整理完成", delay_seconds=15)])
+            runner = TaskRunner(store, workflow, worker_id="task-runner", now=lambda: 10.0)
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(workflow.calls, [(task.id, TaskStage.ORGANIZING)])
+            self.assertEqual(updated.claimed_by, "")
+            self.assertEqual(updated.status, TaskStatus.RUNNING)
+            self.assertEqual(updated.next_run_at, 25.0)
+
     def test_repeated_defer_uses_backoff_without_growing_event_log(self):
         current_time = 1.0
 
@@ -167,6 +185,50 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(tenth.next_run_at, 361.0)
             self.assertEqual(tenth.metadata["_defer_count"], 10)
             self.assertEqual(len([event for event in events if event["message"] == "等待 CMS 整理"]), 1)
+
+    def test_organizing_defer_over_limit_becomes_needs_action_and_releases_lock(self):
+        current_time = 1.0
+
+        def now():
+            return current_time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "等待 CMS 整理完成",
+                metadata_patch={
+                    "_defer_stage": TaskStage.ORGANIZING.value,
+                    "_defer_message": "等待 CMS 整理完成",
+                    "_defer_count": 29,
+                    "_lock_key": "115:global",
+                    "_lock_reason": "115/CMS 全局阶段",
+                    "_lock_waiting": False,
+                },
+                next_run_at=current_time,
+                clear_claim=True,
+            )
+            runner = TaskRunner(
+                store,
+                FakeWorkflow([StageResult.defer("等待 CMS 整理完成", delay_seconds=15)]),
+                worker_id="worker-1",
+                now=now,
+            )
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(updated.current_stage, TaskStage.NEEDS_ACTION)
+            self.assertEqual(updated.status, TaskStatus.NEEDS_ACTION)
+            self.assertEqual(updated.error_type, "organizing_timeout")
+            self.assertIn("CMS 整理", updated.error_summary)
+            self.assertEqual(updated.claimed_by, "")
+            self.assertEqual(updated.metadata["_lock_key"], "")
+            self.assertFalse(updated.metadata["_lock_waiting"])
+            self.assertEqual(updated.metadata["retry_stage"], TaskStage.ORGANIZING.value)
 
     def test_run_once_records_needs_action_on_current_stage(self):
         with tempfile.TemporaryDirectory() as tmp:

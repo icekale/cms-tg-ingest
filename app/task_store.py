@@ -227,6 +227,23 @@ class TaskStore:
             cursor = conn.execute(f"DELETE FROM tasks WHERE id IN ({placeholders})", task_ids)
         return int(cursor.rowcount or 0)
 
+    def clear_worker_claims(self, worker_id: str, now: float | None = None) -> int:
+        worker_id = str(worker_id or "").strip()
+        if not worker_id:
+            return 0
+        current_time = time.time() if now is None else float(now)
+        with self._lock, self._connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE tasks
+                SET claimed_by = '', claimed_at = 0, next_run_at = ?, updated_at = ?
+                WHERE claimed_by = ?
+                  AND status = ?
+                """,
+                (current_time, current_time, worker_id, TaskStatus.RUNNING.value),
+            )
+        return int(cursor.rowcount or 0)
+
     def record_event(
         self,
         task_id: int,

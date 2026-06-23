@@ -25,6 +25,8 @@ _DESTINATION_LOCK_STAGES = {
     TaskStage.MOVED,
     TaskStage.EMBY_CONFIRMED,
 }
+_ORGANIZING_TIMEOUT_MESSAGES = {"等待 CMS 整理完成"}
+_ORGANIZING_MAX_DEFER_COUNT = 30
 
 
 def _lock_metadata_for_task(task: TaskSnapshot) -> dict[str, object]:
@@ -136,8 +138,10 @@ class TaskRunner:
         self.now = now or time.time
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._startup_claims_cleared = False
 
     def run_once(self) -> bool:
+        self._clear_startup_claims_once()
         task = self.store.claim_next_runnable(self.worker_id, now=self.now())
         if task is None:
             return False
@@ -162,6 +166,14 @@ class TaskRunner:
             return True
         self._apply_result(task, result)
         return True
+
+    def _clear_startup_claims_once(self) -> None:
+        if self._startup_claims_cleared:
+            return
+        self._startup_claims_cleared = True
+        released = self.store.clear_worker_claims(self.worker_id, now=self.now())
+        if released:
+            LOG.warning("Released %s stale task claims for worker_id=%s", released, self.worker_id)
 
     def _prepare_lock(self, task: TaskSnapshot) -> TaskSnapshot | None:
         lock_metadata = _lock_metadata_for_task(task)
@@ -206,6 +218,31 @@ class TaskRunner:
                 "_defer_message": result.message,
                 "_defer_count": defer_count,
             }
+            if (
+                task.current_stage == TaskStage.ORGANIZING
+                and result.message in _ORGANIZING_TIMEOUT_MESSAGES
+                and defer_count >= _ORGANIZING_MAX_DEFER_COUNT
+            ):
+                metadata_patch.update(
+                    {
+                        "retry_from_stage": task.current_stage.value,
+                        "retry_stage": TaskStage.ORGANIZING.value,
+                        "_lock_key": "",
+                        "_lock_waiting": False,
+                        "_lock_owner_task_id": "",
+                    }
+                )
+                self.store.record_event(
+                    task.id,
+                    TaskStage.NEEDS_ACTION,
+                    TaskStatus.NEEDS_ACTION,
+                    "CMS 整理等待超时，请人工检查分享内容或稍后重试",
+                    metadata_patch=metadata_patch,
+                    error_type="organizing_timeout",
+                    error_summary="CMS 整理等待超时，请人工检查分享内容或稍后重试",
+                    clear_claim=True,
+                )
+                return
             self.store.record_event(
                 task.id,
                 task.current_stage,

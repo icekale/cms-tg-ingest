@@ -284,6 +284,23 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(updated.claimed_by, "worker-1")
             self.assertEqual(updated.claimed_at, 1.0)
 
+    def test_clear_worker_claims_releases_previous_process_running_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            claimed = store.claim_next_runnable("task-runner", now=1.0)
+            self.assertEqual(claimed.claimed_by, "task-runner")
+
+            released = store.clear_worker_claims("task-runner", now=10.0)
+            updated = store.find_task(task.id)
+
+            self.assertEqual(released, 1)
+            self.assertEqual(updated.status, TaskStatus.RUNNING)
+            self.assertEqual(updated.claimed_by, "")
+            self.assertEqual(updated.claimed_at, 0)
+            self.assertEqual(updated.next_run_at, 10.0)
+
     def test_metadata_merge_preserves_existing_keys_and_ignores_none_values(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
