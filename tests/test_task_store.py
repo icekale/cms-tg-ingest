@@ -58,6 +58,37 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["message"], "CMS submitted")
 
+    def test_repeated_running_event_updates_task_without_growing_timeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+
+            store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "等待 CMS 整理完成",
+                metadata_patch={"first": "yes"},
+                next_run_at=10.0,
+                clear_claim=True,
+            )
+            updated = store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "等待 CMS 整理完成",
+                metadata_patch={"second": "yes"},
+                next_run_at=25.0,
+                clear_claim=True,
+            )
+            events = store.list_events(task.id)
+
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["message"], "等待 CMS 整理完成")
+            self.assertEqual(updated.next_run_at, 25.0)
+            self.assertEqual(updated.metadata["first"], "yes")
+            self.assertEqual(updated.metadata["second"], "yes")
+
     def test_record_failure_stores_error_and_retry_count(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
@@ -89,3 +120,269 @@ class TaskStoreTests(unittest.TestCase):
             recent = store.list_recent_tasks(limit=2)
 
             self.assertEqual([task.id for task in recent], [two.id, one.id])
+
+    def test_queue_summary_counts_statuses_and_lock_waits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            pending = store.upsert_task("pending", "", "https://115cdn.com/s/pending")
+            store.enqueue_task(pending.id, TaskStage.RECEIVED, next_run_at=0)
+            running = store.upsert_task("running", "", "https://115cdn.com/s/running")
+            store.enqueue_task(running.id, TaskStage.ORGANIZING, next_run_at=0)
+            store.claim_next_runnable("worker", now=0)
+            waiting = store.upsert_task("waiting", "", "https://115cdn.com/s/waiting")
+            store.record_event(
+                waiting.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "等待资源锁",
+                metadata_patch={"_lock_key": "115:global", "_lock_reason": "115/CMS 全局阶段", "_lock_waiting": True},
+            )
+            manual = store.upsert_task("manual", "", "https://115cdn.com/s/manual")
+            store.record_event(manual.id, TaskStage.NEEDS_ACTION, TaskStatus.NEEDS_ACTION, "请选择分类")
+            failed = store.upsert_task("failed", "", "https://115cdn.com/s/failed")
+            store.record_event(failed.id, TaskStage.STRM_READY, TaskStatus.FAILED, "STRM missing")
+
+            summary = store.queue_summary(limit=10)
+
+            self.assertEqual(summary.recent_count, 5)
+            self.assertEqual(summary.pending_count, 1)
+            self.assertEqual(summary.running_count, 2)
+            self.assertEqual(summary.needs_action_count, 1)
+            self.assertEqual(summary.failed_count, 1)
+            self.assertEqual(summary.lock_wait_count, 1)
+            self.assertEqual(summary.latest_lock_wait.id, waiting.id)
+
+    def test_task_store_persists_runtime_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
+
+            updated = store.record_event(
+                task.id,
+                TaskStage.RECEIVED,
+                TaskStatus.RUNNING,
+                "已接收",
+                submission_id=7,
+                metadata_patch={"own_share_file_id": "fid-1", "emby_parent": "电影"},
+            )
+
+            self.assertEqual(updated.chat_id, "464100862")
+            self.assertEqual(updated.submission_id, 7)
+            self.assertEqual(updated.metadata["own_share_file_id"], "fid-1")
+            self.assertEqual(updated.metadata["emby_parent"], "电影")
+
+    def test_enqueue_and_claim_next_runnable_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, message="等待整理", next_run_at=1.0)
+
+            early = store.claim_next_runnable("worker-1", now=0.5)
+            claimed = store.claim_next_runnable("worker-1", now=1.0)
+            second = store.claim_next_runnable("worker-2", now=1.0)
+
+            self.assertIsNone(early)
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed.id, task.id)
+            self.assertEqual(claimed.current_stage, TaskStage.ORGANIZING)
+            self.assertEqual(claimed.status, TaskStatus.RUNNING)
+            self.assertEqual(claimed.claimed_by, "worker-1")
+            self.assertIsNone(second)
+
+    def test_failed_task_is_not_claimed_until_requeued(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(task.id, TaskStage.STRM_READY, TaskStatus.FAILED, "失败", error_summary="未找到 STRM")
+
+            self.assertIsNone(store.claim_next_runnable("worker-1", now=10.0))
+
+            store.enqueue_task(task.id, TaskStage.STRM_READY, message="手动重试", next_run_at=10.0)
+            claimed = store.claim_next_runnable("worker-1", now=10.0)
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed.current_stage, TaskStage.STRM_READY)
+
+    def test_pending_cleaned_task_is_claimable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.CLEANED, message="等待清理", next_run_at=1.0)
+
+            claimed = store.claim_next_runnable("worker-1", now=1.0)
+
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed.current_stage, TaskStage.CLEANED)
+            self.assertEqual(claimed.status, TaskStatus.RUNNING)
+
+    def test_succeeded_cleaned_task_is_not_claimable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "清理完成",
+                next_run_at=1.0,
+            )
+
+            self.assertIsNone(store.claim_next_runnable("worker-1", now=1.0))
+
+    def test_cross_instance_claim_does_not_double_claim_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "tasks.db"
+            first_store = TaskStore(db_path)
+            second_store = TaskStore(db_path)
+            task = first_store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            first_store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
+
+            first_claim = first_store.claim_next_runnable("worker-1", now=1.0)
+            second_claim = second_store.claim_next_runnable("worker-2", now=1.0)
+
+            self.assertIsNotNone(first_claim)
+            self.assertIsNone(second_claim)
+
+    def test_default_stale_claim_timeout_is_conservative(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
+
+            first_claim = store.claim_next_runnable("worker-1", now=1.0)
+            second_claim = store.claim_next_runnable("worker-2", now=1000.0)
+
+            self.assertIsNotNone(first_claim)
+            self.assertIsNone(second_claim)
+
+    def test_record_event_preserves_claim_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            claimed = store.claim_next_runnable("worker-1", now=1.0)
+
+            updated = store.record_event(claimed.id, TaskStage.ORGANIZING, TaskStatus.RUNNING, "处理中")
+
+            self.assertEqual(updated.claimed_by, "worker-1")
+            self.assertEqual(updated.claimed_at, 1.0)
+
+    def test_record_event_clear_claim_false_preserves_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            claimed = store.claim_next_runnable("worker-1", now=1.0)
+
+            updated = store.record_event(
+                claimed.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "处理中",
+                clear_claim=False,
+            )
+
+            self.assertEqual(updated.claimed_by, "worker-1")
+            self.assertEqual(updated.claimed_at, 1.0)
+
+    def test_metadata_merge_preserves_existing_keys_and_ignores_none_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(task.id, TaskStage.RECEIVED, TaskStatus.RUNNING, "收到", metadata_patch={"keep": "yes"})
+
+            updated = store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "整理",
+                metadata_patch={"new": "value", "keep": None},
+            )
+
+            self.assertEqual(updated.metadata["keep"], "yes")
+            self.assertEqual(updated.metadata["new"], "value")
+
+    def test_cross_instance_metadata_patches_preserve_existing_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "tasks.db"
+            first_store = TaskStore(db_path)
+            second_store = TaskStore(db_path)
+            task = first_store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+
+            first_store.record_event(task.id, TaskStage.RECEIVED, TaskStatus.RUNNING, "收到", metadata_patch={"first": "1"})
+            updated = second_store.record_event(task.id, TaskStage.ORGANIZING, TaskStatus.RUNNING, "整理", metadata_patch={"second": "2"})
+
+            self.assertEqual(updated.metadata["first"], "1")
+            self.assertEqual(updated.metadata["second"], "2")
+
+    def test_legacy_schema_migrates_runtime_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "tasks.db"
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE tasks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        share_code TEXT NOT NULL,
+                        receive_code TEXT NOT NULL DEFAULT '',
+                        url TEXT NOT NULL,
+                        title TEXT NOT NULL DEFAULT '',
+                        tmdb_id TEXT NOT NULL DEFAULT '',
+                        category TEXT NOT NULL DEFAULT '',
+                        current_stage TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        error_type TEXT NOT NULL DEFAULT '',
+                        error_summary TEXT NOT NULL DEFAULT '',
+                        retry_count INTEGER NOT NULL DEFAULT 0,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        UNIQUE(share_code, receive_code)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE task_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        task_id INTEGER NOT NULL,
+                        stage TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        message TEXT NOT NULL DEFAULT '',
+                        error_type TEXT NOT NULL DEFAULT '',
+                        error_detail TEXT NOT NULL DEFAULT '',
+                        created_at REAL NOT NULL,
+                        FOREIGN KEY(task_id) REFERENCES tasks(id)
+                    )
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO tasks (share_code, receive_code, url, current_stage, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    ("legacy", "", "https://115cdn.com/s/legacy", TaskStage.RECEIVED.value, TaskStatus.PENDING.value, 1.0, 1.0),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            store = TaskStore(db_path)
+            conn = sqlite3.connect(db_path)
+            try:
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+            finally:
+                conn.close()
+            legacy_claim = store.claim_next_runnable("worker-1", now=10.0)
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc", chat_id="464100862")
+            updated = store.record_event(task.id, TaskStage.RECEIVED, TaskStatus.RUNNING, "收到", submission_id=7)
+
+            self.assertTrue({"chat_id", "submission_id", "next_run_at", "claimed_by", "claimed_at", "metadata_json"} <= columns)
+            self.assertIsNone(legacy_claim)
+            self.assertEqual(updated.chat_id, "464100862")
+            self.assertEqual(updated.submission_id, 7)

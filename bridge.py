@@ -15,13 +15,18 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import html as html_lib
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 from contextlib import contextmanager
 from typing import Any
 
 from app.models import TaskStage, TaskStatus
+from app.quality import format_task_quality_report, scan_task_quality
 from app.task_bridge import ensure_task_for_link, record_failure, record_submission_event, sync_task_from_submission
+from app.task_engine import decide_retry, stage_display_name
+from app.task_health import format_taskstore_health
+from app.task_runner import StageResult, TaskRunner
 from app.task_store import TaskStore
 from app.web import start_web_server
 
@@ -119,20 +124,25 @@ class Config:
     openai_model: str = "gpt-4.1-mini"
     openai_high_confidence: float = 0.75
     openai_suggest_confidence: float = 0.45
+    tmdb_api_key: str = ""
+    tmdb_bearer_token: str = ""
     workflow_mode: str = "direct"
     p115_cookie_path: str = "/config/115-cookies.txt"
+    p115_min_request_interval_seconds: float = 2.0
     self_share_receive_cid: str = ""
     self_share_strm_root: str = "/mnt/user/Unraid/strm/share"
     self_share_cms_local_path: str = "/media/share"
     self_share_cms_cid: str = "0"
     self_share_cleanup_after_emby: bool = False
     self_share_source_cleanup_parent_ids: str = ""
-    self_share_auto_organize_retry_seconds: int = 90
+    self_share_auto_organize_retry_seconds: int = 15
     status_repair_enabled: bool = True
     status_repair_interval_seconds: int = 300
     status_repair_limit: int = 50
     cms_parent_cid_category_map: str = ""
+    self_share_organized_scan_parent_ids: str = ""
     task_db_path: str = "/data/tasks.db"
+    task_engine_enabled: bool = False
     web_enabled: bool = False
     web_host: str = "0.0.0.0"
     web_port: int = 8787
@@ -176,20 +186,25 @@ class Config:
             openai_model=os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"),
             openai_high_confidence=env_float("OPENAI_HIGH_CONFIDENCE", 0.75),
             openai_suggest_confidence=env_float("OPENAI_SUGGEST_CONFIDENCE", 0.45),
+            tmdb_api_key=os.environ.get("TMDB_API_KEY", ""),
+            tmdb_bearer_token=os.environ.get("TMDB_BEARER_TOKEN", ""),
             workflow_mode=os.environ.get("WORKFLOW_MODE", "direct").strip().lower() or "direct",
             p115_cookie_path=os.environ.get("P115_COOKIE_PATH", "/config/115-cookies.txt"),
+            p115_min_request_interval_seconds=env_float("P115_MIN_REQUEST_INTERVAL_SECONDS", 2.0),
             self_share_receive_cid=os.environ.get("SELF_SHARE_RECEIVE_CID", ""),
             self_share_strm_root=os.environ.get("SELF_SHARE_STRM_ROOT", "/mnt/user/Unraid/strm/share"),
             self_share_cms_local_path=os.environ.get("SELF_SHARE_CMS_LOCAL_PATH", "/media/share"),
             self_share_cms_cid=os.environ.get("SELF_SHARE_CMS_CID", "0"),
             self_share_cleanup_after_emby=parse_bool_env(os.environ.get("SELF_SHARE_CLEANUP_AFTER_EMBY"), False),
             self_share_source_cleanup_parent_ids=os.environ.get("SELF_SHARE_SOURCE_CLEANUP_PARENT_IDS", ""),
-            self_share_auto_organize_retry_seconds=int(os.environ.get("SELF_SHARE_AUTO_ORGANIZE_RETRY_SECONDS", "90")),
+            self_share_auto_organize_retry_seconds=int(os.environ.get("SELF_SHARE_AUTO_ORGANIZE_RETRY_SECONDS", "15")),
             status_repair_enabled=parse_bool_env(os.environ.get("STATUS_REPAIR_ENABLED"), True),
             status_repair_interval_seconds=int(os.environ.get("STATUS_REPAIR_INTERVAL_SECONDS", "300")),
             status_repair_limit=int(os.environ.get("STATUS_REPAIR_LIMIT", "50")),
             cms_parent_cid_category_map=os.environ.get("CMS_PARENT_CID_CATEGORY_MAP", ""),
+            self_share_organized_scan_parent_ids=os.environ.get("SELF_SHARE_ORGANIZED_SCAN_PARENT_IDS", ""),
             task_db_path=os.environ.get("TASK_DB_PATH", "/data/tasks.db"),
+            task_engine_enabled=parse_bool_env(os.environ.get("TASK_ENGINE_ENABLED"), False),
             web_enabled=parse_bool_env(os.environ.get("WEB_ENABLED"), False),
             web_host=os.environ.get("WEB_HOST", "0.0.0.0"),
             web_port=int(os.environ.get("WEB_PORT", "8787")),
@@ -203,12 +218,28 @@ def create_task_store(config: Config) -> TaskStore:
     return TaskStore(config.task_db_path)
 
 
-def maybe_start_web_server(config: Config, task_store: TaskStore, starter=start_web_server):
+def maybe_start_web_server(config: Config, task_store: TaskStore, submission_store: Any | None = None, starter=start_web_server):
     if not config.web_enabled:
         return None
-    server = starter(task_store, config.web_host, config.web_port, web_token=config.web_token)
+    kwargs = {"web_token": config.web_token}
+    if submission_store is not None:
+        kwargs["submission_store"] = submission_store
+    server = starter(task_store, config.web_host, config.web_port, **kwargs)
     LOG.info("v0.2 web admin started host=%s port=%s", config.web_host, config.web_port)
     return server
+
+
+def call_maybe_start_web_server(config: Config, task_store: TaskStore, submission_store: Any | None = None):
+    try:
+        parameters = inspect.signature(maybe_start_web_server).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    supports_submission_store = "submission_store" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    if supports_submission_store:
+        return maybe_start_web_server(config, task_store, submission_store=submission_store)
+    return maybe_start_web_server(config, task_store)
 
 
 def best_effort_task_sync(action: str, func, *args, **kwargs):
@@ -264,6 +295,35 @@ class SubmissionStore:
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_submissions_updated_at ON submissions(updated_at)")
             self._ensure_columns(conn)
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_submissions_self_share_move
+                ON submissions(workflow_mode, lower(COALESCE(move_status, '')), updated_at)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_submissions_self_share_cleanup
+                ON submissions(
+                    workflow_mode,
+                    lower(COALESCE(move_status, '')),
+                    lower(COALESCE(emby_status, '')),
+                    lower(COALESCE(cleanup_status, '')),
+                    updated_at
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS parent_category_memory (
+                    parent_id TEXT PRIMARY KEY,
+                    category TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
 
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(submissions)")}
@@ -378,6 +438,36 @@ class SubmissionStore:
             )
             row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
         return self._row_to_dict(row)
+
+    def remember_parent_category(self, parent_id: str, category: str, source: str = "manual") -> None:
+        parent_id = str(parent_id or "").strip()
+        category = str(category or "").strip()
+        if not parent_id or not category:
+            return
+        now = time.time()
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO parent_category_memory (parent_id, category, source, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(parent_id) DO UPDATE SET
+                    category = excluded.category,
+                    source = excluded.source,
+                    updated_at = excluded.updated_at
+                """,
+                (parent_id, category, str(source or "").strip(), now, now),
+            )
+
+    def category_for_parent_id(self, parent_id: str) -> str:
+        parent_id = str(parent_id or "").strip()
+        if not parent_id:
+            return ""
+        with self._lock, self._connection() as conn:
+            row = conn.execute(
+                "SELECT category FROM parent_category_memory WHERE parent_id = ?",
+                (parent_id,),
+            ).fetchone()
+        return str(row["category"] or "").strip() if row else ""
 
     def update_recognition(self, row_id: int, recognition: dict[str, Any], category_status: str) -> dict[str, Any] | None:
         with self._lock, self._connection() as conn:
@@ -670,15 +760,22 @@ class SelfShareConfig:
     source_cleanup_parent_ids: set[str] | None = None
     auto_organize_retry_seconds: int = 90
     parent_cid_category_map: dict[str, str] | None = None
+    organized_scan_parent_ids: set[str] | None = None
 
     @classmethod
     def from_config(cls, config: Config, cms: "CmsClient | None" = None) -> "SelfShareConfig":
         excluded = set()
+        organized_scan_parent_ids = set(split_env_list(config.self_share_organized_scan_parent_ids))
         if cms:
             try:
                 excluded.update(cms.auto_organize_excluded_parent_ids())
             except Exception:
                 LOG.debug("Failed to load CMS auto organize excluded folders", exc_info=True)
+            if not organized_scan_parent_ids:
+                try:
+                    organized_scan_parent_ids.update(cms.auto_organize_existing_parent_ids())
+                except Exception:
+                    LOG.debug("Failed to load CMS organized scan folders", exc_info=True)
         return cls(
             enabled=config.workflow_mode == "self_share_sync",
             strm_root=Path(config.self_share_strm_root).expanduser(),
@@ -689,6 +786,7 @@ class SelfShareConfig:
             source_cleanup_parent_ids=set(split_env_list(config.self_share_source_cleanup_parent_ids)),
             auto_organize_retry_seconds=max(0, int(config.self_share_auto_organize_retry_seconds)),
             parent_cid_category_map=parse_parent_cid_category_map(config.cms_parent_cid_category_map),
+            organized_scan_parent_ids=organized_scan_parent_ids,
         )
 
 
@@ -821,12 +919,30 @@ def media_type_for_category(category: str) -> str:
     return ""
 
 
+def is_115_receive_restricted_error(exc: Exception) -> bool:
+    text = str(exc or "")
+    return any(token in text for token in ("限制接收", "被限制接收", "操作过于频繁", "风控"))
+
+
+def extract_primary_chinese_title(value: str) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"^[A-Za-z]-", "", text)
+    match = re.match(r"([\u4e00-\u9fff][\u4e00-\u9fff·・：:]+)", text)
+    if not match:
+        return ""
+    title = match.group(1).strip("·・：:")
+    return title if len(normalize_text(title)) >= 2 else ""
+
+
 def candidate_tokens(recognition: dict[str, Any], share_name: str = "") -> list[str]:
     tokens = []
     for value in (recognition.get("tmdb_id"), recognition.get("title"), recognition.get("share_name"), share_name):
         value = str(value or "").strip()
         if value:
             tokens.append(value)
+        primary_title = extract_primary_chinese_title(value)
+        if primary_title:
+            tokens.append(primary_title)
     normalized = []
     seen = set()
     for token in tokens:
@@ -914,6 +1030,35 @@ def find_recent_library_strm_source_dir(config: MoveConfig, row: dict[str, Any],
     return safe_resolve(path), category
 
 
+def category_from_existing_library_match(
+    config: MoveConfig,
+    row: dict[str, Any],
+    recognition: dict[str, Any],
+    share_name: str = "",
+) -> str:
+    found = find_recent_library_strm_source_dir(config, row, recognition, share_name=share_name)
+    if not found:
+        return ""
+    source_dir, category = found
+    expected_tmdb = expected_task_tmdb_id(recognition, row)
+    source_tmdb = extract_tmdb_id_from_name(str(source_dir))
+    if expected_tmdb and source_tmdb and expected_tmdb != source_tmdb:
+        return ""
+    return category
+
+
+def has_authoritative_category(row: dict[str, Any], recognition: dict[str, Any]) -> bool:
+    if str(row.get("category_status") or "").strip() == "selected" and str(row.get("category_choice") or "").strip():
+        return True
+    status = str(recognition.get("category_status") or "").strip()
+    if status != "self_share_resolved":
+        return False
+    return bool(
+        str(recognition.get("category") or "").strip()
+        and (str(recognition.get("organized_parent_id") or "").strip() or str(recognition.get("parent_id") or "").strip())
+    )
+
+
 def plan_strm_move(source_path: Path | None, category: str, config: MoveConfig) -> MovePlan:
     if not source_path:
         return MovePlan(status="skipped", reason="未找到 STRM 源目录", category=category)
@@ -998,6 +1143,51 @@ def validate_self_share_strm_source(source: Path, row: dict[str, Any]) -> str:
     return ""
 
 
+def remove_direct_strm_files(path: Path) -> int:
+    if not path.exists() or not path.is_dir():
+        return 0
+    removed = 0
+    for strm_path in sorted(path.rglob("*.strm")):
+        try:
+            text = strm_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "/d/" not in text:
+            continue
+        try:
+            strm_path.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
+def category_from_existing_library_folder(config: MoveConfig, folder: dict[str, Any]) -> str:
+    folder_name = str(folder.get("file_name") or "").strip()
+    if not folder_name:
+        return ""
+    matches: list[tuple[int, float, str]] = []
+    for category, root in config.library_roots.items():
+        path = safe_resolve(root / folder_name)
+        if not path.exists() or not path.is_dir():
+            continue
+        matches.append((1 if has_strm_file(path) else 0, newest_mtime(path), category))
+    if not matches:
+        return ""
+    matches.sort(reverse=True)
+    return matches[0][2]
+
+
+def cleanup_direct_strm_for_organized_folder(config: MoveConfig, folder: dict[str, Any]) -> int:
+    folder_name = str(folder.get("file_name") or "").strip()
+    if not folder_name:
+        return 0
+    removed = 0
+    for root in config.library_roots.values():
+        removed += remove_direct_strm_files(safe_resolve(root / folder_name))
+    return removed
+
+
 def merge_self_share_strm_folder(plan: MovePlan, store: SubmissionStore, row: dict[str, Any]) -> dict[str, Any]:
     if plan.status in {"pending", "conflict"} and plan.source_path and plan.dest_path:
         source = safe_resolve(plan.source_path)
@@ -1020,6 +1210,7 @@ def merge_self_share_strm_folder(plan: MovePlan, store: SubmissionStore, row: di
     if not dest.exists() or not dest.is_dir():
         return execute_strm_move(MovePlan("pending", "ready", source, dest, plan.category), store, row)
     try:
+        remove_direct_strm_files(dest)
         for child in source.rglob("*"):
             if not child.is_file():
                 continue
@@ -1063,15 +1254,26 @@ class SelfShareWorkflow:
         if not row.get("own_share_file_id"):
             self.cms.run_auto_organize()
             row = self.store.update_self_share(row_id, workflow_phase="auto_organize_submitted") or row
-            folder = self.p115.find_organized_folder(
-                recognition,
-                share_name,
-                excluded_parent_ids=self.config.excluded_parent_ids or set(),
-                min_update_time=float(row.get("created_at") or 0),
-            )
+            find_kwargs = {
+                "excluded_parent_ids": self.config.excluded_parent_ids or set(),
+                "min_update_time": float(row.get("created_at") or 0),
+            }
+            if self.config.organized_scan_parent_ids:
+                find_kwargs.update(
+                    {
+                        "scan_parent_ids": self.config.organized_scan_parent_ids,
+                        "category_names": set(self.config.parent_cid_category_map.values())
+                        if self.config.parent_cid_category_map
+                        else set(default_library_roots()),
+                    }
+                )
+            folder = self.p115.find_organized_folder(recognition, share_name, **find_kwargs)
             if not folder:
                 return row, None
-            category = category_for_115_parent_id(str(folder.get("parent_id") or ""), self.config.parent_cid_category_map)
+            category = str(folder.get("category") or "").strip() or category_for_115_parent_id(
+                str(folder.get("parent_id") or ""),
+                self.config.parent_cid_category_map,
+            )
             if category and not row.get("category_choice") and hasattr(self.store, "update_category"):
                 row = self.store.update_category(row_id, category, "selected") or row
             enriched = enrich_recognition_from_self_share_folder(recognition, folder, category, share_name)
@@ -1111,6 +1313,785 @@ class SelfShareWorkflow:
             )
             row = self.store.update_self_share(row_id, workflow_phase="share_sync_submitted", share_sync_status="submitted") or row
         return row, find_self_share_strm_source_dir(self.config, row, recognition, share_name)
+
+
+class BridgeSelfShareTaskWorkflow:
+    def __init__(
+        self,
+        cms,
+        telegram,
+        chat_id,
+        store,
+        task_store,
+        p115,
+        self_share_config,
+        move_config,
+        emby,
+        openai_classifier,
+        tmdb_resolver,
+        cleanup_client=None,
+        receive_cid="",
+        organized_parent_id="",
+        pending_title_prefix="",
+        fallback_category="",
+        task_db_path=None,
+    ):
+        self.cms = cms
+        self.telegram = telegram
+        self.chat_id = chat_id
+        self.store = store
+        self.task_store = task_store
+        self.p115 = p115
+        self.self_share_config = self_share_config
+        self.move_config = move_config
+        self.emby = emby
+        self.openai_classifier = openai_classifier
+        self.tmdb_resolver = tmdb_resolver
+        self.cleanup_client = cleanup_client
+        self.receive_cid = str(receive_cid or "").strip()
+        self.organized_parent_id = str(organized_parent_id or "").strip()
+        self.pending_title_prefix = str(pending_title_prefix or "").strip()
+        self.fallback_category = str(fallback_category or "").strip()
+        self.task_db_path = task_db_path
+
+    def run_stage(self, task):
+        if task.current_stage == TaskStage.RECEIVED:
+            return self._stage_received(task)
+        if task.current_stage == TaskStage.ORGANIZING:
+            return self._stage_organizing(task)
+        if task.current_stage == TaskStage.RECOGNIZING:
+            return self._stage_recognizing(task)
+        if task.current_stage == TaskStage.OWN_SHARE_CREATED:
+            return self._stage_own_share_created(task)
+        if task.current_stage == TaskStage.SHARE_SYNC_SUBMITTED:
+            return self._stage_share_sync_submitted(task)
+        if task.current_stage == TaskStage.STRM_READY:
+            return self._stage_strm_ready(task)
+        if task.current_stage == TaskStage.MOVED:
+            return self._stage_moved(task)
+        if task.current_stage == TaskStage.EMBY_CONFIRMED:
+            return self._stage_emby_confirmed(task)
+        if task.current_stage == TaskStage.CLEANED:
+            return self._stage_cleaned(task)
+        return StageResult.failed("阶段尚未实现", error_type="unsupported_stage")
+
+    def _submission_row(self, task) -> dict[str, Any] | None:
+        submission_id = task.metadata.get("submission_id") or task.submission_id
+        if submission_id not in (None, ""):
+            return self.store.find_by_id(int(submission_id))
+        return self.store.find_by_key(ShareKey(task.share_code, task.receive_code))
+
+    def _stage_received(self, task):
+        if not self.self_share_config.enabled:
+            return StageResult.failed("自分享工作流未启用", error_type="self_share_disabled")
+        if not self.receive_cid:
+            return StageResult.failed("缺少 115 接收目录 ID", error_type="missing_receive_cid")
+
+        existing = self.store.find_by_key(ShareKey(task.share_code, task.receive_code))
+        if self._has_received_self_share_state(existing):
+            return StageResult.complete("已接收 115 分享到待整理", self._received_metadata(existing))
+
+        try:
+            received = self.p115.receive_share_to_cid(task.share_code, task.receive_code, self.receive_cid)
+        except RuntimeError as exc:
+            if is_115_receive_restricted_error(exc):
+                return StageResult.needs_action(
+                    "115 接收被限制，已停止自动重试；请稍后恢复后手动重试或先手动转存。",
+                    {"share_code": task.share_code},
+                )
+            raise
+        title = str(received.get("title") or task.title or task.share_code).strip()
+        row = self.store.upsert_submission(
+            ShareKey(task.share_code, task.receive_code),
+            task.url,
+            "received",
+            title=title,
+        )
+        row = self.store.update_self_share(
+            int(row["id"]),
+            workflow_mode="self_share_sync",
+            workflow_phase="received_to_pending",
+        ) or row
+        return StageResult.complete(
+            "已接收 115 分享到待整理",
+            {
+                "submission_id": int(row["id"]),
+                "received_title": title,
+                "received_file_ids": received.get("file_ids") or [],
+            },
+        )
+
+    def _stage_organizing(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        workflow_phase = str(row.get("workflow_phase") or "")
+        folder = None
+        if row.get("own_share_file_id") and row.get("own_share_file_name"):
+            folder = {
+                "file_id": row.get("own_share_file_id"),
+                "file_name": row.get("own_share_file_name"),
+                "parent_id": self._organized_parent_id(task, self._recognition_from_row(row)),
+            }
+        elif workflow_phase not in {"auto_organize_submitted", "organized_found", "own_share_created", "share_sync_submitted"}:
+            self.cms.run_auto_organize()
+            row = self.store.update_self_share(int(row["id"]), workflow_phase="auto_organize_submitted") or row
+        recognition = self._recognition_from_row(row)
+        title = str(row.get("title") or task.title or task.share_code)
+        if folder is None:
+            find_kwargs = {
+                "excluded_parent_ids": self.self_share_config.excluded_parent_ids or set(),
+                "min_update_time": float(row.get("created_at") or 0),
+            }
+            if self.self_share_config.organized_scan_parent_ids:
+                find_kwargs.update(
+                    {
+                        "scan_parent_ids": self.self_share_config.organized_scan_parent_ids,
+                        "category_names": set(self.self_share_config.parent_cid_category_map.values())
+                        if self.self_share_config.parent_cid_category_map
+                        else set(default_library_roots()),
+                    }
+                )
+            folder = self.p115.find_organized_folder(recognition, title, **find_kwargs)
+        if not folder:
+            return StageResult.defer(
+                "等待 CMS 整理完成",
+                self.self_share_config.auto_organize_retry_seconds or 30,
+                {"submission_id": int(row["id"])},
+            )
+        existing_library_category = category_from_existing_library_folder(self.move_config, folder)
+        if existing_library_category and not str(folder.get("category") or "").strip():
+            folder = dict(folder)
+            folder["category"] = existing_library_category
+        direct_strm_removed = cleanup_direct_strm_for_organized_folder(self.move_config, folder)
+        row = self.store.update_self_share(
+            int(row["id"]),
+            workflow_phase="organized_found",
+            own_share_file_id=folder.get("file_id"),
+            own_share_file_name=folder.get("file_name"),
+        ) or row
+        recognition.update(
+            {
+                "organized_parent_id": str(folder.get("parent_id") or ""),
+                "parent_id": str(folder.get("parent_id") or ""),
+                "category": str(folder.get("category") or recognition.get("category") or ""),
+            }
+        )
+        if hasattr(self.store, "update_recognition"):
+            row = self.store.update_recognition(int(row["id"]), recognition, "organized_found") or row
+        return StageResult.complete(
+            "已找到 CMS 整理后的 115 文件夹",
+            {"submission_id": int(row["id"]), "organized_folder": folder, "direct_strm_removed": direct_strm_removed},
+        )
+
+    def _stage_recognizing(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        recognition = self._recognition_from_row(row)
+        folder = task.metadata.get("organized_folder")
+        if not isinstance(folder, dict):
+            parent_id = self._organized_parent_id(task, recognition)
+            folder = {
+                "file_id": row.get("own_share_file_id"),
+                "file_name": row.get("own_share_file_name"),
+                "parent_id": parent_id,
+            }
+        file_id = str(folder.get("file_id") or "").strip()
+        folder_name = str(folder.get("file_name") or row.get("own_share_file_name") or task.title or "").strip()
+        share_name = str(row.get("title") or task.title or folder_name or task.share_code).strip()
+        parent_id = self._organized_parent_id(task, recognition, folder)
+        category = str(folder.get("category") or "").strip() or category_for_115_parent_id(
+            parent_id,
+            self.self_share_config.parent_cid_category_map,
+        )
+        if not category and hasattr(self.store, "category_for_parent_id"):
+            category = self.store.category_for_parent_id(parent_id)
+        manual_category = ""
+        if str(row.get("category_status") or "").strip() == "selected":
+            manual_category = str(row.get("category_choice") or "").strip()
+        if manual_category:
+            category = manual_category
+        tmdb_id = str(
+            extract_tmdb_id_from_name(folder_name)
+            or extract_tmdb_id_from_name(share_name)
+            or recognition.get("tmdb_id")
+            or ""
+        ).strip()
+        recognition.update(
+            {
+                "title": recognition.get("title") or folder_name or share_name,
+                "share_name": recognition.get("share_name") or share_name,
+                "tmdb_id": tmdb_id,
+                "category": category,
+                "organized_parent_id": parent_id,
+                "parent_id": parent_id,
+            }
+        )
+        category = str(category or "").strip()
+        if category:
+            recognition = enrich_recognition_from_self_share_folder(recognition, folder, category, share_name)
+            recognition["organized_parent_id"] = parent_id
+            recognition["parent_id"] = parent_id
+            tmdb_id = str(recognition.get("tmdb_id") or tmdb_id).strip()
+        else:
+            cms_category = category_from_existing_library_folder(self.move_config, {"file_name": folder_name})
+            if cms_category:
+                category = cms_category
+                recognition = enrich_recognition_from_self_share_folder(recognition, folder, category, share_name)
+                recognition["organized_parent_id"] = parent_id
+                recognition["parent_id"] = parent_id
+                tmdb_id = str(recognition.get("tmdb_id") or tmdb_id).strip()
+                if hasattr(self.store, "update_category"):
+                    row = self.store.update_category(int(row["id"]), category, "selected") or row
+                if hasattr(self.store, "update_recognition"):
+                    row = self.store.update_recognition(int(row["id"]), recognition, "self_share_resolved") or row
+                return StageResult.complete(
+                    "已通过 CMS 直链 STRM 媒体库识别分类",
+                    {
+                        "submission_id": int(row["id"]),
+                        "recognition": recognition,
+                        "category": category,
+                        "tmdb_id": tmdb_id,
+                        "own_share_file_id": file_id,
+                    },
+                )
+            previous_count = 0
+            if task.metadata.get("_defer_stage") == TaskStage.RECOGNIZING.value and task.metadata.get("_defer_message") == "等待 CMS 直链 STRM 分类":
+                try:
+                    previous_count = int(task.metadata.get("_defer_count") or 0)
+                except (TypeError, ValueError):
+                    previous_count = 0
+            if self.move_config.library_roots and previous_count < 4:
+                recognition["category"] = ""
+                recognition["category_status"] = "waiting_cms_direct_strm"
+                if hasattr(self.store, "update_recognition"):
+                    row = self.store.update_recognition(int(row["id"]), recognition, "waiting_cms_direct_strm") or row
+                return StageResult.defer(
+                    "等待 CMS 直链 STRM 分类",
+                    5,
+                    {"submission_id": int(row["id"]), "recognition": recognition, "own_share_file_id": file_id},
+                )
+            recognition["category"] = ""
+            recognition["category_status"] = "needs_action"
+            recognition.pop("category_suggestion", None)
+            recognition.pop("openai_confidence", None)
+            recognition.pop("openai_reason", None)
+            return self._needs_action_recognition_result(row, recognition)
+        if category and hasattr(self.store, "update_category"):
+            row = self.store.update_category(int(row["id"]), category, "selected") or row
+        if hasattr(self.store, "update_recognition"):
+            row = self.store.update_recognition(int(row["id"]), recognition, "self_share_resolved") or row
+        return StageResult.complete(
+            "已识别整理后的 115 文件夹",
+            {
+                "submission_id": int(row["id"]),
+                "recognition": recognition,
+                "category": category,
+                "tmdb_id": tmdb_id,
+                "own_share_file_id": file_id,
+            },
+        )
+
+    def _stage_own_share_created(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        file_id = str(task.metadata.get("own_share_file_id") or row.get("own_share_file_id") or "").strip()
+        if not file_id:
+            return StageResult.failed("缺少自有分享文件夹 ID", error_type="own_share_file_missing")
+        created = False
+        if not row.get("own_share_code"):
+            share = self.p115.create_long_share(file_id)
+            row = self.store.update_self_share(
+                int(row["id"]),
+                workflow_phase="own_share_created",
+                own_share_code=share.get("share_code"),
+                own_share_receive_code=share.get("receive_code"),
+                own_share_url=share.get("share_url"),
+            ) or row
+            created = True
+        if self.cleanup_client:
+            row, cleanup_line = cleanup_own_share_source(self.store, row, self.cleanup_client)
+            if str(row.get("cleanup_status") or "").lower() == "error":
+                return StageResult.failed(
+                    str(row.get("cleanup_error") or cleanup_line or "115 转存源删除失败"),
+                    error_type="cleanup_failed",
+                    metadata=self._own_share_metadata(row),
+                )
+        message = "已创建自有 115 分享" if created else "已存在自有 115 分享"
+        return StageResult.complete(message, self._own_share_metadata(row))
+
+    def _stage_share_sync_submitted(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        own_code = str(task.metadata.get("own_share_code") or row.get("own_share_code") or "").strip()
+        own_pwd = str(task.metadata.get("own_share_receive_code") or row.get("own_share_receive_code") or "").strip()
+        if not own_code:
+            return StageResult.failed("缺少自有分享码", error_type="own_share_missing")
+        if row.get("share_sync_status") != "submitted":
+            self.cms.add_share115_sync_task(
+                own_code,
+                own_pwd,
+                cid=self.self_share_config.cms_cid,
+                local_path=self.self_share_config.cms_local_path,
+            )
+            row = self.store.update_self_share(
+                int(row["id"]),
+                workflow_phase="share_sync_submitted",
+                share_sync_status="submitted",
+            ) or row
+        return StageResult.complete(
+            "已提交 CMS 分享同步",
+            {"submission_id": int(row["id"]), "share_sync_status": row.get("share_sync_status") or "submitted"},
+        )
+
+    def _stage_strm_ready(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        recognition = self._recognition_from_row(row)
+        share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
+        source = find_self_share_strm_source_dir(self.self_share_config, row, recognition, share_name)
+        metadata = {
+            "submission_id": int(row["id"]),
+            "category": final_category_for_move(row, recognition),
+            "recognition": recognition,
+        }
+        if not source:
+            folder_name = str(row.get("own_share_file_name") or "").strip()
+            if folder_name:
+                cms_category = category_from_existing_library_folder(
+                    self.move_config,
+                    {"file_name": folder_name},
+                )
+                if cms_category:
+                    recognition["category"] = cms_category
+                    recognition["category_status"] = "self_share_resolved"
+                    if hasattr(self.store, "update_category"):
+                        row = self.store.update_category(int(row["id"]), cms_category, "selected") or row
+                    if hasattr(self.store, "update_recognition"):
+                        row = self.store.update_recognition(int(row["id"]), recognition, "self_share_resolved") or row
+                    metadata["category"] = cms_category
+                    metadata["recognition"] = recognition
+                removed = cleanup_direct_strm_for_organized_folder(
+                    self.move_config,
+                    {"file_name": folder_name},
+                )
+                metadata["direct_strm_removed"] = removed
+            return StageResult.defer(
+                "等待自有分享 STRM 源目录生成",
+                self.self_share_config.auto_organize_retry_seconds or 30,
+                metadata,
+            )
+        metadata["source_path"] = str(source)
+        issue = validate_self_share_strm_source(source, row)
+        if issue:
+            if hasattr(self.store, "update_move"):
+                self.store.update_move(
+                    int(row["id"]),
+                    "error",
+                    source_path=str(source),
+                    category_final=str(metadata.get("category") or ""),
+                    error=issue,
+                )
+            return StageResult.failed(issue, error_type="invalid_strm_source", metadata=metadata)
+        return StageResult.complete("已找到自有分享 STRM 源目录", metadata)
+
+    def _stage_moved(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        if str(row.get("move_status") or "").lower() == "moved":
+            metadata = self._move_metadata(row, task.metadata)
+            dest_path = str(metadata.get("dest_path") or "").strip()
+            if self._strm_destination_ready(dest_path):
+                metadata.update(self._request_emby_refresh_once(task, dest_path))
+                return StageResult.complete("STRM 已移动到媒体库", metadata)
+            return StageResult.defer(
+                "等待已移动 STRM 目标目录可用",
+                self.self_share_config.auto_organize_retry_seconds or 30,
+                metadata,
+            )
+        recognition = self._recognition_from_row(row)
+        share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
+        source = find_self_share_strm_source_dir(self.self_share_config, row, recognition, share_name)
+        category = final_category_for_move(row, recognition)
+        existing_category = "" if has_authoritative_category(row, recognition) else category_from_existing_library_match(self.move_config, row, recognition, share_name)
+        if existing_category and existing_category != category:
+            category = existing_category
+            row = self.store.update_category(int(row["id"]), category, "selected") or row
+        move_config = move_config_for_workflow_source(self.move_config, source, self.self_share_config)
+        plan = plan_strm_move(source, category, move_config)
+        metadata = {
+            "submission_id": int(row["id"]),
+            "source_path": str(plan.source_path) if plan.source_path else "",
+            "dest_path": str(plan.dest_path) if plan.dest_path else "",
+            "category": category,
+        }
+        if is_move_plan_retryable(plan):
+            return StageResult.defer(
+                plan.reason,
+                self.self_share_config.auto_organize_retry_seconds or 30,
+                metadata,
+            )
+        moved_row = merge_self_share_strm_folder(plan, self.store, row)
+        move_status = str(moved_row.get("move_status") or "").lower()
+        metadata.update(
+            {
+                "source_path": str(moved_row.get("source_path") or metadata["source_path"]),
+                "dest_path": str(moved_row.get("dest_path") or metadata["dest_path"]),
+                "category": str(moved_row.get("category_final") or category),
+            }
+        )
+        if move_status == "moved":
+            send_move_result(self.telegram, self.chat_id, plan, moved_row)
+            metadata.update(self._request_emby_refresh_once(task, str(metadata.get("dest_path") or "")))
+            return StageResult.complete("STRM 已移动到媒体库", metadata)
+        error = str(moved_row.get("move_error") or plan.reason or "STRM 移动失败")
+        return StageResult.failed(error, error_type="strm_move_failed", metadata=metadata)
+
+    def _stage_emby_confirmed(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        if str(row.get("emby_status") or "").lower() == "confirmed":
+            if not self.emby or not getattr(self.emby, "enabled", False):
+                return StageResult.complete("Emby 已确认入库", self._emby_metadata(row))
+            recognition = self._recognition_from_row(row)
+            share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
+            recognition.setdefault("share_name", share_name)
+            match = self._find_emby_match_for_moved_dest(recognition, row, task.metadata)
+            if match:
+                return StageResult.complete("Emby 已确认入库", self._emby_metadata(row))
+            updated = self.store.update_emby(int(row["id"]), "pending") or row
+            return StageResult.defer(
+                "等待 Emby 确认入库",
+                self._emby_confirmation_retry_seconds(task),
+                {"submission_id": int(row["id"]), "recognition": recognition, "emby_status": updated.get("emby_status")},
+            )
+        if not self.emby or not getattr(self.emby, "enabled", False):
+            return StageResult.needs_action("Emby 确认未启用", {"submission_id": int(row["id"])})
+        if str(row.get("move_status") or "").lower() == "moved":
+            metadata = self._move_metadata(row, task.metadata)
+            dest_path = str(metadata.get("dest_path") or "").strip()
+            if dest_path and not self._strm_destination_ready(dest_path):
+                restore_status, restore_metadata = restore_missing_self_share_library_folder(
+                    self.store,
+                    self.cms,
+                    row,
+                    self.self_share_config,
+                    self.move_config,
+                )
+                if restore_status in {"restore_submitted", "waiting_source"}:
+                    return StageResult.defer(
+                        "目标 STRM 被 CMS 同步删除，等待自有分享 STRM 重新生成",
+                        self.self_share_config.auto_organize_retry_seconds or 30,
+                        restore_metadata,
+                    )
+                if restore_status == "restored":
+                    return StageResult.defer(
+                        "目标 STRM 被 CMS 同步删除，已用自有分享 STRM 恢复",
+                        self.self_share_config.auto_organize_retry_seconds or 30,
+                        restore_metadata,
+                    )
+                return StageResult.defer(
+                    "等待已移动 STRM 目标目录恢复",
+                    self.self_share_config.auto_organize_retry_seconds or 30,
+                    metadata,
+                )
+        recognition = self._recognition_from_row(row)
+        share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
+        recognition.setdefault("share_name", share_name)
+        match = self._find_emby_match_for_moved_dest(recognition, row, task.metadata)
+        if not match:
+            return StageResult.defer(
+                "等待 Emby 确认入库",
+                self._emby_confirmation_retry_seconds(task),
+                {"submission_id": int(row["id"]), "recognition": recognition},
+            )
+        send_emby_confirmed(self.telegram, self.chat_id, self.store, row, match, self.emby, cleanup_client=None)
+        updated = self.store.find_by_id(int(row["id"])) or row
+        return StageResult.complete("Emby 已确认入库", self._emby_metadata(updated))
+
+    def _stage_cleaned(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        if str(row.get("move_status") or "").lower() != "moved":
+            return StageResult.needs_action("等待 STRM 移动确认后再清理", {"submission_id": int(row["id"])})
+        if str(row.get("emby_status") or "").lower() != "confirmed":
+            return StageResult.needs_action("等待 Emby 确认后再清理", {"submission_id": int(row["id"])})
+        if str(row.get("move_status") or "").lower() == "moved":
+            metadata = self._move_metadata(row, task.metadata)
+            dest_path = str(metadata.get("dest_path") or "").strip()
+            if dest_path and not self._strm_destination_ready(dest_path):
+                restore_status, restore_metadata = restore_missing_self_share_library_folder(
+                    self.store,
+                    self.cms,
+                    row,
+                    self.self_share_config,
+                    self.move_config,
+                )
+                if restore_status in {"restore_submitted", "waiting_source"}:
+                    return StageResult.defer(
+                        "目标 STRM 被 CMS 同步删除，等待自有分享 STRM 重新生成",
+                        self.self_share_config.auto_organize_retry_seconds or 30,
+                        restore_metadata,
+                    )
+                if restore_status == "restored":
+                    return StageResult.defer(
+                        "目标 STRM 被 CMS 同步删除，已用自有分享 STRM 恢复",
+                        self.self_share_config.auto_organize_retry_seconds or 30,
+                        restore_metadata,
+                    )
+                return StageResult.needs_action(
+                    "任务状态已完成，但目标 STRM 不存在，请检查媒体库目录",
+                    metadata,
+                )
+        if str(row.get("cleanup_status") or "").lower() == "deleted":
+            return StageResult.complete("115 转存源已删除，自有分享保留", self._cleanup_metadata(row))
+        if not self.cleanup_client:
+            updated = row
+            if hasattr(self.store, "update_cleanup"):
+                updated = self.store.update_cleanup(int(row["id"]), "skipped", error="disabled") or row
+            metadata = self._cleanup_metadata(updated)
+            metadata["cleanup_status"] = "skipped"
+            metadata["cleanup_error"] = "disabled"
+            return StageResult.complete("清理已跳过（未启用）", metadata)
+        if not str(row.get("own_share_code") or "").strip():
+            return StageResult.failed("缺少自有分享码，拒绝清理 115 转存源", error_type="own_share_missing")
+        if not str(row.get("own_share_file_id") or "").strip():
+            return StageResult.failed("缺少自有分享文件夹 ID", error_type="own_share_file_missing")
+        updated, line = cleanup_own_share_source(self.store, row, self.cleanup_client)
+        cleanup_status = str(updated.get("cleanup_status") or "").lower()
+        if cleanup_status == "deleted":
+            return StageResult.complete(line or "115 转存源已删除，自有分享保留", self._cleanup_metadata(updated))
+        if cleanup_status == "error":
+            return StageResult.failed(
+                str(updated.get("cleanup_error") or line or "115 转存源删除失败"),
+                error_type="cleanup_failed",
+                metadata=self._cleanup_metadata(updated),
+            )
+        return StageResult.needs_action(line or "等待 115 转存源清理", self._cleanup_metadata(updated))
+
+    def _recognition_from_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        try:
+            recognition = json.loads(row.get("recognition_json") or "{}")
+        except Exception:
+            recognition = {}
+        return recognition if isinstance(recognition, dict) else {}
+
+    def _has_received_self_share_state(self, row: dict[str, Any] | None) -> bool:
+        if not row or row.get("workflow_mode") != "self_share_sync":
+            return False
+        phase = str(row.get("workflow_phase") or "").strip()
+        if phase in {"received", "received_to_pending", "auto_organize_submitted", "organized_found", "own_share_created", "share_sync_submitted"}:
+            return True
+        return any(row.get(key) for key in ("own_share_file_id", "own_share_code", "share_sync_status"))
+
+    def _received_metadata(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "submission_id": int(row["id"]),
+            "received_title": str(row.get("title") or ""),
+            "received_file_ids": [],
+        }
+
+    def _has_persisted_category_suggestion(self, recognition: dict[str, Any]) -> bool:
+        status = str(recognition.get("category_status") or "").strip()
+        if status == "openai_suggested":
+            return True
+        return bool(recognition.get("category_suggestion") and status not in {"selected", "self_share_resolved", "tmdb_resolved", "tmdb_search_resolved", "openai_confident"})
+
+    def _needs_action_recognition_result(self, row: dict[str, Any], recognition: dict[str, Any]):
+        status = str(recognition.get("category_status") or "needs_action").strip()
+        if hasattr(self.store, "update_recognition"):
+            row = self.store.update_recognition(int(row["id"]), recognition, status) or row
+        message = f"CMS 未能确定分类：{format_task_label(row)}\n"
+        suggestion = str(recognition.get("category_suggestion") or "").strip()
+        if suggestion:
+            confidence = as_float(recognition.get("openai_confidence"), 0.0)
+            message += f"OpenAI建议：{suggestion}（置信度 {confidence:.2f}）\n"
+        reason = str(recognition.get("openai_reason") or "").strip()
+        if reason:
+            message += f"理由：{reason[:80]}\n"
+        message += "请选择分类："
+        self.telegram.send_message(
+            self.chat_id,
+            message,
+            reply_markup=category_keyboard(int(row["id"])),
+        )
+        return StageResult.needs_action(
+            "等待人工确认分类",
+            {"submission_id": int(row["id"]), "recognition": recognition},
+        )
+
+    def _organized_parent_id(
+        self,
+        task,
+        recognition: dict[str, Any],
+        folder: dict[str, Any] | None = None,
+    ) -> str:
+        if folder:
+            value = folder.get("parent_id") or folder.get("pid")
+            if value:
+                return str(value).strip()
+        return str(
+            task.metadata.get("organized_parent_id")
+            or task.metadata.get("parent_id")
+            or recognition.get("organized_parent_id")
+            or recognition.get("parent_id")
+            or self.organized_parent_id
+            or ""
+        ).strip()
+
+    def _own_share_metadata(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "submission_id": int(row["id"]),
+            "own_share_file_id": row.get("own_share_file_id"),
+            "own_share_file_name": row.get("own_share_file_name"),
+            "own_share_code": row.get("own_share_code"),
+            "own_share_receive_code": row.get("own_share_receive_code"),
+            "own_share_url": row.get("own_share_url"),
+            "cleanup_status": row.get("cleanup_status"),
+            "cleanup_file_id": row.get("cleanup_file_id"),
+            "cleanup_error": row.get("cleanup_error"),
+        }
+
+    def _move_metadata(self, row: dict[str, Any], task_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        task_metadata = task_metadata or {}
+        source_path = str(row.get("source_path") or task_metadata.get("source_path") or "")
+        dest_path = str(row.get("dest_path") or task_metadata.get("dest_path") or "")
+        metadata = {
+            "submission_id": int(row["id"]),
+            "source_path": str(safe_resolve(Path(source_path))) if source_path else "",
+            "dest_path": str(safe_resolve(Path(dest_path))) if dest_path else "",
+            "category": str(row.get("category_final") or task_metadata.get("category") or ""),
+        }
+        if task_metadata.get("emby_refresh_requested") is not None:
+            metadata["emby_refresh_requested"] = bool(task_metadata.get("emby_refresh_requested"))
+        if task_metadata.get("emby_refresh_library"):
+            metadata["emby_refresh_library"] = str(task_metadata.get("emby_refresh_library") or "")
+        if task_metadata.get("emby_refresh_error"):
+            metadata["emby_refresh_error"] = str(task_metadata.get("emby_refresh_error") or "")
+        return metadata
+
+    def _strm_destination_ready(self, dest_path: str) -> bool:
+        if not dest_path:
+            return False
+        dest = safe_resolve(Path(dest_path))
+        if not dest.exists():
+            return False
+        if dest.is_file():
+            return dest.suffix.lower() == ".strm"
+        if not dest.is_dir():
+            return False
+        return has_strm_file(dest)
+
+    def _request_emby_refresh_once(self, task, dest_path: str) -> dict[str, Any]:
+        if not dest_path or task.metadata.get("emby_refresh_requested"):
+            return {}
+        if not self.emby or not getattr(self.emby, "enabled", False):
+            return {}
+        if not hasattr(self.emby, "refresh_library_for_path"):
+            return {}
+        try:
+            library_name = self.emby.refresh_library_for_path(dest_path)
+        except Exception as exc:
+            LOG.warning("Failed to request Emby library refresh for %s: %s", dest_path, exc)
+            return {"emby_refresh_error": str(exc)[:200]}
+        metadata = {"emby_refresh_requested": True}
+        if library_name:
+            metadata["emby_refresh_library"] = str(library_name)
+        return metadata
+
+    def _emby_confirmation_retry_seconds(self, task) -> int:
+        message = "等待 Emby 确认入库"
+        previous_count = 0
+        if task.metadata.get("_defer_stage") == TaskStage.EMBY_CONFIRMED.value and task.metadata.get("_defer_message") == message:
+            try:
+                previous_count = int(task.metadata.get("_defer_count") or 0)
+            except (TypeError, ValueError):
+                previous_count = 0
+        if previous_count < 4:
+            return 5
+        return self.self_share_config.auto_organize_retry_seconds or 30
+
+    def _emby_match_in_moved_dest(
+        self,
+        match: dict[str, Any],
+        row: dict[str, Any],
+        task_metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        expected = str(row.get("dest_path") or (task_metadata or {}).get("dest_path") or "").strip()
+        if not expected:
+            return True
+        actual = str(match.get("Path") or "").strip()
+        if not actual:
+            return False
+        expected_path = safe_resolve(Path(expected))
+        actual_path = safe_resolve(Path(actual))
+        return actual_path == expected_path or is_relative_to(actual_path, expected_path)
+
+    def _find_emby_match_for_moved_dest(
+        self,
+        recognition: dict[str, Any],
+        row: dict[str, Any],
+        task_metadata: dict[str, Any] | None = None,
+    ) -> dict | None:
+        expected = str(row.get("dest_path") or (task_metadata or {}).get("dest_path") or "").strip()
+        if not expected:
+            return find_emby_match(self.emby, recognition, row, recent_limit=30)
+        tmdb_id = expected_task_tmdb_id(recognition, row)
+        candidates: list[dict] = []
+        if tmdb_id and hasattr(self.emby, "find_items_by_tmdb"):
+            try:
+                items = self.emby.find_items_by_tmdb(tmdb_id)
+            except Exception:
+                LOG.debug("Failed to query Emby duplicate TMDB candidates", exc_info=True)
+                items = []
+            if isinstance(items, list):
+                candidates.extend(item for item in items if isinstance(item, dict))
+        if tmdb_id and hasattr(self.emby, "find_item_by_tmdb"):
+            match = self.emby.find_item_by_tmdb(tmdb_id)
+            if isinstance(match, dict):
+                candidates.append(match)
+        if hasattr(self.emby, "recent_items"):
+            candidates.extend(item for item in self.emby.recent_items(limit=100) if isinstance(item, dict))
+        seen: set[str] = set()
+        for item in candidates:
+            key = str(item.get("Id") or item.get("Path") or id(item))
+            if key in seen:
+                continue
+            seen.add(key)
+            if tmdb_id:
+                if item_tmdb_id(item) != tmdb_id:
+                    continue
+            elif not match_emby_item([item], recognition, row):
+                continue
+            if self._emby_match_in_moved_dest(item, row, task_metadata):
+                return item
+        return None
+
+    def _emby_metadata(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "submission_id": int(row["id"]),
+            "emby_status": row.get("emby_status"),
+            "item_id": row.get("emby_item_id"),
+            "title": row.get("emby_title"),
+            "path": row.get("emby_path"),
+            "parent": row.get("emby_parent"),
+            "library": row.get("emby_parent"),
+        }
+
+    def _cleanup_metadata(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "submission_id": int(row["id"]),
+            "cleanup_status": row.get("cleanup_status"),
+            "cleanup_file_id": row.get("cleanup_file_id"),
+            "cleanup_error": row.get("cleanup_error"),
+        }
 
 
 def enrich_recognition_from_self_share_folder(
@@ -1154,6 +2135,7 @@ def find_self_share_strm_source_dir(
         candidate = safe_resolve(config.strm_root / folder_name)
         if candidate.exists() and has_strm_file(candidate):
             return candidate
+        return None
     return find_strm_source_dir(move_config, recognition, share_name=share_name)
 
 
@@ -1177,7 +2159,7 @@ def move_config_for_workflow_source(
             source_roots=[self_share_config.strm_root],
             library_roots=move_config.library_roots,
             conflict_policy=move_config.conflict_policy,
-            stable_seconds=move_config.stable_seconds,
+            stable_seconds=min(max(0, int(move_config.stable_seconds)), 5),
         )
     return move_config
 
@@ -1295,42 +2277,62 @@ def repair_stranded_self_share_moves(store: Any, move_config: MoveConfig, limit:
     return repaired
 
 
-def restore_missing_self_share_library_folders(
+MISSING_SELF_SHARE_SOURCE_REASONS = {"STRM 源目录不存在", "源目录不包含 STRM 文件", "未找到 STRM 源目录"}
+
+
+def restore_missing_self_share_library_folder(
     store: Any,
     cms: Any,
+    row: dict[str, Any],
     self_share_config: SelfShareConfig,
     move_config: MoveConfig,
-    limit: int = 50,
-) -> int:
-    restored = 0
-    if not hasattr(store, "missing_self_share_library_candidates"):
-        return restored
-    for row in store.missing_self_share_library_candidates(limit=max(1, int(limit))):
-        dest = safe_resolve(Path(str(row.get("dest_path") or "")))
-        if dest.exists() and has_strm_file(dest):
-            continue
-        category = category_for_self_share_row(row)
-        folder_name = str(row.get("own_share_file_name") or "").strip()
-        if not category or not folder_name:
-            continue
-        source = safe_resolve(self_share_config.strm_root / folder_name)
-        restore_move_config = MoveConfig(
-            source_roots=[self_share_config.strm_root],
-            library_roots=move_config.library_roots,
-            conflict_policy=move_config.conflict_policy,
-            stable_seconds=move_config.stable_seconds,
+) -> tuple[str, dict[str, Any]]:
+    metadata = {
+        "submission_id": int(row["id"]),
+        "dest_path": str(row.get("dest_path") or ""),
+        "category": category_for_self_share_row(row),
+    }
+    dest = safe_resolve(Path(str(row.get("dest_path") or "")))
+    if dest.exists() and has_strm_file(dest):
+        return "ready", metadata
+    category = category_for_self_share_row(row)
+    folder_name = str(row.get("own_share_file_name") or "").strip()
+    if not category or not folder_name:
+        return "skipped", metadata
+    source = safe_resolve(self_share_config.strm_root / folder_name)
+    restore_move_config = MoveConfig(
+        source_roots=[self_share_config.strm_root],
+        library_roots=move_config.library_roots,
+        conflict_policy=move_config.conflict_policy,
+        stable_seconds=move_config.stable_seconds,
+    )
+    plan = plan_strm_move(source, category, restore_move_config)
+    metadata.update(
+        {
+            "source_path": str(plan.source_path or source),
+            "dest_path": str(plan.dest_path or dest),
+            "category": category,
+            "restore_reason": plan.reason,
+        }
+    )
+    if plan.status in {"pending", "conflict"}:
+        updated = merge_self_share_strm_folder(plan, store, row)
+        metadata.update(
+            {
+                "source_path": str(updated.get("source_path") or metadata["source_path"]),
+                "dest_path": str(updated.get("dest_path") or metadata["dest_path"]),
+                "category": str(updated.get("category_final") or category),
+            }
         )
-        plan = plan_strm_move(source, category, restore_move_config)
-        if plan.status in {"pending", "conflict"}:
-            updated = merge_self_share_strm_folder(plan, store, row)
-            if str(updated.get("move_status") or "").lower() == "moved":
-                restored += 1
-            continue
-        if plan.status == "skipped" and plan.reason in {"STRM 源目录不存在", "源目录不包含 STRM 文件", "未找到 STRM 源目录"}:
-            share_code = str(row.get("own_share_code") or "").strip()
-            receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
-            if not share_code:
-                continue
+        if str(updated.get("move_status") or "").lower() == "moved":
+            return "restored", metadata
+        return "move_failed", metadata
+    if plan.status == "skipped" and plan.reason in MISSING_SELF_SHARE_SOURCE_REASONS:
+        share_code = str(row.get("own_share_code") or "").strip()
+        receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+        if not share_code:
+            return "skipped", metadata
+        if str(row.get("workflow_phase") or "") != "restore_share_sync_submitted":
             cms.add_share115_sync_task(
                 share_code,
                 receive_code,
@@ -1343,6 +2345,29 @@ def restore_missing_self_share_library_folders(
                     workflow_phase="restore_share_sync_submitted",
                     share_sync_status="restore_submitted",
                 )
+            return "restore_submitted", metadata
+        return "waiting_source", metadata
+    return "skipped", metadata
+
+
+def restore_missing_self_share_library_folders(
+    store: Any,
+    cms: Any,
+    self_share_config: SelfShareConfig,
+    move_config: MoveConfig,
+    limit: int = 50,
+    recent_seconds: int = 3600,
+) -> int:
+    restored = 0
+    if not hasattr(store, "missing_self_share_library_candidates"):
+        return restored
+    cutoff = time.time() - max(1, int(recent_seconds)) if recent_seconds > 0 else 0
+    for row in store.missing_self_share_library_candidates(limit=max(1, int(limit))):
+        if cutoff and float(row.get("updated_at") or 0) < cutoff:
+            continue
+        status, _metadata = restore_missing_self_share_library_folder(store, cms, row, self_share_config, move_config)
+        if status == "restored":
+            restored += 1
     return restored
 
 
@@ -1431,6 +2456,22 @@ def format_history(rows: list[dict[str, Any]]) -> str:
     library_summary = format_library_summary(rows)
     if library_summary:
         lines.append(library_summary)
+    return "\n".join(lines)
+
+
+def format_taskstore_history(tasks: list[Any]) -> str:
+    if not tasks:
+        return ""
+    lines = ["TaskStore 最近历史："]
+    for idx, task in enumerate(tasks, 1):
+        title = task.title or task.metadata.get("received_title") or task.share_code
+        category = task.category or task.metadata.get("category") or task.metadata.get("category_final") or "-"
+        dest = task.metadata.get("dest_path") or "-"
+        emby_parent = task.metadata.get("emby_parent") or task.metadata.get("emby_refresh_library") or "-"
+        lines.append(
+            f"{idx}. #{task.id} {title} | 阶段:{stage_display_name(task.current_stage)} | "
+            f"状态:{task.status.value} | 分类:{category} | 媒体库:{emby_parent} | 路径:{dest}"
+        )
     return "\n".join(lines)
 
 
@@ -1675,6 +2716,7 @@ def format_health(
     telegram_last_error_at: str | None = None,
     openai_enabled: bool | None = None,
     openai_ok: bool | None = None,
+    task_health: str | None = None,
 ) -> str:
     source_ok = all(safe_resolve(root).exists() for root in move_config.source_roots)
     lib_ok = all(safe_resolve(root).exists() for root in move_config.library_roots.values())
@@ -1696,6 +2738,8 @@ def format_health(
             f"冲突策略: {move_config.conflict_policy}",
         ]
     )
+    if task_health:
+        lines.extend(["", task_health])
     return "\n".join(lines)
 
 
@@ -1721,6 +2765,8 @@ class HttpJson:
             raise RuntimeError(f"Cannot reach {url}: {exc.reason}") from exc
         except TimeoutError as exc:
             raise RuntimeError(f"Cannot reach {url}: {exc}") from exc
+        if not raw.strip():
+            return {}
         try:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -1810,6 +2856,26 @@ def p115_file_name(item: dict[str, Any]) -> str:
     return str(item.get("n") or item.get("file_name") or item.get("name") or "").strip()
 
 
+def p115_is_folder(item: dict[str, Any]) -> bool:
+    return bool(p115_file_id(item) and not item.get("fid"))
+
+
+def infer_category_from_115_path(parts: list[str], category_names: set[str] | None = None) -> str:
+    categories = category_names or set(default_library_roots())
+    for part in reversed(parts):
+        if part in categories:
+            return part
+    return ""
+
+
+def infer_category_from_115_item(item: dict[str, Any]) -> str:
+    category = str(item.get("_category") or "").strip()
+    if category:
+        return category
+    parent_name = str(item.get("dp") or "").strip()
+    return parent_name if parent_name in set(default_library_roots()) else ""
+
+
 def select_organized_115_folder(
     items: list[dict[str, Any]],
     recognition: dict[str, Any],
@@ -1832,6 +2898,9 @@ def select_organized_115_folder(
         if p115_parent_id(item) in excluded:
             continue
         norm_name = normalize_text(name)
+        name_tmdb = extract_tmdb_id_from_name(name)
+        if tmdb_id and name_tmdb and name_tmdb != tmdb_id:
+            continue
         score = 0
         if tmdb_id and tmdb_id in name:
             score += 8
@@ -1845,7 +2914,18 @@ def select_organized_115_folder(
             update_time = float(item.get("tu") or item.get("t") or item.get("te") or 0)
         except (TypeError, ValueError):
             update_time = 0.0
-        matches.append((score, update_time, {"file_id": file_id, "file_name": name, "parent_id": p115_parent_id(item)}))
+        matches.append(
+            (
+                score,
+                update_time,
+                {
+                    "file_id": file_id,
+                    "file_name": name,
+                    "parent_id": p115_parent_id(item),
+                    "category": infer_category_from_115_item(item),
+                },
+            )
+        )
     if not matches:
         return None
     matches.sort(key=lambda value: (value[0], value[1]), reverse=True)
@@ -1930,9 +3010,21 @@ def select_source_residue_115_files(
 
 
 class P115WebClient:
-    def __init__(self, cookie: str, http: Any | None = None, timeout: int = 60):
+    def __init__(
+        self,
+        cookie: str,
+        http: Any | None = None,
+        timeout: int = 60,
+        min_interval_seconds: float = 0.0,
+        clock: Any | None = None,
+        sleeper: Any | None = None,
+    ):
         self.cookie = load_cookie_value(cookie)
         self.http = http or FormHttp(timeout)
+        self.min_interval_seconds = max(0.0, float(min_interval_seconds or 0.0))
+        self.clock = clock or time.monotonic
+        self.sleeper = sleeper or time.sleep
+        self._last_request_at: float | None = None
         if not self.cookie:
             raise RuntimeError("115 cookie is empty")
 
@@ -1944,7 +3036,18 @@ class P115WebClient:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
         }
 
+    def _rate_limit(self) -> None:
+        if self.min_interval_seconds <= 0:
+            return
+        now = float(self.clock())
+        if self._last_request_at is not None:
+            wait_seconds = self.min_interval_seconds - (now - self._last_request_at)
+            if wait_seconds > 0:
+                self.sleeper(wait_seconds)
+        self._last_request_at = float(self.clock())
+
     def _request(self, url: str, method: str = "GET", data: dict | None = None, params: dict | None = None) -> dict:
+        self._rate_limit()
         return self.http.request(url, method=method, data=data, params=params, headers=self._headers())
 
     @staticmethod
@@ -2009,6 +3112,33 @@ class P115WebClient:
         self._ensure_state(resp, "115 list files failed")
         return iter_items(resp.get("data") or resp)
 
+    def scan_organized_folders(
+        self,
+        parent_ids: set[str],
+        category_names: set[str] | None = None,
+        max_depth: int = 4,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        queue: list[tuple[str, list[str], int]] = [(str(parent_id), [], 0) for parent_id in parent_ids if str(parent_id)]
+        seen: set[str] = set()
+        folders: list[dict[str, Any]] = []
+        while queue:
+            parent_id, parts, depth = queue.pop(0)
+            if parent_id in seen or depth >= max_depth:
+                continue
+            seen.add(parent_id)
+            for item in self.list_files(parent_id, limit=limit):
+                if not p115_is_folder(item):
+                    continue
+                name = p115_file_name(item)
+                file_id = p115_file_id(item)
+                child_parts = parts + [name]
+                folder = dict(item)
+                folder["_category"] = infer_category_from_115_path(child_parts, category_names)
+                folders.append(folder)
+                queue.append((file_id, child_parts, depth + 1))
+        return folders
+
     def find_source_residue_files(
         self,
         recognition: dict[str, Any],
@@ -2036,6 +3166,8 @@ class P115WebClient:
         share_name: str,
         excluded_parent_ids: set[str] | None = None,
         min_update_time: float = 0,
+        scan_parent_ids: set[str] | None = None,
+        category_names: set[str] | None = None,
     ) -> dict[str, str] | None:
         search_values = candidate_tokens(recognition, share_name)
         tmdb_id = str(recognition.get("tmdb_id") or extract_tmdb_id_from_name(share_name) or "").strip()
@@ -2052,6 +3184,15 @@ class P115WebClient:
         selected = select_organized_115_folder(items, recognition, share_name, excluded_parent_ids=excluded_parent_ids)
         if selected:
             return selected
+        if scan_parent_ids:
+            try:
+                scanned = self.scan_organized_folders(scan_parent_ids, category_names=category_names)
+            except Exception:
+                LOG.debug("115 organized folder scan failed; falling back to search", exc_info=True)
+            else:
+                selected = select_organized_115_folder(scanned, recognition, share_name, excluded_parent_ids=excluded_parent_ids)
+                if selected:
+                    return selected
         # If CMS/TMDB already identified the item, do not guess by year; wait for the exact TMDB folder.
         if tmdb_id:
             return None
@@ -2212,17 +3353,32 @@ class CmsClient:
             raise RuntimeError(resp.get("msg") or "CMS login failed")
         self.token = token
 
-    def _authorized(self, path: str, payload: dict | None = None, method: str = "POST", params: dict | None = None) -> dict:
-        if not self.token:
-            self.login()
-        if params:
-            path = path + "?" + urllib.parse.urlencode(params)
+    @staticmethod
+    def _is_unauthorized_error(exc: RuntimeError) -> bool:
+        text = str(exc).lower()
+        return "401" in text or "unauthorized" in text
+
+    def _authorized_request(self, path: str, payload: dict | None, method: str) -> dict:
         return self.http.request(
             f"{self.config.cms_base_url}{path}",
             method=method,
             payload=payload,
             headers={"Authorization": f"Bearer {self.token}"},
         )
+
+    def _authorized(self, path: str, payload: dict | None = None, method: str = "POST", params: dict | None = None) -> dict:
+        if not self.token:
+            self.login()
+        if params:
+            path = path + "?" + urllib.parse.urlencode(params)
+        try:
+            return self._authorized_request(path, payload, method)
+        except RuntimeError as exc:
+            if not self._is_unauthorized_error(exc):
+                raise
+            self.token = ""
+            self.login()
+            return self._authorized_request(path, payload, method)
 
     def add_share_down(self, url: str) -> dict:
         resp = self._authorized("/api/cloud/add_share_down", payload={"url": url})
@@ -2284,6 +3440,12 @@ class CmsClient:
             for key in ("NEW_MEDIA_CID", "REDUNDANT_DATA_CID", "NEW_MEDIA_EXISTS_CID", "NEW_MEDIA_FAILED_CID")
             if str(data.get(key) or "").strip()
         }
+
+    def auto_organize_existing_parent_ids(self) -> set[str]:
+        resp = self._authorized("/api/config/auto_organize", method="GET")
+        data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
+        value = str(data.get("NEW_MEDIA_EXISTS_CID") or "").strip()
+        return {value} if value else set()
 
     def healthcheck(self) -> bool:
         try:
@@ -2408,18 +3570,31 @@ class EmbyClient:
         self.user_id = user_id or ""
         self.http = http or HttpJson(timeout)
         self._library_roots: list[tuple[Path, str]] | None = None
+        self._library_entries_cache: list[dict[str, Any]] | None = None
 
     @property
     def enabled(self) -> bool:
         return bool(self.base_url and self.api_key)
 
     def _get(self, path: str, params: dict | None = None) -> dict | list:
+        return self._request("GET", path, params=params)
+
+    def _post(self, path: str, params: dict | None = None, payload: dict | None = None) -> dict | list:
+        return self._request("POST", path, params=params, payload=payload)
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        params: dict | None = None,
+        payload: dict | None = None,
+    ) -> dict | list:
         if not self.enabled:
             raise RuntimeError("Emby confirmation is disabled")
         params = dict(params or {})
         params["api_key"] = self.api_key
         url = self.base_url + path + "?" + urllib.parse.urlencode(params)
-        return self.http.request(url, method="GET")
+        return self.http.request(url, method=method, payload=payload)
 
     def get_user_id(self) -> str:
         if self.user_id:
@@ -2471,9 +3646,18 @@ class EmbyClient:
     def library_roots(self) -> list[tuple[Path, str]]:
         if self._library_roots is not None:
             return self._library_roots
+        entries = self._library_entries()
+        self._library_roots = [(entry["path"], entry["name"]) for entry in entries]
+        return self._library_roots
+
+    def _library_entries(self) -> list[dict[str, Any]]:
+        if self._library_entries_cache is not None:
+            return self._library_entries_cache
+        if self._library_roots is not None:
+            return [{"path": root, "name": name, "item_id": ""} for root, name in self._library_roots]
         resp = self._get("/Library/VirtualFolders/Query")
         items = resp.get("Items") if isinstance(resp, dict) else resp
-        roots: list[tuple[Path, str]] = []
+        entries: list[dict[str, Any]] = []
         if isinstance(items, list):
             for item in items:
                 if not isinstance(item, dict):
@@ -2481,6 +3665,7 @@ class EmbyClient:
                 name = str(item.get("Name") or "").strip()
                 if not name:
                     continue
+                item_id = str(item.get("ItemId") or item.get("Id") or "").strip()
                 raw_paths: list[str] = []
                 for value in item.get("Locations") or []:
                     if value:
@@ -2490,10 +3675,37 @@ class EmbyClient:
                     if isinstance(info, dict) and info.get("Path"):
                         raw_paths.append(str(info.get("Path")))
                 for raw_path in raw_paths:
-                    roots.append((safe_resolve(Path(raw_path)), name))
-        roots.sort(key=lambda pair: len(pair[0].parts), reverse=True)
-        self._library_roots = roots
-        return roots
+                    entries.append({"path": safe_resolve(Path(raw_path)), "name": name, "item_id": item_id})
+        entries.sort(key=lambda entry: len(entry["path"].parts), reverse=True)
+        self._library_entries_cache = entries
+        self._library_roots = [(entry["path"], entry["name"]) for entry in entries]
+        return entries
+
+    def _library_entry_for_path(self, item_path: str | Path) -> dict[str, Any] | None:
+        raw_path = str(item_path or "").strip()
+        if not raw_path:
+            return None
+        resolved = safe_resolve(Path(raw_path))
+        for entry in self._library_entries():
+            if is_relative_to(resolved, entry["path"]):
+                return entry
+        return None
+
+    def refresh_library_for_path(self, item_path: str | Path) -> str | None:
+        entry = self._library_entry_for_path(item_path)
+        if entry and entry.get("item_id"):
+            item_id = urllib.parse.quote(str(entry["item_id"]), safe="")
+            self._post(
+                f"/Items/{item_id}/Refresh",
+                {
+                    "Recursive": "true",
+                    "ImageRefreshMode": "Default",
+                    "MetadataRefreshMode": "Default",
+                },
+            )
+            return str(entry.get("name") or "") or None
+        self._post("/Library/Refresh")
+        return str((entry or {}).get("name") or "") or None
 
     def library_name_for_item(self, item: dict) -> str | None:
         raw_path = str(item.get("Path") or "").strip()
@@ -2533,6 +3745,8 @@ def extract_task_info(resp: dict) -> tuple[str | None, str | None]:
 def classify_error(exc: Exception) -> str:
     text = str(exc)
     low = text.lower()
+    if "taskstore" in low:
+        return "TaskStore 未启用或不可用"
     if "login" in low or "unauthorized" in low or "401" in low:
         return "CMS 登录失败"
     if "cannot reach" in low or "timed out" in low or "connection" in low:
@@ -2569,13 +3783,82 @@ def clean_share_title(value: str) -> str:
     return text.strip()
 
 
-def infer_region_category(media_type: str, title: str, language: str = "") -> str:
+CHINESE_LANGUAGE_MARKERS = {"zh", "cn", "中文", "普通话", "汉语", "粤语", "國語", "国语"}
+CHINESE_COUNTRY_MARKERS = {"CN", "HK", "TW", "MO"}
+ASIAN_MOVIE_COUNTRY_MARKERS = {"JP", "KR", "TH", "ID", "MY", "SG", "PH", "VN"}
+ASIAN_MOVIE_LANGUAGE_MARKERS = {
+    "ja",
+    "jp",
+    "日语",
+    "日本語",
+    "ko",
+    "kr",
+    "韩语",
+    "韓語",
+    "한국어",
+    "th",
+    "泰语",
+    "id",
+    "印尼语",
+}
+INDIAN_MOVIE_MARKERS = {"印度", "印地", "宝莱坞", "bollywood", "hindi", "andhadhun", "tamil", "telugu", "hi", "ta", "te", "印地语", "泰米尔语", "泰卢固语"}
+
+
+def normalized_tmdb_language(language: str) -> str:
+    return re.sub(r"\s+", "", str(language or "").strip()).lower()
+
+
+def language_matches(normalized_language: str, markers: set[str]) -> bool:
+    if not normalized_language:
+        return False
+    parts = {part for part in re.split(r"[/,;，、|]+", normalized_language) if part}
+    for marker in markers:
+        normalized_marker = normalized_tmdb_language(marker)
+        if not normalized_marker:
+            continue
+        if normalized_language == normalized_marker or normalized_marker in parts:
+            return True
+        if len(normalized_marker) > 2 and normalized_marker in normalized_language:
+            return True
+    return False
+
+
+def has_indian_movie_hint(*values: str) -> bool:
+    text = normalize_text(" ".join(str(value or "") for value in values))
+    if not text:
+        return False
+    return any(normalize_text(marker) in text for marker in INDIAN_MOVIE_MARKERS)
+
+
+def user_movie_category_bucket(category: str, media_type: str, *hints: str) -> str:
+    if media_type == "movie" and category == "亚洲电影" and has_indian_movie_hint(*hints):
+        return "欧美电影"
+    return category
+
+
+def infer_region_category(media_type: str, title: str, language: str = "", countries: list[str] | None = None, genres: list[str] | None = None) -> str:
+    normalized_language = normalized_tmdb_language(language)
+    has_language = bool(normalized_language)
+    country_set = {str(country or "").upper() for country in (countries or []) if str(country or "").strip()}
+    genre_text = normalize_text(" ".join(str(genre or "") for genre in (genres or [])))
+    is_animation = any(marker in genre_text for marker in ("animation", "anime", "动画", "動畫", "动漫", "番剧"))
+    is_documentary = any(marker in genre_text for marker in ("documentary", "纪录", "紀錄"))
     if media_type == "tv":
-        if language in {"zh", "cn", "中文", "普通话", "汉语"}:
+        if language_matches(normalized_language, CHINESE_LANGUAGE_MARKERS) or country_set & CHINESE_COUNTRY_MARKERS:
             return "国产电视"
+        if is_animation and country_set & {"JP"}:
+            return "番剧"
         return "外国电视"
     if media_type == "movie":
-        if language in {"zh", "cn", "中文", "普通话", "汉语"} or re.search(r"[\u4e00-\u9fff]", title):
+        if is_documentary:
+            return "纪录片"
+        if is_animation:
+            return "动漫电影"
+        if language_matches(normalized_language, CHINESE_LANGUAGE_MARKERS) or country_set & CHINESE_COUNTRY_MARKERS:
+            return "华语电影"
+        if language_matches(normalized_language, ASIAN_MOVIE_LANGUAGE_MARKERS) or country_set & ASIAN_MOVIE_COUNTRY_MARKERS:
+            return "亚洲电影"
+        if not has_language and re.search(r"[\u4e00-\u9fff]", title):
             return "华语电影"
         return "欧美电影"
     return ""
@@ -2646,6 +3929,87 @@ class TmdbWebResolver:
         return {"ok": True, "title": title, "type": media_type, "tmdb_id": match.group(1), "source": "tmdb_search"}
 
 
+class TmdbApiResolver:
+    def __init__(self, api_key: str = "", bearer_token: str = "", timeout: int = 15, http: HttpJson | None = None, fallback: Any | None = None):
+        self.api_key = str(api_key or "").strip()
+        self.bearer_token = str(bearer_token or "").strip()
+        self.timeout = timeout
+        self.http = http or HttpJson(timeout)
+        self.fallback = fallback
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key or self.bearer_token)
+
+    def lookup(self, tmdb_id: str, media_type: str, share_name: str) -> dict[str, Any]:
+        media_type = "movie" if media_type == "movie" else "tv"
+        tmdb_id = str(tmdb_id or "").strip()
+        if not tmdb_id or not self.enabled:
+            return {"ok": False, "type": media_type, "tmdb_id": tmdb_id}
+        try:
+            return self._normalize_details(self._request(f"/{media_type}/{tmdb_id}", {"language": "zh-CN"}), media_type)
+        except Exception:
+            LOG.debug("TMDB API lookup failed media_type=%s tmdb_id=%s", media_type, tmdb_id, exc_info=True)
+            if self.fallback and getattr(self.fallback, "enabled", True):
+                return self.fallback.lookup(tmdb_id, media_type, share_name)
+            return {"ok": False, "type": media_type, "tmdb_id": tmdb_id}
+
+    def search(self, query: str, media_type: str = "tv") -> dict[str, Any]:
+        query = str(query or "").strip()
+        media_type = "movie" if media_type == "movie" else "tv"
+        if not query or not self.enabled:
+            return {"ok": False, "type": media_type}
+        try:
+            data = self._request(f"/search/{media_type}", {"query": query, "language": "zh-CN", "include_adult": "false"})
+            results = data.get("results") if isinstance(data, dict) else []
+            if not isinstance(results, list) or not results:
+                return {"ok": False, "type": media_type}
+            tmdb_id = str(results[0].get("id") or "").strip()
+            if not tmdb_id:
+                return {"ok": False, "type": media_type}
+            return self.lookup(tmdb_id, media_type, query)
+        except Exception:
+            LOG.debug("TMDB API search failed media_type=%s query=%s", media_type, query, exc_info=True)
+            if self.fallback and getattr(self.fallback, "enabled", True):
+                return self.fallback.search(query, media_type)
+            return {"ok": False, "type": media_type}
+
+    def _request(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        query = {key: value for key, value in params.items() if value not in (None, "")}
+        if self.api_key:
+            query["api_key"] = self.api_key
+        url = "https://api.themoviedb.org/3" + path + "?" + urllib.parse.urlencode(query)
+        headers = {"Accept": "application/json"}
+        if self.bearer_token:
+            headers["Authorization"] = f"Bearer {self.bearer_token}"
+        return self.http.request(url, headers=headers)
+
+    @staticmethod
+    def _normalize_details(data: dict[str, Any], media_type: str) -> dict[str, Any]:
+        if not isinstance(data, dict) or not data.get("id"):
+            return {"ok": False, "type": media_type}
+        countries = []
+        if media_type == "movie":
+            countries = [item.get("iso_3166_1") for item in data.get("production_countries") or [] if isinstance(item, dict)]
+        else:
+            countries = [str(value or "") for value in data.get("origin_country") or []]
+        genres = [str(item.get("name") or "") for item in data.get("genres") or [] if isinstance(item, dict)]
+        title = str(data.get("title") or data.get("name") or data.get("original_title") or data.get("original_name") or "")
+        language = str(data.get("original_language") or "")
+        category = infer_region_category(media_type, title, language, countries, genres)
+        return {
+            "ok": True,
+            "title": title,
+            "type": media_type,
+            "tmdb_id": str(data.get("id") or ""),
+            "language": language,
+            "countries": [country for country in countries if country],
+            "genres": genres,
+            "category": category,
+            "source": "tmdb_api",
+        }
+
+
 def extract_tmdb_search_query(share_name: str) -> str:
     text = str(share_name or "")
     match = re.search(r"([A-Za-z][A-Za-z0-9]+(?:\.[A-Za-z0-9]+){2,})\.S\d{1,2}", text, re.I)
@@ -2711,7 +4075,13 @@ def apply_tmdb_hint_resolution(
     candidates.sort(key=lambda value: value[0], reverse=True)
     best = candidates[0][1]
     media_type = str(best.get("type") or "")
-    category = infer_region_category(media_type, str(best.get("title") or ""), str(best.get("language") or ""))
+    category = str(best.get("category") or "") or infer_region_category(
+        media_type,
+        str(best.get("title") or ""),
+        str(best.get("language") or ""),
+        best.get("countries") if isinstance(best.get("countries"), list) else None,
+        best.get("genres") if isinstance(best.get("genres"), list) else None,
+    )
     if not category:
         return recognition, True
     enriched = dict(recognition)
@@ -2723,7 +4093,7 @@ def apply_tmdb_hint_resolution(
             "category": category,
             "tmdb_id": tmdb_id,
             "category_status": "tmdb_resolved",
-            "openai_source": "tmdb_web",
+            "openai_source": str(best.get("source") or "tmdb_web"),
         }
     )
     return enriched, False
@@ -2749,7 +4119,13 @@ def apply_tmdb_search_resolution(
         return recognition, True
     if not item or not item.get("ok") or not item.get("tmdb_id"):
         return recognition, True
-    category = infer_region_category(str(item.get("type") or media_type), str(item.get("title") or ""), str(item.get("language") or ""))
+    category = str(item.get("category") or "") or infer_region_category(
+        str(item.get("type") or media_type),
+        str(item.get("title") or ""),
+        str(item.get("language") or ""),
+        item.get("countries") if isinstance(item.get("countries"), list) else None,
+        item.get("genres") if isinstance(item.get("genres"), list) else None,
+    )
     if not category:
         return recognition, True
     enriched = dict(recognition)
@@ -2761,7 +4137,7 @@ def apply_tmdb_search_resolution(
             "category": category,
             "tmdb_id": str(item.get("tmdb_id") or ""),
             "category_status": "tmdb_search_resolved",
-            "openai_source": "tmdb_search",
+            "openai_source": str(item.get("source") or "tmdb_search"),
         }
     )
     return enriched, False
@@ -2826,6 +4202,13 @@ def apply_openai_category_fallback(
         media_type = media_type_for_category(category) or "movie"
     if media_type not in {"movie", "tv"}:
         media_type = media_type_for_category(category)
+    category = user_movie_category_bucket(
+        category,
+        media_type,
+        str(result.get("reason") or ""),
+        str(result.get("title") or ""),
+        share_name,
+    )
     enriched = dict(recognition)
     enriched.update(
         {
@@ -3095,7 +4478,28 @@ def parse_category_callback(data: str) -> tuple[int, str] | None:
         return None
 
 
-def handle_callback_query(callback_query: dict, telegram: TelegramClient, allowed_chat_id: str, store: SubmissionStore, emby: EmbyClient | None = None) -> None:
+def remember_manual_parent_category(store: SubmissionStore, row: dict[str, Any], category: str) -> None:
+    if not hasattr(store, "remember_parent_category"):
+        return
+    try:
+        recognition = json.loads(row.get("recognition_json") or "{}")
+    except Exception:
+        recognition = {}
+    if not isinstance(recognition, dict):
+        recognition = {}
+    parent_id = str(recognition.get("organized_parent_id") or recognition.get("parent_id") or "").strip()
+    if parent_id:
+        store.remember_parent_category(parent_id, category, source="manual")
+
+
+def handle_callback_query(
+    callback_query: dict,
+    telegram: TelegramClient,
+    allowed_chat_id: str,
+    store: SubmissionStore,
+    emby: EmbyClient | None = None,
+    task_store: TaskStore | None = None,
+) -> None:
     sender_id = ((callback_query.get("from") or {}).get("id"))
     message = callback_query.get("message") or {}
     chat_id = ((message.get("chat") or {}).get("id"))
@@ -3113,6 +4517,11 @@ def handle_callback_query(callback_query: dict, telegram: TelegramClient, allowe
         telegram.answer_callback_query(callback_id, f"已清理 {removed} 条", show_alert=False)
         telegram.send_message(chat_id, f"已清理 {removed} 条已结束历史记录。正在处理中的任务已保留。")
         return
+    task_action = parse_task_action_callback(data)
+    if task_action:
+        action, task_id = task_action
+        if handle_task_action_callback(action, task_id, callback_id, chat_id, telegram, task_store):
+            return
     recheck_row_id = parse_emby_recheck_callback(data)
     if recheck_row_id is not None:
         row = store.find_by_id(recheck_row_id)
@@ -3135,6 +4544,42 @@ def handle_callback_query(callback_query: dict, telegram: TelegramClient, allowe
     label = CATEGORY_LABELS[category_key]
     status = "skipped" if category_key == "skip" else "selected"
     updated = store.update_category(row_id, None if category_key == "skip" else label, status)
+    if updated and category_key != "skip":
+        remember_manual_parent_category(store, updated, label)
+    if updated and task_store and category_key == "skip":
+        task = task_store.upsert_task(
+            str(updated.get("share_code") or ""),
+            str(updated.get("receive_code") or ""),
+            str(updated.get("url") or ""),
+        )
+        task_store.record_event(
+            task.id,
+            TaskStage.FAILED,
+            TaskStatus.FAILED,
+            "已跳过分类，任务停止",
+            error_type="category_skipped",
+            error_summary="已跳过分类，任务停止",
+            submission_id=int(updated["id"]),
+            metadata_patch={"submission_id": int(updated["id"])},
+            clear_claim=True,
+        )
+    if updated and task_store and category_key != "skip":
+        task = task_store.upsert_task(
+            str(updated.get("share_code") or ""),
+            str(updated.get("receive_code") or ""),
+            str(updated.get("url") or ""),
+        )
+        task_store.record_event(
+            task.id,
+            TaskStage.RECOGNIZING,
+            TaskStatus.PENDING,
+            "已选择分类，重新识别",
+            category=label,
+            submission_id=int(updated["id"]),
+            metadata_patch={"submission_id": int(updated["id"])},
+            next_run_at=time.time(),
+            clear_claim=True,
+        )
     telegram.answer_callback_query(callback_id, f"已记录分类：{label}", show_alert=False)
     if updated:
         telegram.send_message(chat_id, f"已记录分类：{label}\n{format_task_label(updated)}")
@@ -3286,6 +4731,39 @@ def start_status_repair_loop(
     return thread
 
 
+def start_self_share_maintenance_loop(
+    store: Any,
+    cms: Any,
+    self_share_config: SelfShareConfig,
+    move_config: MoveConfig,
+    interval_seconds: int = 15,
+    limit: int = 50,
+) -> threading.Thread | None:
+    if interval_seconds <= 0:
+        return None
+
+    def loop() -> None:
+        while True:
+            try:
+                restored = restore_missing_self_share_library_folders(
+                    store,
+                    cms,
+                    self_share_config,
+                    move_config,
+                    limit=limit,
+                )
+                if restored:
+                    LOG.info("Self-share maintenance restored %s missing STRM folders", restored)
+                    write_metrics_snapshot(store, metrics_path_for_store(store))
+            except Exception:
+                LOG.debug("Self-share maintenance loop failed", exc_info=True)
+            time.sleep(interval_seconds)
+
+    thread = threading.Thread(target=loop, name="self-share-maintenance", daemon=True)
+    thread.start()
+    return thread
+
+
 def emby_parent_label(item: dict) -> str:
     return str(item.get("ParentId") or item.get("CollectionType") or item.get("Type") or "未知")
 
@@ -3359,6 +4837,68 @@ def format_task_label(row: dict[str, Any]) -> str:
     task_id = row.get("cms_task_id")
     title = row.get("title") or row.get("share_code") or "任务"
     return f"{title} #{task_id}" if task_id else str(title)
+
+
+RUNNABLE_TASK_STAGES = {
+    TaskStage.RECEIVED,
+    TaskStage.ORGANIZING,
+    TaskStage.RECOGNIZING,
+    TaskStage.OWN_SHARE_CREATED,
+    TaskStage.SHARE_SYNC_SUBMITTED,
+    TaskStage.STRM_READY,
+    TaskStage.MOVED,
+    TaskStage.EMBY_CONFIRMED,
+    TaskStage.CLEANED,
+}
+RETRY_STAGE_METADATA_KEYS = ("retry_stage", "last_actionable_stage", "failed_stage", "retry_from_stage")
+
+
+def retry_stage_for_intake(task) -> TaskStage:
+    if task.current_stage in RUNNABLE_TASK_STAGES:
+        return task.current_stage
+    for key in RETRY_STAGE_METADATA_KEYS:
+        raw = task.metadata.get(key)
+        if not raw:
+            continue
+        try:
+            stage = TaskStage(str(raw))
+        except ValueError:
+            continue
+        if stage in RUNNABLE_TASK_STAGES:
+            return stage
+    return TaskStage.RECEIVED
+
+
+def completion_drift_retry_stage(task) -> TaskStage | None:
+    if task.status != TaskStatus.SUCCEEDED or task.current_stage != TaskStage.CLEANED:
+        return None
+    dest_path = str(task.metadata.get("dest_path") or "").strip()
+    if not dest_path:
+        return None
+    dest = safe_resolve(Path(dest_path))
+    if dest.exists() and (dest.is_file() or has_strm_file(dest)):
+        return None
+    return TaskStage.EMBY_CONFIRMED
+
+
+def format_task_snapshot(task) -> str:
+    title = task.title or task.metadata.get("received_title") or task.share_code
+    return f"#{task.id} {title}｜{stage_display_name(task.current_stage)}｜{task.status.value}"
+
+
+def format_task_intake_reply(task) -> str:
+    if task.metadata.get("retry_from_stage") == TaskStage.CLEANED.value and task.metadata.get("retry_stage"):
+        return f"任务已重新检查入库状态：{format_task_snapshot(task)}"
+    if task.status == TaskStatus.SUCCEEDED and task.current_stage == TaskStage.CLEANED:
+        dest = task.metadata.get("dest_path") or ""
+        parent = task.metadata.get("emby_parent") or ""
+        suffix = f"\n媒体库：{parent}\n路径：{dest}" if parent or dest else ""
+        return f"任务已完成：{format_task_snapshot(task)}{suffix}"
+    if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION}:
+        return f"任务需要处理：{format_task_snapshot(task)}\n原因：{task.error_summary or '无详细错误'}"
+    if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+        return f"任务处理中/已在队列中：{format_task_snapshot(task)}"
+    return f"任务已接收：{format_task_snapshot(task)}"
 
 
 def sync_cms_status_task_event(task_store: TaskStore | None, row: dict[str, Any], status: str, title: str | None = None):
@@ -3536,6 +5076,110 @@ def format_status(rows: list[dict[str, Any]]) -> str:
     if failure_summary:
         lines.append(failure_summary)
     return "\n".join(lines)
+
+
+def format_taskstore_status(tasks: list[Any]) -> str:
+    if not tasks:
+        return ""
+    lines = ["TaskStore 最近任务："]
+    for idx, task in enumerate(tasks, 1):
+        title = task.title or task.metadata.get("received_title") or task.share_code
+        err = f"，{task.error_summary}" if task.error_summary else ""
+        lines.append(
+            f"{idx}. #{task.id} {title}：{stage_display_name(task.current_stage)} / {task.status.value}{err}"
+        )
+    return "\n".join(lines)
+
+
+def task_action_keyboard(tasks: list[Any], limit: int = 5) -> dict[str, Any] | None:
+    buttons: list[list[dict[str, str]]] = []
+    for task in tasks[:limit]:
+        row = [
+            {"text": f"详情 #{task.id}", "callback_data": f"task_detail:{task.id}"},
+            {"text": f"查 Emby #{task.id}", "callback_data": f"task_emby:{task.id}"},
+        ]
+        if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {TaskStage.FAILED, TaskStage.NEEDS_ACTION}:
+            row.append({"text": f"重试 #{task.id}", "callback_data": f"task_retry:{task.id}"})
+        row.append({"text": f"恢复 STRM #{task.id}", "callback_data": f"task_restore:{task.id}"})
+        row.append({"text": f"从头重跑 #{task.id}", "callback_data": f"task_reprocess:{task.id}"})
+        buttons.append(row)
+    return {"inline_keyboard": buttons} if buttons else None
+
+
+def parse_task_action_callback(data: str) -> tuple[str, int] | None:
+    parts = str(data or "").split(":")
+    if len(parts) != 2 or parts[0] not in {"task_detail", "task_retry", "task_emby", "task_restore", "task_reprocess"}:
+        return None
+    try:
+        return parts[0], int(parts[1])
+    except ValueError:
+        return None
+
+
+def handle_task_action_callback(
+    action: str,
+    task_id: int,
+    callback_id: str,
+    chat_id: int | str,
+    telegram: Any,
+    task_store: TaskStore | None,
+) -> bool:
+    if task_store is None:
+        telegram.answer_callback_query(callback_id, "任务引擎未启用", show_alert=True)
+        return True
+    task = task_store.find_task(task_id)
+    if not task:
+        telegram.answer_callback_query(callback_id, "任务不存在或已过期", show_alert=True)
+        return True
+    if action == "task_detail":
+        events = task_store.list_events(task_id)[-5:]
+        event_lines = [f"- {stage_display_name(TaskStage(event['stage'])) if event.get('stage') in TaskStage._value2member_map_ else event.get('stage')} / {event.get('status')}: {event.get('message')}" for event in events]
+        text = format_task_intake_reply(task)
+        if event_lines:
+            text += "\n最近事件：\n" + "\n".join(event_lines)
+        telegram.answer_callback_query(callback_id, "已发送任务详情", show_alert=False)
+        telegram.send_message(chat_id, text, reply_markup=task_action_keyboard([task]))
+        return True
+    if action == "task_retry":
+        decision = decide_retry(task)
+        target_stage = decision.stage or retry_stage_for_intake(task)
+        task_store.record_event(
+            task_id,
+            target_stage,
+            TaskStatus.PENDING,
+            "TG 按钮触发重试",
+            increment_retry=True,
+            metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": target_stage.value},
+            clear_claim=True,
+        )
+        updated = task_store.enqueue_task(task_id, target_stage, message="TG 按钮重试已入队", next_run_at=0)
+        telegram.answer_callback_query(callback_id, "已重新入队", show_alert=False)
+        telegram.send_message(chat_id, f"已重新入队：{format_task_snapshot(updated)}")
+        return True
+    if action == "task_emby":
+        updated = task_store.enqueue_task(task_id, TaskStage.EMBY_CONFIRMED, message="TG 按钮触发 Emby 检查", next_run_at=0)
+        telegram.answer_callback_query(callback_id, "已加入 Emby 检查队列", show_alert=False)
+        telegram.send_message(chat_id, f"已加入 Emby 检查队列：{format_task_snapshot(updated)}")
+        return True
+    if action == "task_restore":
+        task_store.record_event(
+            task_id,
+            TaskStage.EMBY_CONFIRMED,
+            TaskStatus.PENDING,
+            "TG 按钮触发 STRM 恢复",
+            metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": TaskStage.EMBY_CONFIRMED.value},
+            clear_claim=True,
+        )
+        updated = task_store.enqueue_task(task_id, TaskStage.EMBY_CONFIRMED, message="TG 按钮 STRM 恢复已入队", next_run_at=0)
+        telegram.answer_callback_query(callback_id, "已加入 STRM 恢复队列", show_alert=False)
+        telegram.send_message(chat_id, f"已加入 STRM 恢复队列：{format_task_snapshot(updated)}")
+        return True
+    if action == "task_reprocess":
+        updated = task_store.reprocess_task(task_id, message="TG 按钮触发从头重跑", next_run_at=0)
+        telegram.answer_callback_query(callback_id, "已从头重跑", show_alert=False)
+        telegram.send_message(chat_id, f"已从头重跑：{format_task_snapshot(updated)}")
+        return True
+    return False
 
 
 def is_terminal_status(status: str) -> bool:
@@ -3811,9 +5455,10 @@ def handle_update(
     cleanup_client: Any | None = None,
     self_share_receive_cid: str = "",
     task_store: TaskStore | None = None,
+    task_engine_enabled: bool = False,
 ) -> None:
     if update.get("callback_query"):
-        handle_callback_query(update.get("callback_query") or {}, telegram, allowed_chat_id, store, emby=emby)
+        handle_callback_query(update.get("callback_query") or {}, telegram, allowed_chat_id, store, emby=emby, task_store=task_store)
         return
 
     message = update.get("message") or {}
@@ -3832,6 +5477,12 @@ def handle_update(
         send_menu_message(telegram, chat_id, HELP_TEXT)
         return
     if command == "/status":
+        if task_engine_enabled and task_store is not None:
+            tasks = task_store.list_recent_tasks(limit=8)
+            taskstore_status = format_taskstore_status(tasks)
+            if taskstore_status:
+                telegram.send_message(chat_id, taskstore_status, reply_markup=task_action_keyboard(tasks))
+                return
         telegram.send_message(chat_id, format_status(store.recent(limit=8)))
         return
     if command == "/metrics":
@@ -3840,9 +5491,19 @@ def handle_update(
         telegram.send_message(chat_id, format_metrics(payload))
         return
     if command == "/history":
+        if task_engine_enabled and task_store is not None:
+            taskstore_history = format_taskstore_history(task_store.list_recent_tasks(limit=10))
+            if taskstore_history:
+                telegram.send_message(chat_id, taskstore_history)
+                return
         telegram.send_message(chat_id, format_history(store.recent(limit=10)))
         return
     if command == "/quality":
+        if task_engine_enabled and task_store is not None:
+            issues = scan_task_quality(task_store)
+            if issues:
+                telegram.send_message(chat_id, format_task_quality_report(issues))
+                return
         rows = store.recent(limit=50)
         telegram.send_message(chat_id, format_quality_report(rows), reply_markup=quality_keyboard(rows))
         return
@@ -3866,6 +5527,10 @@ def handle_update(
                 telegram_last_error_at=LAST_TELEGRAM_TRANSIENT_ERROR_AT,
                 openai_enabled=bool(openai_classifier and openai_classifier.enabled),
                 openai_ok=openai_classifier.healthcheck() if openai_classifier else False,
+                task_health=format_taskstore_health(
+                    task_store,
+                    enabled=bool(task_engine_enabled),
+                ) if task_engine_enabled and task_store is not None else None,
             ),
         )
         return
@@ -3878,6 +5543,35 @@ def handle_update(
     for index, link in enumerate(links, 1):
         try:
             key = normalize_share_link(link)
+            if self_share_workflow and task_engine_enabled and task_store is None:
+                raise RuntimeError("TaskStore is required when TASK_ENGINE_ENABLED=true for self_share_sync")
+            if self_share_workflow and task_engine_enabled and task_store is not None:
+                task = task_store.upsert_task(key.share_code, key.receive_code, link, chat_id=str(chat_id or ""))
+                drift_stage = completion_drift_retry_stage(task)
+                if drift_stage:
+                    task = task_store.record_event(
+                        task.id,
+                        drift_stage,
+                        TaskStatus.RUNNING,
+                        "已完成任务状态漂移，准备重新检查",
+                        metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": drift_stage.value},
+                    )
+                    task = task_store.enqueue_task(task.id, drift_stage, message="重新检查入库状态")
+                elif task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {TaskStage.FAILED, TaskStage.NEEDS_ACTION}:
+                    retry_stage = retry_stage_for_intake(task)
+                    task = task_store.record_event(
+                        task.id,
+                        retry_stage,
+                        task.status,
+                        "准备重新入队",
+                        metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": retry_stage.value},
+                    )
+                    task = task_store.enqueue_task(task.id, retry_stage, message="重新入队")
+                elif task.current_stage == TaskStage.RECEIVED and task.status == TaskStatus.PENDING and not task_store.list_events(task.id):
+                    task = task_store.enqueue_task(task.id, TaskStage.RECEIVED, message="等待执行")
+                result_lines.append(f"{index}. {format_task_intake_reply(task)}")
+                LOG.info("Enqueued self-share link in TaskStore: share_code=%s task_id=%s stage=%s status=%s", key.share_code, task.id, task.current_stage.value, task.status.value)
+                continue
             best_effort_task_sync(
                 "received",
                 ensure_task_for_link,
@@ -3990,12 +5684,25 @@ def run_forever(config: Config) -> None:
     telegram = TelegramClient(config.tg_bot_token, timeout=config.http_timeout)
     emby = EmbyClient(config.emby_base_url, config.emby_api_key, config.emby_user_id, timeout=config.http_timeout)
     openai_classifier = OpenAIClassifier(config)
-    tmdb_resolver = TmdbWebResolver(timeout=min(config.http_timeout, 20))
+    tmdb_web_resolver = TmdbWebResolver(timeout=min(config.http_timeout, 20))
+    tmdb_resolver = (
+        TmdbApiResolver(config.tmdb_api_key, config.tmdb_bearer_token, timeout=min(config.http_timeout, 20), fallback=tmdb_web_resolver)
+        if config.tmdb_api_key or config.tmdb_bearer_token
+        else tmdb_web_resolver
+    )
     store = SubmissionStore(config.db_path)
     task_store = create_task_store(config)
-    maybe_start_web_server(config, task_store)
+    call_maybe_start_web_server(config, task_store, submission_store=store)
     self_share_config = SelfShareConfig.from_config(config, cms)
-    p115 = P115WebClient(config.p115_cookie_path, timeout=config.http_timeout) if self_share_config.enabled else None
+    p115 = (
+        P115WebClient(
+            config.p115_cookie_path,
+            timeout=config.http_timeout,
+            min_interval_seconds=config.p115_min_request_interval_seconds,
+        )
+        if self_share_config.enabled
+        else None
+    )
     self_share_workflow = SelfShareWorkflow(self_share_config, cms, p115, store) if p115 else None
     move_config = MoveConfig.from_config(config)
     if self_share_config.enabled:
@@ -4006,6 +5713,34 @@ def run_forever(config: Config) -> None:
             conflict_policy=move_config.conflict_policy,
             stable_seconds=move_config.stable_seconds,
         )
+    if config.task_engine_enabled and self_share_config.enabled and p115:
+        task_workflow = BridgeSelfShareTaskWorkflow(
+            cms=cms,
+            telegram=telegram,
+            chat_id=config.tg_allowed_chat_id,
+            store=store,
+            task_store=task_store,
+            p115=p115,
+            self_share_config=self_share_config,
+            move_config=move_config,
+            emby=emby,
+            openai_classifier=openai_classifier,
+            tmdb_resolver=tmdb_resolver,
+            cleanup_client=p115 if self_share_config.cleanup_after_emby else None,
+            receive_cid=config.self_share_receive_cid,
+        )
+        task_runner = TaskRunner(task_store, task_workflow, interval_seconds=config.task_worker_interval_seconds)
+        task_runner.start()
+        LOG.info("Task engine worker started interval_seconds=%s", config.task_worker_interval_seconds)
+        if config.status_repair_enabled:
+            start_self_share_maintenance_loop(
+                store,
+                cms,
+                self_share_config,
+                move_config,
+                interval_seconds=max(1, int(self_share_config.auto_organize_retry_seconds or config.task_worker_interval_seconds)),
+                limit=max(1, int(config.status_repair_limit)),
+            )
     offset = None
     LOG.info("cms-tg-ingest started db_path=%s", config.db_path)
     try:
@@ -4015,7 +5750,7 @@ def run_forever(config: Config) -> None:
         write_metrics_snapshot(store, metrics_path_for_store(store))
     except Exception:
         LOG.debug("Failed to write startup metrics snapshot", exc_info=True)
-    if config.status_repair_enabled:
+    if config.status_repair_enabled and not (config.task_engine_enabled and self_share_config.enabled):
         start_status_repair_loop(
             store,
             emby,
@@ -4047,6 +5782,7 @@ def run_forever(config: Config) -> None:
                     cleanup_client=p115 if self_share_config.enabled else None,
                     self_share_receive_cid=config.self_share_receive_cid,
                     task_store=task_store,
+                    task_engine_enabled=config.task_engine_enabled,
                 )
         except Exception as exc:
             log_polling_error(telegram, exc)

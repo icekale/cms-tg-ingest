@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -8,6 +9,8 @@ from typing import Any
 class TaskStage(str, Enum):
     RECEIVED = "received"
     CMS_SUBMITTED = "cms_submitted"
+    ORGANIZING = "organizing"
+    RECOGNIZING = "recognizing"
     ORGANIZED = "organized"
     OWN_SHARE_CREATED = "own_share_created"
     SHARE_SYNC_SUBMITTED = "share_sync_submitted"
@@ -61,11 +64,26 @@ class TaskSnapshot:
     error_type: str
     error_summary: str
     retry_count: int
-    created_at: float
-    updated_at: float
+    chat_id: str = ""
+    submission_id: int | None = None
+    next_run_at: float = 0
+    claimed_by: str = ""
+    claimed_at: float = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: float = 0
+    updated_at: float = 0
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "TaskSnapshot":
+        metadata_raw = str(row.get("metadata_json") or "{}").strip() or "{}"
+        try:
+            metadata = json.loads(metadata_raw)
+        except Exception:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        submission_raw = row.get("submission_id")
+        submission_id = int(submission_raw) if submission_raw not in (None, "") else None
         return cls(
             id=int(row["id"]),
             share_code=str(row.get("share_code") or ""),
@@ -79,13 +97,21 @@ class TaskSnapshot:
             error_type=str(row.get("error_type") or ""),
             error_summary=str(row.get("error_summary") or ""),
             retry_count=int(row.get("retry_count") or 0),
+            chat_id=str(row.get("chat_id") or ""),
+            submission_id=submission_id,
+            next_run_at=float(row.get("next_run_at") or 0),
+            claimed_by=str(row.get("claimed_by") or ""),
+            claimed_at=float(row.get("claimed_at") or 0),
+            metadata=metadata,
             created_at=float(row.get("created_at") or 0),
             updated_at=float(row.get("updated_at") or 0),
         )
 
 
 _SUCCESS_FLOW = {
-    TaskStage.RECEIVED: TaskStage.CMS_SUBMITTED,
+    TaskStage.RECEIVED: TaskStage.ORGANIZING,
+    TaskStage.ORGANIZING: TaskStage.RECOGNIZING,
+    TaskStage.RECOGNIZING: TaskStage.OWN_SHARE_CREATED,
     TaskStage.CMS_SUBMITTED: TaskStage.ORGANIZED,
     TaskStage.ORGANIZED: TaskStage.OWN_SHARE_CREATED,
     TaskStage.OWN_SHARE_CREATED: TaskStage.SHARE_SYNC_SUBMITTED,

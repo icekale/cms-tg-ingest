@@ -2,10 +2,16 @@
 
 ## 0.2.0-alpha.2 - Unreleased
 
-- 将真实工作流进度写入 TaskStore：提交、CMS 状态、自有分享、分享同步、STRM 移动、Emby 确认和清理。
-- Web 管理页开始显示 Telegram/CMS 新链接的真实任务时间线。
-- 保持 TaskStore 为旁路时间线，不替代现有 SubmissionStore 执行路径。
-- 保持 Web 重试为非破坏性记录，不自动重复执行高风险操作。
+- 启用 TaskStore authoritative runner：真实工作流进度写入 TaskStore，新自分享链接由 TaskStore 创建任务并由 TaskRunner 推进真实工作流。
+- Web 管理页读取 TaskStore，失败阶段可见，Web 重试会重新排队实际任务；Telegram 新链接接收回复在 authoritative 模式下可返回 TaskStore task ID 和当前阶段，`/status` 和 `/history` 优先读取 TaskStore。
+- TG /status 增加任务操作按钮：详情、重试、查 Emby、恢复 STRM、从头重跑；/quality 增加 TaskStore 本地轻量巡检，不扫描 115。
+- Web 任务详情页增加重试、查 Emby、恢复 STRM、从头重跑按钮；Web /quality 增加 TaskStore 本地轻量巡检，不扫描 115。
+- /health 增加 TaskStore 本地队列健康摘要，Web /health 只读取本地 TaskStore，不扫描 115。
+- Web 详情页支持懒回填旧 SubmissionStore 记录，打开旧任务 ID 时会同步成 TaskStore 任务后展示。
+- TaskEngine 开启时禁止新 self-share 链接回退旧轮询路径，TaskStore 不可用会直接失败提示配置问题。
+- SubmissionStore 保留为兼容、审计和修复元数据；可用 `TASK_ENGINE_ENABLED=false` 回滚到旧执行路径。
+- 自分享 TaskRunner 创建自己的 115 永久分享后立即清理 115 转存源；分享同步 STRM 源目录会提前拒绝直链或非预期分享码 STRM。
+- 自分享等待默认从 90 秒缩短到 15 秒，分享 STRM 移动稳定等待最多 5 秒；CMS 自动整理每条任务只触发一次，等待期间不反复刺激普通同步。
 
 ## 0.2.0-alpha.1 - Unreleased
 

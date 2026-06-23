@@ -7,6 +7,8 @@ class TaskModelTests(unittest.TestCase):
     def test_stage_values_match_v02_design(self):
         self.assertEqual(TaskStage.RECEIVED.value, "received")
         self.assertEqual(TaskStage.CMS_SUBMITTED.value, "cms_submitted")
+        self.assertEqual(TaskStage.ORGANIZING.value, "organizing")
+        self.assertEqual(TaskStage.RECOGNIZING.value, "recognizing")
         self.assertEqual(TaskStage.ORGANIZED.value, "organized")
         self.assertEqual(TaskStage.OWN_SHARE_CREATED.value, "own_share_created")
         self.assertEqual(TaskStage.SHARE_SYNC_SUBMITTED.value, "share_sync_submitted")
@@ -17,16 +19,20 @@ class TaskModelTests(unittest.TestCase):
         self.assertEqual(TaskStage.NEEDS_ACTION.value, "needs_action")
         self.assertEqual(TaskStage.FAILED.value, "failed")
 
-    def test_success_next_stage_flow(self):
-        self.assertEqual(next_stage_after_success(TaskStage.RECEIVED), TaskStage.CMS_SUBMITTED)
-        self.assertEqual(next_stage_after_success(TaskStage.CMS_SUBMITTED), TaskStage.ORGANIZED)
-        self.assertEqual(next_stage_after_success(TaskStage.ORGANIZED), TaskStage.OWN_SHARE_CREATED)
+    def test_success_next_stage_flow_for_authoritative_self_share(self):
+        self.assertEqual(next_stage_after_success(TaskStage.RECEIVED), TaskStage.ORGANIZING)
+        self.assertEqual(next_stage_after_success(TaskStage.ORGANIZING), TaskStage.RECOGNIZING)
+        self.assertEqual(next_stage_after_success(TaskStage.RECOGNIZING), TaskStage.OWN_SHARE_CREATED)
         self.assertEqual(next_stage_after_success(TaskStage.OWN_SHARE_CREATED), TaskStage.SHARE_SYNC_SUBMITTED)
         self.assertEqual(next_stage_after_success(TaskStage.SHARE_SYNC_SUBMITTED), TaskStage.STRM_READY)
         self.assertEqual(next_stage_after_success(TaskStage.STRM_READY), TaskStage.MOVED)
         self.assertEqual(next_stage_after_success(TaskStage.MOVED), TaskStage.EMBY_CONFIRMED)
         self.assertEqual(next_stage_after_success(TaskStage.EMBY_CONFIRMED), TaskStage.CLEANED)
         self.assertIsNone(next_stage_after_success(TaskStage.CLEANED))
+
+    def test_legacy_cms_stage_still_maps_forward(self):
+        self.assertEqual(next_stage_after_success(TaskStage.CMS_SUBMITTED), TaskStage.ORGANIZED)
+        self.assertEqual(next_stage_after_success(TaskStage.ORGANIZED), TaskStage.OWN_SHARE_CREATED)
 
     def test_status_and_retry_action_values_are_stable(self):
         self.assertEqual(TaskStatus.PENDING.value, "pending")

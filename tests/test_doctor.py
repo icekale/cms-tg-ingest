@@ -90,6 +90,72 @@ class DoctorConfigTests(unittest.TestCase):
         self.assertIn("WEB_PORT", text)
         self.assertIn("TASK_DB directory does not exist", text)
 
+    def test_task_engine_requires_self_share_workflow_without_leaking_secrets(self):
+        env = {
+            "TG_BOT_TOKEN": "123456:secret-token",
+            "TG_ALLOWED_CHAT_ID": "464100862",
+            "CMS_BASE_URL": "http://cms:9527",
+            "CMS_USERNAME": "user",
+            "CMS_PASSWORD": "secret-password",
+            "DB_PATH": "/data/submissions.db",
+            "TASK_DB_PATH": "/data/tasks.db",
+            "TASK_ENGINE_ENABLED": "true",
+            "WORKFLOW_MODE": "direct",
+        }
+
+        report = doctor.run_checks(env=env, filesystem=doctor.MemoryFilesystem(existing_paths={"/data"}))
+
+        self.assertFalse(report.ok)
+        text = report.to_text()
+        self.assertIn("Task engine currently requires WORKFLOW_MODE=self_share_sync", text)
+        self.assertNotIn("secret-token", text)
+        self.assertNotIn("secret-password", text)
+
+    def test_task_engine_enabled_alias_requires_self_share_workflow_without_leaking_secrets(self):
+        env = {
+            "TG_BOT_TOKEN": "123456:secret-token",
+            "TG_ALLOWED_CHAT_ID": "464100862",
+            "CMS_BASE_URL": "http://cms:9527",
+            "CMS_USERNAME": "user",
+            "CMS_PASSWORD": "secret-password",
+            "DB_PATH": "/data/submissions.db",
+            "TASK_DB_PATH": "/data/tasks.db",
+            "TASK_ENGINE_ENABLED": "enabled",
+            "WORKFLOW_MODE": "direct",
+        }
+
+        report = doctor.run_checks(env=env, filesystem=doctor.MemoryFilesystem(existing_paths={"/data"}))
+
+        self.assertFalse(report.ok)
+        text = report.to_text()
+        self.assertIn("Task engine currently requires WORKFLOW_MODE=self_share_sync", text)
+        self.assertNotIn("secret-token", text)
+        self.assertNotIn("secret-password", text)
+
+    def test_task_engine_requires_positive_worker_interval(self):
+        env = {
+            "TG_BOT_TOKEN": "123456:secret-token",
+            "TG_ALLOWED_CHAT_ID": "464100862",
+            "CMS_BASE_URL": "http://cms:9527",
+            "CMS_USERNAME": "user",
+            "CMS_PASSWORD": "secret-password",
+            "DB_PATH": "/data/submissions.db",
+            "TASK_DB_PATH": "/data/tasks.db",
+            "TASK_ENGINE_ENABLED": "true",
+            "TASK_WORKER_INTERVAL_SECONDS": "0",
+            "WORKFLOW_MODE": "self_share_sync",
+            "P115_COOKIE_PATH": "/config/115-cookies.txt",
+            "SELF_SHARE_RECEIVE_CID": "pending-cid",
+            "SELF_SHARE_STRM_ROOT": "/mnt/share",
+            "STRM_SOURCE_ROOTS": "/mnt/share",
+        }
+        filesystem = doctor.MemoryFilesystem(existing_paths={"/data", "/config/115-cookies.txt", "/mnt/share"})
+
+        report = doctor.run_checks(env=env, filesystem=filesystem)
+
+        self.assertFalse(report.ok)
+        self.assertIn("TASK_WORKER_INTERVAL_SECONDS must be a positive number", report.to_text())
+
     def test_audit_db_reports_tmdb_mismatch_direct_and_unexpected_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

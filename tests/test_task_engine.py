@@ -57,4 +57,6 @@ class TaskEngineTests(unittest.TestCase):
 
     def test_stage_display_names_are_chinese(self):
         self.assertEqual(stage_display_name(TaskStage.CMS_SUBMITTED), "提交 CMS")
+        self.assertEqual(stage_display_name(TaskStage.ORGANIZING), "CMS 整理")
+        self.assertEqual(stage_display_name(TaskStage.RECOGNIZING), "识别分类")
         self.assertEqual(stage_display_name(TaskStage.EMBY_CONFIRMED), "Emby 确认")
