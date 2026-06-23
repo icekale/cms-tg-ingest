@@ -1,8 +1,11 @@
 import importlib.util
+import sqlite3
 import sys
 import tempfile
 import unittest
+import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("bridge", Path(__file__).resolve().parents[1] / "bridge.py")
 bridge = importlib.util.module_from_spec(spec)
@@ -164,6 +167,79 @@ class QualityNoiseTests(unittest.TestCase):
         self.assertEqual(bridge.quality_issue_for_row(row), "")
 
 class EmbyProviderSearchTests(unittest.TestCase):
+    def test_http_json_accepts_empty_post_response(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b""
+
+        with patch.object(urllib.request, "urlopen", return_value=FakeResponse()):
+            self.assertEqual(bridge.HttpJson(timeout=1).request("http://emby/Library/Refresh", method="POST"), {})
+
+    def test_refresh_library_for_path_refreshes_matching_virtual_folder(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", payload=None, headers=None):
+                self.calls.append((url, method))
+                if method == "GET":
+                    return {
+                        "Items": [
+                            {
+                                "Name": "Strm欧美电影",
+                                "Locations": ["/mnt/user/Unraid/strm/转存/MovieUS"],
+                            }
+                        ]
+                    }
+                return {}
+
+        http = FakeHttp()
+        emby = bridge.EmbyClient("http://emby", "key", http=http)
+
+        library = emby.refresh_library_for_path("/mnt/user/Unraid/strm/转存/MovieUS/L-老去-2021-[tmdb=631843]")
+
+        self.assertEqual(library, "Strm欧美电影")
+        self.assertEqual(http.calls[0][1], "GET")
+        self.assertIn("/Library/VirtualFolders/Query", http.calls[0][0])
+        self.assertEqual(http.calls[1][1], "POST")
+        self.assertIn("/Library/Refresh", http.calls[1][0])
+        self.assertIn("api_key=key", http.calls[1][0])
+
+    def test_refresh_library_for_path_prefers_matching_library_item_refresh(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", payload=None, headers=None):
+                self.calls.append((url, method))
+                if method == "GET":
+                    return {
+                        "Items": [
+                            {
+                                "Name": "Strm亚洲电影",
+                                "ItemId": "library-item-id",
+                                "Locations": ["/mnt/user/Unraid/strm/转存/MovieAsia"],
+                            }
+                        ]
+                    }
+                return {}
+
+        http = FakeHttp()
+        emby = bridge.EmbyClient("http://emby", "key", http=http)
+
+        library = emby.refresh_library_for_path("/mnt/user/Unraid/strm/转存/MovieAsia/S-娑婆诃-2019-[tmdb=491584]")
+
+        self.assertEqual(library, "Strm亚洲电影")
+        self.assertEqual(http.calls[1][1], "POST")
+        self.assertIn("/Items/library-item-id/Refresh", http.calls[1][0])
+        self.assertIn("Recursive=true", http.calls[1][0])
+
     def test_find_item_by_tmdb_uses_emby_provider_query(self):
         class FakeEmby(bridge.EmbyClient):
             def __init__(self):
@@ -258,6 +334,20 @@ class EmbyAutoMatchTests(unittest.TestCase):
 
 
 class StatusRepairTests(unittest.TestCase):
+    def test_submission_store_creates_self_share_performance_indexes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "submissions.db"
+            bridge.SubmissionStore(db_path)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+            finally:
+                conn.close()
+
+        self.assertIn("idx_submissions_self_share_move", indexes)
+        self.assertIn("idx_submissions_self_share_cleanup", indexes)
+
     def test_submission_store_stale_for_repair_filters_confirmed_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = bridge.SubmissionStore(Path(tmp) / "submissions.db")

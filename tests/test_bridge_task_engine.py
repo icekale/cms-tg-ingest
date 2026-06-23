@@ -34,7 +34,7 @@ class FakeP115:
         self.received.append((share_code, receive_code, receive_cid))
         return {"title": "received title", "file_ids": ["file-a", "file-b"]}
 
-    def find_organized_folder(self, recognition, title, excluded_parent_ids=None, min_update_time=0):
+    def find_organized_folder(self, recognition, title, excluded_parent_ids=None, min_update_time=0, **kwargs):
         return self.folder
 
     def create_long_share(self, file_id):
@@ -60,6 +60,7 @@ class FakeEmby:
     def __init__(self):
         self.items_by_tmdb = {}
         self.recent = []
+        self.refreshed_paths = []
 
     def find_item_by_tmdb(self, tmdb_id):
         return self.items_by_tmdb.get(str(tmdb_id))
@@ -69,6 +70,10 @@ class FakeEmby:
 
     def library_name_for_item(self, item):
         return item.get("LibraryName")
+
+    def refresh_library_for_path(self, item_path):
+        self.refreshed_paths.append(str(item_path))
+        return "电影库"
 
 
 class FakeCleanupClient:
@@ -223,6 +228,22 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(row["workflow_mode"], "self_share_sync")
             self.assertEqual(result.metadata["submission_id"], row["id"])
 
+    def test_received_stage_stops_when_115_receive_is_restricted(self):
+        class RestrictedP115(FakeP115):
+            def receive_share_to_cid(self, share_code, receive_code, receive_cid):
+                raise RuntimeError("你已被限制接收，如有疑问请联系客服")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            workflow.p115 = RestrictedP115()
+            task = self._claim_task("abc", "1234", TaskStage.RECEIVED)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("115 接收被限制", result.message)
+            self.assertIsNone(self.submissions.find_by_key(bridge.ShareKey("abc", "1234")))
+
     def test_received_stage_reuses_existing_self_share_row_without_receiving_again(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp, receive_cid="pending-cid")
@@ -278,7 +299,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["category"], "华语电影")
             self.assertEqual(result.metadata["tmdb_id"], "123456")
 
-    def test_recognizing_stage_uses_openai_tmdb_fallback_for_unmapped_parent(self):
+    def test_recognizing_stage_stops_for_manual_category_when_cms_parent_unmapped(self):
         with tempfile.TemporaryDirectory() as tmp:
             classifier = FakeClassifier()
             tmdb = FakeTmdbResolver()
@@ -301,11 +322,64 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
 
             result = workflow.run_stage(task)
 
-            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
-            self.assertEqual(result.metadata["category"], "外国电视")
-            self.assertEqual(result.metadata["tmdb_id"], "654321")
-            self.assertEqual(len(classifier.calls), 1)
-            self.assertNotEqual(tmdb.searches, [])
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(classifier.calls, [])
+            self.assertEqual(tmdb.lookups, [])
+            self.assertEqual(tmdb.searches, [])
+            self.assertEqual(len(self.telegram.messages), 1)
+            _, text, reply_markup = self.telegram.messages[0]
+            self.assertIn("CMS 未能确定分类", text)
+            self.assertIn("请选择分类", text)
+            self.assertNotIn("OpenAI建议", text)
+            self.assertEqual(reply_markup, bridge.category_keyboard(int(row["id"])))
+            recognition = result.metadata["recognition"]
+            self.assertEqual(recognition["category"], "")
+            self.assertEqual(recognition["category_status"], "needs_action")
+            self.assertEqual(recognition["tmdb_id"], "")
+            self.assertEqual(recognition["organized_parent_id"], "unmapped-parent")
+
+    def test_recognizing_stage_defers_for_cms_direct_strm_signal_when_category_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tv_root = Path(tmp) / "library" / "tvcn"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"国产电视": tv_root}),
+            )
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="翘楚 (2026)") or row
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="Q-翘楚-2026-[tmdb=289271]",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECOGNIZING,
+                {
+                    "submission_id": row["id"],
+                    "organized_folder": {
+                        "file_id": "folder-id",
+                        "file_name": "Q-翘楚-2026-[tmdb=289271]",
+                        "parent_id": "unmapped-parent",
+                    },
+                },
+                row["id"],
+            )
+
+            waiting = workflow.run_stage(task)
+            self._write_strm(tv_root / "Q-翘楚-2026-[tmdb=289271]" / "Season 01", content="http://cms/d/direct-link/ep01.mp4")
+            resolved = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(waiting.outcome, StageOutcome.DEFER)
+            self.assertIn("等待 CMS 直链 STRM 分类", waiting.message)
+            self.assertEqual(self.telegram.messages, [])
+            self.assertEqual(resolved.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(resolved.metadata["category"], "国产电视")
+            self.assertEqual(stored["category_choice"], "国产电视")
+            self.assertEqual(stored["category_status"], "self_share_resolved")
 
     def test_recognizing_stage_mapped_parent_category_skips_openai(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -362,7 +436,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["category"], "华语电影")
             self.assertEqual(classifier.calls, [])
 
-    def test_recognizing_stage_persists_openai_suggestion_and_reuses_without_recalling_openai(self):
+    def test_recognizing_stage_reuses_manual_prompt_without_recalling_openai_or_tmdb(self):
         with tempfile.TemporaryDirectory() as tmp:
             classifier = FakeClassifier(confidence=0.5)
             tmdb = FakeTmdbResolver()
@@ -402,11 +476,13 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
 
             self.assertEqual(first.outcome, StageOutcome.NEEDS_ACTION)
             self.assertEqual(second.outcome, StageOutcome.NEEDS_ACTION)
-            self.assertEqual(len(classifier.calls), 1)
-            self.assertEqual(second.metadata["recognition"]["category_status"], "openai_suggested")
-            self.assertEqual(second.metadata["recognition"]["category_suggestion"], "外国电视")
+            self.assertEqual(classifier.calls, [])
+            self.assertEqual(tmdb.lookups, [])
+            self.assertEqual(tmdb.searches, [])
+            self.assertEqual(second.metadata["recognition"]["category_status"], "needs_action")
+            self.assertEqual(second.metadata["recognition"].get("category_suggestion"), None)
 
-    def test_recognizing_stage_prompts_telegram_category_keyboard_for_openai_suggestion(self):
+    def test_recognizing_stage_prompts_telegram_category_keyboard_without_openai_suggestion(self):
         with tempfile.TemporaryDirectory() as tmp:
             classifier = FakeClassifier(confidence=0.5)
             workflow = self._workflow(tmp, openai_classifier=classifier, tmdb_resolver=FakeTmdbResolver())
@@ -439,9 +515,11 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(len(self.telegram.messages), 1)
             chat_id, text, reply_markup = self.telegram.messages[0]
             self.assertEqual(chat_id, "chat-id")
-            self.assertIn("OpenAI建议：外国电视", text)
-            self.assertIn("请选择建议分类", text)
+            self.assertIn("CMS 未能确定分类", text)
+            self.assertNotIn("OpenAI建议", text)
+            self.assertIn("请选择分类", text)
             self.assertEqual(reply_markup, bridge.category_keyboard(int(row["id"])))
+            self.assertEqual(classifier.calls, [])
 
     def test_recognizing_stage_uses_manually_selected_category_after_callback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -510,6 +588,34 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.cms.share_sync_calls, [("owncode", "ownpwd", "0", "/media/share")])
             self.assertEqual(self.cms.plain_share_down_calls, [])
 
+    def test_own_share_stage_deletes_115_source_immediately_after_share_created(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = FakeCleanupClient()
+            workflow = self._workflow(tmp, cleanup_client=cleanup)
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="S-双喜-2025-[tmdb=123456]",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(cleanup.deleted, ["folder-id"])
+            self.assertEqual(stored["own_share_code"], "owncode")
+            self.assertEqual(stored["cleanup_status"], "deleted")
+            self.assertEqual(result.metadata["cleanup_status"], "deleted")
+
     def test_strm_ready_stage_defers_until_own_share_strm_source_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
@@ -526,6 +632,156 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(ready.metadata["category"], "华语电影")
             self.assertEqual(ready.metadata["source_path"], str(bridge.safe_resolve(self.config.strm_root / row["own_share_file_name"])))
             self.assertEqual(ready.metadata["recognition"]["tmdb_id"], "123456")
+
+    def test_strm_ready_stage_rejects_direct_link_before_move(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._self_share_row()
+            source = self.config.strm_root / row["own_share_file_name"]
+            self._write_strm(source, content="http://cms/d/direct-link/movie.mkv")
+            task = self._claim_task("abc", "1234", TaskStage.STRM_READY, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.FAILED)
+            self.assertIn("发现直链 STRM", result.message)
+            self.assertEqual(stored["move_status"], "error")
+            self.assertTrue(source.exists())
+
+    def test_strm_ready_stage_removes_late_direct_library_strm_while_waiting_for_share_strm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            western_root = Path(tmp) / "library" / "western"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"欧美电影": western_root}),
+            )
+            row = self._self_share_row(title="Z-忠犬八公的故事-2009-[tmdb=28178]", category="欧美电影", tmdb_id="28178")
+            direct_dir = western_root / row["own_share_file_name"]
+            self._write_strm(direct_dir, content="http://cms/d/direct-link/movie.mkv")
+            task = self._claim_task("abc", "1234", TaskStage.STRM_READY, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIn("等待自有分享 STRM", result.message)
+            self.assertFalse((direct_dir / "movie.strm").exists())
+            self.assertEqual(result.metadata["direct_strm_removed"], 1)
+
+    def test_strm_ready_stage_uses_late_direct_strm_library_as_cms_category_signal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            asia_root = Path(tmp) / "library" / "asia"
+            western_root = Path(tmp) / "library" / "western"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(
+                    source_roots=[],
+                    library_roots={"亚洲电影": asia_root, "欧美电影": western_root},
+                ),
+            )
+            row = self._self_share_row(title="P-破墓-2024-[tmdb=838209]", category="欧美电影", tmdb_id="838209")
+            direct_dir = asia_root / row["own_share_file_name"]
+            self._write_strm(direct_dir, content="http://cms/d/direct-link/movie.mkv")
+            task = self._claim_task("abc", "1234", TaskStage.STRM_READY, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            recognition = bridge.parse_recognition_json(stored)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(result.metadata["category"], "亚洲电影")
+            self.assertEqual(result.metadata["recognition"]["category"], "亚洲电影")
+            self.assertEqual(stored["category_choice"], "亚洲电影")
+            self.assertEqual(stored["category_status"], "self_share_resolved")
+            self.assertEqual(recognition["category"], "亚洲电影")
+            self.assertEqual(recognition["category_status"], "self_share_resolved")
+            self.assertFalse((direct_dir / "movie.strm").exists())
+            self.assertEqual(result.metadata["direct_strm_removed"], 1)
+
+    def test_organizing_stage_triggers_auto_organize_only_once_while_waiting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, {"submission_id": row["id"]}, row["id"])
+
+            first = workflow.run_stage(task)
+            second = workflow.run_stage(task)
+
+            self.assertEqual(first.outcome, StageOutcome.DEFER)
+            self.assertEqual(second.outcome, StageOutcome.DEFER)
+            self.assertEqual(self.cms.auto_organize_calls, 1)
+
+    def test_organizing_stage_reuses_persisted_folder_without_rescanning_115(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="organized_found",
+                own_share_file_id="folder-id",
+                own_share_file_name="S-双喜-2025-[tmdb=123456]",
+            ) or row
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["organized_folder"]["file_id"], "folder-id")
+            self.assertEqual(self.cms.auto_organize_calls, 0)
+
+    def test_organizing_stage_removes_direct_strm_from_cms_sync_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            western_root = Path(tmp) / "library" / "western"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"欧美电影": western_root}),
+            )
+            row = self._row()
+            folder_name = "Z-蜘蛛侠-2002-[tmdb=557]"
+            self.p115.folder = {
+                "file_id": "folder-id",
+                "file_name": folder_name,
+                "parent_id": "western-parent",
+            }
+            direct_dir = western_root / folder_name
+            self._write_strm(direct_dir, content="http://cms/d/direct-link/movie.mkv")
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertFalse((direct_dir / "movie.strm").exists())
+            self.assertTrue(direct_dir.exists())
+
+    def test_organizing_stage_uses_direct_strm_library_as_cms_category_signal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            asia_root = Path(tmp) / "library" / "asia"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"亚洲电影": asia_root}),
+            )
+            row = self._row()
+            folder_name = "S-娑婆诃-2019-[tmdb=556509]"
+            self.p115.folder = {
+                "file_id": "folder-id",
+                "file_name": folder_name,
+                "parent_id": "unmapped-cms-parent",
+            }
+            direct_dir = asia_root / folder_name
+            self._write_strm(direct_dir, content="http://cms/d/direct-link/movie.mkv")
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, {"submission_id": row["id"]}, row["id"])
+
+            organizing = workflow.run_stage(task)
+            recognizing_task = self._claim_task("abc", "1234", TaskStage.RECOGNIZING, organizing.metadata, row["id"])
+            recognizing = workflow.run_stage(recognizing_task)
+
+            self.assertEqual(organizing.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(organizing.metadata["organized_folder"]["category"], "亚洲电影")
+            self.assertFalse((direct_dir / "movie.strm").exists())
+            self.assertEqual(recognizing.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(recognizing.metadata["category"], "亚洲电影")
+            self.assertEqual(self.telegram.messages, [])
 
     def test_moved_stage_merges_own_share_strm_folder_into_category_library(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -553,6 +809,37 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["source_path"], str(bridge.safe_resolve(source)))
             self.assertEqual(result.metadata["category"], "华语电影")
             self.assertEqual(len(self.telegram.messages), 1)
+
+    def test_moved_stage_keeps_authoritative_cms_category_even_when_same_tmdb_exists_elsewhere(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            asia_root = Path(tmp) / "library" / "asia"
+            western_root = Path(tmp) / "library" / "western"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(
+                    source_roots=[],
+                    library_roots={"亚洲电影": asia_root, "欧美电影": western_root},
+                ),
+            )
+            row = self._self_share_row(title="W-无声-2020-[tmdb=606740]", category="亚洲电影", tmdb_id="606740")
+            source = self.config.strm_root / row["own_share_file_name"]
+            asia_dest = asia_root / row["own_share_file_name"]
+            western_dest = western_root / row["own_share_file_name"]
+            self._write_strm(source, content="http://cms/s/owncode_ownpwd_1.mkv")
+            self._write_strm(western_dest, content="http://cms/d/direct-link/movie.mkv")
+            task = self._claim_task("abc", "1234", TaskStage.MOVED, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            moved = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertFalse(source.exists())
+            self.assertTrue(asia_dest.exists())
+            self.assertTrue(western_dest.exists())
+            self.assertIn("/s/owncode_ownpwd_", (asia_dest / "movie.strm").read_text(encoding="utf-8"))
+            self.assertIn("/d/", (western_dest / "movie.strm").read_text(encoding="utf-8"))
+            self.assertEqual(moved["category_final"], "亚洲电影")
+            self.assertEqual(result.metadata["category"], "亚洲电影")
 
     def test_moved_stage_reuses_persisted_moved_row_when_dest_strm_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -582,6 +869,39 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["category"], "华语电影")
             self.assertFalse(source.exists())
             self.assertEqual(self.telegram.messages, [])
+
+    def test_moved_stage_requests_emby_refresh_for_destination_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            library_root = Path(tmp) / "library" / "movies"
+            emby = FakeEmby()
+            workflow = self._workflow(
+                tmp,
+                emby=emby,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"华语电影": library_root}),
+            )
+            row = self._self_share_row()
+            source = self.config.strm_root / row["own_share_file_name"]
+            self._write_strm(source)
+            task = self._claim_task("abc", "1234", TaskStage.MOVED, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            again = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.MOVED,
+                {
+                    "submission_id": row["id"],
+                    "emby_refresh_requested": True,
+                    "dest_path": result.metadata["dest_path"],
+                },
+                row["id"],
+            )
+            workflow.run_stage(again)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(emby.refreshed_paths, [result.metadata["dest_path"]])
+            self.assertTrue(result.metadata["emby_refresh_requested"])
+            self.assertEqual(result.metadata["emby_refresh_library"], "电影库")
 
     def test_moved_stage_fails_when_source_folder_tmdb_mismatches_recognition(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -644,11 +964,13 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             emby = FakeEmby()
             workflow = self._workflow(tmp, emby=emby)
             row = self._self_share_row()
+            dest = Path(tmp) / "library" / "movies" / "S-双喜-2025-[tmdb=123456]"
+            self._write_strm(dest)
             row = self.submissions.update_move(
                 int(row["id"]),
                 "moved",
                 source_path=str(self.config.strm_root / row["own_share_file_name"]),
-                dest_path="/library/movies/S-双喜-2025-[tmdb=123456]",
+                dest_path=str(dest),
                 category_final="华语电影",
             ) or row
             task = self._claim_task("abc", "1234", TaskStage.EMBY_CONFIRMED, {"submission_id": row["id"]}, row["id"])
@@ -657,7 +979,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             emby.items_by_tmdb["123456"] = {
                 "Id": "emby-item",
                 "Name": "双喜",
-                "Path": "/library/movies/S-双喜-2025-[tmdb=123456]",
+                "Path": str(dest / "movie.strm"),
                 "ParentId": "parent-id",
                 "LibraryName": "电影库",
             }
@@ -665,12 +987,110 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             stored = self.submissions.find_by_id(int(row["id"]))
 
             self.assertEqual(waiting.outcome, StageOutcome.DEFER)
+            self.assertEqual(waiting.delay_seconds, 5)
             self.assertEqual(confirmed.outcome, StageOutcome.COMPLETE)
             self.assertEqual(stored["emby_status"], "confirmed")
             self.assertEqual(stored["emby_item_id"], "emby-item")
             self.assertEqual(stored["emby_parent"], "电影库")
             self.assertEqual(confirmed.metadata["library"], "电影库")
             self.assertEqual(stored["cleanup_status"], None)
+
+
+    def test_emby_confirmed_stage_restores_missing_dest_after_cms_delete_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            emby = FakeEmby()
+            library_root = Path(tmp) / "library" / "movies"
+            workflow = self._workflow(
+                tmp,
+                emby=emby,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"华语电影": library_root}, stable_seconds=0),
+            )
+            row = self._self_share_row()
+            dest = library_root / row["own_share_file_name"]
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(self.config.strm_root / row["own_share_file_name"]),
+                dest_path=str(dest),
+                category_final="华语电影",
+            ) or row
+            task = self._claim_task("abc", "1234", TaskStage.EMBY_CONFIRMED, {"submission_id": row["id"]}, row["id"])
+
+            first = workflow.run_stage(task)
+            second = workflow.run_stage(task)
+            source = self.config.strm_root / row["own_share_file_name"]
+            self._write_strm(source)
+            restored = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(first.outcome, StageOutcome.DEFER)
+            self.assertEqual(second.outcome, StageOutcome.DEFER)
+            self.assertEqual(self.cms.share_sync_calls, [("owncode", "ownpwd", "0", "/media/share")])
+            self.assertEqual(stored["workflow_phase"], "restore_share_sync_submitted")
+            self.assertEqual(stored["share_sync_status"], "restore_submitted")
+            self.assertEqual(restored.outcome, StageOutcome.DEFER)
+            self.assertTrue((dest / "movie.strm").exists())
+            self.assertFalse(source.exists())
+
+    def test_emby_confirmed_stage_revalidates_stored_confirmation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            emby = FakeEmby()
+            workflow = self._workflow(tmp, emby=emby)
+            row = self._self_share_row()
+            dest = Path(tmp) / "library" / "movies" / "S-双喜-2025-[tmdb=123456]"
+            self._write_strm(dest)
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(self.config.strm_root / row["own_share_file_name"]),
+                dest_path=str(dest),
+                category_final="华语电影",
+            ) or row
+            row = self.submissions.update_emby(
+                int(row["id"]),
+                "confirmed",
+                item_id="old-item",
+                title="双喜",
+                path=str(dest / "movie.strm"),
+                parent="电影库",
+            ) or row
+            task = self._claim_task("abc", "1234", TaskStage.EMBY_CONFIRMED, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(stored["emby_status"], "pending")
+            self.assertIn("等待 Emby 确认", result.message)
+
+    def test_cleaned_stage_revalidates_missing_dest_before_reporting_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            emby = FakeEmby()
+            library_root = Path(tmp) / "library" / "movies"
+            workflow = self._workflow(
+                tmp,
+                emby=emby,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"华语电影": library_root}, stable_seconds=0),
+                cleanup_client=FakeCleanupClient(),
+            )
+            row = self._self_share_row()
+            dest = library_root / row["own_share_file_name"]
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(self.config.strm_root / row["own_share_file_name"]),
+                dest_path=str(dest),
+                category_final="华语电影",
+            ) or row
+            row = self.submissions.update_emby(int(row["id"]), "confirmed", item_id="old-item", path=str(dest / "movie.strm")) or row
+            row = self.submissions.update_cleanup(int(row["id"]), "deleted", file_id="folder-id") or row
+            task = self._claim_task("abc", "1234", TaskStage.CLEANED, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIn("目标 STRM 被 CMS 同步删除", result.message)
+            self.assertEqual(self.cms.share_sync_calls, [("owncode", "ownpwd", "0", "/media/share")])
 
     def test_emby_confirmed_stage_defers_same_tmdb_match_outside_moved_dest_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -679,6 +1099,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             row = self._self_share_row()
             dest_a = Path(tmp) / "library" / "A" / "S-双喜-2025-[tmdb=123456]"
             dest_b = Path(tmp) / "library" / "B" / "S-双喜-2025-[tmdb=123456]"
+            self._write_strm(dest_a)
             row = self.submissions.update_move(
                 int(row["id"]),
                 "moved",
@@ -720,6 +1141,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             row = self._self_share_row()
             dest_a = Path(tmp) / "library" / "A" / "S-双喜-2025-[tmdb=123456]"
             dest_b = Path(tmp) / "library" / "B" / "S-双喜-2025-[tmdb=123456]"
+            self._write_strm(dest_a)
             row = self.submissions.update_move(
                 int(row["id"]),
                 "moved",
@@ -759,11 +1181,13 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             cleanup = FakeCleanupClient()
             workflow = self._workflow(tmp, cleanup_client=cleanup)
             row = self._self_share_row()
+            dest = Path(tmp) / "library" / "dest"
+            self._write_strm(dest)
             row = self.submissions.update_move(
                 int(row["id"]),
                 "moved",
                 source_path="/share/source",
-                dest_path="/library/dest",
+                dest_path=str(dest),
                 category_final="华语电影",
             ) or row
             task = self._claim_task("abc", "1234", TaskStage.CLEANED, {"submission_id": row["id"]}, row["id"])
@@ -782,11 +1206,13 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp, cleanup_client=None)
             row = self._self_share_row()
+            dest = Path(tmp) / "library" / "dest"
+            self._write_strm(dest)
             row = self.submissions.update_move(
                 int(row["id"]),
                 "moved",
                 source_path="/share/source",
-                dest_path="/library/dest",
+                dest_path=str(dest),
                 category_final="华语电影",
             ) or row
             row = self.submissions.update_emby(int(row["id"]), "confirmed") or row
@@ -805,11 +1231,13 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp, cleanup_client=None)
             row = self._self_share_row()
+            dest = Path(tmp) / "library" / "dest"
+            self._write_strm(dest)
             row = self.submissions.update_move(
                 int(row["id"]),
                 "moved",
                 source_path="/share/source",
-                dest_path="/library/dest",
+                dest_path=str(dest),
                 category_final="华语电影",
             ) or row
             row = self.submissions.update_emby(int(row["id"]), "confirmed") or row
@@ -835,11 +1263,13 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             cleanup = FakeCleanupClient()
             workflow = self._workflow(tmp, cleanup_client=cleanup)
             row = self._self_share_row()
+            dest = Path(tmp) / "library" / "dest"
+            self._write_strm(dest)
             row = self.submissions.update_move(
                 int(row["id"]),
                 "moved",
                 source_path="/share/source",
-                dest_path="/library/dest",
+                dest_path=str(dest),
                 category_final="华语电影",
             ) or row
             row = self.submissions.update_emby(int(row["id"]), "confirmed") or row

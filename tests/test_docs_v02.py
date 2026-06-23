@@ -45,17 +45,18 @@ class V02DocsTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("在 `TASK_ENGINE_ENABLED=true` 的 TaskRunner 路径中", readme)
-        self.assertIn("只会在 STRM 已移动且 Emby 确认入库后删除", readme)
+        self.assertIn("自己的永久分享创建成功后立即删除 115 转存源", readme)
+        self.assertIn("后续 STRM 只使用自己的分享链接生成", readme)
         self.assertIn("旧 SubmissionStore + 轮询路径是兼容回滚路径", readme)
-        self.assertNotIn("自有分享创建成功后删除 115 转存源", readme)
+        self.assertNotIn("只会在 STRM 已移动且 Emby 确认入库后删除", readme)
 
     def test_env_example_scopes_cleanup_safety_to_task_engine(self):
         env = (ROOT / ".env.example").read_text(encoding="utf-8")
 
         self.assertIn("TASK_ENGINE_ENABLED=true", env)
-        self.assertIn("Task engine path cleans only after own share, STRM move/library, and Emby confirmation", env)
+        self.assertIn("Task engine path deletes the 115 source immediately after your own permanent share is created", env)
         self.assertIn("legacy SubmissionStore path keeps compatibility behavior", env)
-        self.assertNotIn("cleanup runs after your own permanent 115 share is created", env)
+        self.assertNotIn("Task engine path cleans only after own share, STRM move/library, and Emby confirmation", env)
 
 
 if __name__ == "__main__":

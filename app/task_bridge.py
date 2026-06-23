@@ -29,6 +29,33 @@ def _metadata(row: dict[str, Any], extra: dict[str, Any]) -> dict[str, str]:
     return {"title": title, "tmdb_id": tmdb_id, "category": category}
 
 
+def _runtime_metadata(row: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "own_share_file_id",
+        "own_share_file_name",
+        "own_share_code",
+        "own_share_receive_code",
+        "own_share_url",
+        "share_sync_status",
+        "source_path",
+        "dest_path",
+        "category_final",
+        "move_status",
+        "move_error",
+        "emby_status",
+        "emby_item_id",
+        "emby_title",
+        "emby_path",
+        "emby_parent",
+        "cleanup_status",
+        "cleanup_file_id",
+        "cleanup_error",
+    )
+    metadata = {key: row.get(key) for key in keys if row.get(key) not in (None, "")}
+    metadata.update({str(key): value for key, value in extra.items() if value not in (None, "")})
+    return metadata
+
+
 def _last_event_matches(store: TaskStore, task_id: int, stage: TaskStage, status: TaskStatus, message: str, error_summary: str) -> bool:
     events = store.list_events(task_id)
     if not events:
@@ -87,6 +114,8 @@ def record_submission_event(
         error_summary=error_summary,
         error_detail=_text(metadata.get("error_detail")),
         increment_retry=bool(metadata.get("increment_retry", False)),
+        submission_id=int(row["id"]) if row.get("id") not in (None, "") else None,
+        metadata_patch=_runtime_metadata(row, metadata),
     )
 
 

@@ -54,6 +54,43 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.next_run_at, 35.0)
             self.assertEqual(updated.claimed_by, "")
 
+    def test_repeated_defer_uses_backoff_without_growing_event_log(self):
+        current_time = 1.0
+
+        def now():
+            return current_time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=current_time)
+            runner = TaskRunner(
+                store,
+                FakeWorkflow([StageResult.defer("等待 CMS 整理", delay_seconds=15) for _ in range(10)]),
+                worker_id="worker-1",
+                now=now,
+            )
+
+            for _ in range(4):
+                self.assertTrue(runner.run_once())
+                current_time = store.find_task(task.id).next_run_at
+            self.assertEqual(store.find_task(task.id).next_run_at, 61.0)
+
+            self.assertTrue(runner.run_once())
+            fifth = store.find_task(task.id)
+            current_time = fifth.next_run_at
+            self.assertEqual(fifth.next_run_at, 91.0)
+
+            for _ in range(5):
+                self.assertTrue(runner.run_once())
+                current_time = store.find_task(task.id).next_run_at
+            tenth = store.find_task(task.id)
+            events = store.list_events(task.id)
+
+            self.assertEqual(tenth.next_run_at, 361.0)
+            self.assertEqual(tenth.metadata["_defer_count"], 10)
+            self.assertEqual(len([event for event in events if event["message"] == "等待 CMS 整理"]), 1)
+
     def test_run_once_records_needs_action_on_current_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

@@ -89,6 +89,27 @@ class OpenAIFallbackTests(unittest.TestCase):
         self.assertIs(should_prompt, True)
         self.assertEqual(enriched, original)
 
+    def test_openai_indian_movie_suggestion_maps_to_user_western_bucket(self):
+        fallback = FakeOpenAI({
+            "category": "亚洲电影",
+            "confidence": 0.99,
+            "media_type": "movie",
+            "title": "D-调音师",
+            "tmdb_id": "534780",
+            "reason": "对应印度电影《Andhadhun》，印度影片应归入亚洲电影。",
+        })
+
+        enriched, should_prompt = bridge.apply_openai_category_fallback(
+            uncertain_recognition(),
+            "Andhadhun.2018.1080p.Blu-ray Remux.DTS-HD 5.1.H.264.mkv",
+            fallback,
+        )
+
+        self.assertIs(should_prompt, False)
+        self.assertEqual(enriched["category"], "欧美电影")
+        self.assertEqual(enriched["category_suggestion"], "欧美电影")
+        self.assertEqual(enriched["type"], "movie")
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -188,6 +209,51 @@ class OpenAIRequestHeaderTests(unittest.TestCase):
 
 
 class TmdbHintResolutionTests(unittest.TestCase):
+    def test_tmdb_movie_uses_default_language_not_localized_chinese_title_for_region(self):
+        self.assertEqual(bridge.infer_region_category("movie", "蜘蛛侠2", "英语"), "欧美电影")
+
+    def test_tmdb_movie_maps_korean_native_default_language_to_asian_movie(self):
+        self.assertEqual(bridge.infer_region_category("movie", "从邪恶中拯救我", "한국어/조선말"), "亚洲电影")
+
+    def test_tmdb_movie_maps_hindi_to_user_western_bucket(self):
+        self.assertEqual(bridge.infer_region_category("movie", "调音师", "hi"), "欧美电影")
+
+    def test_tmdb_hint_resolves_korean_movie_as_asian_movie(self):
+        class FakeTmdb:
+            enabled = True
+            def lookup(self, tmdb_id, media_type, share_name):
+                if media_type == "movie":
+                    return {"ok": True, "title": "从邪恶中拯救我", "type": "movie", "tmdb_id": tmdb_id, "language": "한국어/조선말"}
+                return {"ok": False}
+
+        resolved, should_prompt = bridge.apply_tmdb_hint_resolution(
+            {"ok": False, "title": "", "type": "", "category": "", "tmdb_id": "581526"},
+            "从邪恶中拯救我 2020 加长版 韩国 黄政民 李政宰 蓝光原盘REMUX DIY原盘中字",
+            FakeTmdb(),
+        )
+
+        self.assertFalse(should_prompt)
+        self.assertEqual(resolved["category"], "亚洲电影")
+        self.assertEqual(resolved["tmdb_id"], "581526")
+
+    def test_tmdb_hint_resolves_english_movie_with_chinese_localized_title_as_western(self):
+        class FakeTmdb:
+            enabled = True
+            def lookup(self, tmdb_id, media_type, share_name):
+                if media_type == "movie":
+                    return {"ok": True, "title": "蜘蛛侠2", "type": "movie", "tmdb_id": tmdb_id, "language": "英语"}
+                return {"ok": False}
+
+        resolved, should_prompt = bridge.apply_tmdb_hint_resolution(
+            {"ok": False, "title": "", "type": "", "category": "", "tmdb_id": "558"},
+            "蜘蛛侠2.剧场版.Spider-Man.2.2004.mkv",
+            FakeTmdb(),
+        )
+
+        self.assertFalse(should_prompt)
+        self.assertEqual(resolved["category"], "欧美电影")
+        self.assertEqual(resolved["tmdb_id"], "558")
+
     def test_extract_tmdb_search_query_prefers_release_english_series_title(self):
         share_name = "[龙之家族.第二季].House.of.the.Dragon.S02.2024.UHD.BluRay.Remux.2160p.HEVC.DoVi.HDR.TrueHD7.1.Atmos-CMCT等2个文件(夹)"
 

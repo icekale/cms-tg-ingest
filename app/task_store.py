@@ -169,13 +169,33 @@ class TaskStore:
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute("SELECT metadata_json FROM tasks WHERE id = ?", (task_id,)).fetchone()
             merged_metadata = self._merge_metadata(current["metadata_json"] if current else "{}", metadata_patch)
-            conn.execute(
+            last_event = conn.execute(
                 """
-                INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                SELECT stage, status, message, error_type, error_detail
+                FROM task_events
+                WHERE task_id = ?
+                ORDER BY id DESC
+                LIMIT 1
                 """,
-                (task_id, stage.value, status.value, message, error_type, error_detail, now),
+                (task_id,),
+            ).fetchone()
+            duplicate_running_event = bool(
+                status == TaskStatus.RUNNING
+                and last_event
+                and last_event["stage"] == stage.value
+                and last_event["status"] == status.value
+                and last_event["message"] == message
+                and last_event["error_type"] == error_type
+                and last_event["error_detail"] == error_detail
             )
+            if not duplicate_running_event:
+                conn.execute(
+                    """
+                    INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (task_id, stage.value, status.value, message, error_type, error_detail, now),
+                )
             updates = [
                 "current_stage = ?",
                 "status = ?",
@@ -227,6 +247,30 @@ class TaskStore:
             TaskStatus.PENDING,
             message,
             next_run_at=time.time() if next_run_at is None else float(next_run_at),
+            clear_claim=True,
+        )
+
+    def reprocess_task(
+        self,
+        task_id: int,
+        message: str = "从头重跑已入队",
+        next_run_at: float = 0,
+    ) -> TaskSnapshot:
+        task = self.find_task(task_id)
+        if task is None:
+            raise KeyError(f"task not found: {task_id}")
+        return self.record_event(
+            task_id,
+            TaskStage.RECEIVED,
+            TaskStatus.PENDING,
+            message,
+            increment_retry=True,
+            metadata_patch={
+                "retry_from_stage": task.current_stage.value,
+                "retry_stage": TaskStage.RECEIVED.value,
+                "force_reprocess": True,
+            },
+            next_run_at=next_run_at,
             clear_claim=True,
         )
 

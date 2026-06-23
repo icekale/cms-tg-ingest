@@ -44,6 +44,12 @@ class BridgeV02IntegrationTests(unittest.TestCase):
 
             self.assertTrue(cfg.task_engine_enabled)
 
+    def test_self_share_retry_default_is_fast_for_task_engine(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):
+            cfg = bridge.Config.from_env()
+
+            self.assertEqual(cfg.self_share_auto_organize_retry_seconds, 15)
+
     def test_create_task_store_uses_task_db_path(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):
             cfg = bridge.Config.from_env()
@@ -255,6 +261,7 @@ class BridgeV02IntegrationTests(unittest.TestCase):
                 cfg = bridge.Config.from_env()
                 task_runner_started = []
                 repair_calls = []
+                maintenance_calls = []
                 p115 = object()
 
                 class OneUpdateTelegram:
@@ -286,6 +293,7 @@ class BridgeV02IntegrationTests(unittest.TestCase):
                      patch.object(bridge, "P115WebClient", lambda *args, **kwargs: p115), \
                      patch.object(bridge, "maybe_start_web_server", lambda config, task_store: None), \
                      patch.object(bridge, "start_status_repair_loop", lambda *args, **kwargs: repair_calls.append((args, kwargs))), \
+                     patch.object(bridge, "start_self_share_maintenance_loop", lambda *args, **kwargs: maintenance_calls.append((args, kwargs)), create=True), \
                      patch.object(bridge, "write_metrics_snapshot", lambda *args, **kwargs: None), \
                      patch.object(bridge, "normalize_emby_parents", lambda *args, **kwargs: 0), \
                      patch.object(bridge, "TaskRunner", FakeTaskRunner):
@@ -294,6 +302,8 @@ class BridgeV02IntegrationTests(unittest.TestCase):
 
                 self.assertEqual(task_runner_started, [True])
                 self.assertEqual(repair_calls, [])
+                self.assertEqual(len(maintenance_calls), 1)
+                self.assertEqual(maintenance_calls[0][1]["interval_seconds"], 15)
 
     def test_run_forever_starts_status_repair_when_task_engine_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -506,27 +516,91 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             telegram = FakeTelegram()
             p115 = FakeP115Receive()
 
-            bridge.handle_update(
-                self.update("https://115cdn.com/s/abc?password=1234"),
-                cms,
-                telegram,
-                "464100862",
-                submission_store,
-                poll_status=False,
-                task_store=task_store,
-                self_share_workflow=object(),
-                cleanup_client=p115,
-                self_share_receive_cid="pending-cid",
-                task_engine_enabled=True,
-            )
+            poll_calls = []
+            with patch.object(bridge, "start_status_poll", lambda *args, **kwargs: poll_calls.append((args, kwargs))):
+                bridge.handle_update(
+                    self.update("https://115cdn.com/s/abc?password=1234"),
+                    cms,
+                    telegram,
+                    "464100862",
+                    submission_store,
+                    poll_status=True,
+                    task_store=task_store,
+                    self_share_workflow=object(),
+                    cleanup_client=p115,
+                    self_share_receive_cid="pending-cid",
+                    task_engine_enabled=True,
+                )
 
             self.assertEqual(cms.submitted, [])
             self.assertEqual(p115.received, [])
+            self.assertEqual(poll_calls, [])
             tasks = task_store.list_recent_tasks(limit=10)
             self.assertEqual(len(tasks), 1)
             self.assertEqual(tasks[0].current_stage, TaskStage.RECEIVED)
             self.assertEqual(tasks[0].status, TaskStatus.PENDING)
             self.assertIn("任务", telegram.messages[-1][1])
+
+    def test_task_engine_self_share_without_taskstore_does_not_fallback_to_polling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            cms = FakeCmsSubmit()
+            telegram = FakeTelegram()
+            p115 = FakeP115Receive()
+            poll_calls = []
+
+            with patch.object(bridge, "start_status_poll", lambda *args, **kwargs: poll_calls.append((args, kwargs))):
+                bridge.handle_update(
+                    self.update("https://115cdn.com/s/abc?password=1234"),
+                    cms,
+                    telegram,
+                    "464100862",
+                    submission_store,
+                    poll_status=True,
+                    task_store=None,
+                    self_share_workflow=object(),
+                    cleanup_client=p115,
+                    self_share_receive_cid="pending-cid",
+                    task_engine_enabled=True,
+                )
+
+            row = submission_store.find_by_key(bridge.ShareKey("abc", "1234"))
+            self.assertEqual(cms.submitted, [])
+            self.assertEqual(p115.received, [])
+            self.assertEqual(poll_calls, [])
+            self.assertEqual(row["status"], "failed")
+            self.assertIn("TaskStore", row["last_error"])
+            self.assertIn("失败", telegram.messages[-1][1])
+
+    def test_task_engine_disabled_self_share_still_allows_legacy_polling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            cms = FakeCmsSubmit()
+            telegram = FakeTelegram()
+            p115 = FakeP115Receive()
+            poll_calls = []
+
+            with patch.object(bridge, "start_status_poll", lambda *args, **kwargs: poll_calls.append((args, kwargs))):
+                bridge.handle_update(
+                    self.update("https://115cdn.com/s/abc?password=1234"),
+                    cms,
+                    telegram,
+                    "464100862",
+                    submission_store,
+                    poll_status=True,
+                    task_store=None,
+                    self_share_workflow=object(),
+                    cleanup_client=p115,
+                    self_share_receive_cid="pending-cid",
+                    task_engine_enabled=False,
+                )
+
+            row = submission_store.find_by_key(bridge.ShareKey("abc", "1234"))
+            self.assertEqual(cms.submitted, [])
+            self.assertEqual(p115.received, [("abc", "1234", "pending-cid")])
+            self.assertEqual(len(poll_calls), 1)
+            self.assertEqual(row["status"], "received")
+            self.assertIn("已接收", telegram.messages[-1][1])
 
     def test_task_engine_duplicate_running_link_reports_current_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -555,6 +629,327 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(cms.submitted, [])
             self.assertEqual(p115.received, [])
             self.assertIn("CMS 整理", telegram.messages[-1][1])
+
+    def test_task_engine_duplicate_completed_link_requeues_when_dest_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
+            task_store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "任务完成",
+                metadata_patch={"dest_path": str(Path(tmp) / "missing" / "movie-folder")},
+            )
+            cms = FakeCmsSubmit()
+            telegram = FakeTelegram()
+            p115 = FakeP115Receive()
+
+            bridge.handle_update(
+                self.update("https://115cdn.com/s/abc?password=1234"),
+                cms,
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                cleanup_client=p115,
+                self_share_receive_cid="pending-cid",
+                task_engine_enabled=True,
+            )
+
+            updated = task_store.find_task(task.id)
+            claimed = task_store.claim_next_runnable("worker", now=9999999999.0)
+            self.assertEqual(cms.submitted, [])
+            self.assertEqual(p115.received, [])
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.current_stage, TaskStage.EMBY_CONFIRMED)
+            self.assertEqual(claimed.id, task.id)
+            self.assertNotIn("任务已完成", telegram.messages[-1][1])
+            self.assertIn("重新检查", telegram.messages[-1][1])
+
+
+    def test_status_command_prefers_taskstore_when_authoritative_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store.upsert_submission(
+                bridge.ShareKey("old", ""),
+                "https://115cdn.com/s/old",
+                "submitted",
+                title="旧兼容记录",
+            )
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
+            task_store.record_event(
+                task.id,
+                TaskStage.STRM_READY,
+                TaskStatus.FAILED,
+                "等待自有分享 STRM 源目录生成",
+                title="新任务电影",
+                error_summary="未找到 STRM",
+            )
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("/status"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                task_engine_enabled=True,
+            )
+
+            message = telegram.messages[-1][1]
+            self.assertIn("TaskStore 最近任务", message)
+            self.assertIn("#1 新任务电影", message)
+            self.assertIn("STRM 生成", message)
+            self.assertIn("failed", message)
+            self.assertIn("未找到 STRM", message)
+            self.assertNotIn("旧兼容记录", message)
+
+    def test_history_command_uses_taskstore_then_submission_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store.upsert_submission(
+                bridge.ShareKey("old", ""),
+                "https://115cdn.com/s/old",
+                "submitted",
+                title="旧兼容记录",
+            )
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("abc", "", "https://115cdn.com/s/abc", chat_id="464100862")
+            task_store.record_event(task.id, TaskStage.MOVED, TaskStatus.SUCCEEDED, "已移动", title="新任务电影")
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("/history"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                task_engine_enabled=True,
+            )
+            taskstore_message = telegram.messages[-1][1]
+
+            empty_task_store = TaskStore(Path(tmp) / "empty-tasks.db")
+            bridge.handle_update(
+                self.update("/history"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=empty_task_store,
+                task_engine_enabled=True,
+            )
+            fallback_message = telegram.messages[-1][1]
+
+            self.assertIn("TaskStore 最近历史", taskstore_message)
+            self.assertIn("新任务电影", taskstore_message)
+            self.assertNotIn("旧兼容记录", taskstore_message)
+            self.assertIn("最近历史", fallback_message)
+            self.assertIn("旧兼容记录", fallback_message)
+
+
+    def test_status_command_includes_task_action_buttons(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
+            task_store.record_event(
+                task.id,
+                TaskStage.STRM_READY,
+                TaskStatus.FAILED,
+                "STRM missing",
+                title="按钮电影",
+                error_summary="未找到 STRM",
+            )
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("/status"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                task_engine_enabled=True,
+            )
+
+            reply_markup = telegram.messages[-1][2]
+            buttons = [button for row in reply_markup["inline_keyboard"] for button in row]
+            self.assertIn({"text": "详情 #1", "callback_data": "task_detail:1"}, buttons)
+            self.assertIn({"text": "重试 #1", "callback_data": "task_retry:1"}, buttons)
+            self.assertIn({"text": "查 Emby #1", "callback_data": "task_emby:1"}, buttons)
+            self.assertIn({"text": "恢复 STRM #1", "callback_data": "task_restore:1"}, buttons)
+            self.assertIn({"text": "从头重跑 #1", "callback_data": "task_reprocess:1"}, buttons)
+
+    def test_task_retry_callback_requeues_failed_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
+            task_store.record_event(task.id, TaskStage.STRM_READY, TaskStatus.FAILED, "STRM missing", error_summary="未找到 STRM")
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                {
+                    "callback_query": {
+                        "id": "task-retry-1",
+                        "from": {"id": 464100862},
+                        "message": {"chat": {"id": 464100862}},
+                        "data": f"task_retry:{task.id}",
+                    }
+                },
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                task_engine_enabled=True,
+            )
+
+            updated = task_store.find_task(task.id)
+            claimed = task_store.claim_next_runnable("worker", now=0)
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.current_stage, TaskStage.STRM_READY)
+            self.assertEqual(updated.retry_count, 1)
+            self.assertEqual(claimed.id, task.id)
+            self.assertEqual(telegram.answers[-1][1], "已重新入队")
+            self.assertIn("已重新入队", telegram.messages[-1][1])
+
+    def test_task_reprocess_callback_requeues_from_received_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
+            task_store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "cleanup complete",
+                title="重跑电影",
+                metadata_patch={"own_share_code": "ownabc"},
+            )
+            task_store.enqueue_task(task.id, TaskStage.CLEANED, next_run_at=1.0)
+            task_store.claim_next_runnable("stale-worker", now=1.0)
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                {
+                    "callback_query": {
+                        "id": "task-reprocess-1",
+                        "from": {"id": 464100862},
+                        "message": {"chat": {"id": 464100862}},
+                        "data": f"task_reprocess:{task.id}",
+                    }
+                },
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                task_engine_enabled=True,
+            )
+
+            updated = task_store.find_task(task.id)
+            claimed = task_store.claim_next_runnable("worker", now=0)
+            events = task_store.list_events(task.id)
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(updated.next_run_at, 0)
+            self.assertEqual(updated.claimed_by, "")
+            self.assertEqual(updated.retry_count, 1)
+            self.assertEqual(updated.metadata["retry_from_stage"], TaskStage.CLEANED.value)
+            self.assertEqual(updated.metadata["retry_stage"], TaskStage.RECEIVED.value)
+            self.assertTrue(updated.metadata["force_reprocess"])
+            self.assertEqual(claimed.id, task.id)
+            self.assertEqual(claimed.current_stage, TaskStage.RECEIVED)
+            self.assertIn("TG 按钮触发从头重跑", [event["message"] for event in events])
+            self.assertEqual(telegram.answers[-1][1], "已从头重跑")
+            self.assertIn("已从头重跑", telegram.messages[-1][1])
+
+    def test_task_emby_and_restore_callbacks_enqueue_target_stages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            emby_task = task_store.upsert_task("emby", "", "https://115cdn.com/s/emby", chat_id="464100862")
+            task_store.record_event(emby_task.id, TaskStage.MOVED, TaskStatus.SUCCEEDED, "moved")
+            restore_task = task_store.upsert_task("restore", "", "https://115cdn.com/s/restore", chat_id="464100862")
+            task_store.record_event(restore_task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done", metadata_patch={"dest_path": str(Path(tmp) / "missing")})
+            telegram = FakeTelegram()
+
+            for callback_id, data in (("emby", f"task_emby:{emby_task.id}"), ("restore", f"task_restore:{restore_task.id}")):
+                bridge.handle_update(
+                    {
+                        "callback_query": {
+                            "id": callback_id,
+                            "from": {"id": 464100862},
+                            "message": {"chat": {"id": 464100862}},
+                            "data": data,
+                        }
+                    },
+                    FakeCmsSubmit(),
+                    telegram,
+                    "464100862",
+                    submission_store,
+                    poll_status=False,
+                    task_store=task_store,
+                    task_engine_enabled=True,
+                )
+
+            updated_emby = task_store.find_task(emby_task.id)
+            updated_restore = task_store.find_task(restore_task.id)
+            self.assertEqual(updated_emby.status, TaskStatus.PENDING)
+            self.assertEqual(updated_emby.current_stage, TaskStage.EMBY_CONFIRMED)
+            self.assertEqual(updated_restore.status, TaskStatus.PENDING)
+            self.assertEqual(updated_restore.current_stage, TaskStage.EMBY_CONFIRMED)
+            self.assertIn("已加入 Emby 检查队列", telegram.messages[-2][1])
+            self.assertIn("已加入 STRM 恢复队列", telegram.messages[-1][1])
+
+    def test_health_command_includes_taskstore_queue_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            submission_store = bridge.SubmissionStore(root / "submissions.db")
+            task_store = TaskStore(root / "tasks.db")
+            pending = task_store.upsert_task("pending", "", "https://115cdn.com/s/pending")
+            task_store.enqueue_task(pending.id, TaskStage.RECEIVED, next_run_at=0)
+            running = task_store.upsert_task("running", "", "https://115cdn.com/s/running")
+            task_store.enqueue_task(running.id, TaskStage.ORGANIZING, next_run_at=0)
+            task_store.claim_next_runnable("worker", now=0)
+            failed = task_store.upsert_task("failed", "", "https://115cdn.com/s/failed")
+            task_store.record_event(failed.id, TaskStage.STRM_READY, TaskStatus.FAILED, "STRM missing", title="失败电影", error_summary="未找到 STRM")
+            move_config = bridge.MoveConfig(source_roots=[root], library_roots={"测试": root}, stable_seconds=0)
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("/health"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                task_engine_enabled=True,
+                move_config=move_config,
+            )
+
+            message = telegram.messages[-1][1]
+            self.assertIn("TaskEngine: ENABLED", message)
+            self.assertIn("TaskStore最近任务: 3", message)
+            self.assertIn("待执行: 1", message)
+            self.assertIn("运行中: 1", message)
+            self.assertIn("失败/需处理: 1", message)
+            self.assertIn("最近问题: #3 失败电影", message)
 
     def test_category_callback_requeues_authoritative_recognizing_task(self):
         with tempfile.TemporaryDirectory() as tmp:

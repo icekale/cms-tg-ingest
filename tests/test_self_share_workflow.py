@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -11,6 +12,32 @@ spec.loader.exec_module(bridge)
 
 
 class P115WebClientTests(unittest.TestCase):
+    def test_requests_are_rate_limited_between_115_api_calls(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                return {"state": True, "data": []}
+
+        now = [100.0]
+        sleeps = []
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        client = bridge.P115WebClient(
+            "UID=1",
+            http=FakeHttp(),
+            timeout=3,
+            min_interval_seconds=2.0,
+            clock=lambda: now[0],
+            sleeper=fake_sleep,
+        )
+
+        client.search_files("first")
+        client.search_files("second")
+
+        self.assertEqual(sleeps, [2.0])
+
     def test_create_long_share_keeps_share_and_sets_permanent_duration(self):
         class FakeHttp:
             def __init__(self):
@@ -86,6 +113,212 @@ class OrganizedFolderSelectionTests(unittest.TestCase):
         self.assertEqual(selected["file_id"], "final")
         self.assertEqual(selected["file_name"], "G-高地战-2011-[tmdb=79553]")
 
+    def test_select_organized_folder_rejects_mismatched_tmdb_when_share_has_explicit_tmdb(self):
+        items = [
+            {"cid": "wrong", "n": "C-初恋了那么多年-2020-[tmdb=110493]", "pid": "tv_root", "tu": "200"},
+        ]
+
+        selected = bridge.select_organized_115_folder(
+            items,
+            {"title": "似是故人来", "tmdb_id": ""},
+            "似是故人来 (1993) {tmdb-1049}",
+            excluded_parent_ids=set(),
+        )
+
+        self.assertIsNone(selected)
+
+    def test_find_organized_folder_searches_short_chinese_title_from_quality_folder_name(self):
+        class FakeHttp:
+            def __init__(self):
+                self.queries = []
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                query = (params or {}).get("search_value", "")
+                self.queries.append(query)
+                if query == "蜘蛛侠":
+                    return {
+                        "state": True,
+                        "data": [
+                            {"cid": "target", "n": "Z-蜘蛛侠-2002-[tmdb=557]", "pid": "western_movie_root", "t": "1782033679"},
+                        ],
+                    }
+                return {"state": True, "data": []}
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        selected = client.find_organized_folder(
+            {"ok": False, "title": "", "tmdb_id": ""},
+            "蜘蛛侠 4K原盘REMUX [HDR] [国英双语] [内封简英双字]",
+            min_update_time=1782033600,
+        )
+
+        self.assertEqual(selected["file_id"], "target")
+        self.assertIn("蜘蛛侠", http.queries)
+
+    def test_find_organized_folder_searches_exact_tokens_before_tree_scan(self):
+        class FakeHttp:
+            def __init__(self):
+                self.scan_calls = 0
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                if url.endswith("/files") and not url.endswith("/files/search"):
+                    self.scan_calls += 1
+                    return {"state": True, "data": []}
+                query = (params or {}).get("search_value", "")
+                if query == "1049":
+                    return {
+                        "state": True,
+                        "data": [
+                            {
+                                "cid": "target",
+                                "n": "S-似是故人来-1993-[tmdb=1049]",
+                                "pid": "western-parent",
+                                "dp": "欧美电影",
+                                "t": "1782054787",
+                            },
+                            {
+                                "cid": "wrong",
+                                "n": "C-初恋了那么多年-2020-[tmdb=110493]",
+                                "pid": "tv-parent",
+                                "dp": "国产电视",
+                                "t": "1782054790",
+                            },
+                        ],
+                    }
+                return {"state": True, "data": []}
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        selected = client.find_organized_folder(
+            {"title": "似是故人来", "tmdb_id": ""},
+            "似是故人来 (1993) {tmdb-1049}",
+            scan_parent_ids={"exists-root"},
+        )
+
+        self.assertEqual(selected["file_id"], "target")
+        self.assertEqual(http.scan_calls, 0)
+
+    def test_find_organized_folder_falls_back_to_exists_tree_after_search_index_misses(self):
+        class FakeHttp:
+            def __init__(self):
+                self.file_cids = []
+                self.searches = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                params = params or {}
+                if url.endswith("/files"):
+                    cid = params.get("cid", "")
+                    self.file_cids.append(cid)
+                    tree = {
+                        "exists-root": [{"cid": "movie-root", "pid": "exists-root", "n": "电影"}],
+                        "movie-root": [{"cid": "western-root", "pid": "movie-root", "n": "欧美电影"}],
+                        "western-root": [
+                            {
+                                "cid": "target",
+                                "pid": "western-root",
+                                "n": "Z-蜘蛛侠-2002-[tmdb=557]",
+                                "t": "1782033679",
+                            }
+                        ],
+                    }
+                    return {"state": True, "data": tree.get(cid, [])}
+                if url.endswith("/files/search"):
+                    self.searches.append(params.get("search_value", ""))
+                    return {"state": True, "data": []}
+                return {"state": True, "data": []}
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        selected = client.find_organized_folder(
+            {"ok": False, "title": "", "tmdb_id": ""},
+            "蜘蛛侠 4K原盘REMUX [HDR] [国英双语] [内封简英双字]",
+            min_update_time=1782033600,
+            scan_parent_ids={"exists-root"},
+        )
+
+        self.assertEqual(selected["file_id"], "target")
+        self.assertEqual(selected["category"], "欧美电影")
+        self.assertEqual(http.file_cids, ["exists-root", "movie-root", "western-root", "target"])
+        self.assertEqual(http.searches, ["蜘蛛侠4k原盘remuxhdr国英双语内封简英双字", "蜘蛛侠"])
+
+    def test_find_organized_folder_uses_search_before_scan_fallback(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                params = dict(params or {})
+                self.calls.append((url, params))
+                if url.endswith("/files"):
+                    raise RuntimeError("HTTP 405 from https://webapi.115.com/files: Method Not Allowed")
+                if url.endswith("/files/search") and params.get("search_value") == "556509":
+                    return {
+                        "state": True,
+                        "data": [
+                            {"cid": "target", "n": "S-娑婆诃-2019-[tmdb=556509]", "pid": "asia-parent", "tu": "1782050000"},
+                        ],
+                    }
+                return {"state": True, "data": []}
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        selected = client.find_organized_folder(
+            {"tmdb_id": "556509", "title": "娑婆诃"},
+            "娑婆诃 (2019) {tmdb-556509}",
+            scan_parent_ids={"exists-root"},
+        )
+
+        self.assertEqual(selected["file_id"], "target")
+        self.assertFalse(any(call[0].endswith("/files") for call in http.calls))
+        self.assertTrue(any(call[0].endswith("/files/search") for call in http.calls))
+
+    def test_find_organized_folder_scans_four_level_cms_library_tree(self):
+        class FakeHttp:
+            def __init__(self):
+                self.file_cids = []
+                self.searches = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                params = params or {}
+                if url.endswith("/files"):
+                    cid = params.get("cid", "")
+                    self.file_cids.append(cid)
+                    tree = {
+                        "exists-root": [{"cid": "movie-root", "pid": "exists-root", "n": "Movie"}],
+                        "movie-root": [{"cid": "movie-type-root", "pid": "movie-root", "n": "电影"}],
+                        "movie-type-root": [{"cid": "asia-root", "pid": "movie-type-root", "n": "亚洲电影"}],
+                        "asia-root": [
+                            {
+                                "cid": "target",
+                                "pid": "asia-root",
+                                "n": "W-无声-2020-[tmdb=606740]",
+                                "t": "1782033679",
+                            }
+                        ],
+                    }
+                    return {"state": True, "data": tree.get(cid, [])}
+                if url.endswith("/files/search"):
+                    self.searches.append(params.get("search_value", ""))
+                    return {"state": True, "data": []}
+                return {"state": True, "data": []}
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        selected = client.find_organized_folder(
+            {"ok": True, "title": "无声", "tmdb_id": "606740"},
+            "无声 (2020)",
+            min_update_time=1782033600,
+            scan_parent_ids={"exists-root"},
+        )
+
+        self.assertEqual(selected["file_id"], "target")
+        self.assertEqual(selected["category"], "亚洲电影")
+        self.assertEqual(http.file_cids, ["exists-root", "movie-root", "movie-type-root", "asia-root"])
+        self.assertEqual(http.searches, ["606740", "无声", "无声2020"])
 
 
     def test_find_organized_folder_falls_back_to_recent_tmdb_year_folder(self):
@@ -775,6 +1008,19 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertEqual(selected.source_roots, [share_root])
             self.assertEqual(selected.library_roots, config.library_roots)
 
+    def test_self_share_move_config_caps_stability_wait_for_share_strm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            movie_root = root / "Movie"
+            share_source = share_root / "H-环太平洋-2013-[tmdb=68726]"
+            config = bridge.MoveConfig(source_roots=[root / "direct"], library_roots={"欧美电影": movie_root}, stable_seconds=30)
+            self_share = bridge.SelfShareConfig(enabled=True, strm_root=share_root)
+
+            selected = bridge.move_config_for_workflow_source(config, share_source, self_share)
+
+            self.assertEqual(selected.stable_seconds, 5)
+
     def test_merge_self_share_folder_rejects_direct_strm_before_copy(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1073,6 +1319,69 @@ if __name__ == "__main__":
     unittest.main()
 
 class P115FailureHandlingTests(unittest.TestCase):
+    def test_exact_self_share_folder_name_prevents_broad_sibling_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            sibling = share_root / "S-双喜-2025-[tmdb=123456]"
+            sibling.mkdir(parents=True)
+            (sibling / "movie.strm").write_text("http://cms/s/other_1212_file.mkv", encoding="utf-8")
+            row = {
+                "workflow_mode": "self_share_sync",
+                "own_share_file_name": "S-双喜-2025-[tmdb=654321]",
+            }
+
+            found = bridge.find_self_share_strm_source_dir(
+                bridge.SelfShareConfig(enabled=True, strm_root=share_root),
+                row,
+                {"title": "双喜", "tmdb_id": "123456"},
+                "双喜",
+            )
+
+            self.assertIsNone(found)
+
+    def test_maintenance_restore_skips_stale_completed_rows_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            movie_root = root / "Movie"
+            dest = movie_root / "Y-旧任务-2025-[tmdb=1054867]"
+            store = bridge.SubmissionStore(root / "submissions.db")
+            row = store.upsert_submission(bridge.ShareKey("oldshare", "pass"), "https://115cdn.com/s/oldshare?password=pass", "submitted", title="旧任务 (2025) {tmdb-1054867}")
+            store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_name=dest.name,
+                own_share_code="swswold",
+                own_share_receive_code="1212",
+                share_sync_status="submitted",
+            )
+            store.update_category(int(row["id"]), "欧美电影", "selected")
+            store.update_move(int(row["id"]), "moved", source_path=str(share_root / dest.name), dest_path=str(dest), category_final="欧美电影")
+            old_updated_at = time.time() - 1000
+            with store._lock, store._connection() as conn:
+                conn.execute("UPDATE submissions SET updated_at = ? WHERE id = ?", (old_updated_at, int(row["id"])))
+
+            class FakeCms:
+                def __init__(self):
+                    self.sync_payloads = []
+                def add_share115_sync_task(self, share_code, receive_code, cid="0", local_path="/media/share"):
+                    self.sync_payloads.append({"share_code": share_code, "receive_code": receive_code, "cid": cid, "local_path": local_path})
+                    return {"code": 200}
+
+            cms = FakeCms()
+            restored = bridge.restore_missing_self_share_library_folders(
+                store,
+                cms,
+                bridge.SelfShareConfig(enabled=True, strm_root=share_root, cms_local_path="/media/share", cms_cid="0"),
+                bridge.MoveConfig(source_roots=[share_root], library_roots={"欧美电影": movie_root}, stable_seconds=0),
+                limit=10,
+                recent_seconds=60,
+            )
+
+            self.assertEqual(restored, 0)
+            self.assertEqual(cms.sync_payloads, [])
+
     def test_delete_file_raises_when_115_returns_state_false_without_canceling_share(self):
         class FakeHttp:
             def request(self, url, method="GET", data=None, headers=None, params=None):
@@ -1093,3 +1402,55 @@ class ParentCidCategoryMapTests(unittest.TestCase):
         self.assertEqual(mapping["cid_tv"], "外国电视")
         self.assertEqual(bridge.category_for_115_parent_id("cid_movie", mapping), "欧美电影")
         self.assertEqual(bridge.category_for_115_parent_id("missing", mapping), "")
+
+    def test_cms_client_reads_existing_folder_for_organized_scan(self):
+        class FakeHttp:
+            def request(self, url, method="POST", payload=None, headers=None):
+                if url.endswith("/api/auth/login"):
+                    return {"code": 200, "data": {"token": "token"}}
+                if url.endswith("/api/config/auto_organize"):
+                    return {"code": 200, "data": {"NEW_MEDIA_EXISTS_CID": "exists-cid"}}
+                return {"code": 404}
+
+        config = bridge.Config(
+            tg_bot_token="tg",
+            tg_allowed_chat_id="chat",
+            cms_base_url="http://cms",
+            cms_username="user",
+            cms_password="pass",
+        )
+        cms = bridge.CmsClient(config, http=FakeHttp())
+
+        self.assertEqual(cms.auto_organize_existing_parent_ids(), {"exists-cid"})
+
+    def test_cms_client_relogs_once_when_token_expires(self):
+        class FakeHttp:
+            def __init__(self):
+                self.login_calls = 0
+                self.authorized_headers = []
+
+            def request(self, url, method="POST", payload=None, headers=None):
+                if url.endswith("/api/auth/login"):
+                    self.login_calls += 1
+                    return {"code": 200, "data": {"token": f"token-{self.login_calls}"}}
+                self.authorized_headers.append(dict(headers or {}))
+                if len(self.authorized_headers) == 1:
+                    raise RuntimeError("HTTP 401 from http://cms/api/sync/auto_organize: Unauthorized")
+                return {"code": 200, "data": {}}
+
+        config = bridge.Config(
+            tg_bot_token="tg",
+            tg_allowed_chat_id="chat",
+            cms_base_url="http://cms",
+            cms_username="user",
+            cms_password="pass",
+        )
+        http = FakeHttp()
+        cms = bridge.CmsClient(config, http=http)
+
+        resp = cms.run_auto_organize()
+
+        self.assertEqual(resp["code"], 200)
+        self.assertEqual(http.login_calls, 2)
+        self.assertEqual(http.authorized_headers[0]["Authorization"], "Bearer token-1")
+        self.assertEqual(http.authorized_headers[1]["Authorization"], "Bearer token-2")

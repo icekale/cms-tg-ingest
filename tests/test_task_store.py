@@ -58,6 +58,37 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["message"], "CMS submitted")
 
+    def test_repeated_running_event_updates_task_without_growing_timeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+
+            store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "等待 CMS 整理完成",
+                metadata_patch={"first": "yes"},
+                next_run_at=10.0,
+                clear_claim=True,
+            )
+            updated = store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "等待 CMS 整理完成",
+                metadata_patch={"second": "yes"},
+                next_run_at=25.0,
+                clear_claim=True,
+            )
+            events = store.list_events(task.id)
+
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["message"], "等待 CMS 整理完成")
+            self.assertEqual(updated.next_run_at, 25.0)
+            self.assertEqual(updated.metadata["first"], "yes")
+            self.assertEqual(updated.metadata["second"], "yes")
+
     def test_record_failure_stores_error_and_retry_count(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

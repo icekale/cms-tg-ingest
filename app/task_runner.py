@@ -13,6 +13,26 @@ from .task_store import TaskStore
 LOG = logging.getLogger(__name__)
 
 
+def _defer_count(metadata: dict[str, object], stage: str, message: str) -> int:
+    if metadata.get("_defer_stage") != stage or metadata.get("_defer_message") != message:
+        return 1
+    try:
+        previous = int(metadata.get("_defer_count") or 0)
+    except (TypeError, ValueError):
+        previous = 0
+    return max(0, previous) + 1
+
+
+def _defer_delay(base_delay_seconds: float, count: int) -> float:
+    if count <= 4:
+        return base_delay_seconds
+    if count <= 6:
+        return max(base_delay_seconds, 30.0)
+    if count <= 10:
+        return max(base_delay_seconds, 60.0)
+    return max(base_delay_seconds, 120.0)
+
+
 class StageOutcome(str, Enum):
     COMPLETE = "complete"
     DEFER = "defer"
@@ -114,13 +134,20 @@ class TaskRunner:
                 self.store.enqueue_task(task.id, next_stage, message="等待执行", next_run_at=now)
             return
         if result.outcome == StageOutcome.DEFER:
+            defer_count = _defer_count(task.metadata, task.current_stage.value, result.message)
+            metadata_patch = {
+                **result.metadata,
+                "_defer_stage": task.current_stage.value,
+                "_defer_message": result.message,
+                "_defer_count": defer_count,
+            }
             self.store.record_event(
                 task.id,
                 task.current_stage,
                 TaskStatus.RUNNING,
                 result.message,
-                metadata_patch=result.metadata,
-                next_run_at=now + result.delay_seconds,
+                metadata_patch=metadata_patch,
+                next_run_at=now + _defer_delay(result.delay_seconds, defer_count),
                 clear_claim=True,
             )
             return
