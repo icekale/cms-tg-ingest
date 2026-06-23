@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from typing import Any
@@ -49,6 +50,28 @@ def _task_lock_label(task: Any) -> str:
     return reason
 
 
+def task_display_title(task: Any) -> str:
+    metadata = getattr(task, "metadata", {}) or {}
+    organized = metadata.get("organized_folder")
+    if isinstance(organized, dict):
+        folder_name = str(organized.get("file_name") or "").strip()
+        if folder_name:
+            return folder_name
+    for key in ("own_share_file_name", "dest_path", "source_path", "emby_path"):
+        value = str(metadata.get(key) or "").strip()
+        if not value:
+            continue
+        if key.endswith("_path"):
+            name = Path(value).name
+            if name:
+                return name
+        return value
+    title = str(getattr(task, "title", "") or "").strip()
+    if title and not title.startswith(("http://", "https://")):
+        return title
+    return str(getattr(task, "share_code", "") or title or "-")
+
+
 def parse_task_id_from_path(path: str) -> int | None:
     parts = str(path or "").strip("/").split("/")
     if len(parts) < 2 or parts[0] != "task":
@@ -62,7 +85,7 @@ def parse_task_id_from_path(path: str) -> int | None:
 def render_task_list(store: TaskStore) -> str:
     rows = []
     for task in store.list_recent_tasks(limit=100):
-        title = task.title or task.share_code
+        title = task_display_title(task)
         lock_label = _task_lock_label(task)
         rows.append(
             "<tr>"
@@ -112,7 +135,7 @@ def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | N
     body = f"""
 <h1>任务 #{task.id}</h1>
 <div class="card">
-<p>标题：{html.escape(task.title or task.share_code)}</p>
+<p>标题：{html.escape(task_display_title(task))}</p>
 <p>阶段：{html.escape(stage_display_name(task.current_stage))}</p>
 <p>状态：{html.escape(task.status.value)}</p>
 <p class="error">错误：{html.escape(task.error_summary)}</p>

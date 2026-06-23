@@ -34,6 +34,28 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("只清除已结束任务记录", html)
             self.assertIn("清除历史记录", html)
 
+
+    def test_render_task_title_prefers_folder_name_over_share_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("swfup1z3np7", "nkrk", "https://115cdn.com/s/swfup1z3np7?password=nkrk")
+            store.record_event(
+                task.id,
+                TaskStage.MOVED,
+                TaskStatus.RUNNING,
+                "moved",
+                title="https://115cdn.com/s/swfup1z3np7?password=nkrk",
+                metadata_patch={"dest_path": "/mnt/user/Unraid/strm/转存/TV/S-实习医生格蕾-2005-[tmdb=1416]"},
+            )
+
+            list_html = render_task_list(store)
+            detail_html = render_task_detail(store, task.id)
+
+            self.assertIn("S-实习医生格蕾-2005-[tmdb=1416]", list_html)
+            self.assertIn("S-实习医生格蕾-2005-[tmdb=1416]", detail_html)
+            self.assertNotIn("swfup1z3np7</td>", list_html)
+            self.assertNotIn("标题：https://115cdn.com", detail_html)
+
     def test_render_task_list_shows_lock_wait_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
