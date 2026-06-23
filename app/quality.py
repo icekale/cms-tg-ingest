@@ -17,7 +17,13 @@ class QualityIssue:
     title: str = ""
 
 
-def inspect_task_files(task: TaskSnapshot, *, dest_path: str | Path, own_share_code: str = "") -> list[QualityIssue]:
+def inspect_task_files(
+    task: TaskSnapshot,
+    *,
+    dest_path: str | Path,
+    own_share_code: str = "",
+    own_share_receive_code: str = "1212",
+) -> list[QualityIssue]:
     del task
     dest = Path(dest_path)
     if not dest.exists():
@@ -26,7 +32,8 @@ def inspect_task_files(task: TaskSnapshot, *, dest_path: str | Path, own_share_c
     if not files:
         return [QualityIssue("missing_strm", "目标目录没有 STRM 文件", str(dest))]
     issues: list[QualityIssue] = []
-    expected_marker = f"/s/{own_share_code}_1212_" if own_share_code else "/s/"
+    receive_code = str(own_share_receive_code or "1212").strip() or "1212"
+    expected_marker = f"/s/{own_share_code}_{receive_code}_" if own_share_code else "/s/"
     for path in files:
         text = path.read_text(encoding="utf-8", errors="replace").strip()
         if "/d/" in text:
@@ -43,8 +50,14 @@ def scan_task_quality(store: TaskStore, limit: int = 100) -> list[QualityIssue]:
         if not dest_path:
             continue
         own_share_code = str(task.metadata.get("own_share_code") or "").strip()
+        own_share_receive_code = str(task.metadata.get("own_share_receive_code") or "1212").strip() or "1212"
         title = task.title or str(task.metadata.get("received_title") or "") or task.share_code
-        for issue in inspect_task_files(task, dest_path=dest_path, own_share_code=own_share_code):
+        for issue in inspect_task_files(
+            task,
+            dest_path=dest_path,
+            own_share_code=own_share_code,
+            own_share_receive_code=own_share_receive_code,
+        ):
             issues.append(replace(issue, task_id=task.id, title=title))
     return issues
 

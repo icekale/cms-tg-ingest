@@ -935,6 +935,40 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(moved["category_final"], "亚洲电影")
             self.assertEqual(result.metadata["category"], "亚洲电影")
 
+    def test_moved_stage_keeps_tmdb_resolved_category_even_when_same_tmdb_exists_elsewhere(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tv_root = Path(tmp) / "library" / "tv"
+            western_root = Path(tmp) / "library" / "western"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(
+                    source_roots=[],
+                    library_roots={"外国电视": tv_root, "欧美电影": western_root},
+                ),
+            )
+            row = self._self_share_row(title="W-无耻之徒-2011-[tmdb=34307]", category="外国电视", tmdb_id="34307")
+            recognition = bridge.parse_recognition_json(row)
+            recognition["category_status"] = "tmdb_resolved"
+            row = self.submissions.update_recognition(int(row["id"]), recognition, "tmdb_resolved") or row
+            source = self.config.strm_root / row["own_share_file_name"]
+            tv_dest = tv_root / row["own_share_file_name"]
+            western_dest = western_root / row["own_share_file_name"]
+            self._write_strm(source, content="http://cms/s/owncode_ownpwd_1.mkv")
+            self._write_strm(western_dest, content="http://cms/d/direct-link/movie.mkv")
+            task = self._claim_task("abc", "1234", TaskStage.MOVED, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            moved = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertFalse(source.exists())
+            self.assertTrue(tv_dest.exists())
+            self.assertTrue(western_dest.exists())
+            self.assertIn("/s/owncode_ownpwd_", (tv_dest / "movie.strm").read_text(encoding="utf-8"))
+            self.assertIn("/d/", (western_dest / "movie.strm").read_text(encoding="utf-8"))
+            self.assertEqual(moved["category_final"], "外国电视")
+            self.assertEqual(result.metadata["category"], "外国电视")
+
     def test_moved_stage_reuses_persisted_moved_row_when_dest_strm_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
             library_root = Path(tmp) / "library" / "movies"

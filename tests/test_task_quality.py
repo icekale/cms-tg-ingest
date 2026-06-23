@@ -35,6 +35,19 @@ class TaskQualityTests(unittest.TestCase):
 
             self.assertEqual(issues, [])
 
+    def test_accepts_self_share_strm_url_with_custom_receive_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "Movie"
+            dest.mkdir()
+            (dest / "movie.strm").write_text("http://cms/s/ownshare_abcd_fileid.mkv", encoding="utf-8")
+            store = TaskStore(root / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+
+            issues = inspect_task_files(task, dest_path=dest, own_share_code="ownshare", own_share_receive_code="abcd")
+
+            self.assertEqual(issues, [])
+
     def test_flags_missing_dest_and_missing_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -75,6 +88,22 @@ class TaskQualityTests(unittest.TestCase):
                 "moved",
                 title="直链电影",
                 metadata_patch={"dest_path": str(direct_dest), "own_share_code": "owndirect"},
+            )
+            custom_dest = root / "custom-dest"
+            custom_dest.mkdir()
+            (custom_dest / "movie.strm").write_text("https://115.com/s/owncustom_abcd_file.mkv", encoding="utf-8")
+            custom = store.upsert_task("custom", "", "https://115cdn.com/s/custom")
+            store.record_event(
+                custom.id,
+                TaskStage.MOVED,
+                TaskStatus.SUCCEEDED,
+                "moved",
+                title="自定义提取码电影",
+                metadata_patch={
+                    "dest_path": str(custom_dest),
+                    "own_share_code": "owncustom",
+                    "own_share_receive_code": "abcd",
+                },
             )
 
             issues = scan_task_quality(store)

@@ -1051,11 +1051,15 @@ def has_authoritative_category(row: dict[str, Any], recognition: dict[str, Any])
     if str(row.get("category_status") or "").strip() == "selected" and str(row.get("category_choice") or "").strip():
         return True
     status = str(recognition.get("category_status") or "").strip()
+    category = str(recognition.get("category") or "").strip()
+    if not category:
+        return False
+    if status in {"tmdb_resolved", "tmdb_search_resolved"}:
+        return bool(str(recognition.get("tmdb_id") or "").strip())
     if status != "self_share_resolved":
         return False
     return bool(
-        str(recognition.get("category") or "").strip()
-        and (str(recognition.get("organized_parent_id") or "").strip() or str(recognition.get("parent_id") or "").strip())
+        str(recognition.get("organized_parent_id") or "").strip() or str(recognition.get("parent_id") or "").strip()
     )
 
 

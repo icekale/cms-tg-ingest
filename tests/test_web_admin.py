@@ -99,6 +99,26 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn(f'action="/task/{task.id}/reprocess"', html)
             self.assertIn("从头重跑", html)
 
+    def test_task_routes_return_404_for_malformed_task_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            app = WebApp(store, web_token="")
+
+            cases = [
+                ("GET", "/task/"),
+                ("GET", "/task/not-a-number"),
+                ("POST", "/task/not-a-number/retry"),
+                ("POST", "/task/not-a-number/emby"),
+                ("POST", "/task/not-a-number/restore"),
+                ("POST", "/task/not-a-number/reprocess"),
+            ]
+            for method, path in cases:
+                with self.subTest(method=method, path=path):
+                    status, headers, body = app.handle_request(method, path, {}, b"")
+                    self.assertEqual(status, 404)
+                    self.assertEqual(headers["Content-Type"], "text/plain; charset=utf-8")
+                    self.assertEqual(body, b"not found")
+
     def test_retry_endpoint_enqueues_failed_stage_for_worker_claim(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

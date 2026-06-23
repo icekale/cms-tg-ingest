@@ -49,6 +49,16 @@ def _task_lock_label(task: Any) -> str:
     return reason
 
 
+def parse_task_id_from_path(path: str) -> int | None:
+    parts = str(path or "").strip("/").split("/")
+    if len(parts) < 2 or parts[0] != "task":
+        return None
+    try:
+        return int(parts[1])
+    except (TypeError, ValueError):
+        return None
+
+
 def render_task_list(store: TaskStore) -> str:
     rows = []
     for task in store.list_recent_tasks(limit=100):
@@ -211,15 +221,21 @@ class WebApp:
             self.store.clear_finished_tasks()
             return 303, {"Location": "/"}, b""
         if method == "GET" and parsed.path.startswith("/task/"):
-            task_id = int(parsed.path.split("/")[2])
+            task_id = parse_task_id_from_path(parsed.path)
+            if task_id is None:
+                return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
             return 200, {"Content-Type": "text/html; charset=utf-8"}, render_task_detail(self.store, task_id, self.submission_store).encode("utf-8")
         if method == "POST" and parsed.path.startswith("/task/") and parsed.path.endswith("/emby"):
-            task_id = int(parsed.path.split("/")[2])
+            task_id = parse_task_id_from_path(parsed.path)
+            if task_id is None:
+                return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
             if self.store.find_task(task_id):
                 self.store.enqueue_task(task_id, TaskStage.EMBY_CONFIRMED, message="Web 触发 Emby 检查", next_run_at=0)
             return 303, {"Location": f"/task/{task_id}"}, b""
         if method == "POST" and parsed.path.startswith("/task/") and parsed.path.endswith("/restore"):
-            task_id = int(parsed.path.split("/")[2])
+            task_id = parse_task_id_from_path(parsed.path)
+            if task_id is None:
+                return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
             task = self.store.find_task(task_id)
             if task:
                 self.store.record_event(
@@ -233,12 +249,16 @@ class WebApp:
                 self.store.enqueue_task(task_id, TaskStage.EMBY_CONFIRMED, message="Web STRM 恢复已入队", next_run_at=0)
             return 303, {"Location": f"/task/{task_id}"}, b""
         if method == "POST" and parsed.path.startswith("/task/") and parsed.path.endswith("/reprocess"):
-            task_id = int(parsed.path.split("/")[2])
+            task_id = parse_task_id_from_path(parsed.path)
+            if task_id is None:
+                return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
             if self.store.find_task(task_id):
                 self.store.reprocess_task(task_id, message="Web 触发从头重跑", next_run_at=0)
             return 303, {"Location": f"/task/{task_id}"}, b""
         if method == "POST" and parsed.path.startswith("/task/") and parsed.path.endswith("/retry"):
-            task_id = int(parsed.path.split("/")[2])
+            task_id = parse_task_id_from_path(parsed.path)
+            if task_id is None:
+                return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
             task = self.store.find_task(task_id)
             if task:
                 decision = decide_retry(task)
