@@ -1442,21 +1442,35 @@ class BridgeSelfShareTaskWorkflow:
             row = self.store.update_self_share(int(row["id"]), workflow_phase="auto_organize_submitted") or row
         recognition = self._recognition_from_row(row)
         title = str(row.get("title") or task.title or task.share_code)
+        find_kwargs = {
+            "excluded_parent_ids": self.self_share_config.excluded_parent_ids or set(),
+            "min_update_time": float(row.get("created_at") or 0),
+        }
+        if self.self_share_config.organized_scan_parent_ids:
+            find_kwargs.update(
+                {
+                    "scan_parent_ids": self.self_share_config.organized_scan_parent_ids,
+                    "category_names": set(self.self_share_config.parent_cid_category_map.values())
+                    if self.self_share_config.parent_cid_category_map
+                    else set(default_library_roots()),
+                }
+            )
         if folder is None:
-            find_kwargs = {
-                "excluded_parent_ids": self.self_share_config.excluded_parent_ids or set(),
-                "min_update_time": float(row.get("created_at") or 0),
-            }
-            if self.self_share_config.organized_scan_parent_ids:
-                find_kwargs.update(
-                    {
-                        "scan_parent_ids": self.self_share_config.organized_scan_parent_ids,
-                        "category_names": set(self.self_share_config.parent_cid_category_map.values())
-                        if self.self_share_config.parent_cid_category_map
-                        else set(default_library_roots()),
-                    }
-                )
             folder = self.p115.find_organized_folder(recognition, title, **find_kwargs)
+        if not folder:
+            tmdb_resolved, tmdb_should_prompt = apply_tmdb_search_resolution(recognition, title, self.tmdb_resolver)
+            if not tmdb_should_prompt and str(tmdb_resolved.get("tmdb_id") or "").strip():
+                recognition = dict(tmdb_resolved)
+                folder = self.p115.find_organized_folder(recognition, title, **find_kwargs)
+                category = str(recognition.get("category") or "").strip()
+                if category and hasattr(self.store, "update_category"):
+                    row = self.store.update_category(int(row["id"]), category, "selected") or row
+                if hasattr(self.store, "update_recognition"):
+                    row = self.store.update_recognition(
+                        int(row["id"]),
+                        recognition,
+                        str(recognition.get("category_status") or "tmdb_search_resolved"),
+                    ) or row
         if not folder:
             return StageResult.defer(
                 "等待 CMS 整理完成",
@@ -4038,7 +4052,7 @@ class TmdbApiResolver:
 
 def extract_tmdb_search_query(share_name: str) -> str:
     text = str(share_name or "")
-    match = re.search(r"([A-Za-z][A-Za-z0-9]+(?:\.[A-Za-z0-9]+){2,})\.S\d{1,2}", text, re.I)
+    match = re.search(r"([A-Za-z][A-Za-z0-9]+(?:\.[A-Za-z0-9]+){1,})\.S\d{1,2}", text, re.I)
     if match:
         return re.sub(r"\.+", " ", match.group(1)).strip()
     match = re.search(r"([A-Za-z][A-Za-z0-9]+(?:\.[A-Za-z0-9]+){1,})\.(?:19|20)\d{2}", text, re.I)

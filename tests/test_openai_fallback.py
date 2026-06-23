@@ -259,6 +259,11 @@ class TmdbHintResolutionTests(unittest.TestCase):
 
         self.assertEqual(bridge.extract_tmdb_search_query(share_name), "House of the Dragon")
 
+    def test_extract_tmdb_search_query_accepts_two_token_series_title(self):
+        share_name = "Greys.Anatomy.S22.1080p.DSNP.WEB-DL.DDP5.1.H.264-HiveWeb"
+
+        self.assertEqual(bridge.extract_tmdb_search_query(share_name), "Greys Anatomy")
+
     def test_tmdb_search_resolver_uses_search_result_id(self):
         class FakeResolver:
             enabled = True

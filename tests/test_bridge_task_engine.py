@@ -121,6 +121,23 @@ class FakeTmdbResolver:
         return {"ok": False}
 
 
+class FakeTmdbSearchResolver(FakeTmdbResolver):
+    def search(self, query, media_type):
+        self.searches.append((query, media_type))
+        if query == "Greys Anatomy" and media_type == "tv":
+            return {
+                "ok": True,
+                "title": "实习医生格蕾",
+                "type": "tv",
+                "tmdb_id": "1416",
+                "language": "en",
+                "countries": ["US"],
+                "genres": ["剧情"],
+                "category": "外国电视",
+                "source": "tmdb_api",
+            }
+        return {"ok": False}
+
 class FakeTmdbHintResolver(FakeTmdbResolver):
     def lookup(self, tmdb_id, media_type, share_name):
         self.lookups.append((tmdb_id, media_type, share_name))
@@ -292,6 +309,49 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.DEFER)
             self.assertEqual(self.cms.auto_organize_calls, 1)
             self.assertIn("等待 CMS 整理", result.message)
+
+    def test_organizing_stage_uses_tmdb_search_to_find_cms_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmdb = FakeTmdbSearchResolver()
+            workflow = self._workflow(tmp, tmdb_resolver=tmdb)
+            row = self._row()
+            row = self.submissions.update_status(
+                int(row["id"]),
+                "received",
+                title="Greys.Anatomy.S22.1080p.DSNP.WEB-DL.DDP5.1.H.264-HiveWeb",
+            ) or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            calls = []
+
+            def find_organized_folder(recognition, title, excluded_parent_ids=None, min_update_time=0, **kwargs):
+                calls.append((dict(recognition), title, kwargs))
+                if recognition.get("tmdb_id") == "1416":
+                    return {
+                        "file_id": "folder-id",
+                        "file_name": "S-实习医生格蕾-2005-[tmdb=1416]",
+                        "parent_id": "tv-parent",
+                        "category": "外国电视",
+                    }
+                return None
+
+            self.p115.find_organized_folder = find_organized_folder
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            recognition = bridge.parse_recognition_json(stored)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(tmdb.searches, [("Greys Anatomy", "tv")])
+            self.assertGreaterEqual(len(calls), 2)
+            self.assertEqual(calls[-1][0]["tmdb_id"], "1416")
+            self.assertEqual(result.metadata["organized_folder"]["file_id"], "folder-id")
+            self.assertEqual(result.metadata["organized_folder"]["category"], "外国电视")
+            self.assertEqual(recognition["tmdb_id"], "1416")
+            self.assertEqual(recognition["category"], "外国电视")
+            self.assertEqual(stored["category_choice"], "外国电视")
+            self.assertEqual(recognition["category_status"], "tmdb_search_resolved")
+            self.assertEqual(stored["category_status"], "organized_found")
 
     def test_recognizing_stage_uses_cms_parent_category_before_llm(self):
         with tempfile.TemporaryDirectory() as tmp:
