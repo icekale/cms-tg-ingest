@@ -1535,6 +1535,28 @@ class BridgeSelfShareTaskWorkflow:
             recognition["parent_id"] = parent_id
             tmdb_id = str(recognition.get("tmdb_id") or tmdb_id).strip()
         else:
+            tmdb_resolved, tmdb_should_prompt = apply_tmdb_hint_resolution(recognition, share_name, self.tmdb_resolver)
+            tmdb_category = str(tmdb_resolved.get("category") or "").strip()
+            if not tmdb_should_prompt and tmdb_category:
+                category = tmdb_category
+                recognition = dict(tmdb_resolved)
+                recognition["organized_parent_id"] = parent_id
+                recognition["parent_id"] = parent_id
+                tmdb_id = str(recognition.get("tmdb_id") or tmdb_id).strip()
+                if hasattr(self.store, "update_category"):
+                    row = self.store.update_category(int(row["id"]), category, "selected") or row
+                if hasattr(self.store, "update_recognition"):
+                    row = self.store.update_recognition(int(row["id"]), recognition, str(recognition.get("category_status") or "tmdb_resolved")) or row
+                return StageResult.complete(
+                    "已通过 TMDB 识别分类",
+                    {
+                        "submission_id": int(row["id"]),
+                        "recognition": recognition,
+                        "category": category,
+                        "tmdb_id": tmdb_id,
+                        "own_share_file_id": file_id,
+                    },
+                )
             cms_category = category_from_existing_library_folder(self.move_config, {"file_name": folder_name})
             if cms_category:
                 category = cms_category

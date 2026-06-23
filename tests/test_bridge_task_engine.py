@@ -121,6 +121,24 @@ class FakeTmdbResolver:
         return {"ok": False}
 
 
+class FakeTmdbHintResolver(FakeTmdbResolver):
+    def lookup(self, tmdb_id, media_type, share_name):
+        self.lookups.append((tmdb_id, media_type, share_name))
+        if tmdb_id == "34307" and media_type == "tv":
+            return {
+                "ok": True,
+                "title": "无耻之徒",
+                "type": "tv",
+                "tmdb_id": "34307",
+                "language": "en",
+                "countries": ["US"],
+                "genres": ["剧情", "喜剧"],
+                "category": "外国电视",
+                "source": "tmdb_api",
+            }
+        return {"ok": False}
+
+
 class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
     def _workflow(
         self,
@@ -337,6 +355,51 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(recognition["category_status"], "needs_action")
             self.assertEqual(recognition["tmdb_id"], "")
             self.assertEqual(recognition["organized_parent_id"], "unmapped-parent")
+
+    def test_recognizing_stage_uses_tmdb_hint_when_parent_unmapped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmdb = FakeTmdbHintResolver()
+            workflow = self._workflow(tmp, tmdb_resolver=tmdb)
+            row = self._row()
+            row = self.submissions.update_status(
+                int(row["id"]),
+                "received",
+                title="无耻之徒 (2011) [tmdbid=34307]",
+            ) or row
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="W-无耻之徒-2011-[tmdb=34307]",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECOGNIZING,
+                {
+                    "submission_id": row["id"],
+                    "organized_folder": {
+                        "file_id": "folder-id",
+                        "file_name": "W-无耻之徒-2011-[tmdb=34307]",
+                        "parent_id": "unmapped-parent",
+                    },
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            recognition = bridge.parse_recognition_json(stored)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["category"], "外国电视")
+            self.assertEqual(result.metadata["tmdb_id"], "34307")
+            self.assertEqual(recognition["category"], "外国电视")
+            self.assertEqual(recognition["category_status"], "tmdb_resolved")
+            self.assertEqual(stored["category_choice"], "外国电视")
+            self.assertEqual(stored["category_status"], "tmdb_resolved")
+            self.assertEqual(tmdb.lookups[0][0], "34307")
+            self.assertEqual(self.telegram.messages, [])
 
     def test_recognizing_stage_defers_for_cms_direct_strm_signal_when_category_unknown(self):
         with tempfile.TemporaryDirectory() as tmp:
