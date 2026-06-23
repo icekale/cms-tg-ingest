@@ -39,24 +39,40 @@ code {{ background: #eee; padding: 2px 4px; border-radius: 4px; }}
 </html>"""
 
 
+def _task_lock_label(task: Any) -> str:
+    reason = str(task.metadata.get("_lock_reason") or "").strip()
+    if not reason:
+        return "-"
+    if task.metadata.get("_lock_waiting"):
+        owner = str(task.metadata.get("_lock_owner_task_id") or "").strip()
+        return f"等待资源锁: #{owner} {reason}" if owner else f"等待资源锁: {reason}"
+    return reason
+
+
 def render_task_list(store: TaskStore) -> str:
     rows = []
     for task in store.list_recent_tasks(limit=100):
         title = task.title or task.share_code
+        lock_label = _task_lock_label(task)
         rows.append(
             "<tr>"
             f'<td><a href="/task/{task.id}">#{task.id}</a></td>'
             f"<td>{html.escape(title)}</td>"
             f"<td>{html.escape(stage_display_name(task.current_stage))}</td>"
             f"<td>{html.escape(task.status.value)}</td>"
+            f"<td>{html.escape(lock_label)}</td>"
             f'<td class="error">{html.escape(task.error_summary)}</td>'
             "</tr>"
         )
     body = (
         "<h1>cms-tg-ingest 任务</h1>"
-        '<p><a href="/quality">TaskStore 本地轻量巡检</a></p>'
-        '<p><a href="/health">TaskStore 本地健康</a></p>'
-        "<table><thead><tr><th>ID</th><th>标题</th><th>阶段</th><th>状态</th><th>错误</th></tr></thead><tbody>"
+        '<div class="actions">'
+        '<a href="/quality">TaskStore 本地轻量巡检</a> '
+        '<a href="/health">TaskStore 本地健康</a> '
+        '<form method="post" action="/history/clear" onsubmit="return confirm(\'只清除已结束任务记录，不删除文件。确定继续？\')">'
+        '<button type="submit">清除历史记录</button></form>'
+        "</div>"
+        "<table><thead><tr><th>ID</th><th>标题</th><th>阶段</th><th>状态</th><th>资源锁</th><th>错误</th></tr></thead><tbody>"
         + "".join(rows)
         + "</tbody></table>"
     )
@@ -92,6 +108,7 @@ def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | N
 <p class="error">错误：{html.escape(task.error_summary)}</p>
 <p>媒体库：{html.escape(str(task.metadata.get("emby_parent") or task.metadata.get("emby_refresh_library") or "-"))}</p>
 <p>路径：{html.escape(str(task.metadata.get("dest_path") or task.metadata.get("emby_path") or "-"))}</p>
+<p>资源锁：{html.escape(_task_lock_label(task))}</p>
 <p>重试建议：{html.escape(decision.reason)}</p>
 <div class="actions">
 {retry_form}
@@ -111,10 +128,40 @@ def render_quality_page(store: TaskStore) -> str:
     body = f"""
 <h1>TaskStore 本地轻量巡检</h1>
 <div class="card"><pre>{html.escape(report)}</pre></div>
+<div class="actions">
+<form method="post" action="/quality/fix" onsubmit="return confirm('将按巡检结果入队修复：缺失目录恢复 STRM，直链 STRM 从头重跑。确定继续？')">
+<button type="submit">修复全部巡检问题</button>
+</form>
+</div>
 <p>只读取本地 TaskStore 和 STRM 文件路径，不扫描 115。</p>
 <p><a href="/">返回任务列表</a></p>
 """
     return _page("质量巡检", body)
+
+
+def fix_quality_issues(store: TaskStore) -> int:
+    fixed_task_ids: set[int] = set()
+    for issue in scan_task_quality(store):
+        if issue.task_id in fixed_task_ids:
+            continue
+        task = store.find_task(issue.task_id)
+        if not task or task.status not in {TaskStatus.SUCCEEDED, TaskStatus.FAILED}:
+            continue
+        if issue.code in {"missing_dest", "missing_strm"}:
+            store.record_event(
+                task.id,
+                TaskStage.EMBY_CONFIRMED,
+                TaskStatus.PENDING,
+                "Web 巡检自动修复：恢复 STRM",
+                metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": TaskStage.EMBY_CONFIRMED.value},
+                clear_claim=True,
+            )
+            store.enqueue_task(task.id, TaskStage.EMBY_CONFIRMED, message="Web 巡检恢复 STRM 已入队", next_run_at=0)
+            fixed_task_ids.add(task.id)
+        elif issue.code in {"direct_strm", "unexpected_strm"}:
+            store.reprocess_task(task.id, message="Web 巡检自动修复：从头重跑", next_run_at=0)
+            fixed_task_ids.add(task.id)
+    return len(fixed_task_ids)
 
 
 def render_health_page(store: TaskStore) -> str:
@@ -155,8 +202,14 @@ class WebApp:
             return 200, {"Content-Type": "text/html; charset=utf-8"}, render_task_list(self.store).encode("utf-8")
         if method == "GET" and parsed.path == "/quality":
             return 200, {"Content-Type": "text/html; charset=utf-8"}, render_quality_page(self.store).encode("utf-8")
+        if method == "POST" and parsed.path == "/quality/fix":
+            fix_quality_issues(self.store)
+            return 303, {"Location": "/quality"}, b""
         if method == "GET" and parsed.path == "/health":
             return 200, {"Content-Type": "text/html; charset=utf-8"}, render_health_page(self.store).encode("utf-8")
+        if method == "POST" and parsed.path == "/history/clear":
+            self.store.clear_finished_tasks()
+            return 303, {"Location": "/"}, b""
         if method == "GET" and parsed.path.startswith("/task/"):
             task_id = int(parsed.path.split("/")[2])
             return 200, {"Content-Type": "text/html; charset=utf-8"}, render_task_detail(self.store, task_id, self.submission_store).encode("utf-8")

@@ -5,10 +5,22 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .models import TaskSnapshot, TaskStage, TaskStatus
+
+
+@dataclass(frozen=True)
+class TaskQueueSummary:
+    recent_count: int
+    pending_count: int
+    running_count: int
+    needs_action_count: int
+    failed_count: int
+    lock_wait_count: int
+    latest_lock_wait: TaskSnapshot | None = None
 
 
 class TaskStore:
@@ -139,10 +151,81 @@ class TaskStore:
             rows = conn.execute("SELECT * FROM tasks ORDER BY updated_at DESC, id DESC LIMIT ?", (limit,)).fetchall()
         return [self._snapshot(row) for row in rows]
 
+    def queue_summary(self, limit: int = 100) -> TaskQueueSummary:
+        tasks = self.list_recent_tasks(limit=limit)
+        lock_waits = [
+            task
+            for task in tasks
+            if task.status == TaskStatus.RUNNING and bool(task.metadata.get("_lock_waiting"))
+        ]
+        return TaskQueueSummary(
+            recent_count=len(tasks),
+            pending_count=sum(1 for task in tasks if task.status == TaskStatus.PENDING),
+            running_count=sum(1 for task in tasks if task.status == TaskStatus.RUNNING),
+            needs_action_count=sum(1 for task in tasks if task.status == TaskStatus.NEEDS_ACTION),
+            failed_count=sum(1 for task in tasks if task.status == TaskStatus.FAILED),
+            lock_wait_count=len(lock_waits),
+            latest_lock_wait=lock_waits[0] if lock_waits else None,
+        )
+
+    def find_active_lock_holder(
+        self,
+        lock_key: str,
+        *,
+        exclude_task_id: int,
+        now: float | None = None,
+        stale_after_seconds: int = 21600,
+        limit: int = 100,
+    ) -> TaskSnapshot | None:
+        if not lock_key:
+            return None
+        current_time = time.time() if now is None else float(now)
+        stale_before = current_time - max(1, int(stale_after_seconds))
+        for task in self.list_recent_tasks(limit=limit):
+            if task.id == exclude_task_id:
+                continue
+            if task.status != TaskStatus.RUNNING or not task.claimed_by:
+                continue
+            if task.claimed_at <= stale_before or task.metadata.get("_lock_waiting"):
+                continue
+            if str(task.metadata.get("_lock_key") or "") == lock_key:
+                return task
+        return None
+
+    def patch_metadata(self, task_id: int, metadata_patch: dict[str, Any]) -> TaskSnapshot:
+        now = time.time()
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute("SELECT metadata_json FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if current is None:
+                raise KeyError(f"task not found: {task_id}")
+            merged_metadata = self._merge_metadata(current["metadata_json"], metadata_patch)
+            conn.execute(
+                "UPDATE tasks SET metadata_json = ?, updated_at = ? WHERE id = ?",
+                (merged_metadata, now, task_id),
+            )
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return self._snapshot(row)
+
     def list_events(self, task_id: int) -> list[dict[str, Any]]:
         with self._lock, self._connection() as conn:
             rows = conn.execute("SELECT * FROM task_events WHERE task_id = ? ORDER BY id ASC", (task_id,)).fetchall()
         return [dict(row) for row in rows]
+
+    def clear_finished_tasks(self) -> int:
+        terminal_statuses = (TaskStatus.SUCCEEDED.value, TaskStatus.FAILED.value)
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                "SELECT id FROM tasks WHERE status IN (?, ?)",
+                terminal_statuses,
+            ).fetchall()
+            task_ids = [int(row["id"]) for row in rows]
+            if not task_ids:
+                return 0
+            placeholders = ",".join("?" for _ in task_ids)
+            conn.execute(f"DELETE FROM task_events WHERE task_id IN ({placeholders})", task_ids)
+            cursor = conn.execute(f"DELETE FROM tasks WHERE id IN ({placeholders})", task_ids)
+        return int(cursor.rowcount or 0)
 
     def record_event(
         self,

@@ -124,6 +124,8 @@ class Config:
     openai_model: str = "gpt-4.1-mini"
     openai_high_confidence: float = 0.75
     openai_suggest_confidence: float = 0.45
+    tmdb_api_key: str = ""
+    tmdb_bearer_token: str = ""
     workflow_mode: str = "direct"
     p115_cookie_path: str = "/config/115-cookies.txt"
     p115_min_request_interval_seconds: float = 2.0
@@ -184,6 +186,8 @@ class Config:
             openai_model=os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"),
             openai_high_confidence=env_float("OPENAI_HIGH_CONFIDENCE", 0.75),
             openai_suggest_confidence=env_float("OPENAI_SUGGEST_CONFIDENCE", 0.45),
+            tmdb_api_key=os.environ.get("TMDB_API_KEY", ""),
+            tmdb_bearer_token=os.environ.get("TMDB_BEARER_TOKEN", ""),
             workflow_mode=os.environ.get("WORKFLOW_MODE", "direct").strip().lower() or "direct",
             p115_cookie_path=os.environ.get("P115_COOKIE_PATH", "/config/115-cookies.txt"),
             p115_min_request_interval_seconds=env_float("P115_MIN_REQUEST_INTERVAL_SECONDS", 2.0),
@@ -3780,6 +3784,8 @@ def clean_share_title(value: str) -> str:
 
 
 CHINESE_LANGUAGE_MARKERS = {"zh", "cn", "中文", "普通话", "汉语", "粤语", "國語", "国语"}
+CHINESE_COUNTRY_MARKERS = {"CN", "HK", "TW", "MO"}
+ASIAN_MOVIE_COUNTRY_MARKERS = {"JP", "KR", "TH", "ID", "MY", "SG", "PH", "VN"}
 ASIAN_MOVIE_LANGUAGE_MARKERS = {
     "ja",
     "jp",
@@ -3830,17 +3836,27 @@ def user_movie_category_bucket(category: str, media_type: str, *hints: str) -> s
     return category
 
 
-def infer_region_category(media_type: str, title: str, language: str = "") -> str:
+def infer_region_category(media_type: str, title: str, language: str = "", countries: list[str] | None = None, genres: list[str] | None = None) -> str:
     normalized_language = normalized_tmdb_language(language)
     has_language = bool(normalized_language)
+    country_set = {str(country or "").upper() for country in (countries or []) if str(country or "").strip()}
+    genre_text = normalize_text(" ".join(str(genre or "") for genre in (genres or [])))
+    is_animation = any(marker in genre_text for marker in ("animation", "anime", "动画", "動畫", "动漫", "番剧"))
+    is_documentary = any(marker in genre_text for marker in ("documentary", "纪录", "紀錄"))
     if media_type == "tv":
-        if language_matches(normalized_language, CHINESE_LANGUAGE_MARKERS):
+        if language_matches(normalized_language, CHINESE_LANGUAGE_MARKERS) or country_set & CHINESE_COUNTRY_MARKERS:
             return "国产电视"
+        if is_animation and country_set & {"JP"}:
+            return "番剧"
         return "外国电视"
     if media_type == "movie":
-        if language_matches(normalized_language, CHINESE_LANGUAGE_MARKERS):
+        if is_documentary:
+            return "纪录片"
+        if is_animation:
+            return "动漫电影"
+        if language_matches(normalized_language, CHINESE_LANGUAGE_MARKERS) or country_set & CHINESE_COUNTRY_MARKERS:
             return "华语电影"
-        if language_matches(normalized_language, ASIAN_MOVIE_LANGUAGE_MARKERS):
+        if language_matches(normalized_language, ASIAN_MOVIE_LANGUAGE_MARKERS) or country_set & ASIAN_MOVIE_COUNTRY_MARKERS:
             return "亚洲电影"
         if not has_language and re.search(r"[\u4e00-\u9fff]", title):
             return "华语电影"
@@ -3913,6 +3929,87 @@ class TmdbWebResolver:
         return {"ok": True, "title": title, "type": media_type, "tmdb_id": match.group(1), "source": "tmdb_search"}
 
 
+class TmdbApiResolver:
+    def __init__(self, api_key: str = "", bearer_token: str = "", timeout: int = 15, http: HttpJson | None = None, fallback: Any | None = None):
+        self.api_key = str(api_key or "").strip()
+        self.bearer_token = str(bearer_token or "").strip()
+        self.timeout = timeout
+        self.http = http or HttpJson(timeout)
+        self.fallback = fallback
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key or self.bearer_token)
+
+    def lookup(self, tmdb_id: str, media_type: str, share_name: str) -> dict[str, Any]:
+        media_type = "movie" if media_type == "movie" else "tv"
+        tmdb_id = str(tmdb_id or "").strip()
+        if not tmdb_id or not self.enabled:
+            return {"ok": False, "type": media_type, "tmdb_id": tmdb_id}
+        try:
+            return self._normalize_details(self._request(f"/{media_type}/{tmdb_id}", {"language": "zh-CN"}), media_type)
+        except Exception:
+            LOG.debug("TMDB API lookup failed media_type=%s tmdb_id=%s", media_type, tmdb_id, exc_info=True)
+            if self.fallback and getattr(self.fallback, "enabled", True):
+                return self.fallback.lookup(tmdb_id, media_type, share_name)
+            return {"ok": False, "type": media_type, "tmdb_id": tmdb_id}
+
+    def search(self, query: str, media_type: str = "tv") -> dict[str, Any]:
+        query = str(query or "").strip()
+        media_type = "movie" if media_type == "movie" else "tv"
+        if not query or not self.enabled:
+            return {"ok": False, "type": media_type}
+        try:
+            data = self._request(f"/search/{media_type}", {"query": query, "language": "zh-CN", "include_adult": "false"})
+            results = data.get("results") if isinstance(data, dict) else []
+            if not isinstance(results, list) or not results:
+                return {"ok": False, "type": media_type}
+            tmdb_id = str(results[0].get("id") or "").strip()
+            if not tmdb_id:
+                return {"ok": False, "type": media_type}
+            return self.lookup(tmdb_id, media_type, query)
+        except Exception:
+            LOG.debug("TMDB API search failed media_type=%s query=%s", media_type, query, exc_info=True)
+            if self.fallback and getattr(self.fallback, "enabled", True):
+                return self.fallback.search(query, media_type)
+            return {"ok": False, "type": media_type}
+
+    def _request(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        query = {key: value for key, value in params.items() if value not in (None, "")}
+        if self.api_key:
+            query["api_key"] = self.api_key
+        url = "https://api.themoviedb.org/3" + path + "?" + urllib.parse.urlencode(query)
+        headers = {"Accept": "application/json"}
+        if self.bearer_token:
+            headers["Authorization"] = f"Bearer {self.bearer_token}"
+        return self.http.request(url, headers=headers)
+
+    @staticmethod
+    def _normalize_details(data: dict[str, Any], media_type: str) -> dict[str, Any]:
+        if not isinstance(data, dict) or not data.get("id"):
+            return {"ok": False, "type": media_type}
+        countries = []
+        if media_type == "movie":
+            countries = [item.get("iso_3166_1") for item in data.get("production_countries") or [] if isinstance(item, dict)]
+        else:
+            countries = [str(value or "") for value in data.get("origin_country") or []]
+        genres = [str(item.get("name") or "") for item in data.get("genres") or [] if isinstance(item, dict)]
+        title = str(data.get("title") or data.get("name") or data.get("original_title") or data.get("original_name") or "")
+        language = str(data.get("original_language") or "")
+        category = infer_region_category(media_type, title, language, countries, genres)
+        return {
+            "ok": True,
+            "title": title,
+            "type": media_type,
+            "tmdb_id": str(data.get("id") or ""),
+            "language": language,
+            "countries": [country for country in countries if country],
+            "genres": genres,
+            "category": category,
+            "source": "tmdb_api",
+        }
+
+
 def extract_tmdb_search_query(share_name: str) -> str:
     text = str(share_name or "")
     match = re.search(r"([A-Za-z][A-Za-z0-9]+(?:\.[A-Za-z0-9]+){2,})\.S\d{1,2}", text, re.I)
@@ -3978,7 +4075,13 @@ def apply_tmdb_hint_resolution(
     candidates.sort(key=lambda value: value[0], reverse=True)
     best = candidates[0][1]
     media_type = str(best.get("type") or "")
-    category = infer_region_category(media_type, str(best.get("title") or ""), str(best.get("language") or ""))
+    category = str(best.get("category") or "") or infer_region_category(
+        media_type,
+        str(best.get("title") or ""),
+        str(best.get("language") or ""),
+        best.get("countries") if isinstance(best.get("countries"), list) else None,
+        best.get("genres") if isinstance(best.get("genres"), list) else None,
+    )
     if not category:
         return recognition, True
     enriched = dict(recognition)
@@ -3990,7 +4093,7 @@ def apply_tmdb_hint_resolution(
             "category": category,
             "tmdb_id": tmdb_id,
             "category_status": "tmdb_resolved",
-            "openai_source": "tmdb_web",
+            "openai_source": str(best.get("source") or "tmdb_web"),
         }
     )
     return enriched, False
@@ -4016,7 +4119,13 @@ def apply_tmdb_search_resolution(
         return recognition, True
     if not item or not item.get("ok") or not item.get("tmdb_id"):
         return recognition, True
-    category = infer_region_category(str(item.get("type") or media_type), str(item.get("title") or ""), str(item.get("language") or ""))
+    category = str(item.get("category") or "") or infer_region_category(
+        str(item.get("type") or media_type),
+        str(item.get("title") or ""),
+        str(item.get("language") or ""),
+        item.get("countries") if isinstance(item.get("countries"), list) else None,
+        item.get("genres") if isinstance(item.get("genres"), list) else None,
+    )
     if not category:
         return recognition, True
     enriched = dict(recognition)
@@ -4028,7 +4137,7 @@ def apply_tmdb_search_resolution(
             "category": category,
             "tmdb_id": str(item.get("tmdb_id") or ""),
             "category_status": "tmdb_search_resolved",
-            "openai_source": "tmdb_search",
+            "openai_source": str(item.get("source") or "tmdb_search"),
         }
     )
     return enriched, False
@@ -5575,7 +5684,12 @@ def run_forever(config: Config) -> None:
     telegram = TelegramClient(config.tg_bot_token, timeout=config.http_timeout)
     emby = EmbyClient(config.emby_base_url, config.emby_api_key, config.emby_user_id, timeout=config.http_timeout)
     openai_classifier = OpenAIClassifier(config)
-    tmdb_resolver = TmdbWebResolver(timeout=min(config.http_timeout, 20))
+    tmdb_web_resolver = TmdbWebResolver(timeout=min(config.http_timeout, 20))
+    tmdb_resolver = (
+        TmdbApiResolver(config.tmdb_api_key, config.tmdb_bearer_token, timeout=min(config.http_timeout, 20), fallback=tmdb_web_resolver)
+        if config.tmdb_api_key or config.tmdb_bearer_token
+        else tmdb_web_resolver
+    )
     store = SubmissionStore(config.db_path)
     task_store = create_task_store(config)
     call_maybe_start_web_server(config, task_store, submission_store=store)

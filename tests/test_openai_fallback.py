@@ -278,6 +278,93 @@ class TmdbHintResolutionTests(unittest.TestCase):
         self.assertEqual(resolved["tmdb_id"], "94997")
         self.assertEqual(resolved["category"], "外国电视")
 
+    def test_tmdb_api_resolver_maps_movie_details_to_region_category(self):
+        class FakeHttp:
+            def request(self, url, method="GET", payload=None, headers=None):
+                self.url = url
+                self.method = method
+                self.headers = headers or {}
+                return {
+                    "id": 581526,
+                    "title": "从邪恶中拯救我",
+                    "original_language": "ko",
+                    "production_countries": [{"iso_3166_1": "KR"}],
+                    "genres": [{"name": "动作"}],
+                }
+
+        resolver = bridge.TmdbApiResolver(api_key="test-key", http=FakeHttp())
+
+        item = resolver.lookup("581526", "movie", "从邪恶中拯救我 2020")
+
+        self.assertTrue(item["ok"])
+        self.assertEqual(item["type"], "movie")
+        self.assertEqual(item["tmdb_id"], "581526")
+        self.assertEqual(item["language"], "ko")
+        self.assertEqual(item["countries"], ["KR"])
+        self.assertEqual(item["category"], "亚洲电影")
+        self.assertIn("api_key=test-key", resolver.http.url)
+
+    def test_tmdb_api_resolver_uses_bearer_token_without_logging_secret(self):
+        class FakeHttp:
+            def request(self, url, method="GET", payload=None, headers=None):
+                self.url = url
+                self.headers = headers or {}
+                return {"id": 255522, "name": "周二谋杀定律", "original_language": "en", "origin_country": ["US"], "genres": []}
+
+        resolver = bridge.TmdbApiResolver(bearer_token="secret-token", http=FakeHttp())
+
+        item = resolver.lookup("255522", "tv", "周二谋杀定律")
+
+        self.assertTrue(item["ok"])
+        self.assertEqual(item["type"], "tv")
+        self.assertEqual(item["category"], "外国电视")
+        self.assertEqual(resolver.http.headers["Authorization"], "Bearer secret-token")
+        self.assertNotIn("secret-token", resolver.http.url)
+
+    def test_tmdb_api_resolver_search_maps_result_details(self):
+        class FakeHttp:
+            def __init__(self):
+                self.urls = []
+            def request(self, url, method="GET", payload=None, headers=None):
+                self.urls.append(url)
+                if "/search/tv" in url:
+                    return {"results": [{"id": 94997, "name": "权力的游戏前传：龙族"}]}
+                return {"id": 94997, "name": "权力的游戏前传：龙族", "original_language": "en", "origin_country": ["US"]}
+
+        resolver = bridge.TmdbApiResolver(api_key="test-key", http=FakeHttp())
+
+        item = resolver.search("House of the Dragon", "tv")
+
+        self.assertTrue(item["ok"])
+        self.assertEqual(item["tmdb_id"], "94997")
+        self.assertEqual(item["category"], "外国电视")
+        self.assertTrue(any("/search/tv" in url for url in resolver.http.urls))
+        self.assertTrue(any("/tv/94997" in url for url in resolver.http.urls))
+
+    def test_tmdb_api_resolver_falls_back_to_web_resolver_when_api_fails(self):
+        class FailingHttp:
+            def request(self, url, method="GET", payload=None, headers=None):
+                raise RuntimeError("HTTP 401 from TMDB")
+
+        class FakeFallback:
+            def lookup(self, tmdb_id, media_type, share_name):
+                self.lookup_args = (tmdb_id, media_type, share_name)
+                return {"ok": True, "title": "从邪恶中拯救我", "type": media_type, "tmdb_id": tmdb_id, "language": "ko", "source": "tmdb_web"}
+            def search(self, query, media_type):
+                self.search_args = (query, media_type)
+                return {"ok": True, "title": query, "type": media_type, "tmdb_id": "94997", "source": "tmdb_search"}
+
+        fallback = FakeFallback()
+        resolver = bridge.TmdbApiResolver(api_key="bad-key", http=FailingHttp(), fallback=fallback)
+
+        looked_up = resolver.lookup("581526", "movie", "从邪恶中拯救我")
+        searched = resolver.search("House of the Dragon", "tv")
+
+        self.assertEqual(looked_up["source"], "tmdb_web")
+        self.assertEqual(fallback.lookup_args, ("581526", "movie", "从邪恶中拯救我"))
+        self.assertEqual(searched["source"], "tmdb_search")
+        self.assertEqual(fallback.search_args, ("House of the Dragon", "tv"))
+
     def test_tmdb_hint_prefers_tv_page_when_title_matches_tv_not_movie(self):
         class FakeTmdb:
             enabled = True

@@ -19,6 +19,16 @@ class FakeWorkflow:
         return self.results.pop(0)
 
 
+class InspectingWorkflow(FakeWorkflow):
+    def __init__(self, results):
+        super().__init__(results)
+        self.seen_tasks = []
+
+    def run_stage(self, task):
+        self.seen_tasks.append(task)
+        return super().run_stage(task)
+
+
 class TaskRunnerTests(unittest.TestCase):
     def test_run_once_completes_stage_and_enqueues_next_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -53,6 +63,73 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.status, TaskStatus.RUNNING)
             self.assertEqual(updated.next_run_at, 35.0)
             self.assertEqual(updated.claimed_by, "")
+
+    def test_run_once_stores_global_lock_metadata_before_workflow_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=5.0)
+            workflow = InspectingWorkflow([StageResult.defer("等待 CMS 整理", delay_seconds=30)])
+            runner = TaskRunner(store, workflow, worker_id="worker-1", now=lambda: 5.0)
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(workflow.seen_tasks[0].metadata["_lock_key"], "115:global")
+            self.assertEqual(updated.metadata["_lock_key"], "115:global")
+            self.assertIn("115", updated.metadata["_lock_reason"])
+            self.assertFalse(updated.metadata["_lock_waiting"])
+
+    def test_run_once_uses_destination_lock_for_move_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(
+                task.id,
+                TaskStage.STRM_READY,
+                TaskStatus.SUCCEEDED,
+                "STRM ready",
+                metadata_patch={"dest_path": "/library/movie"},
+            )
+            store.enqueue_task(task.id, TaskStage.MOVED, next_run_at=5.0)
+            runner = TaskRunner(store, FakeWorkflow([StageResult.complete("移动完成")]), worker_id="worker-1", now=lambda: 5.0)
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(updated.metadata["_lock_key"], "dest:/library/movie")
+            self.assertIn("媒体库", updated.metadata["_lock_reason"])
+            self.assertFalse(updated.metadata["_lock_waiting"])
+
+    def test_run_once_waits_when_another_task_holds_same_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            holder = store.upsert_task("holder", "", "https://115cdn.com/s/holder")
+            store.enqueue_task(holder.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            claimed = store.claim_next_runnable("worker-1", now=1.0)
+            store.record_event(
+                claimed.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "资源锁: 115/CMS 全局阶段",
+                metadata_patch={"_lock_key": "115:global", "_lock_reason": "115/CMS 全局阶段", "_lock_waiting": False},
+                clear_claim=False,
+            )
+            waiting = store.upsert_task("waiting", "", "https://115cdn.com/s/waiting")
+            store.enqueue_task(waiting.id, TaskStage.ORGANIZING, next_run_at=2.0)
+            workflow = FakeWorkflow([StageResult.complete("不应执行")])
+            runner = TaskRunner(store, workflow, worker_id="worker-2", interval_seconds=7, now=lambda: 2.0)
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(waiting.id)
+
+            self.assertEqual(workflow.calls, [])
+            self.assertEqual(updated.status, TaskStatus.RUNNING)
+            self.assertEqual(updated.next_run_at, 9.0)
+            self.assertEqual(updated.claimed_by, "")
+            self.assertEqual(updated.metadata["_lock_key"], "115:global")
+            self.assertTrue(updated.metadata["_lock_waiting"])
+            self.assertEqual(updated.metadata["_lock_owner_task_id"], holder.id)
 
     def test_repeated_defer_uses_backoff_without_growing_event_log(self):
         current_time = 1.0

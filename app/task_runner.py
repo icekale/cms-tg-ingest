@@ -7,10 +7,52 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Protocol
 
-from .models import TaskSnapshot, TaskStatus, next_stage_after_success
+from .models import TaskSnapshot, TaskStage, TaskStatus, next_stage_after_success
 from .task_store import TaskStore
 
 LOG = logging.getLogger(__name__)
+
+
+_GLOBAL_115_LOCK_STAGES = {
+    TaskStage.RECEIVED,
+    TaskStage.ORGANIZING,
+    TaskStage.OWN_SHARE_CREATED,
+    TaskStage.SHARE_SYNC_SUBMITTED,
+    TaskStage.CLEANED,
+}
+_DESTINATION_LOCK_STAGES = {
+    TaskStage.STRM_READY,
+    TaskStage.MOVED,
+    TaskStage.EMBY_CONFIRMED,
+}
+
+
+def _lock_metadata_for_task(task: TaskSnapshot) -> dict[str, object]:
+    if task.current_stage in _GLOBAL_115_LOCK_STAGES:
+        return {
+            "_lock_key": "115:global",
+            "_lock_reason": "115/CMS 全局阶段",
+            "_lock_waiting": False,
+            "_lock_owner_task_id": "",
+        }
+    if task.current_stage in _DESTINATION_LOCK_STAGES:
+        dest_path = str(task.metadata.get("dest_path") or task.metadata.get("emby_path") or "").strip()
+        if dest_path:
+            return {
+                "_lock_key": f"dest:{dest_path}",
+                "_lock_reason": "媒体库目录阶段",
+                "_lock_waiting": False,
+                "_lock_owner_task_id": "",
+            }
+        tmdb_id = str(task.tmdb_id or task.metadata.get("tmdb_id") or "").strip()
+        if tmdb_id:
+            return {
+                "_lock_key": f"tmdb:{tmdb_id}",
+                "_lock_reason": "TMDB 条目阶段",
+                "_lock_waiting": False,
+                "_lock_owner_task_id": "",
+            }
+    return {}
 
 
 def _defer_count(metadata: dict[str, object], stage: str, message: str) -> int:
@@ -99,6 +141,9 @@ class TaskRunner:
         task = self.store.claim_next_runnable(self.worker_id, now=self.now())
         if task is None:
             return False
+        task = self._prepare_lock(task)
+        if task is None:
+            return True
         try:
             result = self.workflow.run_stage(task)
         except Exception as exc:
@@ -117,6 +162,26 @@ class TaskRunner:
             return True
         self._apply_result(task, result)
         return True
+
+    def _prepare_lock(self, task: TaskSnapshot) -> TaskSnapshot | None:
+        lock_metadata = _lock_metadata_for_task(task)
+        if not lock_metadata:
+            return task
+        lock_key = str(lock_metadata.get("_lock_key") or "")
+        holder = self.store.find_active_lock_holder(lock_key, exclude_task_id=task.id, now=self.now())
+        if holder:
+            wait_metadata = {**lock_metadata, "_lock_waiting": True, "_lock_owner_task_id": holder.id}
+            self.store.record_event(
+                task.id,
+                task.current_stage,
+                TaskStatus.RUNNING,
+                f"等待资源锁: #{holder.id} {lock_metadata.get('_lock_reason', '')}",
+                metadata_patch=wait_metadata,
+                next_run_at=self.now() + self.interval_seconds,
+                clear_claim=True,
+            )
+            return None
+        return self.store.patch_metadata(task.id, lock_metadata)
 
     def _apply_result(self, task: TaskSnapshot, result: StageResult) -> None:
         now = self.now()

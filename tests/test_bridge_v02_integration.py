@@ -25,6 +25,8 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             "WEB_TOKEN": "secret",
             "TASK_MAX_RETRIES": "5",
             "TASK_ENGINE_ENABLED": "true",
+            "TMDB_API_KEY": "tmdb-test-key",
+            "TMDB_BEARER_TOKEN": "tmdb-test-token",
         }
 
     def test_config_reads_v02_web_and_task_settings(self):
@@ -37,6 +39,8 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             self.assertEqual(cfg.web_port, 8787)
             self.assertEqual(cfg.web_token, "secret")
             self.assertEqual(cfg.task_max_retries, 5)
+            self.assertEqual(cfg.tmdb_api_key, "tmdb-test-key")
+            self.assertEqual(cfg.tmdb_bearer_token, "tmdb-test-token")
 
     def test_config_reads_task_engine_enabled(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):

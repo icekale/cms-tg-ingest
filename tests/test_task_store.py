@@ -121,6 +121,37 @@ class TaskStoreTests(unittest.TestCase):
 
             self.assertEqual([task.id for task in recent], [two.id, one.id])
 
+    def test_queue_summary_counts_statuses_and_lock_waits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            pending = store.upsert_task("pending", "", "https://115cdn.com/s/pending")
+            store.enqueue_task(pending.id, TaskStage.RECEIVED, next_run_at=0)
+            running = store.upsert_task("running", "", "https://115cdn.com/s/running")
+            store.enqueue_task(running.id, TaskStage.ORGANIZING, next_run_at=0)
+            store.claim_next_runnable("worker", now=0)
+            waiting = store.upsert_task("waiting", "", "https://115cdn.com/s/waiting")
+            store.record_event(
+                waiting.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "等待资源锁",
+                metadata_patch={"_lock_key": "115:global", "_lock_reason": "115/CMS 全局阶段", "_lock_waiting": True},
+            )
+            manual = store.upsert_task("manual", "", "https://115cdn.com/s/manual")
+            store.record_event(manual.id, TaskStage.NEEDS_ACTION, TaskStatus.NEEDS_ACTION, "请选择分类")
+            failed = store.upsert_task("failed", "", "https://115cdn.com/s/failed")
+            store.record_event(failed.id, TaskStage.STRM_READY, TaskStatus.FAILED, "STRM missing")
+
+            summary = store.queue_summary(limit=10)
+
+            self.assertEqual(summary.recent_count, 5)
+            self.assertEqual(summary.pending_count, 1)
+            self.assertEqual(summary.running_count, 2)
+            self.assertEqual(summary.needs_action_count, 1)
+            self.assertEqual(summary.failed_count, 1)
+            self.assertEqual(summary.lock_wait_count, 1)
+            self.assertEqual(summary.latest_lock_wait.id, waiting.id)
+
     def test_task_store_persists_runtime_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

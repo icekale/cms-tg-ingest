@@ -28,7 +28,56 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("示例电影", html)
             self.assertIn("STRM 生成", html)
             self.assertIn("未找到 STRM", html)
+            self.assertIn("资源锁", html)
             self.assertIn(f"/task/{task.id}", html)
+            self.assertIn('action="/history/clear"', html)
+            self.assertIn("只清除已结束任务记录", html)
+            self.assertIn("清除历史记录", html)
+
+    def test_render_task_list_shows_lock_wait_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "等待资源锁",
+                title="等待电影",
+                metadata_patch={
+                    "_lock_key": "115:global",
+                    "_lock_reason": "115/CMS 全局阶段",
+                    "_lock_waiting": True,
+                    "_lock_owner_task_id": 9,
+                },
+            )
+
+            html = render_task_list(store)
+
+            self.assertIn("等待资源锁: #9 115/CMS 全局阶段", html)
+
+    def test_clear_history_endpoint_removes_finished_tasks_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            done = store.upsert_task("done", "", "https://115cdn.com/s/done")
+            store.record_event(done.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            failed = store.upsert_task("failed", "", "https://115cdn.com/s/failed")
+            store.record_event(failed.id, TaskStage.STRM_READY, TaskStatus.FAILED, "failed")
+            pending = store.upsert_task("pending", "", "https://115cdn.com/s/pending")
+            store.enqueue_task(pending.id, TaskStage.RECEIVED, next_run_at=0)
+            manual = store.upsert_task("manual", "", "https://115cdn.com/s/manual")
+            store.record_event(manual.id, TaskStage.NEEDS_ACTION, TaskStatus.NEEDS_ACTION, "choose category")
+            app = WebApp(store, web_token="")
+
+            status, headers, body = app.handle_request("POST", "/history/clear", {}, b"")
+            remaining = {task.share_code for task in store.list_recent_tasks(limit=10)}
+
+            self.assertEqual(status, 303)
+            self.assertEqual(headers["Location"], "/")
+            self.assertEqual(remaining, {"pending", "manual"})
+            self.assertEqual(store.list_events(done.id), [])
+            self.assertEqual(store.list_events(failed.id), [])
+            self.assertEqual(body, b"")
 
     def test_render_task_detail_contains_event_timeline_and_retry_form(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -193,6 +242,70 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("直链电影", html)
             self.assertIn("发现直链 STRM", html)
             self.assertIn(str(dest / "movie.strm"), html)
+            self.assertIn('action="/quality/fix"', html)
+            self.assertIn("修复全部巡检问题", html)
+
+    def test_quality_fix_endpoint_restores_missing_dest_and_reprocesses_bad_strm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = TaskStore(root / "tasks.db")
+            missing = store.upsert_task("missing", "", "https://115cdn.com/s/missing")
+            store.record_event(
+                missing.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "done",
+                title="丢失目录",
+                metadata_patch={"dest_path": str(root / "missing-dest"), "own_share_code": "ownmissing"},
+            )
+            direct_dest = root / "direct"
+            direct_dest.mkdir()
+            (direct_dest / "movie.strm").write_text("https://115.com/d/direct.mkv", encoding="utf-8")
+            direct = store.upsert_task("direct", "", "https://115cdn.com/s/direct")
+            store.record_event(
+                direct.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "done",
+                title="直链电影",
+                metadata_patch={"dest_path": str(direct_dest), "own_share_code": "owndirect"},
+            )
+            pending_dest = root / "pending"
+            pending_dest.mkdir()
+            (pending_dest / "movie.strm").write_text("https://115.com/d/direct.mkv", encoding="utf-8")
+            pending = store.upsert_task("pending", "", "https://115cdn.com/s/pending")
+            store.record_event(
+                pending.id,
+                TaskStage.MOVED,
+                TaskStatus.PENDING,
+                "waiting",
+                metadata_patch={"dest_path": str(pending_dest), "own_share_code": "ownpending"},
+                next_run_at=0,
+            )
+            app = WebApp(store, web_token="")
+
+            status, headers, body = app.handle_request("POST", "/quality/fix", {}, b"")
+            missing_task = store.find_task(missing.id)
+            direct_task = store.find_task(direct.id)
+            pending_task = store.find_task(pending.id)
+            missing_events = [event["message"] for event in store.list_events(missing.id)]
+            direct_events = [event["message"] for event in store.list_events(direct.id)]
+
+            self.assertEqual(status, 303)
+            self.assertEqual(headers["Location"], "/quality")
+            self.assertEqual(missing_task.status, TaskStatus.PENDING)
+            self.assertEqual(missing_task.current_stage, TaskStage.EMBY_CONFIRMED)
+            self.assertEqual(missing_task.next_run_at, 0)
+            self.assertEqual(missing_task.metadata["retry_stage"], TaskStage.EMBY_CONFIRMED.value)
+            self.assertEqual(direct_task.status, TaskStatus.PENDING)
+            self.assertEqual(direct_task.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(direct_task.next_run_at, 0)
+            self.assertTrue(direct_task.metadata["force_reprocess"])
+            self.assertEqual(pending_task.status, TaskStatus.PENDING)
+            self.assertEqual(pending_task.current_stage, TaskStage.MOVED)
+            self.assertIn("Web 巡检自动修复：恢复 STRM", missing_events)
+            self.assertIn("Web 巡检自动修复：从头重跑", direct_events)
+            self.assertEqual(body, b"")
 
     def test_health_page_shows_local_taskstore_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -217,6 +330,32 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("运行中: 1", html)
             self.assertIn("失败/需处理: 1", html)
             self.assertIn("最近问题: #3 失败电影", html)
+
+    def test_health_page_shows_lock_wait_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            waiting = store.upsert_task("waiting", "", "https://115cdn.com/s/waiting")
+            store.record_event(
+                waiting.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "等待资源锁",
+                title="等待电影",
+                metadata_patch={
+                    "_lock_key": "115:global",
+                    "_lock_reason": "115/CMS 全局阶段",
+                    "_lock_waiting": True,
+                    "_lock_owner_task_id": 7,
+                },
+            )
+            app = WebApp(store, web_token="")
+
+            status, _headers, body = app.handle_request("GET", "/health", {}, b"")
+            html = body.decode("utf-8")
+
+            self.assertEqual(status, 200)
+            self.assertIn("锁等待: 1", html)
+            self.assertIn("最近锁等待: #1 等待电影 / 115/CMS 全局阶段 / holder #7", html)
 
     def test_retry_endpoint_ignores_completed_cleaned_task(self):
         with tempfile.TemporaryDirectory() as tmp:
