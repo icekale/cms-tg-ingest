@@ -205,6 +205,19 @@ class TaskRunner:
         return result.task
 
     def _apply_result(self, task: TaskSnapshot, result: StageResult) -> None:
+        current = self.store.find_task(task.id)
+        if (
+            current is None
+            or current.current_stage != task.current_stage
+            or current.claimed_by != self.worker_id
+        ):
+            LOG.warning(
+                "Discarded stale task result task_id=%s stage=%s worker_id=%s",
+                task.id,
+                task.current_stage.value,
+                self.worker_id,
+            )
+            return
         now = self.now()
         if result.outcome == StageOutcome.COMPLETE:
             self.store.record_event(

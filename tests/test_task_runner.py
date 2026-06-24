@@ -173,6 +173,37 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.status, TaskStatus.RUNNING)
             self.assertEqual(updated.next_run_at, 25.0)
 
+    def test_run_once_discards_result_when_task_was_requeued_to_different_stage(self):
+        class RequeueDuringWorkflow(FakeWorkflow):
+            def __init__(self, store, task_id):
+                super().__init__([StageResult.defer("等待 CMS 整理完成", delay_seconds=15)])
+                self.store = store
+                self.task_id = task_id
+
+            def run_stage(self, task):
+                self.store.reprocess_task(self.task_id, message="用户从头重跑", next_run_at=0)
+                return super().run_stage(task)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            runner = TaskRunner(
+                store,
+                RequeueDuringWorkflow(store, task.id),
+                worker_id="worker-1",
+                now=lambda: 1.0,
+            )
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(updated.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.next_run_at, 0)
+            self.assertEqual(updated.claimed_by, "")
+            self.assertEqual(updated.metadata["force_reprocess"], True)
+
     def test_repeated_defer_uses_backoff_without_growing_event_log(self):
         current_time = 1.0
 
