@@ -2,6 +2,9 @@
 
 ## 0.2.0-alpha.2 - Unreleased
 
+- 增加任务等待原因、等待次数和下一次检查时间展示，长时间等待会转入 NEEDS_ACTION 方便人工恢复。
+- 优化本地 STRM 就绪检查，缩短分享同步后等待时间，同时不增加 115 扫描频率。
+- 继续拆分 `bridge.py` 中的 Telegram UI 和旧轮询逻辑，降低后续维护成本。
 - 启用 TaskStore authoritative runner：真实工作流进度写入 TaskStore，新自分享链接由 TaskStore 创建任务并由 TaskRunner 推进真实工作流。
 - 后端内部拆分为 config、service clients、media STRM operations、classification、self-share workflows。
 - `bridge.py` 保持可执行入口和兼容 facade。
