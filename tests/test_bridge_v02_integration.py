@@ -539,6 +539,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(cms.submitted, [])
             self.assertEqual(p115.received, [])
             self.assertEqual(poll_calls, [])
+            self.assertIsNone(submission_store.find_by_key(bridge.ShareKey("abc", "1234")))
             tasks = task_store.list_recent_tasks(limit=10)
             self.assertEqual(len(tasks), 1)
             self.assertEqual(tasks[0].current_stage, TaskStage.RECEIVED)

@@ -787,6 +787,29 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(ready.metadata["source_path"], str(bridge.safe_resolve(self.config.strm_root / row["own_share_file_name"])))
             self.assertEqual(ready.metadata["recognition"]["tmdb_id"], "123456")
 
+    def test_strm_ready_stage_ignores_direct_strm_source_roots_while_waiting_for_share_strm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            direct_root = Path(tmp) / "direct-strm"
+            library_root = Path(tmp) / "library" / "movies"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[direct_root], library_roots={"华语电影": library_root}),
+            )
+            row = self._self_share_row()
+            direct_dir = direct_root / row["own_share_file_name"]
+            self._write_strm(direct_dir, content="http://cms/d/direct-link/movie.mkv")
+            task = self._claim_task("abc", "1234", TaskStage.STRM_READY, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIn("等待自有分享 STRM", result.message)
+            self.assertNotIn("source_path", result.metadata)
+            self.assertNotEqual(stored["move_status"], "moved")
+            self.assertTrue((direct_dir / "movie.strm").exists())
+            self.assertFalse((library_root / row["own_share_file_name"]).exists())
+
     def test_strm_ready_stage_rejects_direct_link_before_move(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
