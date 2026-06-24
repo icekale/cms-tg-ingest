@@ -46,6 +46,12 @@ TASK_MAX_RETRIES=3
 
 访问地址示例：`http://<unraid-ip>:8787/`。如需回滚到旧的 SubmissionStore + 轮询路径，设置 `TASK_ENGINE_ENABLED=false`；该旧路径是兼容回滚路径，不提供 TaskRunner 的同等清理顺序保证。
 
+## 后端结构
+
+后端按职责拆分为配置、外部客户端、媒体文件操作、分类识别和自分享工作流；`bridge.py` 只保留为启动入口和兼容层。新 self-share 链接由 TaskRunner/TaskStore 推进真实执行状态，避免回退到旧轮询路径。
+
+自分享最终 STRM 必须来自自己的 115 永久分享；移动前会校验 `.strm` 内容包含自己的 `/s/<own_share_code>_<receive_code>_` marker，并拒绝 `/d/` 直链 STRM。CMS 普通同步直链 STRM 最多只作为分类参考，不作为最终入库来源。
+
 ## 快速开始
 
 ```sh

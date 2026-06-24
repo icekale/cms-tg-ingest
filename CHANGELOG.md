@@ -3,6 +3,9 @@
 ## 0.2.0-alpha.2 - Unreleased
 
 - 启用 TaskStore authoritative runner：真实工作流进度写入 TaskStore，新自分享链接由 TaskStore 创建任务并由 TaskRunner 推进真实工作流。
+- 后端内部拆分为 config、service clients、media STRM operations、classification、self-share workflows。
+- `bridge.py` 保持可执行入口和兼容 facade。
+- 强化自分享 STRM 安全校验，禁止 direct `/d/` STRM 作为最终媒体库输出。
 - Web 管理页读取 TaskStore，失败阶段可见，Web 重试会重新排队实际任务；Telegram 新链接接收回复在 authoritative 模式下可返回 TaskStore task ID 和当前阶段，`/status` 和 `/history` 优先读取 TaskStore。
 - TG /status 增加任务操作按钮：详情、重试、查 Emby、恢复 STRM、从头重跑；/quality 增加 TaskStore 本地轻量巡检，不扫描 115。
 - Web 任务详情页增加重试、查 Emby、恢复 STRM、从头重跑按钮；Web /quality 增加 TaskStore 本地轻量巡检，不扫描 115。
