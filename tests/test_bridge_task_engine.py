@@ -299,6 +299,26 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["submission_id"], row["id"])
             self.assertEqual(result.metadata["received_title"], "received title")
 
+    def test_force_reprocess_receives_again_when_existing_row_has_no_downstream_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="auto_organize_submitted",
+            ) or row
+            task = self._claim_task("abc", "1234", TaskStage.RECEIVED, {"force_reprocess": True})
+
+            result = workflow.run_stage(task)
+            updated = self.submissions.find_by_key(bridge.ShareKey("abc", "1234"))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(self.p115.received, [("abc", "1234", "pending-cid")])
+            self.assertEqual(result.metadata["submission_id"], row["id"])
+            self.assertEqual(result.metadata["received_file_ids"], ["file-a", "file-b"])
+            self.assertEqual(updated["workflow_phase"], "received_to_pending")
+
     def test_organizing_stage_defers_when_folder_not_found(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)

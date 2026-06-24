@@ -360,7 +360,7 @@ class BridgeSelfShareTaskWorkflow:
             return StageResult.failed("缺少 115 接收目录 ID", error_type="missing_receive_cid")
 
         existing = self.store.find_by_key(_ShareKey(task.share_code, task.receive_code))
-        if self._has_received_self_share_state(existing):
+        if self._should_reuse_received_self_share_state(existing, task.metadata):
             return StageResult.complete("已接收 115 分享到待整理", self._received_metadata(existing))
 
         try:
@@ -891,13 +891,44 @@ class BridgeSelfShareTaskWorkflow:
             recognition = {}
         return recognition if isinstance(recognition, dict) else {}
 
+    def _should_reuse_received_self_share_state(
+        self,
+        row: dict[str, Any] | None,
+        task_metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        if not self._has_received_self_share_state(row):
+            return False
+        if not (task_metadata or {}).get("force_reprocess"):
+            return True
+        return self._has_downstream_self_share_state(row)
+
     def _has_received_self_share_state(self, row: dict[str, Any] | None) -> bool:
         if not row or row.get("workflow_mode") != "self_share_sync":
             return False
         phase = str(row.get("workflow_phase") or "").strip()
         if phase in {"received", "received_to_pending", "auto_organize_submitted", "organized_found", "own_share_created", "share_sync_submitted"}:
             return True
-        return any(row.get(key) for key in ("own_share_file_id", "own_share_code", "share_sync_status"))
+        return self._has_downstream_self_share_state(row)
+
+    def _has_downstream_self_share_state(self, row: dict[str, Any] | None) -> bool:
+        if not row:
+            return False
+        phase = str(row.get("workflow_phase") or "").strip()
+        if phase in {"organized_found", "own_share_created", "share_sync_submitted"}:
+            return True
+        return any(
+            row.get(key)
+            for key in (
+                "own_share_file_id",
+                "own_share_code",
+                "share_sync_status",
+                "source_path",
+                "dest_path",
+                "move_status",
+                "emby_status",
+                "cleanup_status",
+            )
+        )
 
     def _received_metadata(self, row: dict[str, Any]) -> dict[str, Any]:
         return {
