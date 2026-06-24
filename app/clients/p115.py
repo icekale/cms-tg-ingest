@@ -1,0 +1,484 @@
+from __future__ import annotations
+
+import logging
+import re
+import time
+from typing import Any
+
+from app.clients.http import FormHttp, load_cookie_value
+from app.config import default_library_roots
+
+LOG = logging.getLogger("cms-tg-ingest")
+CMS_PARENT_CID_CATEGORY_MAP: dict[str, str] = {}
+
+
+def as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def normalize_text(value: str) -> str:
+    return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(value or "")).lower()
+
+
+def extract_tmdb_id_from_name(value: str) -> str:
+    match = re.search(r"tmdb(?:id)?[=_\-](\d+)", str(value or ""), re.I)
+    return match.group(1) if match else ""
+
+
+def extract_year_from_name(value: str) -> str:
+    match = re.search(r"(19|20)\d{2}", str(value or ""))
+    return match.group(0) if match else ""
+
+
+def extract_primary_chinese_title(value: str) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"^[A-Za-z]-", "", text)
+    match = re.match(r"([\u4e00-\u9fff][\u4e00-\u9fff·・：:]+)", text)
+    if not match:
+        return ""
+    title = match.group(1).strip("·・：:")
+    return title if len(normalize_text(title)) >= 2 else ""
+
+
+def candidate_tokens(recognition: dict[str, Any], share_name: str = "") -> list[str]:
+    tokens = []
+    for value in (recognition.get("tmdb_id"), recognition.get("title"), recognition.get("share_name"), share_name):
+        value = str(value or "").strip()
+        if value:
+            tokens.append(value)
+        primary_title = extract_primary_chinese_title(value)
+        if primary_title:
+            tokens.append(primary_title)
+    normalized = []
+    seen = set()
+    for token in tokens:
+        norm = normalize_text(token)
+        if norm and norm not in seen:
+            seen.add(norm)
+            normalized.append(norm)
+    return normalized
+
+
+def iter_items(data: Any) -> list[dict]:
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        for key in ("list", "items", "records", "data", "rows"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def p115_file_id(item: dict[str, Any]) -> str:
+    return str(item.get("cid") or item.get("fid") or item.get("file_id") or "").strip()
+
+
+def p115_parent_id(item: dict[str, Any]) -> str:
+    return str(item.get("pid") or item.get("parent_id") or "").strip()
+
+
+def p115_residue_file_id(item: dict[str, Any]) -> str:
+    return str(item.get("fid") or item.get("file_id") or item.get("cid") or "").strip()
+
+
+def p115_residue_parent_id(item: dict[str, Any]) -> str:
+    return str(item.get("cid") or item.get("pid") or item.get("parent_id") or "").strip()
+
+
+def category_for_115_parent_id(parent_id: str, mapping: dict[str, str] | None = None) -> str:
+    category_map = mapping if mapping is not None else CMS_PARENT_CID_CATEGORY_MAP
+    return category_map.get(str(parent_id or "").strip(), "")
+
+
+def p115_file_name(item: dict[str, Any]) -> str:
+    return str(item.get("n") or item.get("file_name") or item.get("name") or "").strip()
+
+
+def p115_is_folder(item: dict[str, Any]) -> bool:
+    return bool(p115_file_id(item) and not item.get("fid"))
+
+
+def infer_category_from_115_path(parts: list[str], category_names: set[str] | None = None) -> str:
+    categories = category_names or set(default_library_roots())
+    for part in reversed(parts):
+        if part in categories:
+            return part
+    return ""
+
+
+def infer_category_from_115_item(item: dict[str, Any]) -> str:
+    category = str(item.get("_category") or "").strip()
+    if category:
+        return category
+    parent_name = str(item.get("dp") or "").strip()
+    return parent_name if parent_name in set(default_library_roots()) else ""
+
+
+def select_organized_115_folder(
+    items: list[dict[str, Any]],
+    recognition: dict[str, Any],
+    share_name: str,
+    excluded_parent_ids: set[str] | None = None,
+) -> dict[str, str] | None:
+    excluded = {str(value) for value in (excluded_parent_ids or set()) if str(value)}
+    tokens = candidate_tokens(recognition, share_name)
+    tmdb_id = str(recognition.get("tmdb_id") or extract_tmdb_id_from_name(share_name) or "").strip()
+    if tmdb_id:
+        tokens.insert(0, tmdb_id)
+    matches: list[tuple[int, float, dict[str, str]]] = []
+    for item in items:
+        file_id = p115_file_id(item)
+        name = p115_file_name(item)
+        if not file_id or not name:
+            continue
+        if "fid" in item and "cid" in item:
+            continue
+        if p115_parent_id(item) in excluded:
+            continue
+        norm_name = normalize_text(name)
+        name_tmdb = extract_tmdb_id_from_name(name)
+        if tmdb_id and name_tmdb and name_tmdb != tmdb_id:
+            continue
+        score = 0
+        if tmdb_id and tmdb_id in name:
+            score += 8
+        if any(token and token in norm_name for token in tokens):
+            score += 3
+        if "[tmdb" in name.lower() or "{tmdb" in name.lower():
+            score += 2
+        if score <= 0:
+            continue
+        try:
+            update_time = float(item.get("tu") or item.get("t") or item.get("te") or 0)
+        except (TypeError, ValueError):
+            update_time = 0.0
+        matches.append(
+            (
+                score,
+                update_time,
+                {
+                    "file_id": file_id,
+                    "file_name": name,
+                    "parent_id": p115_parent_id(item),
+                    "category": infer_category_from_115_item(item),
+                },
+            )
+        )
+    if not matches:
+        return None
+    matches.sort(key=lambda value: (value[0], value[1]), reverse=True)
+    return matches[0][2]
+
+
+def select_recent_tmdb_115_folder(
+    items: list[dict[str, Any]],
+    year: str,
+    excluded_parent_ids: set[str] | None = None,
+    min_update_time: float = 0,
+) -> dict[str, str] | None:
+    excluded = {str(value) for value in (excluded_parent_ids or set()) if str(value)}
+    matches: list[tuple[float, dict[str, str]]] = []
+    for item in items:
+        file_id = p115_file_id(item)
+        name = p115_file_name(item)
+        if not file_id or not name:
+            continue
+        if "fid" in item and "cid" in item:
+            continue
+        if p115_parent_id(item) in excluded:
+            continue
+        low_name = name.lower()
+        if year and year not in name:
+            continue
+        if "[tmdb" not in low_name and "{tmdb" not in low_name:
+            continue
+        try:
+            update_time = float(item.get("tu") or item.get("t") or item.get("te") or 0)
+        except (TypeError, ValueError):
+            update_time = 0.0
+        if min_update_time and update_time and update_time < min_update_time:
+            continue
+        matches.append((update_time, {"file_id": file_id, "file_name": name, "parent_id": p115_parent_id(item)}))
+    if not matches:
+        return None
+    matches.sort(key=lambda value: value[0], reverse=True)
+    return matches[0][1]
+
+
+def select_source_residue_115_files(
+    items: list[dict[str, Any]],
+    recognition: dict[str, Any],
+    share_name: str,
+    excluded_file_ids: set[str] | None = None,
+    min_update_time: float = 0,
+) -> list[dict[str, str]]:
+    excluded = {str(value) for value in (excluded_file_ids or set()) if str(value)}
+    tokens = candidate_tokens(recognition, share_name)
+    year = extract_year_from_name(share_name) or extract_year_from_name(str(recognition.get("title") or ""))
+    matches: list[tuple[int, float, dict[str, str]]] = []
+    for item in items:
+        file_id = p115_residue_file_id(item)
+        name = p115_file_name(item)
+        if not file_id or not name or file_id in excluded:
+            continue
+        update_time = as_float(item.get("tu") or item.get("t") or item.get("te"), 0.0)
+        if min_update_time and update_time and update_time < min_update_time:
+            continue
+        norm_name = normalize_text(name)
+        score = 0
+        if any(token and token in norm_name for token in tokens):
+            score += 5
+        if year and year in name:
+            score += 2
+        if score < 5:
+            continue
+        matches.append(
+            (
+                score,
+                update_time,
+                {
+                    "file_id": file_id,
+                    "file_name": name,
+                    "parent_id": p115_residue_parent_id(item),
+                },
+            )
+        )
+    matches.sort(key=lambda value: (value[0], value[1]), reverse=True)
+    return [match[2] for match in matches]
+
+
+class P115WebClient:
+    def __init__(
+        self,
+        cookie: str,
+        http: Any | None = None,
+        timeout: int = 60,
+        min_interval_seconds: float = 0.0,
+        clock: Any | None = None,
+        sleeper: Any | None = None,
+    ):
+        self.cookie = load_cookie_value(cookie)
+        self.http = http or FormHttp(timeout)
+        self.min_interval_seconds = max(0.0, float(min_interval_seconds or 0.0))
+        self.clock = clock or time.monotonic
+        self.sleeper = sleeper or time.sleep
+        self._last_request_at: float | None = None
+        if not self.cookie:
+            raise RuntimeError("115 cookie is empty")
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Cookie": self.cookie,
+            "Origin": "https://115.com",
+            "Referer": "https://115.com/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+        }
+
+    def _rate_limit(self) -> None:
+        if self.min_interval_seconds <= 0:
+            return
+        now = float(self.clock())
+        if self._last_request_at is not None:
+            wait_seconds = self.min_interval_seconds - (now - self._last_request_at)
+            if wait_seconds > 0:
+                self.sleeper(wait_seconds)
+        self._last_request_at = float(self.clock())
+
+    def _request(self, url: str, method: str = "GET", data: dict | None = None, params: dict | None = None) -> dict:
+        self._rate_limit()
+        return self.http.request(url, method=method, data=data, params=params, headers=self._headers())
+
+    @staticmethod
+    def _ensure_state(resp: dict, fallback: str) -> dict:
+        if resp.get("state") is True:
+            return resp
+        if "state" not in resp and resp.get("code") in {0, "", None}:
+            return resp
+        raise RuntimeError(str(resp.get("error") or resp.get("message") or fallback))
+
+    def search_files(self, search_value: str, limit: int = 20) -> list[dict[str, Any]]:
+        resp = self._request(
+            "https://webapi.115.com/files/search",
+            params={"search_value": search_value, "limit": limit, "offset": 0, "fc_mix": 1},
+        )
+        self._ensure_state(resp, "115 search failed")
+        return iter_items(resp.get("data") or resp)
+
+    def share_snap(self, share_code: str, receive_code: str, cid: str = "0", limit: int = 100) -> dict[str, Any]:
+        resp = self._request(
+            "https://webapi.115.com/share/snap",
+            params={
+                "share_code": share_code,
+                "receive_code": receive_code,
+                "cid": cid,
+                "offset": 0,
+                "limit": limit,
+            },
+        )
+        self._ensure_state(resp, "115 share snap failed")
+        return resp
+
+    def receive_share_to_cid(self, share_code: str, receive_code: str, target_cid: str) -> dict[str, Any]:
+        snap = self.share_snap(share_code, receive_code, cid="0", limit=100)
+        data = snap.get("data") if isinstance(snap.get("data"), dict) else {}
+        items = iter_items(data.get("list") or data)
+        file_ids = [str(item.get("fid") or item.get("cid") or item.get("file_id") or "").strip() for item in items]
+        file_ids = [file_id for file_id in file_ids if file_id]
+        if not file_ids:
+            raise RuntimeError("115 share snap did not return file ids")
+        resp = self._request(
+            "https://webapi.115.com/share/receive",
+            method="POST",
+            data={
+                "share_code": share_code,
+                "receive_code": receive_code,
+                "file_id": ",".join(file_ids),
+                "cid": str(target_cid),
+            },
+        )
+        self._ensure_state(resp, "115 receive share failed")
+        info = data.get("shareinfo") if isinstance(data.get("shareinfo"), dict) else {}
+        receive_data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
+        title = str(receive_data.get("receive_title") or info.get("share_title") or (items[0].get("n") if items else "") or "").strip()
+        return {"title": title, "file_ids": file_ids, "response": resp}
+
+    def list_files(self, parent_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        resp = self._request(
+            "https://webapi.115.com/files",
+            params={"cid": str(parent_id), "limit": limit, "offset": 0, "show_dir": 1, "fc_mix": 1},
+        )
+        self._ensure_state(resp, "115 list files failed")
+        return iter_items(resp.get("data") or resp)
+
+    def scan_organized_folders(
+        self,
+        parent_ids: set[str],
+        category_names: set[str] | None = None,
+        max_depth: int = 4,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        queue: list[tuple[str, list[str], int]] = [(str(parent_id), [], 0) for parent_id in parent_ids if str(parent_id)]
+        seen: set[str] = set()
+        folders: list[dict[str, Any]] = []
+        while queue:
+            parent_id, parts, depth = queue.pop(0)
+            if parent_id in seen or depth >= max_depth:
+                continue
+            seen.add(parent_id)
+            for item in self.list_files(parent_id, limit=limit):
+                if not p115_is_folder(item):
+                    continue
+                name = p115_file_name(item)
+                file_id = p115_file_id(item)
+                child_parts = parts + [name]
+                folder = dict(item)
+                folder["_category"] = infer_category_from_115_path(child_parts, category_names)
+                folders.append(folder)
+                queue.append((file_id, child_parts, depth + 1))
+        return folders
+
+    def find_source_residue_files(
+        self,
+        recognition: dict[str, Any],
+        share_name: str,
+        parent_ids: set[str],
+        excluded_file_ids: set[str] | None = None,
+        min_update_time: float = 0,
+    ) -> list[dict[str, str]]:
+        items: list[dict[str, Any]] = []
+        for parent_id in parent_ids:
+            parent_id = str(parent_id or "").strip()
+            if parent_id:
+                items.extend(self.list_files(parent_id, limit=100))
+        return select_source_residue_115_files(
+            items,
+            recognition,
+            share_name,
+            excluded_file_ids=excluded_file_ids,
+            min_update_time=min_update_time,
+        )
+
+    def find_organized_folder(
+        self,
+        recognition: dict[str, Any],
+        share_name: str,
+        excluded_parent_ids: set[str] | None = None,
+        min_update_time: float = 0,
+        scan_parent_ids: set[str] | None = None,
+        category_names: set[str] | None = None,
+    ) -> dict[str, str] | None:
+        search_values = candidate_tokens(recognition, share_name)
+        tmdb_id = str(recognition.get("tmdb_id") or extract_tmdb_id_from_name(share_name) or "").strip()
+        if tmdb_id:
+            search_values.insert(0, tmdb_id)
+        seen = set()
+        items: list[dict[str, Any]] = []
+        for value in search_values:
+            value = str(value or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            items.extend(self.search_files(value, limit=20))
+        selected = select_organized_115_folder(items, recognition, share_name, excluded_parent_ids=excluded_parent_ids)
+        if selected:
+            return selected
+        if scan_parent_ids:
+            try:
+                scanned = self.scan_organized_folders(scan_parent_ids, category_names=category_names)
+            except Exception:
+                LOG.debug("115 organized folder scan failed; falling back to search", exc_info=True)
+            else:
+                selected = select_organized_115_folder(scanned, recognition, share_name, excluded_parent_ids=excluded_parent_ids)
+                if selected:
+                    return selected
+        # If CMS/TMDB already identified the item, do not guess by year; wait for the exact TMDB folder.
+        if tmdb_id:
+            return None
+        year = extract_year_from_name(share_name)
+        if year:
+            fallback_items: list[dict[str, Any]] = []
+            for value in (f"{year} tmdb", year):
+                if value in seen:
+                    continue
+                seen.add(value)
+                fallback_items.extend(self.search_files(value, limit=20))
+            return select_recent_tmdb_115_folder(fallback_items, year, excluded_parent_ids=excluded_parent_ids, min_update_time=min_update_time)
+        return None
+
+    def create_long_share(self, file_id: str) -> dict[str, str]:
+        resp = self._request(
+            "https://webapi.115.com/share/send",
+            method="POST",
+            data={"file_ids": str(file_id), "ignore_warn": 1},
+        )
+        self._ensure_state(resp, "115 create share failed")
+        data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
+        share_code = str(resp.get("share_code") or data.get("share_code") or "").strip()
+        receive_code = str(resp.get("receive_code") or data.get("receive_code") or "").strip()
+        share_url = str(resp.get("share_url") or data.get("share_url") or "").strip()
+        if not share_code:
+            raise RuntimeError("115 create share did not return share_code")
+        update = self._request(
+            "https://webapi.115.com/share/updateshare",
+            method="POST",
+            data={
+                "share_code": share_code,
+                "receive_code": receive_code or "1212",
+                "share_duration": -1,
+                "auto_fill_recvcode": 1,
+            },
+        )
+        self._ensure_state(update, "115 update share failed")
+        return {"share_code": share_code, "receive_code": receive_code or "1212", "share_url": share_url}
+
+    def delete_file(self, file_id: str) -> dict:
+        resp = self._request(
+            "https://webapi.115.com/rb/delete",
+            method="POST",
+            data={"fid": str(file_id), "ignore_warn": 1},
+        )
+        return self._ensure_state(resp, "115 delete failed")
