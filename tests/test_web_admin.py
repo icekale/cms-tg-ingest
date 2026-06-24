@@ -373,6 +373,28 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("失败/需处理: 1", html)
             self.assertIn("最近问题: #3 失败电影", html)
 
+    def test_health_page_shows_taskstore_wait_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("waiting", "", "https://115cdn.com/s/waiting")
+            store.record_event(
+                task.id,
+                TaskStage.STRM_READY,
+                TaskStatus.PENDING,
+                "等待自有分享 STRM",
+                title="等待电影",
+                metadata_patch={"_defer_message": "等待自有分享 STRM", "_defer_count": 2},
+                next_run_at=9999999999.0,
+            )
+            app = WebApp(store, web_token="")
+
+            status, _headers, body = app.handle_request("GET", "/health", {}, b"")
+            html = body.decode("utf-8")
+
+            self.assertEqual(status, 200)
+            self.assertIn("等待自有分享 STRM", html)
+            self.assertIn("第 2 次", html)
+
     def test_health_page_shows_lock_wait_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

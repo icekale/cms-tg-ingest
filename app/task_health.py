@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from .models import TaskSnapshot, TaskStatus
+from .task_diagnostics import describe_task_wait
 from .task_engine import stage_display_name
 from .task_store import TaskStore
 
@@ -18,6 +20,7 @@ class TaskHealthSummary:
     lock_wait_count: int
     latest_problem: TaskSnapshot | None = None
     latest_lock_wait: TaskSnapshot | None = None
+    wait_details: tuple[str, ...] = ()
 
 
 def build_task_health(store: TaskStore | None, *, enabled: bool, limit: int = 100) -> TaskHealthSummary:
@@ -34,6 +37,12 @@ def build_task_health(store: TaskStore | None, *, enabled: bool, limit: int = 10
     queue = store.queue_summary(limit=limit)
     tasks = store.list_recent_tasks(limit=limit)
     problems = [task for task in tasks if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION}]
+    now = time.time()
+    wait_details = tuple(
+        f"#{task.id} {task.title or task.metadata.get('received_title') or task.share_code}: {describe_task_wait(task, now=now)}"
+        for task in tasks
+        if task.status in {TaskStatus.RUNNING, TaskStatus.PENDING}
+    )
     return TaskHealthSummary(
         enabled=enabled,
         recent_count=queue.recent_count,
@@ -44,6 +53,7 @@ def build_task_health(store: TaskStore | None, *, enabled: bool, limit: int = 10
         lock_wait_count=queue.lock_wait_count,
         latest_problem=problems[0] if problems else None,
         latest_lock_wait=queue.latest_lock_wait,
+        wait_details=wait_details,
     )
 
 
@@ -57,6 +67,8 @@ def format_task_health(summary: TaskHealthSummary) -> str:
         f"锁等待: {summary.lock_wait_count}",
         f"失败/需处理: {summary.problem_count}",
     ]
+    for detail in summary.wait_details:
+        lines.append(f"等待详情: {detail}")
     if summary.latest_lock_wait:
         task = summary.latest_lock_wait
         title = str(task.title or task.metadata.get("received_title") or task.share_code)

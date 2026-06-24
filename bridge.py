@@ -121,6 +121,7 @@ from app.models import TaskStage, TaskStatus
 from app.quality import format_task_quality_report, scan_task_quality
 from app.task_bridge import ensure_task_for_link, record_failure, record_submission_event, sync_task_from_submission
 from app.task_engine import decide_retry, stage_display_name
+from app.task_diagnostics import describe_task_wait
 from app.task_health import format_taskstore_health
 from app.task_runner import StageResult, TaskRunner
 from app.task_store import TaskStore
@@ -1971,6 +1972,8 @@ def format_taskstore_status(tasks: list[Any]) -> str:
         lines.append(
             f"{idx}. #{task.id} {title}：{stage_display_name(task.current_stage)} / {task.status.value}{err}"
         )
+        if task.status in {TaskStatus.RUNNING, TaskStatus.PENDING}:
+            lines.append(f"   等待：{describe_task_wait(task, now=time.time())}")
     return "\n".join(lines)
 
 

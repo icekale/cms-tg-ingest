@@ -716,6 +716,37 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertIn("未找到 STRM", message)
             self.assertNotIn("旧兼容记录", message)
 
+    def test_status_command_shows_taskstore_wait_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
+            task_store.record_event(
+                task.id,
+                TaskStage.STRM_READY,
+                TaskStatus.RUNNING,
+                "等待自有分享 STRM",
+                title="等待电影",
+                metadata_patch={"_defer_message": "等待自有分享 STRM", "_defer_count": 2},
+                next_run_at=9999999999.0,
+            )
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("/status"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                task_engine_enabled=True,
+            )
+
+            message = telegram.messages[-1][1]
+            self.assertIn("等待自有分享 STRM", message)
+            self.assertIn("第 2 次", message)
+
     def test_history_command_uses_taskstore_then_submission_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
