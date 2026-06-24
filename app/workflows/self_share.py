@@ -405,12 +405,6 @@ class BridgeSelfShareTaskWorkflow:
                 "file_name": row.get("own_share_file_name"),
                 "parent_id": self._organized_parent_id(task, self._recognition_from_row(row)),
             }
-        elif self._can_use_received_folder_as_source(task, row):
-            folder = {
-                "file_id": str((task.metadata.get("received_file_ids") or [""])[0]),
-                "file_name": str(task.metadata.get("received_title") or row.get("title") or task.title or task.share_code),
-                "parent_id": self.receive_cid,
-            }
         elif workflow_phase not in {"auto_organize_submitted", "organized_found", "own_share_created", "share_sync_submitted"}:
             self.cms.run_auto_organize()
             row = self.store.update_self_share(int(row["id"]), workflow_phase="auto_organize_submitted") or row
@@ -615,16 +609,6 @@ class BridgeSelfShareTaskWorkflow:
                 "own_share_file_id": file_id,
             },
         )
-
-    def _can_use_received_folder_as_source(self, task, row: dict[str, Any]) -> bool:
-        received_file_ids = task.metadata.get("received_file_ids")
-        if not isinstance(received_file_ids, list) or len([value for value in received_file_ids if str(value).strip()]) != 1:
-            return False
-        if str(row.get("workflow_phase") or "").strip() != "auto_organize_submitted":
-            return False
-        if row.get("own_share_file_id") or row.get("own_share_code") or row.get("share_sync_status"):
-            return False
-        return True
 
     def _folder_child_video_name(self, file_id: str) -> str:
         if not file_id or not hasattr(self.p115, "list_files"):

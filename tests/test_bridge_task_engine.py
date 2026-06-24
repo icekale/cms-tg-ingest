@@ -332,7 +332,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.cms.auto_organize_calls, 1)
             self.assertIn("等待 CMS 整理", result.message)
 
-    def test_organizing_stage_uses_received_file_id_after_waiting_for_cms(self):
+    def test_organizing_stage_does_not_use_unvalidated_received_file_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
             row = self._row()
@@ -347,11 +347,8 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 TaskStage.ORGANIZING,
                 {
                     "submission_id": row["id"],
-                    "received_file_ids": ["received-folder-id"],
+                    "received_file_ids": ["share-snapshot-id"],
                     "received_title": "基督山伯爵士 4K原盘REMUX [HDR]",
-                    "_defer_stage": TaskStage.ORGANIZING.value,
-                    "_defer_message": "等待 CMS 整理完成",
-                    "_defer_count": 1,
                 },
                 row["id"],
             )
@@ -359,10 +356,8 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             result = workflow.run_stage(task)
             stored = self.submissions.find_by_id(int(row["id"]))
 
-            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
-            self.assertEqual(result.metadata["organized_folder"]["file_id"], "received-folder-id")
-            self.assertEqual(stored["own_share_file_id"], "received-folder-id")
-            self.assertEqual(stored["own_share_file_name"], "基督山伯爵士 4K原盘REMUX [HDR]")
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIsNone(stored["own_share_file_id"])
 
     def test_organizing_stage_uses_tmdb_search_to_find_cms_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
