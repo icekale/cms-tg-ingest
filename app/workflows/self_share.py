@@ -690,7 +690,7 @@ class BridgeSelfShareTaskWorkflow:
                 metadata["direct_strm_removed"] = removed
             return StageResult.defer(
                 "等待自有分享 STRM 源目录生成",
-                self.self_share_config.auto_organize_retry_seconds or 30,
+                min(self.self_share_config.auto_organize_retry_seconds or 30, 5),
                 metadata,
             )
         metadata["source_path"] = str(source)

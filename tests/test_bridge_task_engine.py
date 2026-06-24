@@ -29,12 +29,14 @@ class FakeP115:
         self.received = []
         self.folder = None
         self.created_shares = []
+        self.find_organized_calls = []
 
     def receive_share_to_cid(self, share_code, receive_code, receive_cid):
         self.received.append((share_code, receive_code, receive_cid))
         return {"title": "received title", "file_ids": ["file-a", "file-b"]}
 
     def find_organized_folder(self, recognition, title, excluded_parent_ids=None, min_update_time=0, **kwargs):
+        self.find_organized_calls.append((dict(recognition), title, excluded_parent_ids, min_update_time, kwargs))
         return self.folder
 
     def create_long_share(self, file_id):
@@ -776,16 +778,19 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             row = self._self_share_row()
             task = self._claim_task("abc", "1234", TaskStage.STRM_READY, {"submission_id": row["id"]}, row["id"])
 
+            scan_calls_before = len(self.p115.find_organized_calls)
             waiting = workflow.run_stage(task)
             self._write_strm(self.config.strm_root / row["own_share_file_name"])
             ready = workflow.run_stage(task)
 
             self.assertEqual(waiting.outcome, StageOutcome.DEFER)
             self.assertIn("等待自有分享 STRM", waiting.message)
+            self.assertLessEqual(waiting.delay_seconds, 5)
             self.assertEqual(ready.outcome, StageOutcome.COMPLETE)
             self.assertEqual(ready.metadata["category"], "华语电影")
             self.assertEqual(ready.metadata["source_path"], str(bridge.safe_resolve(self.config.strm_root / row["own_share_file_name"])))
             self.assertEqual(ready.metadata["recognition"]["tmdb_id"], "123456")
+            self.assertEqual(len(self.p115.find_organized_calls), scan_calls_before)
 
     def test_strm_ready_stage_ignores_direct_strm_source_roots_while_waiting_for_share_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
