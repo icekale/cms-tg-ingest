@@ -254,6 +254,44 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertFalse(updated.metadata["_lock_waiting"])
             self.assertEqual(updated.metadata["retry_stage"], TaskStage.ORGANIZING.value)
 
+    def test_long_repeated_strm_wait_becomes_needs_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(
+                task.id,
+                TaskStage.STRM_READY,
+                TaskStatus.RUNNING,
+                "等待自有分享 STRM",
+                tmdb_id="123456",
+                metadata_patch={
+                    "_defer_stage": TaskStage.STRM_READY.value,
+                    "_defer_message": "等待自有分享 STRM",
+                    "_defer_count": 19,
+                    "_lock_key": "tmdb:123456",
+                    "_lock_waiting": False,
+                    "tmdb_id": "123456",
+                },
+                next_run_at=1.0,
+                clear_claim=True,
+            )
+            runner = TaskRunner(
+                store,
+                FakeWorkflow([StageResult.defer("等待自有分享 STRM", delay_seconds=15)]),
+                worker_id="worker-1",
+                now=lambda: 1.0,
+            )
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(updated.current_stage, TaskStage.NEEDS_ACTION)
+            self.assertEqual(updated.status, TaskStatus.NEEDS_ACTION)
+            self.assertEqual(updated.error_type, "stage_wait_timeout")
+            self.assertIn("等待自有分享 STRM", updated.error_summary)
+            self.assertEqual(updated.claimed_by, "")
+            self.assertEqual(updated.metadata["retry_stage"], TaskStage.STRM_READY.value)
+
     def test_run_once_records_needs_action_on_current_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

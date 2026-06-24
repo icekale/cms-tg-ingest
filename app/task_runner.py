@@ -27,6 +27,11 @@ _DESTINATION_LOCK_STAGES = {
 }
 _ORGANIZING_TIMEOUT_MESSAGES = {"等待 CMS 整理完成"}
 _ORGANIZING_MAX_DEFER_COUNT = 30
+_STAGE_MAX_DEFER_COUNT = {
+    TaskStage.ORGANIZING: 30,
+    TaskStage.STRM_READY: 20,
+    TaskStage.EMBY_CONFIRMED: 20,
+}
 
 
 def _lock_metadata_for_task(task: TaskSnapshot) -> dict[str, object]:
@@ -222,6 +227,7 @@ class TaskRunner:
                 "_defer_message": result.message,
                 "_defer_count": defer_count,
             }
+            max_defer_count = _STAGE_MAX_DEFER_COUNT.get(task.current_stage)
             if (
                 task.current_stage == TaskStage.ORGANIZING
                 and result.message in _ORGANIZING_TIMEOUT_MESSAGES
@@ -244,6 +250,28 @@ class TaskRunner:
                     metadata_patch=metadata_patch,
                     error_type="organizing_timeout",
                     error_summary="CMS 整理等待超时，请人工检查分享内容或稍后重试",
+                    clear_claim=True,
+                )
+                return
+            if max_defer_count is not None and defer_count >= max_defer_count:
+                error_summary = f"{result.message} 等待超时，请人工检查后重试"
+                metadata_patch.update(
+                    {
+                        "retry_from_stage": task.current_stage.value,
+                        "retry_stage": task.current_stage.value,
+                        "_lock_key": "",
+                        "_lock_waiting": False,
+                        "_lock_owner_task_id": "",
+                    }
+                )
+                self.store.record_event(
+                    task.id,
+                    TaskStage.NEEDS_ACTION,
+                    TaskStatus.NEEDS_ACTION,
+                    error_summary,
+                    metadata_patch=metadata_patch,
+                    error_type="stage_wait_timeout",
+                    error_summary=error_summary,
                     clear_claim=True,
                 )
                 return
