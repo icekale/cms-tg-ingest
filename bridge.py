@@ -90,6 +90,7 @@ from app.media.classify import (
 )
 
 from app.media.strm import (
+    category_for_self_share_row,
     category_from_existing_library_folder,
     category_from_existing_library_match,
     cleanup_direct_strm_for_organized_folder,
@@ -706,13 +707,6 @@ class SubmissionStore:
                 params,
             ).fetchall()
         return [dict(row) for row in rows]
-
-def category_for_self_share_row(row: dict[str, Any]) -> str:
-    for key in ("category_final", "category_choice"):
-        category = str(row.get(key) or "").strip()
-        if category:
-            return category
-    return final_category_for_move(row, parse_recognition_json(row))
 
 def should_wait_for_category(row: dict[str, Any]) -> bool:
     return str(row.get("category_status") or "") == "uncertain" and not row.get("category_choice")

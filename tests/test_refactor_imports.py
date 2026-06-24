@@ -65,12 +65,14 @@ class RefactorImportTests(unittest.TestCase):
         import bridge
         from app.clients.p115 import P115WebClient
         from app.config import Config, MoveConfig, SelfShareConfig
+        from app.media.strm import category_for_self_share_row
         from app.workflows.self_share import BridgeSelfShareTaskWorkflow
 
         self.assertIs(bridge.Config, Config)
         self.assertIs(bridge.MoveConfig, MoveConfig)
         self.assertIs(bridge.SelfShareConfig, SelfShareConfig)
         self.assertIs(bridge.P115WebClient, P115WebClient)
+        self.assertIs(bridge.category_for_self_share_row, category_for_self_share_row)
         self.assertIs(bridge.BridgeSelfShareTaskWorkflow, BridgeSelfShareTaskWorkflow)
 
 
