@@ -320,25 +320,48 @@ class P115WebClient:
         category_names: set[str] | None = None,
         max_depth: int = 4,
         limit: int = 500,
+        recognition: dict[str, Any] | None = None,
+        share_name: str = "",
+        excluded_parent_ids: set[str] | None = None,
+        allowed_parent_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
-        queue: list[tuple[str, list[str], int]] = [(str(parent_id), [], 0) for parent_id in parent_ids if str(parent_id)]
+        root_parent_ids = {str(parent_id) for parent_id in parent_ids if str(parent_id)}
+        queue: list[tuple[str, list[str], int]] = [(parent_id, [], 0) for parent_id in root_parent_ids]
         seen: set[str] = set()
         folders: list[dict[str, Any]] = []
         while queue:
-            parent_id, parts, depth = queue.pop(0)
-            if parent_id in seen or depth >= max_depth:
-                continue
-            seen.add(parent_id)
-            for item in self.list_files(parent_id, limit=limit):
-                if not p115_is_folder(item):
+            batch: list[tuple[str, list[str], int]] = []
+            while queue:
+                parent_id, parts, depth = queue.pop(0)
+                if parent_id in seen or depth >= max_depth:
                     continue
-                name = p115_file_name(item)
-                file_id = p115_file_id(item)
-                child_parts = parts + [name]
-                folder = dict(item)
-                folder["_category"] = infer_category_from_115_path(child_parts, category_names)
-                folders.append(folder)
-                queue.append((file_id, child_parts, depth + 1))
+                seen.add(parent_id)
+                batch.append((parent_id, parts, depth))
+            if not batch:
+                break
+            level_folders: list[dict[str, Any]] = []
+            for parent_id, parts, depth in batch:
+                for item in self.list_files(parent_id, limit=limit):
+                    if not p115_is_folder(item):
+                        continue
+                    name = p115_file_name(item)
+                    file_id = p115_file_id(item)
+                    child_parts = parts + [name]
+                    folder = dict(item)
+                    folder["_category"] = infer_category_from_115_path(child_parts, category_names)
+                    level_folders.append(folder)
+                    queue.append((file_id, child_parts, depth + 1))
+            folders.extend(level_folders)
+            if recognition is not None:
+                selected = select_organized_115_folder(
+                    level_folders,
+                    recognition,
+                    share_name,
+                    excluded_parent_ids=excluded_parent_ids,
+                    allowed_parent_ids=allowed_parent_ids or root_parent_ids,
+                )
+                if selected:
+                    return level_folders
         return folders
 
     def find_source_residue_files(
@@ -388,7 +411,14 @@ class P115WebClient:
             return selected
         if scan_parent_ids:
             try:
-                scanned = self.scan_organized_folders(scan_parent_ids, category_names=category_names)
+                scanned = self.scan_organized_folders(
+                    scan_parent_ids,
+                    category_names=category_names,
+                    recognition=recognition,
+                    share_name=share_name,
+                    excluded_parent_ids=excluded_parent_ids,
+                    allowed_parent_ids=scan_parent_ids,
+                )
             except Exception:
                 LOG.debug("115 organized folder scan failed; falling back to search", exc_info=True)
             else:

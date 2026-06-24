@@ -240,7 +240,7 @@ class OrganizedFolderSelectionTests(unittest.TestCase):
 
         self.assertEqual(selected["file_id"], "target")
         self.assertEqual(selected["category"], "欧美电影")
-        self.assertEqual(http.file_cids, ["exists-root", "movie-root", "western-root", "target"])
+        self.assertEqual(http.file_cids, ["exists-root", "movie-root", "western-root"])
         self.assertEqual(http.searches, ["蜘蛛侠4k原盘remuxhdr国英双语内封简英双字", "蜘蛛侠"])
 
     def test_find_organized_folder_uses_search_before_scan_fallback(self):
@@ -314,6 +314,7 @@ class OrganizedFolderSelectionTests(unittest.TestCase):
 
         self.assertEqual(selected["file_id"], "folder-id")
         self.assertEqual(selected["file_name"], "基督山伯爵士 4K原盘REMUX [HDR 杜比视界] [中英双字 简繁中字]")
+        self.assertEqual(client.http.file_cids, ["exists-root"])
 
     def test_find_organized_folder_scans_four_level_cms_library_tree(self):
         class FakeHttp:
