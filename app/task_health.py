@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .models import TaskSnapshot, TaskStatus
 from .task_diagnostics import describe_task_wait
@@ -21,6 +21,21 @@ class TaskHealthSummary:
     latest_problem: TaskSnapshot | None = None
     latest_lock_wait: TaskSnapshot | None = None
     wait_details: tuple[str, ...] = ()
+    wait_overflow_count: int = 0
+
+
+def _truncate(value: object, limit: int) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else f"{text[: max(0, limit - 3)]}..."
+
+
+def _format_wait_detail(task: TaskSnapshot, *, now: float) -> str:
+    title = _truncate(task.title or task.metadata.get("received_title") or task.share_code, 40)
+    metadata = dict(task.metadata)
+    if "_defer_message" in metadata:
+        metadata["_defer_message"] = _truncate(metadata.get("_defer_message"), 90)
+    safe_task = replace(task, title=title, error_summary=_truncate(task.error_summary, 90), metadata=metadata)
+    return _truncate(f"#{task.id} {title}: {describe_task_wait(safe_task, now=now)}", 200)
 
 
 def build_task_health(store: TaskStore | None, *, enabled: bool, limit: int = 100) -> TaskHealthSummary:
@@ -38,10 +53,10 @@ def build_task_health(store: TaskStore | None, *, enabled: bool, limit: int = 10
     tasks = store.list_recent_tasks(limit=limit)
     problems = [task for task in tasks if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION}]
     now = time.time()
+    wait_tasks = [task for task in tasks if task.status in {TaskStatus.RUNNING, TaskStatus.PENDING}]
     wait_details = tuple(
-        f"#{task.id} {task.title or task.metadata.get('received_title') or task.share_code}: {describe_task_wait(task, now=now)}"
-        for task in tasks
-        if task.status in {TaskStatus.RUNNING, TaskStatus.PENDING}
+        _format_wait_detail(task, now=now)
+        for task in wait_tasks[:5]
     )
     return TaskHealthSummary(
         enabled=enabled,
@@ -54,6 +69,7 @@ def build_task_health(store: TaskStore | None, *, enabled: bool, limit: int = 10
         latest_problem=problems[0] if problems else None,
         latest_lock_wait=queue.latest_lock_wait,
         wait_details=wait_details,
+        wait_overflow_count=max(0, len(wait_tasks) - len(wait_details)),
     )
 
 
@@ -69,6 +85,8 @@ def format_task_health(summary: TaskHealthSummary) -> str:
     ]
     for detail in summary.wait_details:
         lines.append(f"等待详情: {detail}")
+    if summary.wait_overflow_count:
+        lines.append(f"等待详情: 另有 {summary.wait_overflow_count} 个任务等待中")
     if summary.latest_lock_wait:
         task = summary.latest_lock_wait
         title = str(task.title or task.metadata.get("received_title") or task.share_code)

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import bridge
 from app.models import TaskStage, TaskStatus
+from app.task_health import format_taskstore_health
 from app.task_store import TaskStore
 from app.web import WebApp, render_task_detail, render_task_list
 
@@ -394,6 +395,58 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertIn("等待自有分享 STRM", html)
             self.assertIn("第 2 次", html)
+
+    def test_health_page_limits_wait_details_and_reports_overflow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            for index in range(6):
+                task = store.upsert_task(f"waiting-{index}", "", f"https://115cdn.com/s/waiting-{index}")
+                store.record_event(
+                    task.id,
+                    TaskStage.STRM_READY,
+                    TaskStatus.PENDING,
+                    f"等待自有分享 STRM {index}",
+                    title=f"等待电影 {index}",
+                    metadata_patch={"_defer_message": f"等待自有分享 STRM {index}", "_defer_count": index + 1},
+                    next_run_at=9999999999.0,
+                )
+            app = WebApp(store, web_token="")
+
+            status, _headers, body = app.handle_request("GET", "/health", {}, b"")
+            html = body.decode("utf-8")
+
+            self.assertEqual(status, 200)
+            self.assertEqual(html.count("等待详情: #"), 5)
+            self.assertIn("等待详情: 另有 1 个任务等待中", html)
+            self.assertIn("等待电影 5", html)
+            self.assertNotIn("等待详情: #1 等待电影 0", html)
+
+    def test_health_page_truncates_long_wait_detail_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("waiting", "", "https://115cdn.com/s/waiting")
+            long_title = "等待电影" + "A" * 120
+            long_reason = "等待自有分享 STRM" + "B" * 260
+            store.record_event(
+                task.id,
+                TaskStage.STRM_READY,
+                TaskStatus.PENDING,
+                long_reason,
+                title=long_title,
+                metadata_patch={"_defer_message": long_reason, "_defer_count": 2},
+                next_run_at=9999999999.0,
+            )
+
+            report = format_taskstore_health(store, enabled=True)
+            wait_lines = [line for line in report.splitlines() if line.startswith("等待详情: #")]
+
+            self.assertEqual(len(wait_lines), 1)
+            self.assertIn("等待自有分享 STRM", wait_lines[0])
+            self.assertIn("第 2 次", wait_lines[0])
+            self.assertIn("...", wait_lines[0])
+            self.assertNotIn("A" * 80, wait_lines[0])
+            self.assertNotIn("B" * 160, wait_lines[0])
+            self.assertLessEqual(len(wait_lines[0]), 240)
 
     def test_health_page_shows_lock_wait_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
