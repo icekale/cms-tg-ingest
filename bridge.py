@@ -1962,6 +1962,14 @@ def format_status(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def truncate_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    tail_len = min(80, max(0, limit // 3))
+    head_len = max(0, limit - tail_len - 3)
+    return f"{text[:head_len]}...{text[-tail_len:]}"
+
+
 def format_taskstore_status(tasks: list[Any]) -> str:
     if not tasks:
         return ""
@@ -1973,7 +1981,7 @@ def format_taskstore_status(tasks: list[Any]) -> str:
             f"{idx}. #{task.id} {title}：{stage_display_name(task.current_stage)} / {task.status.value}{err}"
         )
         if task.status in {TaskStatus.RUNNING, TaskStatus.PENDING}:
-            lines.append(f"   等待：{describe_task_wait(task, now=time.time())}")
+            lines.append(f"   等待：{truncate_text(describe_task_wait(task, now=time.time()), 200)}")
     return "\n".join(lines)
 
 

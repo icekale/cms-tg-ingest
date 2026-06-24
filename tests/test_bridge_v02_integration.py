@@ -747,6 +747,44 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertIn("等待自有分享 STRM", message)
             self.assertIn("第 2 次", message)
 
+    def test_status_command_truncates_long_taskstore_wait_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
+            long_reason = "等待自有分享 STRM" + "B" * 260
+            task_store.record_event(
+                task.id,
+                TaskStage.STRM_READY,
+                TaskStatus.RUNNING,
+                long_reason,
+                title="等待电影",
+                metadata_patch={"_defer_message": long_reason, "_defer_count": 2},
+                next_run_at=9999999999.0,
+            )
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("/status"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                task_engine_enabled=True,
+            )
+
+            message = telegram.messages[-1][1]
+            wait_lines = [line for line in message.splitlines() if "等待：" in line]
+            self.assertEqual(len(wait_lines), 1)
+            self.assertIn("等待自有分享 STRM", wait_lines[0])
+            self.assertIn("第 2 次", wait_lines[0])
+            self.assertIn("下次检查", wait_lines[0])
+            self.assertIn("...", wait_lines[0])
+            self.assertNotIn("B" * 160, wait_lines[0])
+            self.assertLessEqual(len(wait_lines[0]), 230)
+
     def test_history_command_uses_taskstore_then_submission_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
