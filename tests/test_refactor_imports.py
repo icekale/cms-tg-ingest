@@ -75,6 +75,14 @@ class RefactorImportTests(unittest.TestCase):
         self.assertIs(bridge.category_for_self_share_row, category_for_self_share_row)
         self.assertIs(bridge.BridgeSelfShareTaskWorkflow, BridgeSelfShareTaskWorkflow)
 
+    def test_telegram_ui_exports_formatters_and_bridge_compat(self):
+        import bridge
+        from app.telegram_ui import format_history, format_status, task_action_keyboard
+
+        self.assertIs(bridge.format_history, format_history)
+        self.assertIs(bridge.format_status, format_status)
+        self.assertIs(bridge.task_action_keyboard, task_action_keyboard)
+
 
 if __name__ == "__main__":
     unittest.main()
