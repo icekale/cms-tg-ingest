@@ -359,6 +359,62 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.DEFER)
             self.assertIsNone(stored["own_share_file_id"])
 
+    def test_organizing_stage_ignores_folder_still_under_receive_cid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            self.p115.folder = {
+                "file_id": "local-pending-folder-id",
+                "file_name": "基督山伯爵士 4K原盘REMUX [HDR]",
+                "parent_id": "pending-cid",
+            }
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="auto_organize_submitted",
+            ) or row
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertIn("pending-cid", self.p115.find_organized_calls[0][2])
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIn("等待 CMS 整理", result.message)
+            self.assertIsNone(stored["own_share_file_id"])
+
+    def test_recognizing_stage_rejects_unvalidated_received_file_id_after_manual_category(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            row = self._row()
+            row = self.submissions.update_category(int(row["id"]), "欧美电影", "selected") or row
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="auto_organize_submitted",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECOGNIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_file_ids": ["share-snapshot-id"],
+                    "organized_folder": {
+                        "file_id": "share-snapshot-id",
+                        "file_name": "基督山伯爵士 4K原盘REMUX [HDR]",
+                        "parent_id": "pending-cid",
+                    },
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("可验证", result.message)
+            self.assertEqual(result.metadata["own_share_file_id"], "")
+
     def test_organizing_stage_uses_tmdb_search_to_find_cms_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmdb = FakeTmdbSearchResolver()
@@ -848,6 +904,66 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.p115.created_shares, ["folder-id"])
             self.assertEqual(self.cms.share_sync_calls, [("owncode", "ownpwd", "0", "/media/share")])
             self.assertEqual(self.cms.plain_share_down_calls, [])
+
+    def test_own_share_stage_rejects_unvalidated_received_file_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="auto_organize_submitted",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {
+                    "submission_id": row["id"],
+                    "received_file_ids": ["share-snapshot-id"],
+                    "own_share_file_id": "share-snapshot-id",
+                    "organized_folder": {
+                        "file_id": "share-snapshot-id",
+                        "file_name": "基督山伯爵士 4K原盘REMUX [HDR]",
+                        "parent_id": "pending-cid",
+                    },
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("可验证", result.message)
+            self.assertEqual(self.p115.created_shares, [])
+
+    def test_own_share_stage_rejects_received_file_id_without_folder_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="auto_organize_submitted",
+                own_share_file_id="share-snapshot-id",
+                own_share_file_name="基督山伯爵士 4K原盘REMUX [HDR]",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {
+                    "submission_id": row["id"],
+                    "received_file_ids": ["share-snapshot-id"],
+                    "own_share_file_id": "share-snapshot-id",
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(self.p115.created_shares, [])
 
     def test_own_share_stage_deletes_115_source_immediately_after_share_created(self):
         with tempfile.TemporaryDirectory() as tmp:

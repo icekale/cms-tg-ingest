@@ -76,6 +76,14 @@ def has_authoritative_category(row: dict[str, Any], recognition: dict[str, Any])
     )
 
 
+def is_unverified_received_source(folder: dict[str, Any], task_metadata: dict[str, Any], receive_cid: str) -> bool:
+    file_id = str(folder.get("file_id") or "").strip()
+    parent_id = str(folder.get("parent_id") or folder.get("pid") or "").strip()
+    if file_id and file_id in {str(value) for value in (task_metadata.get("received_file_ids") or []) if str(value)}:
+        return True
+    return bool(receive_cid and parent_id == str(receive_cid).strip())
+
+
 def apply_openai_category_fallback(
     recognition: dict[str, Any],
     share_name: str,
@@ -410,8 +418,11 @@ class BridgeSelfShareTaskWorkflow:
             row = self.store.update_self_share(int(row["id"]), workflow_phase="auto_organize_submitted") or row
         recognition = self._recognition_from_row(row)
         title = str(row.get("title") or task.title or task.share_code)
+        excluded_parent_ids = set(self.self_share_config.excluded_parent_ids or set())
+        if self.receive_cid:
+            excluded_parent_ids.add(self.receive_cid)
         find_kwargs = {
-            "excluded_parent_ids": self.self_share_config.excluded_parent_ids or set(),
+            "excluded_parent_ids": excluded_parent_ids,
             "min_update_time": float(row.get("created_at") or 0),
         }
         if self.self_share_config.organized_scan_parent_ids:
@@ -425,11 +436,15 @@ class BridgeSelfShareTaskWorkflow:
             )
         if folder is None:
             folder = self.p115.find_organized_folder(recognition, title, **find_kwargs)
+        if folder and is_unverified_received_source(folder, task.metadata, self.receive_cid):
+            folder = None
         if not folder:
             tmdb_resolved, tmdb_should_prompt = apply_tmdb_search_resolution(recognition, title, self.tmdb_resolver)
             if not tmdb_should_prompt and str(tmdb_resolved.get("tmdb_id") or "").strip():
                 recognition = dict(tmdb_resolved)
                 folder = self.p115.find_organized_folder(recognition, title, **find_kwargs)
+                if folder and is_unverified_received_source(folder, task.metadata, self.receive_cid):
+                    folder = None
                 category = str(recognition.get("category") or "").strip()
                 if category and hasattr(self.store, "update_category"):
                     row = self.store.update_category(int(row["id"]), category, "selected") or row
@@ -486,6 +501,11 @@ class BridgeSelfShareTaskWorkflow:
         file_id = str(folder.get("file_id") or "").strip()
         folder_name = str(folder.get("file_name") or row.get("own_share_file_name") or task.title or "").strip()
         share_name = str(row.get("title") or task.title or folder_name or task.share_code).strip()
+        if is_unverified_received_source(folder, task.metadata, self.receive_cid):
+            return StageResult.needs_action(
+                "等待可验证的 CMS 整理后源目录，当前 115 ID 仍是接收/分享快照，拒绝继续创建自有分享",
+                {"submission_id": int(row["id"]), "own_share_file_id": ""},
+            )
         child_video_name = self._folder_child_video_name(file_id)
         recognition_share_name = child_video_name or share_name
         parent_id = self._organized_parent_id(task, recognition, folder)
@@ -631,6 +651,17 @@ class BridgeSelfShareTaskWorkflow:
         file_id = str(task.metadata.get("own_share_file_id") or row.get("own_share_file_id") or "").strip()
         if not file_id:
             return StageResult.failed("缺少自有分享文件夹 ID", error_type="own_share_file_missing")
+        folder = task.metadata.get("organized_folder")
+        if isinstance(folder, dict) and is_unverified_received_source(folder, task.metadata, self.receive_cid):
+            return StageResult.needs_action(
+                "等待可验证的 CMS 整理后源目录，当前 115 ID 仍是接收/分享快照，拒绝创建自有分享",
+                self._own_share_metadata(row) | {"own_share_file_id": ""},
+            )
+        if file_id in {str(value) for value in (task.metadata.get("received_file_ids") or []) if str(value)}:
+            return StageResult.needs_action(
+                "等待可验证的 CMS 整理后源目录，当前 115 ID 仍是接收/分享快照，拒绝创建自有分享",
+                self._own_share_metadata(row) | {"own_share_file_id": ""},
+            )
         created = False
         if not row.get("own_share_code"):
             share = self.p115.create_long_share(file_id)
