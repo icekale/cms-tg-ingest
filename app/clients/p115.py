@@ -80,8 +80,10 @@ def select_organized_115_folder(
     recognition: dict[str, Any],
     share_name: str,
     excluded_parent_ids: set[str] | None = None,
+    allowed_parent_ids: set[str] | None = None,
 ) -> dict[str, str] | None:
     excluded = {str(value) for value in (excluded_parent_ids or set()) if str(value)}
+    allowed = {str(value) for value in (allowed_parent_ids or set()) if str(value)}
     tokens = candidate_tokens(recognition, share_name)
     tmdb_id = str(recognition.get("tmdb_id") or extract_tmdb_id_from_name(share_name) or "").strip()
     if tmdb_id:
@@ -94,7 +96,8 @@ def select_organized_115_folder(
             continue
         if "fid" in item and "cid" in item:
             continue
-        if p115_parent_id(item) in excluded:
+        parent_id = p115_parent_id(item)
+        if parent_id in excluded and parent_id not in allowed:
             continue
         norm_name = normalize_text(name)
         name_tmdb = extract_tmdb_id_from_name(name)
@@ -120,7 +123,7 @@ def select_organized_115_folder(
                 {
                     "file_id": file_id,
                     "file_name": name,
-                    "parent_id": p115_parent_id(item),
+                    "parent_id": parent_id,
                     "category": infer_category_from_115_item(item),
                 },
             )
@@ -389,7 +392,13 @@ class P115WebClient:
             except Exception:
                 LOG.debug("115 organized folder scan failed; falling back to search", exc_info=True)
             else:
-                selected = select_organized_115_folder(scanned, recognition, share_name, excluded_parent_ids=excluded_parent_ids)
+                selected = select_organized_115_folder(
+                    scanned,
+                    recognition,
+                    share_name,
+                    excluded_parent_ids=excluded_parent_ids,
+                    allowed_parent_ids=scan_parent_ids,
+                )
                 if selected:
                     return selected
         # If CMS/TMDB already identified the item, do not guess by year; wait for the exact TMDB folder.

@@ -275,6 +275,46 @@ class OrganizedFolderSelectionTests(unittest.TestCase):
         self.assertFalse(any(call[0].endswith("/files") for call in http.calls))
         self.assertTrue(any(call[0].endswith("/files/search") for call in http.calls))
 
+    def test_find_organized_folder_allows_direct_child_under_configured_exists_scan_root(self):
+        class FakeHttp:
+            def __init__(self):
+                self.file_cids = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                params = params or {}
+                if url.endswith("/files"):
+                    cid = params.get("cid", "")
+                    self.file_cids.append(cid)
+                    tree = {
+                        "exists-root": [{"cid": "folder-id", "pid": "exists-root", "n": "基督山伯爵士 4K原盘REMUX [HDR 杜比视界] [中英双字 简繁中字]"}],
+                        "folder-id": [
+                            {
+                                "fid": "video-id",
+                                "cid": "folder-id",
+                                "pid": "folder-id",
+                                "n": "Le.Comte.de.Monte-Cristo.2024.2160p.BluRay.REMUX.HDR.DV.mkv",
+                                "t": "1782314401",
+                            }
+                        ],
+                    }
+                    return {"state": True, "data": tree.get(cid, [])}
+                if url.endswith("/files/search"):
+                    return {"state": True, "data": []}
+                return {"state": True, "data": []}
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        selected = client.find_organized_folder(
+            {"ok": True, "title": "基督山伯爵", "tmdb_id": "1084736", "share_name": "Le.Comte.de.Monte-Cristo.2024.2160p.BluRay.REMUX.HDR.DV.mkv"},
+            "基督山伯爵士 4K原盘REMUX [HDR 杜比视界] [中英双字 简繁中字]",
+            excluded_parent_ids={"exists-root"},
+            min_update_time=1782314300,
+            scan_parent_ids={"exists-root"},
+        )
+
+        self.assertEqual(selected["file_id"], "folder-id")
+        self.assertEqual(selected["file_name"], "基督山伯爵士 4K原盘REMUX [HDR 杜比视界] [中英双字 简繁中字]")
+
     def test_find_organized_folder_scans_four_level_cms_library_tree(self):
         class FakeHttp:
             def __init__(self):
