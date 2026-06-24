@@ -1,4 +1,5 @@
 import ast
+import inspect
 import unittest
 from pathlib import Path
 
@@ -88,6 +89,33 @@ class RefactorImportTests(unittest.TestCase):
         from app.legacy_polling import start_status_poll
 
         self.assertIs(bridge.start_status_poll, start_status_poll)
+
+    def test_legacy_polling_start_status_poll_signature(self):
+        from app.legacy_polling import start_status_poll
+
+        signature = inspect.signature(start_status_poll)
+        expected_names = [
+            "cms",
+            "telegram",
+            "chat_id",
+            "store",
+            "row",
+            "status_poll_seconds",
+            "status_poll_interval",
+            "emby",
+            "move_config",
+            "openai_classifier",
+            "tmdb_resolver",
+            "self_share_workflow",
+            "cleanup_client",
+            "task_store",
+        ]
+        self.assertEqual(list(signature.parameters), expected_names)
+        for name in expected_names[:7]:
+            self.assertIs(signature.parameters[name].default, inspect.Parameter.empty)
+        for name in expected_names[7:]:
+            self.assertIsNone(signature.parameters[name].default)
+            self.assertEqual(signature.parameters[name].kind, inspect.Parameter.KEYWORD_ONLY)
 
 
 if __name__ == "__main__":

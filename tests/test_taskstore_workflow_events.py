@@ -125,8 +125,8 @@ class PollTaskStoreIntegrationTests(unittest.TestCase):
                     464100862,
                     submission_store,
                     row,
-                    max_seconds=1,
-                    interval=1,
+                    1,
+                    1,
                     task_store=task_store,
                 )
 

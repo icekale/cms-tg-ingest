@@ -12,8 +12,8 @@ def start_status_poll(
     chat_id: Any,
     store: Any,
     row: dict[str, Any],
-    status_poll_seconds: int | None = None,
-    status_poll_interval: int | None = None,
+    status_poll_seconds: int,
+    status_poll_interval: int,
     *,
     emby: Any = None,
     move_config: Any = None,
@@ -22,16 +22,10 @@ def start_status_poll(
     self_share_workflow: Any = None,
     cleanup_client: Any = None,
     task_store: Any = None,
-    max_seconds: int | None = None,
-    interval: int | None = None,
 ) -> None:
     bridge_module = sys.modules.get("bridge") or __import__("bridge")
     if not hasattr(bridge_module, "_start_status_poll_impl"):
         raise RuntimeError("bridge legacy polling implementation is not loaded")
-    if status_poll_seconds is None:
-        status_poll_seconds = 300 if max_seconds is None else max_seconds
-    if status_poll_interval is None:
-        status_poll_interval = 20 if interval is None else interval
     bridge_module._start_status_poll_impl(
         cms,
         telegram,
