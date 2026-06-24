@@ -83,6 +83,12 @@ class RefactorImportTests(unittest.TestCase):
         self.assertIs(bridge.format_status, format_status)
         self.assertIs(bridge.task_action_keyboard, task_action_keyboard)
 
+    def test_legacy_polling_exports_start_status_poll_and_bridge_compat(self):
+        import bridge
+        from app.legacy_polling import start_status_poll
+
+        self.assertIs(bridge.start_status_poll, start_status_poll)
+
 
 if __name__ == "__main__":
     unittest.main()

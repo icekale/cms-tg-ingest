@@ -1901,7 +1901,7 @@ def should_skip_existing_submission(row: dict[str, Any] | None, self_share_enabl
     return any(row.get(key) for key in progress_keys)
 
 
-def start_status_poll(
+def _start_status_poll_impl(
     cms: CmsClient,
     telegram: TelegramClient,
     chat_id: int | str,
@@ -2129,6 +2129,10 @@ def start_status_poll(
 
     threading.Thread(target=worker, daemon=True).start()
 
+
+# Import after the implementation exists so app.legacy_polling can avoid
+# importing bridge at module load time.
+from app.legacy_polling import start_status_poll
 
 def handle_update(
     update: dict,
