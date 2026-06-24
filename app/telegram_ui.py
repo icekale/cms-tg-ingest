@@ -172,8 +172,8 @@ def format_taskstore_status(tasks: list[Any]) -> str:
         return ""
     lines = ["TaskStore 最近任务："]
     for idx, task in enumerate(tasks, 1):
-        title = task.title or task.metadata.get("received_title") or task.share_code
-        err = f"，{task.error_summary}" if task.error_summary else ""
+        title = truncate_text(str(task.title or task.metadata.get("received_title") or task.share_code), 80)
+        err = f"，{truncate_text(task.error_summary, 100)}" if task.error_summary else ""
         lines.append(
             f"{idx}. #{task.id} {title}：{stage_display_name(task.current_stage)} / {task.status.value}{err}"
         )

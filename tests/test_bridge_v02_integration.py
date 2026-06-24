@@ -785,6 +785,53 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertNotIn("B" * 160, wait_lines[0])
             self.assertLessEqual(len(wait_lines[0]), 230)
 
+    def test_status_command_truncates_long_taskstore_titles_and_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            title_prefix = "长标题"
+            error_prefix = "错误摘要"
+
+            for idx in range(8):
+                task = task_store.upsert_task(
+                    f"code{idx}",
+                    "1234",
+                    f"https://115cdn.com/s/code{idx}?password=1234",
+                    chat_id="464100862",
+                )
+                task_store.record_event(
+                    task.id,
+                    TaskStage.STRM_READY,
+                    TaskStatus.FAILED,
+                    "STRM missing",
+                    title=f"{title_prefix}{idx}-" + "A" * 300,
+                    error_summary=f"{error_prefix}{idx}-" + "B" * 300,
+                )
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("/status"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                task_engine_enabled=True,
+            )
+
+            message = telegram.messages[-1][1]
+            task_lines = [line for line in message.splitlines() if line.startswith(tuple(f"{idx}." for idx in range(1, 9)))]
+            self.assertEqual(len(task_lines), 8)
+            self.assertIn(title_prefix, message)
+            self.assertIn(error_prefix, message)
+            self.assertIn("...", message)
+            self.assertNotIn("A" * 160, message)
+            self.assertNotIn("B" * 160, message)
+            self.assertLess(len(message), 2500)
+            for line in task_lines:
+                self.assertLessEqual(len(line), 260)
+
     def test_history_command_uses_taskstore_then_submission_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
