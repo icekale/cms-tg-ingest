@@ -22,11 +22,18 @@ def _duration(seconds: float) -> str:
     return f"{minutes // 60} 小时"
 
 
+def _defer_count(metadata: dict) -> int:
+    try:
+        return int(metadata.get("_defer_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def describe_task_wait(task: TaskSnapshot, *, now: float) -> str:
     reason = str(task.metadata.get("_defer_message") or task.error_summary or "等待执行")
     wait_from = task.updated_at or task.created_at or now
     next_run_at = task.next_run_at or now
-    defer_count = int(task.metadata.get("_defer_count") or 0)
+    defer_count = _defer_count(task.metadata)
 
     parts = [
         reason,

@@ -42,6 +42,18 @@ class TaskDiagnosticsTests(unittest.TestCase):
         self.assertIn("下次检查 15 秒后", description)
         self.assertIn("第 3 次", description)
 
+    def test_describe_task_wait_ignores_non_numeric_defer_count(self):
+        task = make_task(
+            metadata={"_defer_message": "等待自有分享 STRM", "_defer_count": "not-a-number"},
+            updated_at=100.0,
+            next_run_at=145.0,
+        )
+
+        description = describe_task_wait(task, now=130.0)
+
+        self.assertIn("等待自有分享 STRM", description)
+        self.assertNotIn("第 ", description)
+
     def test_classify_stuck_task_reports_old_running_deferred_stage(self):
         task = make_task(
             current_stage=TaskStage.ORGANIZING,
