@@ -23,12 +23,15 @@ class RefactorImportTests(unittest.TestCase):
         self.assertEqual(HttpJson.__name__, "HttpJson")
         self.assertEqual(P115WebClient.__name__, "P115WebClient")
 
-    def test_media_modules_export_core_helpers(self):
+    def test_media_classify_module_exports_core_helpers(self):
         from app.media.classify import final_category_for_move, normalize_text
-        from app.media.strm import MovePlan, has_strm_file, validate_self_share_strm_source
 
         self.assertEqual(normalize_text("J-杰克・莱恩-2018"), "j杰克莱恩2018")
         self.assertEqual(final_category_for_move({"category_choice": "外国电视"}, {}), "外国电视")
+
+    def test_media_strm_module_exports_core_helpers(self):
+        from app.media.strm import MovePlan, has_strm_file, validate_self_share_strm_source
+
         self.assertEqual(MovePlan.__name__, "MovePlan")
         self.assertFalse(has_strm_file(Path("/path/that/does/not/exist")))
         self.assertEqual(validate_self_share_strm_source(Path("/path/that/does/not/exist"), {}), "")

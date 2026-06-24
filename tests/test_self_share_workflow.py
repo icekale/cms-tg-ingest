@@ -1048,6 +1048,39 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertIn("发现直链 STRM", updated["move_error"])
             self.assertFalse((dest / "movie.strm").exists())
 
+    def test_merge_self_share_strm_folder_rejects_direct_strm_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "J-杰克・莱恩-2018-[tmdb=73375]"
+            dest = root / "library" / "J-杰克・莱恩-2018-[tmdb=73375]"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            (source / "episode.strm").write_text(
+                "http://cms/d/file.mkv?/杰克・莱恩.mkv",
+                encoding="utf-8",
+            )
+            store = bridge.SubmissionStore(root / "db.sqlite")
+            row = store.upsert_submission(
+                bridge.ShareKey("abc", "1212"),
+                "https://115cdn.com/s/abc?password=1212",
+                "submitted",
+                title="杰克・莱恩 (2018) {tmdb-73375}",
+            )
+            row = store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_code="ownshare",
+                own_share_receive_code="1212",
+                own_share_file_name=source.name,
+            ) or row
+            plan = bridge.MovePlan("conflict", "ready", source, dest, "外国电视")
+
+            updated = bridge.merge_self_share_strm_folder(plan, store, row)
+
+            self.assertEqual(updated["move_status"], "error")
+            self.assertIn("发现直链 STRM", updated["move_error"])
+            self.assertTrue((source / "episode.strm").exists())
+
     def test_merge_self_share_folder_rejects_unexpected_share_code_before_copy(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
