@@ -405,6 +405,12 @@ class BridgeSelfShareTaskWorkflow:
                 "file_name": row.get("own_share_file_name"),
                 "parent_id": self._organized_parent_id(task, self._recognition_from_row(row)),
             }
+        elif self._can_use_received_folder_as_source(task, row):
+            folder = {
+                "file_id": str((task.metadata.get("received_file_ids") or [""])[0]),
+                "file_name": str(task.metadata.get("received_title") or row.get("title") or task.title or task.share_code),
+                "parent_id": self.receive_cid,
+            }
         elif workflow_phase not in {"auto_organize_submitted", "organized_found", "own_share_created", "share_sync_submitted"}:
             self.cms.run_auto_organize()
             row = self.store.update_self_share(int(row["id"]), workflow_phase="auto_organize_submitted") or row
@@ -486,6 +492,8 @@ class BridgeSelfShareTaskWorkflow:
         file_id = str(folder.get("file_id") or "").strip()
         folder_name = str(folder.get("file_name") or row.get("own_share_file_name") or task.title or "").strip()
         share_name = str(row.get("title") or task.title or folder_name or task.share_code).strip()
+        child_video_name = self._folder_child_video_name(file_id)
+        recognition_share_name = child_video_name or share_name
         parent_id = self._organized_parent_id(task, recognition, folder)
         category = str(folder.get("category") or "").strip() or category_for_115_parent_id(
             parent_id,
@@ -507,7 +515,7 @@ class BridgeSelfShareTaskWorkflow:
         recognition.update(
             {
                 "title": recognition.get("title") or folder_name or share_name,
-                "share_name": recognition.get("share_name") or share_name,
+                "share_name": recognition.get("share_name") or recognition_share_name,
                 "tmdb_id": tmdb_id,
                 "category": category,
                 "organized_parent_id": parent_id,
@@ -521,8 +529,15 @@ class BridgeSelfShareTaskWorkflow:
             recognition["parent_id"] = parent_id
             tmdb_id = str(recognition.get("tmdb_id") or tmdb_id).strip()
         else:
-            tmdb_resolved, tmdb_should_prompt = apply_tmdb_hint_resolution(recognition, share_name, self.tmdb_resolver)
+            tmdb_resolved, tmdb_should_prompt = apply_tmdb_hint_resolution(recognition, recognition_share_name, self.tmdb_resolver)
             tmdb_category = str(tmdb_resolved.get("category") or "").strip()
+            if tmdb_should_prompt and child_video_name:
+                tmdb_resolved, tmdb_should_prompt = apply_tmdb_search_resolution(
+                    recognition,
+                    child_video_name,
+                    self.tmdb_resolver,
+                )
+                tmdb_category = str(tmdb_resolved.get("category") or "").strip()
             if not tmdb_should_prompt and tmdb_category:
                 category = tmdb_category
                 recognition = dict(tmdb_resolved)
@@ -600,6 +615,30 @@ class BridgeSelfShareTaskWorkflow:
                 "own_share_file_id": file_id,
             },
         )
+
+    def _can_use_received_folder_as_source(self, task, row: dict[str, Any]) -> bool:
+        received_file_ids = task.metadata.get("received_file_ids")
+        if not isinstance(received_file_ids, list) or len([value for value in received_file_ids if str(value).strip()]) != 1:
+            return False
+        if str(row.get("workflow_phase") or "").strip() != "auto_organize_submitted":
+            return False
+        if row.get("own_share_file_id") or row.get("own_share_code") or row.get("share_sync_status"):
+            return False
+        return True
+
+    def _folder_child_video_name(self, file_id: str) -> str:
+        if not file_id or not hasattr(self.p115, "list_files"):
+            return ""
+        try:
+            items = self.p115.list_files(file_id, limit=20)
+        except Exception:
+            LOG.debug("Failed to list received folder children for recognition", exc_info=True)
+            return ""
+        for item in items:
+            name = str(item.get("n") or item.get("file_name") or item.get("name") or "").strip()
+            if name.lower().endswith((".mkv", ".mp4", ".ts", ".iso", ".avi", ".mov", ".wmv", ".m2ts")):
+                return name
+        return ""
 
     def _stage_own_share_created(self, task):
         row = self._submission_row(task)

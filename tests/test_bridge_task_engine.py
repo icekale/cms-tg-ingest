@@ -332,6 +332,38 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.cms.auto_organize_calls, 1)
             self.assertIn("等待 CMS 整理", result.message)
 
+    def test_organizing_stage_uses_received_file_id_after_waiting_for_cms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="auto_organize_submitted",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_file_ids": ["received-folder-id"],
+                    "received_title": "基督山伯爵士 4K原盘REMUX [HDR]",
+                    "_defer_stage": TaskStage.ORGANIZING.value,
+                    "_defer_message": "等待 CMS 整理完成",
+                    "_defer_count": 1,
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["organized_folder"]["file_id"], "received-folder-id")
+            self.assertEqual(stored["own_share_file_id"], "received-folder-id")
+            self.assertEqual(stored["own_share_file_name"], "基督山伯爵士 4K原盘REMUX [HDR]")
+
     def test_organizing_stage_uses_tmdb_search_to_find_cms_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmdb = FakeTmdbSearchResolver()
@@ -374,6 +406,64 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(stored["category_choice"], "外国电视")
             self.assertEqual(recognition["category_status"], "tmdb_search_resolved")
             self.assertEqual(stored["category_status"], "organized_found")
+
+    def test_recognizing_stage_uses_received_folder_video_name_for_tmdb_search(self):
+        class ChildFileP115(FakeP115):
+            def __init__(self):
+                super().__init__()
+                self.listed = []
+
+            def list_files(self, parent_id, limit=20):
+                self.listed.append((parent_id, limit))
+                return [{"fid": "video-id", "n": "Le.Comte.de.Monte-Cristo.2024.2160p.BluRay.REMUX.HDR.DV.mkv"}]
+
+        class MonteCristoResolver(FakeTmdbResolver):
+            def search(self, query, media_type):
+                self.searches.append((query, media_type))
+                if query == "Le Comte de Monte Cristo" and media_type == "movie":
+                    return {
+                        "ok": True,
+                        "title": "基督山伯爵",
+                        "type": "movie",
+                        "tmdb_id": "1084736",
+                        "language": "fr",
+                        "countries": ["FR"],
+                        "genres": ["剧情"],
+                        "category": "欧美电影",
+                        "source": "tmdb_api",
+                    }
+                return {"ok": False}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            resolver = MonteCristoResolver()
+            workflow = self._workflow(tmp, tmdb_resolver=resolver)
+            workflow.p115 = ChildFileP115()
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="organized_found",
+                own_share_file_id="received-folder-id",
+                own_share_file_name="基督山伯爵士 4K原盘REMUX [HDR]",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECOGNIZING,
+                {"submission_id": row["id"], "own_share_file_id": "received-folder-id"},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            recognition = bridge.parse_recognition_json(stored)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["category"], "欧美电影")
+            self.assertEqual(result.metadata["tmdb_id"], "1084736")
+            self.assertEqual(stored["category_choice"], "欧美电影")
+            self.assertEqual(recognition["tmdb_id"], "1084736")
+            self.assertEqual(workflow.p115.listed, [("received-folder-id", 20)])
 
     def test_recognizing_stage_uses_cms_parent_category_before_llm(self):
         with tempfile.TemporaryDirectory() as tmp:

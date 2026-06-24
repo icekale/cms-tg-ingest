@@ -253,12 +253,13 @@ class TmdbApiResolver:
 
 def extract_tmdb_search_query(share_name: str) -> str:
     text = str(share_name or "")
-    match = re.search(r"([A-Za-z][A-Za-z0-9]+(?:\.[A-Za-z0-9]+){1,})\.S\d{1,2}", text, re.I)
+    title_pattern = r"([A-Za-z][A-Za-z0-9]+(?:[.-][A-Za-z0-9]+){1,})"
+    match = re.search(rf"{title_pattern}\.S\d{{1,2}}", text, re.I)
     if match:
-        return re.sub(r"\.+", " ", match.group(1)).strip()
-    match = re.search(r"([A-Za-z][A-Za-z0-9]+(?:\.[A-Za-z0-9]+){1,})\.(?:19|20)\d{2}", text, re.I)
+        return re.sub(r"[.-]+", " ", match.group(1)).strip()
+    match = re.search(rf"{title_pattern}\.(?:19|20)\d{{2}}", text, re.I)
     if match:
-        return re.sub(r"\.+", " ", match.group(1)).strip()
+        return re.sub(r"[.-]+", " ", match.group(1)).strip()
     return ""
 
 

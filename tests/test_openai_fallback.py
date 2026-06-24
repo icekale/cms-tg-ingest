@@ -264,6 +264,11 @@ class TmdbHintResolutionTests(unittest.TestCase):
 
         self.assertEqual(bridge.extract_tmdb_search_query(share_name), "Greys Anatomy")
 
+    def test_extract_tmdb_search_query_accepts_hyphenated_movie_title(self):
+        share_name = "Le.Comte.de.Monte-Cristo.2024.2160p.BluRay.REMUX.HDR.DV.mkv"
+
+        self.assertEqual(bridge.extract_tmdb_search_query(share_name), "Le Comte de Monte Cristo")
+
     def test_tmdb_search_resolver_uses_search_result_id(self):
         class FakeResolver:
             enabled = True
