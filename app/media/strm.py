@@ -27,11 +27,17 @@ def category_for_self_share_row(row: dict[str, Any]) -> str:
     return final_category_for_move(row, parse_recognition_json(row))
 
 
-def has_strm_file(path: Path) -> bool:
+def iter_strm_files(path: Path):
     try:
-        return any(child.is_file() and child.suffix.lower() == ".strm" for child in path.rglob("*"))
+        for child in path.rglob("*"):
+            if child.is_file() and child.suffix.lower() == ".strm":
+                yield child
     except OSError:
-        return False
+        return
+
+
+def has_strm_file(path: Path) -> bool:
+    return any(iter_strm_files(path))
 
 
 def newest_mtime(path: Path) -> float:
@@ -261,7 +267,7 @@ def validate_self_share_strm_source(source: Path, row: dict[str, Any]) -> str:
         return "等待自有分享码，暂不移动 STRM"
     receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
     expected_marker = f"/s/{own_share_code}_{receive_code}_"
-    for path in sorted(source.rglob("*.strm")):
+    for path in sorted(iter_strm_files(source)):
         text = path.read_text(encoding="utf-8", errors="replace").strip()
         if "/d/" in text:
             return f"发现直链 STRM：{path}"
@@ -274,7 +280,7 @@ def remove_direct_strm_files(path: Path) -> int:
     if not path.exists() or not path.is_dir():
         return 0
     removed = 0
-    for strm_path in sorted(path.rglob("*.strm")):
+    for strm_path in sorted(iter_strm_files(path)):
         try:
             text = strm_path.read_text(encoding="utf-8", errors="replace")
         except OSError:

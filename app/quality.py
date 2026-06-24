@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from dataclasses import replace
 from pathlib import Path
 
+from .media.strm import iter_strm_files
 from .models import TaskSnapshot
 from .task_store import TaskStore
 
@@ -28,7 +29,7 @@ def inspect_task_files(
     dest = Path(dest_path)
     if not dest.exists():
         return [QualityIssue("missing_dest", "目标目录不存在", str(dest))]
-    files = sorted(path for path in dest.rglob("*.strm") if path.is_file())
+    files = sorted(iter_strm_files(dest))
     if not files:
         return [QualityIssue("missing_strm", "目标目录没有 STRM 文件", str(dest))]
     issues: list[QualityIssue] = []

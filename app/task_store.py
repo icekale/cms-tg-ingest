@@ -7,7 +7,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .models import TaskSnapshot, TaskStage, TaskStatus
 
@@ -21,6 +21,12 @@ class TaskQueueSummary:
     failed_count: int
     lock_wait_count: int
     latest_lock_wait: TaskSnapshot | None = None
+
+
+@dataclass(frozen=True)
+class TaskLockClaimResult:
+    task: TaskSnapshot | None = None
+    holder: TaskSnapshot | None = None
 
 
 class TaskStore:
@@ -206,6 +212,94 @@ class TaskStore:
             )
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return self._snapshot(row)
+
+    def claim_task_lock(
+        self,
+        task_id: int,
+        lock_metadata: dict[str, Any],
+        conflicts_with_holder: Callable[[TaskSnapshot], bool],
+        *,
+        wait_message: str,
+        next_run_at: float,
+        now: float | None = None,
+        stale_after_seconds: int = 21600,
+        limit: int = 100,
+    ) -> TaskLockClaimResult:
+        current_time = time.time() if now is None else float(now)
+        stale_before = current_time - max(1, int(stale_after_seconds))
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            holder: TaskSnapshot | None = None
+            rows = conn.execute(
+                """
+                SELECT * FROM tasks
+                WHERE id != ?
+                  AND status = ?
+                  AND claimed_by != ''
+                  AND claimed_at > ?
+                ORDER BY updated_at ASC, id ASC
+                LIMIT ?
+                """,
+                (task_id, TaskStatus.RUNNING.value, stale_before, int(limit)),
+            ).fetchall()
+            for row in rows:
+                candidate = self._snapshot(row)
+                if candidate.metadata.get("_lock_waiting"):
+                    continue
+                if conflicts_with_holder(candidate):
+                    holder = candidate
+                    break
+
+            current = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if current is None:
+                raise KeyError(f"task not found: {task_id}")
+            metadata_patch = dict(lock_metadata)
+            if holder is not None:
+                metadata_patch.update({"_lock_waiting": True, "_lock_owner_task_id": holder.id})
+            merged_metadata = self._merge_metadata(current["metadata_json"], metadata_patch)
+            if holder is None:
+                conn.execute(
+                    "UPDATE tasks SET metadata_json = ?, updated_at = ? WHERE id = ?",
+                    (merged_metadata, current_time, task_id),
+                )
+                row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                return TaskLockClaimResult(task=self._snapshot(row) if row else None)
+
+            last_event = conn.execute(
+                """
+                SELECT stage, status, message, error_type, error_detail
+                FROM task_events
+                WHERE task_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+            duplicate_running_event = bool(
+                last_event
+                and last_event["stage"] == current["current_stage"]
+                and last_event["status"] == TaskStatus.RUNNING.value
+                and last_event["message"] == wait_message
+                and last_event["error_type"] == ""
+                and last_event["error_detail"] == ""
+            )
+            if not duplicate_running_event:
+                conn.execute(
+                    """
+                    INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (task_id, current["current_stage"], TaskStatus.RUNNING.value, wait_message, "", "", current_time),
+                )
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = ?, metadata_json = ?, next_run_at = ?, claimed_by = '', claimed_at = 0, updated_at = ?
+                WHERE id = ?
+                """,
+                (TaskStatus.RUNNING.value, merged_metadata, float(next_run_at), current_time, task_id),
+            )
+        return TaskLockClaimResult(holder=holder)
 
     def list_events(self, task_id: int) -> list[dict[str, Any]]:
         with self._lock, self._connection() as conn:

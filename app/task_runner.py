@@ -180,20 +180,24 @@ class TaskRunner:
         if not lock_metadata:
             return task
         lock_key = str(lock_metadata.get("_lock_key") or "")
-        holder = self.store.find_active_lock_holder(lock_key, exclude_task_id=task.id, now=self.now())
-        if holder:
-            wait_metadata = {**lock_metadata, "_lock_waiting": True, "_lock_owner_task_id": holder.id}
-            self.store.record_event(
-                task.id,
-                task.current_stage,
-                TaskStatus.RUNNING,
-                f"等待资源锁: #{holder.id} {lock_metadata.get('_lock_reason', '')}",
-                metadata_patch=wait_metadata,
-                next_run_at=self.now() + self.interval_seconds,
-                clear_claim=True,
-            )
+        wait_message = f"等待资源锁: {lock_metadata.get('_lock_reason', '')}"
+
+        def conflicts_with_holder(holder: TaskSnapshot) -> bool:
+            if str(holder.metadata.get("_lock_key") or "") == lock_key:
+                return True
+            return str(_lock_metadata_for_task(holder).get("_lock_key") or "") == lock_key
+
+        result = self.store.claim_task_lock(
+            task.id,
+            lock_metadata,
+            conflicts_with_holder,
+            wait_message=wait_message,
+            next_run_at=self.now() + self.interval_seconds,
+            now=self.now(),
+        )
+        if result.holder:
             return None
-        return self.store.patch_metadata(task.id, lock_metadata)
+        return result.task
 
     def _apply_result(self, task: TaskSnapshot, result: StageResult) -> None:
         now = self.now()

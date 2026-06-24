@@ -1048,6 +1048,33 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertIn("发现直链 STRM", updated["move_error"])
             self.assertFalse((dest / "movie.strm").exists())
 
+    def test_merge_self_share_folder_rejects_uppercase_direct_strm_before_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            dest = root / "library" / "Movie"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            (source / "MOVIE.STRM").write_text("http://cms/d/direct.mkv", encoding="utf-8")
+            store = bridge.SubmissionStore(root / "db.sqlite")
+            row = store.upsert_submission(
+                bridge.ShareKey("abc", "1234"),
+                "https://115cdn.com/s/abc?password=1234",
+                "received",
+            )
+            row = store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_code="ownshare",
+            ) or row
+            plan = bridge.MovePlan("conflict", "ready", source, dest, "欧美电影")
+
+            updated = bridge.merge_self_share_strm_folder(plan, store, row)
+
+            self.assertEqual(updated["move_status"], "error")
+            self.assertIn("发现直链 STRM", updated["move_error"])
+            self.assertFalse((dest / "MOVIE.STRM").exists())
+
     def test_merge_self_share_strm_folder_rejects_direct_strm_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1259,6 +1286,19 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertFalse(source.exists())
             self.assertEqual((dest / strm_name).read_text(encoding="utf-8"), "http://cms/s/swswmerge_1212_1.mp4")
             self.assertEqual(updated["move_status"], "moved")
+
+    def test_remove_direct_strm_files_deletes_uppercase_strm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "library" / "Movie"
+            dest.mkdir(parents=True)
+            direct = dest / "MOVIE.STRM"
+            direct.write_text("http://cms/d/direct.mp4", encoding="utf-8")
+
+            removed = bridge.remove_direct_strm_files(dest)
+
+            self.assertEqual(removed, 1)
+            self.assertFalse(direct.exists())
 
     def test_restore_missing_self_share_library_folder_resubmits_share_sync(self):
         with tempfile.TemporaryDirectory() as tmp:

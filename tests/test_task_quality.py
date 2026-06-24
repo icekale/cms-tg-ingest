@@ -22,6 +22,19 @@ class TaskQualityTests(unittest.TestCase):
 
             self.assertEqual(issues, [QualityIssue("direct_strm", "发现直链 STRM", str(dest / "movie.strm"))])
 
+    def test_flags_uppercase_direct_strm_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "Movie"
+            dest.mkdir()
+            (dest / "MOVIE.STRM").write_text("http://cms/d/direct-file.mkv", encoding="utf-8")
+            store = TaskStore(root / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+
+            issues = inspect_task_files(task, dest_path=dest, own_share_code="ownshare")
+
+            self.assertEqual(issues, [QualityIssue("direct_strm", "发现直链 STRM", str(dest / "MOVIE.STRM"))])
+
     def test_accepts_self_share_strm_url(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

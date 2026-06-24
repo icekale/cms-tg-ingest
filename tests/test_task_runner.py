@@ -131,6 +131,30 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertTrue(updated.metadata["_lock_waiting"])
             self.assertEqual(updated.metadata["_lock_owner_task_id"], holder.id)
 
+    def test_run_once_waits_when_same_lock_task_is_claimed_before_lock_metadata_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            holder = store.upsert_task("holder", "", "https://115cdn.com/s/holder")
+            store.enqueue_task(holder.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            claimed = store.claim_next_runnable("worker-1", now=1.0)
+            self.assertEqual(claimed.id, holder.id)
+            self.assertEqual(claimed.claimed_by, "worker-1")
+            waiting = store.upsert_task("waiting", "", "https://115cdn.com/s/waiting")
+            store.enqueue_task(waiting.id, TaskStage.ORGANIZING, next_run_at=2.0)
+            workflow = FakeWorkflow([StageResult.complete("不应执行")])
+            runner = TaskRunner(store, workflow, worker_id="worker-2", interval_seconds=7, now=lambda: 2.0)
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(waiting.id)
+
+            self.assertEqual(workflow.calls, [])
+            self.assertEqual(updated.status, TaskStatus.RUNNING)
+            self.assertEqual(updated.next_run_at, 9.0)
+            self.assertEqual(updated.claimed_by, "")
+            self.assertEqual(updated.metadata["_lock_key"], "115:global")
+            self.assertTrue(updated.metadata["_lock_waiting"])
+            self.assertEqual(updated.metadata["_lock_owner_task_id"], holder.id)
+
     def test_run_once_releases_previous_same_worker_claim_before_claiming(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
