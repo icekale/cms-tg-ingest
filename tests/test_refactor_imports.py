@@ -1,0 +1,56 @@
+import unittest
+from pathlib import Path
+
+
+class RefactorImportTests(unittest.TestCase):
+    def test_config_module_exports_core_config_types(self):
+        from app.config import Config, MoveConfig, MovePlan, SelfShareConfig
+
+        self.assertEqual(Config.__name__, "Config")
+        self.assertEqual(MoveConfig.__name__, "MoveConfig")
+        self.assertEqual(MovePlan.__name__, "MovePlan")
+        self.assertEqual(SelfShareConfig.__name__, "SelfShareConfig")
+
+    def test_client_modules_export_clients(self):
+        from app.clients.cms import CmsClient
+        from app.clients.emby import EmbyClient
+        from app.clients.http import FormHttp, HttpJson
+        from app.clients.p115 import P115WebClient
+
+        self.assertEqual(CmsClient.__name__, "CmsClient")
+        self.assertEqual(EmbyClient.__name__, "EmbyClient")
+        self.assertEqual(FormHttp.__name__, "FormHttp")
+        self.assertEqual(HttpJson.__name__, "HttpJson")
+        self.assertEqual(P115WebClient.__name__, "P115WebClient")
+
+    def test_media_modules_export_core_helpers(self):
+        from app.media.classify import final_category_for_move, normalize_text
+        from app.media.strm import MovePlan, has_strm_file, validate_self_share_strm_source
+
+        self.assertEqual(normalize_text("J-杰克・莱恩-2018"), "j杰克莱恩2018")
+        self.assertEqual(final_category_for_move({"category_choice": "外国电视"}, {}), "外国电视")
+        self.assertEqual(MovePlan.__name__, "MovePlan")
+        self.assertFalse(has_strm_file(Path("/path/that/does/not/exist")))
+        self.assertEqual(validate_self_share_strm_source(Path("/path/that/does/not/exist"), {}), "")
+
+    def test_workflow_module_exports_self_share_workflows(self):
+        from app.workflows.self_share import BridgeSelfShareTaskWorkflow, SelfShareWorkflow
+
+        self.assertEqual(SelfShareWorkflow.__name__, "SelfShareWorkflow")
+        self.assertEqual(BridgeSelfShareTaskWorkflow.__name__, "BridgeSelfShareTaskWorkflow")
+
+    def test_bridge_keeps_compatibility_exports(self):
+        import bridge
+        from app.clients.p115 import P115WebClient
+        from app.config import Config, MoveConfig, SelfShareConfig
+        from app.workflows.self_share import BridgeSelfShareTaskWorkflow
+
+        self.assertIs(bridge.Config, Config)
+        self.assertIs(bridge.MoveConfig, MoveConfig)
+        self.assertIs(bridge.SelfShareConfig, SelfShareConfig)
+        self.assertIs(bridge.P115WebClient, P115WebClient)
+        self.assertIs(bridge.BridgeSelfShareTaskWorkflow, BridgeSelfShareTaskWorkflow)
+
+
+if __name__ == "__main__":
+    unittest.main()
