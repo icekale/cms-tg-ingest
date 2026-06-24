@@ -116,13 +116,19 @@ class TaskStore:
         return TaskSnapshot.from_row(dict(row))
 
     @staticmethod
-    def _merge_metadata(existing_json: str | None, patch: dict[str, Any] | None) -> str:
+    def _merge_metadata(
+        existing_json: str | None,
+        patch: dict[str, Any] | None,
+        delete_keys: tuple[str, ...] | None = None,
+    ) -> str:
         try:
             current = json.loads(existing_json or "{}")
         except Exception:
             current = {}
         if not isinstance(current, dict):
             current = {}
+        for key in delete_keys or ():
+            current.pop(str(key), None)
         if patch:
             current.update({str(key): value for key, value in patch.items() if value is not None})
         return json.dumps(current, ensure_ascii=False, sort_keys=True)
@@ -354,6 +360,7 @@ class TaskStore:
         increment_retry: bool = False,
         submission_id: int | None = None,
         metadata_patch: dict[str, Any] | None = None,
+        metadata_delete_keys: tuple[str, ...] | None = None,
         next_run_at: float | None = None,
         clear_claim: bool = False,
     ) -> TaskSnapshot:
@@ -362,7 +369,11 @@ class TaskStore:
             # Acquire the write lock before reading metadata so concurrent patches do not lose updates.
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute("SELECT metadata_json FROM tasks WHERE id = ?", (task_id,)).fetchone()
-            merged_metadata = self._merge_metadata(current["metadata_json"] if current else "{}", metadata_patch)
+            merged_metadata = self._merge_metadata(
+                current["metadata_json"] if current else "{}",
+                metadata_patch,
+                metadata_delete_keys,
+            )
             last_event = conn.execute(
                 """
                 SELECT stage, status, message, error_type, error_detail
@@ -440,6 +451,7 @@ class TaskStore:
             target_stage,
             TaskStatus.PENDING,
             message,
+            metadata_delete_keys=("_defer_stage", "_defer_message", "_defer_count"),
             next_run_at=time.time() if next_run_at is None else float(next_run_at),
             clear_claim=True,
         )
@@ -464,6 +476,7 @@ class TaskStore:
                 "retry_stage": TaskStage.RECEIVED.value,
                 "force_reprocess": True,
             },
+            metadata_delete_keys=("_defer_stage", "_defer_message", "_defer_count"),
             next_run_at=next_run_at,
             clear_claim=True,
         )

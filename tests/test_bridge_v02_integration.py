@@ -1252,6 +1252,50 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(claimed.id, task.id)
             self.assertEqual(claimed.current_stage, TaskStage.RECOGNIZING)
 
+    def test_task_engine_requeue_clears_stale_defer_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
+            task = task_store.record_event(
+                task.id,
+                TaskStage.NEEDS_ACTION,
+                TaskStatus.NEEDS_ACTION,
+                "CMS 整理等待超时",
+                error_type="organizing_timeout",
+                error_summary="CMS 整理等待超时",
+                metadata_patch={
+                    "_defer_stage": TaskStage.ORGANIZING.value,
+                    "_defer_message": "等待 CMS 整理完成",
+                    "_defer_count": 31,
+                    "retry_stage": TaskStage.ORGANIZING.value,
+                },
+            )
+            cms = FakeCmsSubmit()
+            telegram = FakeTelegram()
+            p115 = FakeP115Receive()
+
+            bridge.handle_update(
+                self.update("https://115cdn.com/s/abc?password=1234"),
+                cms,
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                cleanup_client=p115,
+                self_share_receive_cid="pending-cid",
+                task_engine_enabled=True,
+            )
+
+            updated = task_store.find_task(task.id)
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.current_stage, TaskStage.ORGANIZING)
+            self.assertNotIn("_defer_count", updated.metadata)
+            self.assertNotIn("_defer_stage", updated.metadata)
+            self.assertNotIn("_defer_message", updated.metadata)
+
     def test_task_engine_requeues_sentinel_failed_to_received_fallback_when_no_retry_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
