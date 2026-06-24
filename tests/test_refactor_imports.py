@@ -1,3 +1,4 @@
+import ast
 import unittest
 from pathlib import Path
 
@@ -41,6 +42,24 @@ class RefactorImportTests(unittest.TestCase):
 
         self.assertEqual(SelfShareWorkflow.__name__, "SelfShareWorkflow")
         self.assertEqual(BridgeSelfShareTaskWorkflow.__name__, "BridgeSelfShareTaskWorkflow")
+
+    def test_app_modules_do_not_import_bridge(self):
+        app_root = Path(__file__).resolve().parents[1] / "app"
+        offenders = []
+        for path in app_root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    offenders.extend(
+                        f"{path.relative_to(app_root.parent)}:{alias.name}"
+                        for alias in node.names
+                        if alias.name == "bridge" or alias.name.startswith("bridge.")
+                    )
+                elif isinstance(node, ast.ImportFrom):
+                    module = node.module or ""
+                    if module == "bridge" or module.startswith("bridge."):
+                        offenders.append(f"{path.relative_to(app_root.parent)}:{module}")
+        self.assertEqual(offenders, [])
 
     def test_bridge_keeps_compatibility_exports(self):
         import bridge
