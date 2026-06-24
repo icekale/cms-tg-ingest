@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
-import re
 import time
 from typing import Any
 
 from app.clients.http import FormHttp, load_cookie_value
 from app.config import default_library_roots
+from app.media.classify import candidate_tokens, extract_tmdb_id_from_name, extract_year_from_name, normalize_text
 
 LOG = logging.getLogger("cms-tg-ingest")
 CMS_PARENT_CID_CATEGORY_MAP: dict[str, str] = {}
@@ -17,49 +17,6 @@ def as_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
-
-
-def normalize_text(value: str) -> str:
-    return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(value or "")).lower()
-
-
-def extract_tmdb_id_from_name(value: str) -> str:
-    match = re.search(r"tmdb(?:id)?[=_\-](\d+)", str(value or ""), re.I)
-    return match.group(1) if match else ""
-
-
-def extract_year_from_name(value: str) -> str:
-    match = re.search(r"(19|20)\d{2}", str(value or ""))
-    return match.group(0) if match else ""
-
-
-def extract_primary_chinese_title(value: str) -> str:
-    text = str(value or "").strip()
-    text = re.sub(r"^[A-Za-z]-", "", text)
-    match = re.match(r"([\u4e00-\u9fff][\u4e00-\u9fff·・：:]+)", text)
-    if not match:
-        return ""
-    title = match.group(1).strip("·・：:")
-    return title if len(normalize_text(title)) >= 2 else ""
-
-
-def candidate_tokens(recognition: dict[str, Any], share_name: str = "") -> list[str]:
-    tokens = []
-    for value in (recognition.get("tmdb_id"), recognition.get("title"), recognition.get("share_name"), share_name):
-        value = str(value or "").strip()
-        if value:
-            tokens.append(value)
-        primary_title = extract_primary_chinese_title(value)
-        if primary_title:
-            tokens.append(primary_title)
-    normalized = []
-    seen = set()
-    for token in tokens:
-        norm = normalize_text(token)
-        if norm and norm not in seen:
-            seen.add(norm)
-            normalized.append(norm)
-    return normalized
 
 
 def iter_items(data: Any) -> list[dict]:

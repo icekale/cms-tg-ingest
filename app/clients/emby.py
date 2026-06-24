@@ -1,25 +1,12 @@
 from __future__ import annotations
 
-import re
 import urllib.parse
 from pathlib import Path
 from typing import Any
 
 from app.clients.http import HttpJson
 from app.config import is_relative_to, safe_resolve
-
-
-def extract_tmdb_id_from_name(value: str) -> str:
-    match = re.search(r"tmdb(?:id)?[=_\-](\d+)", str(value or ""), re.I)
-    return match.group(1) if match else ""
-
-
-def item_tmdb_id(item: dict[str, Any]) -> str:
-    provider_ids = item.get("ProviderIds") or item.get("ProviderIDs") or {}
-    tmdb_id = str(provider_ids.get("Tmdb") or provider_ids.get("TMDB") or "").strip()
-    if tmdb_id:
-        return tmdb_id
-    return extract_tmdb_id_from_name(" ".join(str(item.get(k) or "") for k in ("Path", "Name", "OriginalTitle")))
+from app.media.classify import item_tmdb_id
 
 
 class EmbyClient:

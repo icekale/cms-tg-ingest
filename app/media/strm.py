@@ -1,124 +1,22 @@
 from __future__ import annotations
 
-import json
-import re
 import shutil
 import time
 from pathlib import Path
 from typing import Any
 
 from app.config import MoveConfig, MovePlan, SelfShareConfig, is_relative_to, is_under_any_root, safe_resolve
+from app.media.classify import (
+    candidate_tokens,
+    expected_task_tmdb_id,
+    extract_tmdb_id_from_name,
+    final_category_for_move,
+    media_type_for_category,
+    normalize_text,
+    parse_recognition_json,
+)
 
-
-CATEGORY_ALIASES = {
-    "动画电影": "动漫电影",
-}
 MISSING_SELF_SHARE_SOURCE_REASONS = {"STRM 源目录不存在", "源目录不包含 STRM 文件", "未找到 STRM 源目录"}
-
-
-def normalize_text(value: str) -> str:
-    return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(value or "")).lower()
-
-
-def extract_tmdb_id_from_name(value: str) -> str:
-    match = re.search(r"tmdb(?:id)?[=_\-](\d+)", str(value or ""), re.I)
-    return match.group(1) if match else ""
-
-
-def extract_year_from_name(value: str) -> str:
-    match = re.search(r"(19|20)\d{2}", str(value or ""))
-    return match.group(0) if match else ""
-
-
-def media_type_for_category(category: str) -> str:
-    if category in {"华语电影", "欧美电影", "亚洲电影", "动漫电影"}:
-        return "movie"
-    if category in {"国产电视", "外国电视", "番剧"}:
-        return "tv"
-    return ""
-
-
-def extract_primary_chinese_title(value: str) -> str:
-    text = str(value or "").strip()
-    text = re.sub(r"^[A-Za-z]-", "", text)
-    match = re.match(r"([\u4e00-\u9fff][\u4e00-\u9fff·・：:]+)", text)
-    if not match:
-        return ""
-    title = match.group(1).strip("·・：:")
-    return title if len(normalize_text(title)) >= 2 else ""
-
-
-def candidate_tokens(recognition: dict[str, Any], share_name: str = "") -> list[str]:
-    tokens = []
-    for value in (recognition.get("tmdb_id"), recognition.get("title"), recognition.get("share_name"), share_name):
-        value = str(value or "").strip()
-        if value:
-            tokens.append(value)
-        primary_title = extract_primary_chinese_title(value)
-        if primary_title:
-            tokens.append(primary_title)
-    normalized = []
-    seen = set()
-    for token in tokens:
-        norm = normalize_text(token)
-        if norm and norm not in seen:
-            seen.add(norm)
-            normalized.append(norm)
-    return normalized
-
-
-def parse_recognition_json(row: dict[str, Any]) -> dict[str, Any]:
-    raw = row.get("recognition_json")
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(str(raw))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def expected_task_tmdb_id(recognition: dict[str, Any], row: dict[str, Any] | None = None) -> str:
-    row = row or {}
-    explicit = str(recognition.get("tmdb_id") or "").strip()
-    if explicit:
-        return explicit
-    for value in (
-        row.get("title"),
-        recognition.get("share_name"),
-        row.get("url"),
-        row.get("own_share_file_name"),
-        row.get("dest_path"),
-        row.get("source_path"),
-        row.get("emby_path"),
-    ):
-        tmdb_id = extract_tmdb_id_from_name(str(value or ""))
-        if tmdb_id:
-            return tmdb_id
-    return ""
-
-
-def map_category_label(label: str, recognition: dict[str, Any]) -> str:
-    del recognition
-    label = str(label or "").strip()
-    return CATEGORY_ALIASES.get(label, label)
-
-
-def final_category_for_move(row: dict[str, Any], recognition: dict[str, Any]) -> str:
-    for value in (
-        row.get("category_choice"),
-        row.get("category_final"),
-        recognition.get("category"),
-    ):
-        value = str(value or "").strip()
-        if value:
-            return map_category_label(value, recognition)
-    media_type = str(recognition.get("type") or "")
-    if media_type == "movie":
-        return "欧美电影"
-    if media_type == "tv":
-        return "外国电视"
-    return ""
 
 
 def category_for_self_share_row(row: dict[str, Any]) -> str:
