@@ -458,6 +458,66 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(recognition["category_status"], "tmdb_search_resolved")
             self.assertEqual(stored["category_status"], "organized_found")
 
+    def test_organizing_stage_uses_tmdb_search_for_chinese_quality_title(self):
+        class MonteCristoResolver(FakeTmdbResolver):
+            def search(self, query, media_type):
+                self.searches.append((query, media_type))
+                if query == "基督山伯爵士" and media_type == "movie":
+                    return {
+                        "ok": True,
+                        "title": "基督山伯爵",
+                        "type": "movie",
+                        "tmdb_id": "1084736",
+                        "language": "fr",
+                        "countries": ["FR"],
+                        "genres": ["剧情"],
+                        "category": "欧美电影",
+                        "source": "tmdb_api",
+                    }
+                return {"ok": False}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmdb = MonteCristoResolver()
+            workflow = self._workflow(tmp, tmdb_resolver=tmdb)
+            row = self._row()
+            row = self.submissions.update_status(
+                int(row["id"]),
+                "received",
+                title="基督山伯爵士 4K原盘REMUX [HDR 杜比视界] [中英双字 简繁中字]",
+            ) or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            calls = []
+
+            def find_organized_folder(recognition, title, excluded_parent_ids=None, min_update_time=0, **kwargs):
+                calls.append((dict(recognition), title, kwargs))
+                if recognition.get("tmdb_id") == "1084736":
+                    return {
+                        "file_id": "folder-id",
+                        "file_name": "基督山伯爵士 4K原盘REMUX [HDR 杜比视界] [中英双字 简繁中字]",
+                        "parent_id": "movie-parent",
+                        "category": "欧美电影",
+                    }
+                return None
+
+            self.p115.find_organized_folder = find_organized_folder
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            recognition = bridge.parse_recognition_json(stored)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(tmdb.searches, [("基督山伯爵士", "movie")])
+            self.assertGreaterEqual(len(calls), 2)
+            self.assertEqual(calls[-1][0]["tmdb_id"], "1084736")
+            self.assertEqual(result.metadata["organized_folder"]["file_id"], "folder-id")
+            self.assertEqual(result.metadata["organized_folder"]["category"], "欧美电影")
+            self.assertEqual(recognition["tmdb_id"], "1084736")
+            self.assertEqual(recognition["category"], "欧美电影")
+            self.assertEqual(stored["category_choice"], "欧美电影")
+            self.assertEqual(recognition["category_status"], "tmdb_search_resolved")
+            self.assertEqual(stored["category_status"], "organized_found")
+
     def test_recognizing_stage_uses_received_folder_video_name_for_tmdb_search(self):
         class ChildFileP115(FakeP115):
             def __init__(self):

@@ -269,6 +269,35 @@ class TmdbHintResolutionTests(unittest.TestCase):
 
         self.assertEqual(bridge.extract_tmdb_search_query(share_name), "Le Comte de Monte Cristo")
 
+    def test_extract_tmdb_search_query_accepts_mixed_chinese_english_title(self):
+        share_name = "蜘蛛侠：英雄无归.Spider-Man: No Way Home.2021.UHD.IMAX.2160p.BluRay.REMUX.DV.HDR.mkv"
+
+        self.assertEqual(bridge.extract_tmdb_search_query(share_name), "Spider Man No Way Home")
+
+    def test_extract_tmdb_search_query_falls_back_to_chinese_quality_title(self):
+        share_name = "基督山伯爵士 4K原盘REMUX [HDR 杜比视界] [中英双字 简繁中字]"
+
+        self.assertEqual(bridge.extract_tmdb_search_query(share_name), "基督山伯爵士")
+
+    def test_tmdb_search_resolver_uses_chinese_quality_title(self):
+        class FakeResolver:
+            enabled = True
+            def search(self, query, media_type):
+                self.query = query
+                self.media_type = media_type
+                return {"ok": True, "title": "基督山伯爵", "type": "movie", "tmdb_id": "1084736", "category": "欧美电影"}
+
+        resolver = FakeResolver()
+        share_name = "基督山伯爵士 4K原盘REMUX [HDR 杜比视界] [中英双字 简繁中字]"
+
+        resolved, should_prompt = bridge.apply_tmdb_search_resolution({"ok": False, "title": "", "tmdb_id": ""}, share_name, resolver)
+
+        self.assertFalse(should_prompt)
+        self.assertEqual(resolver.query, "基督山伯爵士")
+        self.assertEqual(resolver.media_type, "movie")
+        self.assertEqual(resolved["tmdb_id"], "1084736")
+        self.assertEqual(resolved["category"], "欧美电影")
+
     def test_tmdb_search_resolver_uses_search_result_id(self):
         class FakeResolver:
             enabled = True
