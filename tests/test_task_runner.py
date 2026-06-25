@@ -224,12 +224,12 @@ class TaskRunnerTests(unittest.TestCase):
             for _ in range(4):
                 self.assertTrue(runner.run_once())
                 current_time = store.find_task(task.id).next_run_at
-            self.assertEqual(store.find_task(task.id).next_run_at, 61.0)
+            self.assertEqual(store.find_task(task.id).next_run_at, 91.0)
 
             self.assertTrue(runner.run_once())
             fifth = store.find_task(task.id)
             current_time = fifth.next_run_at
-            self.assertEqual(fifth.next_run_at, 91.0)
+            self.assertEqual(fifth.next_run_at, 151.0)
 
             for _ in range(5):
                 self.assertTrue(runner.run_once())
@@ -237,9 +237,35 @@ class TaskRunnerTests(unittest.TestCase):
             tenth = store.find_task(task.id)
             events = store.list_events(task.id)
 
-            self.assertEqual(tenth.next_run_at, 361.0)
+            self.assertEqual(tenth.next_run_at, 571.0)
             self.assertEqual(tenth.metadata["_defer_count"], 10)
             self.assertEqual(len([event for event in events if event["message"] == "等待 CMS 整理"]), 1)
+
+    def test_repeated_five_second_waits_back_off_after_two_fast_checks(self):
+        current_time = 1.0
+
+        def now():
+            return current_time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.STRM_READY, next_run_at=current_time)
+            runner = TaskRunner(
+                store,
+                FakeWorkflow([StageResult.defer("等待自有分享 STRM 源目录生成", delay_seconds=5) for _ in range(6)]),
+                worker_id="worker-1",
+                now=now,
+            )
+
+            observed_next_runs = []
+            for _ in range(6):
+                self.assertTrue(runner.run_once())
+                current_time = store.find_task(task.id).next_run_at
+                observed_next_runs.append(current_time)
+
+            self.assertEqual(observed_next_runs, [6.0, 11.0, 41.0, 71.0, 131.0, 191.0])
+            self.assertEqual(store.find_task(task.id).metadata["_defer_count"], 6)
 
     def test_organizing_defer_over_limit_becomes_needs_action_and_releases_lock(self):
         current_time = 1.0

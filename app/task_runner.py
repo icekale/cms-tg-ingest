@@ -73,11 +73,11 @@ def _defer_count(metadata: dict[str, object], stage: str, message: str) -> int:
 
 
 def _defer_delay(base_delay_seconds: float, count: int) -> float:
-    if count <= 4:
+    if count <= 2:
         return base_delay_seconds
-    if count <= 6:
+    if count <= 4:
         return max(base_delay_seconds, 30.0)
-    if count <= 10:
+    if count <= 8:
         return max(base_delay_seconds, 60.0)
     return max(base_delay_seconds, 120.0)
 
