@@ -1,7 +1,7 @@
 import unittest
 
 from app.models import TaskSnapshot, TaskStage, TaskStatus
-from app.task_diagnostics import classify_stuck_task, describe_task_wait
+from app.task_diagnostics import classify_stuck_task, describe_task_wait, explain_task_slowness
 
 
 def make_task(**overrides):
@@ -48,6 +48,8 @@ class TaskDiagnosticsTests(unittest.TestCase):
                 "_defer_message": "等待自有分享 STRM",
                 "stage_elapsed_seconds": 12.5,
                 "stage_wait_seconds": 30.0,
+                "p115_stage_request_count": 2,
+                "p115_total_request_count": 7,
             },
             updated_at=100.0,
             next_run_at=145.0,
@@ -57,6 +59,36 @@ class TaskDiagnosticsTests(unittest.TestCase):
 
         self.assertIn("执行 12.5 秒", description)
         self.assertIn("排队/等待 30 秒", description)
+        self.assertIn("115调用 本阶段2次/累计7次", description)
+
+    def test_explain_task_slowness_names_cms_strm_emby_and_115_cooldown(self):
+        cases = [
+            (
+                make_task(current_stage=TaskStage.ORGANIZING, metadata={"_defer_message": "等待 CMS 整理完成"}),
+                "等 CMS 整理",
+            ),
+            (
+                make_task(current_stage=TaskStage.STRM_READY, metadata={"_defer_message": "等待自有分享 STRM 源目录生成"}),
+                "等分享 STRM",
+            ),
+            (
+                make_task(current_stage=TaskStage.EMBY_CONFIRMED, metadata={"_defer_message": "等待 Emby 扫描入库"}),
+                "等 Emby 入库",
+            ),
+            (
+                make_task(
+                    current_stage=TaskStage.ORGANIZING,
+                    metadata={"p115_risk_cooldown_until": 700.0},
+                    updated_at=100.0,
+                ),
+                "等 115 风控冷却",
+            ),
+        ]
+
+        for task, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, explain_task_slowness(task, now=100.0))
+        self.assertIn("剩余 10 分钟", explain_task_slowness(cases[-1][0], now=100.0))
 
     def test_describe_task_wait_ignores_non_numeric_defer_count(self):
         task = make_task(

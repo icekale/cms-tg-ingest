@@ -8,7 +8,7 @@ from typing import Any
 
 from app.media.classify import expected_task_tmdb_id, extract_tmdb_id_from_name, normalize_text, parse_recognition_json
 from app.models import TaskStage, TaskStatus
-from app.task_diagnostics import describe_task_wait
+from app.task_diagnostics import describe_task_wait, format_task_observability
 from app.task_engine import stage_display_name
 from app.workflows.self_share import format_task_label
 
@@ -179,6 +179,8 @@ def format_taskstore_status(tasks: list[Any]) -> str:
         )
         if task.status in {TaskStatus.RUNNING, TaskStatus.PENDING}:
             lines.append(f"   等待：{truncate_text(describe_task_wait(task, now=time.time()), 200)}")
+        for line in format_task_observability(task, now=time.time()):
+            lines.append(f"   {truncate_text(line, 200)}")
     return "\n".join(lines)
 
 

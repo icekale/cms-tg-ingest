@@ -750,6 +750,46 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertIn("等待自有分享 STRM", message)
             self.assertIn("第 2 次", message)
 
+    def test_status_command_shows_slowness_and_p115_call_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
+            task_store.record_event(
+                task.id,
+                TaskStage.EMBY_CONFIRMED,
+                TaskStatus.RUNNING,
+                "等待 Emby 扫描入库",
+                title="等待电影",
+                metadata_patch={
+                    "_defer_message": "等待 Emby 扫描入库",
+                    "_defer_count": 2,
+                    "stage_elapsed_seconds": 4.0,
+                    "stage_wait_seconds": 20.0,
+                    "p115_stage_request_count": 0,
+                    "p115_total_request_count": 5,
+                },
+                next_run_at=9999999999.0,
+            )
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("/status"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                task_engine_enabled=True,
+            )
+
+            message = telegram.messages[-1][1]
+            self.assertIn("为什么慢：等 Emby 入库", message)
+            self.assertIn("执行 4 秒", message)
+            self.assertIn("排队/等待 20 秒", message)
+            self.assertIn("115调用 本阶段0次/累计5次", message)
+
     def test_status_command_truncates_long_taskstore_wait_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")

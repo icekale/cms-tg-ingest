@@ -38,6 +38,7 @@ class P115WebClientTests(unittest.TestCase):
         client.search_files("second")
 
         self.assertEqual(sleeps, [2.0])
+        self.assertEqual(client.request_count, 2)
 
     def test_create_long_share_keeps_share_and_sets_permanent_duration(self):
         class FakeHttp:

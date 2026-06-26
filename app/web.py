@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import html
-from pathlib import Path
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from threading import Thread
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .models import RetryAction, TaskStage, TaskStatus
-from .task_engine import decide_retry, stage_display_name
 from .task_bridge import sync_task_from_submission
+from .task_diagnostics import format_stage_observability, format_task_observability
+from .task_engine import decide_retry, stage_display_name
 from .task_health import format_taskstore_health
 from .quality import format_task_quality_report, scan_task_quality
 from .task_store import TaskStore
@@ -187,6 +189,10 @@ def _task_issue_message(task: Any) -> str:
     return _task_wait_message(task)
 
 
+def _task_observability_lines(task: Any, *, now: float | None = None) -> list[str]:
+    return format_task_observability(task, now=time.time() if now is None else now)
+
+
 def _task_counts(tasks: list[Any]) -> dict[str, int]:
     return {
         "active": sum(1 for task in tasks if task.status in {TaskStatus.RUNNING, TaskStatus.PENDING}),
@@ -211,6 +217,10 @@ def _render_task_row(task: Any, *, compact: bool = False) -> str:
     message = _task_issue_message(task)
     message_class = " error" if task.status == TaskStatus.FAILED else ""
     message_html = f'<div class="task-message{message_class}">{html.escape(message)}</div>' if message else ""
+    observability_html = "".join(
+        f'<div class="task-message">{html.escape(line)}</div>'
+        for line in _task_observability_lines(task)[:3]
+    )
     detail_label = "查看详情" if compact else f"查看详情 #{task.id}"
     return (
         '<div class="task-row">'
@@ -222,6 +232,7 @@ def _render_task_row(task: Any, *, compact: bool = False) -> str:
         f'{_badge(status_label, _status_class(task.status))}'
         '</div>'
         f'{message_html}'
+        f'{observability_html}'
         '</div>'
         f'<a class="button" href="/task/{task.id}">{detail_label}</a>'
         '</div>'
@@ -320,6 +331,13 @@ def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | N
     dest_path = str(task.metadata.get("dest_path") or task.metadata.get("emby_path") or "-")
     error_summary = str(task.error_summary or "-")
     wait_label = _task_wait_message(task) or _task_lock_label(task)
+    observability = _task_observability_lines(task)
+    slow_label = next((line.split("：", 1)[1] for line in observability if line.startswith("为什么慢：")), "-")
+    timing_label = next((line.split("：", 1)[1] for line in observability if line.startswith("耗时：")), "-")
+    p115_label = next((line for line in observability if line.startswith("115调用：")), "-")
+    stage_elapsed_summary, stage_p115_summary = format_stage_observability(task)
+    stage_elapsed_summary = stage_elapsed_summary or "-"
+    stage_p115_summary = stage_p115_summary or "-"
     body = f"""
 <div class="topbar">
   <div>
@@ -336,6 +354,11 @@ def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | N
     <div class="detail-item"><div class="detail-label">媒体库</div><div class="detail-value">{html.escape(media_library)}</div></div>
     <div class="detail-item"><div class="detail-label">路径</div><div class="detail-value">{html.escape(dest_path)}</div></div>
     <div class="detail-item"><div class="detail-label">资源/等待</div><div class="detail-value">{html.escape(wait_label)}</div></div>
+    <div class="detail-item"><div class="detail-label">为什么慢</div><div class="detail-value">{html.escape(slow_label)}</div></div>
+    <div class="detail-item"><div class="detail-label">阶段耗时</div><div class="detail-value">{html.escape(timing_label)}</div></div>
+    <div class="detail-item"><div class="detail-label">各阶段耗时</div><div class="detail-value">{html.escape(stage_elapsed_summary)}</div></div>
+    <div class="detail-item"><div class="detail-label">115 调用</div><div class="detail-value">{html.escape(p115_label)}</div></div>
+    <div class="detail-item"><div class="detail-label">各阶段 115 调用</div><div class="detail-value">{html.escape(stage_p115_summary)}</div></div>
     <div class="detail-item"><div class="detail-label">错误</div><div class="detail-value">{html.escape(error_summary)}</div></div>
     <div class="detail-item"><div class="detail-label">重试建议</div><div class="detail-value">{html.escape(decision.reason)}</div></div>
   </div>

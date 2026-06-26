@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass, replace
 
 from .models import TaskSnapshot, TaskStatus
-from .task_diagnostics import describe_task_wait
+from .task_diagnostics import _duration, describe_task_wait
 from .task_engine import stage_display_name
 from .task_store import TaskStore
 
@@ -22,6 +22,7 @@ class TaskHealthSummary:
     latest_lock_wait: TaskSnapshot | None = None
     wait_details: tuple[str, ...] = ()
     wait_overflow_count: int = 0
+    p115_cooldown_until: float = 0.0
 
 
 def _truncate(value: object, limit: int) -> str:
@@ -54,6 +55,14 @@ def build_task_health(store: TaskStore | None, *, enabled: bool, limit: int = 10
     problems = [task for task in tasks if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION}]
     now = time.time()
     wait_tasks = [task for task in tasks if task.status in {TaskStatus.RUNNING, TaskStatus.PENDING}]
+    cooldown_until = 0.0
+    for task in tasks:
+        try:
+            value = float(task.metadata.get("p115_risk_cooldown_until") or 0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > now:
+            cooldown_until = max(cooldown_until, value)
     wait_details = tuple(
         _format_wait_detail(task, now=now)
         for task in wait_tasks[:5]
@@ -70,6 +79,7 @@ def build_task_health(store: TaskStore | None, *, enabled: bool, limit: int = 10
         latest_lock_wait=queue.latest_lock_wait,
         wait_details=wait_details,
         wait_overflow_count=max(0, len(wait_tasks) - len(wait_details)),
+        p115_cooldown_until=cooldown_until,
     )
 
 
@@ -83,6 +93,11 @@ def format_task_health(summary: TaskHealthSummary) -> str:
         f"锁等待: {summary.lock_wait_count}",
         f"失败/需处理: {summary.problem_count}",
     ]
+    if summary.p115_cooldown_until:
+        remaining = _duration(summary.p115_cooldown_until - time.time())
+        lines.append(f"115风控冷却: ACTIVE，剩余 {remaining}")
+    else:
+        lines.append("115风控冷却: inactive")
     for detail in summary.wait_details:
         lines.append(f"等待详情: {detail}")
     if summary.wait_overflow_count:

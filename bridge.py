@@ -2431,6 +2431,7 @@ def run_forever(config: Config) -> None:
             task_workflow,
             interval_seconds=config.task_worker_interval_seconds,
             risk_cooldown_seconds=config.p115_risk_cooldown_seconds,
+            p115_client=p115,
         )
         task_runner.start()
         LOG.info("Task engine worker started interval_seconds=%s", config.task_worker_interval_seconds)

@@ -109,6 +109,49 @@ class WebAdminTests(unittest.TestCase):
 
             self.assertIn("等待资源锁: #9 115/CMS 全局阶段", html)
 
+    def test_render_task_list_and_detail_show_observability_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(
+                task.id,
+                TaskStage.STRM_READY,
+                TaskStatus.RUNNING,
+                "等待自有分享 STRM 源目录生成",
+                title="等待电影",
+                metadata_patch={
+                    "_defer_message": "等待自有分享 STRM 源目录生成",
+                    "_defer_count": 3,
+                    "stage_elapsed_seconds": 8.2,
+                    "stage_wait_seconds": 15.0,
+                    "stage_elapsed_seconds_by_stage": {
+                        "organizing": 3.0,
+                        "strm_ready": 8.2,
+                    },
+                    "p115_stage_request_count": 1,
+                    "p115_total_request_count": 6,
+                    "p115_request_counts_by_stage": {
+                        "organizing": 2,
+                        "strm_ready": 1,
+                    },
+                },
+                next_run_at=9999999999.0,
+            )
+
+            list_html = render_task_list(store)
+            detail_html = render_task_detail(store, task.id)
+
+            self.assertIn("为什么慢：等分享 STRM 生成", list_html)
+            self.assertIn("耗时：执行 8.2 秒，排队/等待 15 秒", list_html)
+            self.assertIn("115调用：本阶段1次/累计6次", list_html)
+            self.assertIn("为什么慢", detail_html)
+            self.assertIn("等分享 STRM 生成", detail_html)
+            self.assertIn("115调用：本阶段1次/累计6次", detail_html)
+            self.assertIn("CMS 整理 3 秒", detail_html)
+            self.assertIn("STRM 生成 8.2 秒", detail_html)
+            self.assertIn("CMS 整理 2次", detail_html)
+            self.assertIn("STRM 生成 1次", detail_html)
+
     def test_clear_history_endpoint_removes_finished_tasks_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
@@ -436,6 +479,25 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertIn("等待自有分享 STRM", html)
             self.assertIn("第 2 次", html)
+
+    def test_health_page_shows_active_115_risk_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("cooldown", "", "https://115cdn.com/s/cooldown")
+            store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "115 风控冷却中",
+                title="冷却电影",
+                metadata_patch={"p115_risk_cooldown_until": 9999999999.0},
+                next_run_at=9999999999.0,
+            )
+
+            report = format_taskstore_health(store, enabled=True)
+
+            self.assertIn("115风控冷却: ACTIVE", report)
+            self.assertIn("剩余", report)
 
     def test_health_page_limits_wait_details_and_reports_overflow(self):
         with tempfile.TemporaryDirectory() as tmp:

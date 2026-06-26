@@ -252,6 +252,7 @@ class P115WebClient:
         self.clock = clock or time.monotonic
         self.sleeper = sleeper or time.sleep
         self._last_request_at: float | None = None
+        self.request_count = 0
         if not self.cookie:
             raise RuntimeError("115 cookie is empty")
 
@@ -275,6 +276,7 @@ class P115WebClient:
 
     def _request(self, url: str, method: str = "GET", data: dict | None = None, params: dict | None = None) -> dict:
         self._rate_limit()
+        self.request_count += 1
         return self.http.request(url, method=method, data=data, params=params, headers=self._headers())
 
     @staticmethod

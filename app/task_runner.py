@@ -51,6 +51,36 @@ def _stage_timing_metadata(task: TaskSnapshot, finished_at: float) -> dict[str, 
     }
 
 
+def _p115_request_count(client: object | None) -> int | None:
+    if client is None or not hasattr(client, "request_count"):
+        return None
+    try:
+        return int(getattr(client, "request_count"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _p115_request_metadata(task: TaskSnapshot, before: int | None, after: int | None) -> dict[str, int]:
+    if before is None or after is None:
+        return {}
+    stage_count = max(0, after - before)
+    try:
+        previous_total = int(task.metadata.get("p115_total_request_count") or 0)
+    except (TypeError, ValueError):
+        previous_total = 0
+    return {
+        "p115_stage_request_count": stage_count,
+        "p115_total_request_count": max(0, previous_total) + stage_count,
+        "p115_request_count_snapshot": after,
+    }
+
+
+def _metric_by_stage(existing: object, stage: TaskStage, value: float | int) -> dict[str, float | int]:
+    result = dict(existing) if isinstance(existing, dict) else {}
+    result[stage.value] = value
+    return result
+
+
 def _lock_metadata_for_task(task: TaskSnapshot) -> dict[str, object]:
     if task.current_stage in _GLOBAL_115_LOCK_STAGES:
         return {
@@ -152,6 +182,7 @@ class TaskRunner:
         worker_id: str = "task-runner",
         interval_seconds: float = 5,
         risk_cooldown_seconds: float = 900,
+        p115_client: object | None = None,
         now: Callable[[], float] | None = None,
     ):
         self.store = store
@@ -159,6 +190,7 @@ class TaskRunner:
         self.worker_id = worker_id
         self.interval_seconds = max(0.1, float(interval_seconds))
         self.risk_cooldown_seconds = max(1.0, float(risk_cooldown_seconds))
+        self.p115_client = p115_client
         self.now = now or time.time
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -175,12 +207,23 @@ class TaskRunner:
         task = self._prepare_lock(task)
         if task is None:
             return True
+        p115_before = _p115_request_count(self.p115_client)
         try:
             result = self.workflow.run_stage(task)
         except P115RiskControlError as exc:
             self._p115_risk_cooldown_until = self.now() + self.risk_cooldown_seconds
             message = "115 风控/频率限制，已暂停自动重试；请稍后在 TG/Web 手动重试。"
+            p115_metadata = _p115_request_metadata(task, p115_before, _p115_request_count(self.p115_client))
+            observability_metadata = {}
+            if "p115_stage_request_count" in p115_metadata:
+                observability_metadata["p115_request_counts_by_stage"] = _metric_by_stage(
+                    task.metadata.get("p115_request_counts_by_stage"),
+                    task.current_stage,
+                    p115_metadata["p115_stage_request_count"],
+                )
             metadata_patch = {
+                **p115_metadata,
+                **observability_metadata,
                 "retry_from_stage": task.current_stage.value,
                 "retry_stage": task.current_stage.value,
                 "p115_risk_cooldown_until": self._p115_risk_cooldown_until,
@@ -202,11 +245,20 @@ class TaskRunner:
             return True
         except Exception as exc:
             LOG.exception("Task stage failed task_id=%s stage=%s", task.id, task.current_stage.value)
+            p115_metadata = _p115_request_metadata(task, p115_before, _p115_request_count(self.p115_client))
+            observability_metadata = {}
+            if "p115_stage_request_count" in p115_metadata:
+                observability_metadata["p115_request_counts_by_stage"] = _metric_by_stage(
+                    task.metadata.get("p115_request_counts_by_stage"),
+                    task.current_stage,
+                    p115_metadata["p115_stage_request_count"],
+                )
             self.store.record_event(
                 task.id,
                 task.current_stage,
                 TaskStatus.FAILED,
                 str(exc) or exc.__class__.__name__,
+                metadata_patch=p115_metadata | observability_metadata,
                 error_type="stage_exception",
                 error_summary=str(exc) or exc.__class__.__name__,
                 error_detail=repr(exc),
@@ -214,7 +266,7 @@ class TaskRunner:
                 clear_claim=True,
             )
             return True
-        self._apply_result(task, result)
+        self._apply_result(task, result, p115_before=p115_before, p115_after=_p115_request_count(self.p115_client))
         return True
 
     def _defer_for_p115_risk_cooldown(self, task: TaskSnapshot) -> bool:
@@ -272,7 +324,14 @@ class TaskRunner:
             return None
         return result.task
 
-    def _apply_result(self, task: TaskSnapshot, result: StageResult) -> None:
+    def _apply_result(
+        self,
+        task: TaskSnapshot,
+        result: StageResult,
+        *,
+        p115_before: int | None = None,
+        p115_after: int | None = None,
+    ) -> None:
         current = self.store.find_task(task.id)
         if (
             current is None
@@ -288,13 +347,27 @@ class TaskRunner:
             return
         now = self.now()
         timing_metadata = _stage_timing_metadata(task, now)
+        p115_metadata = _p115_request_metadata(task, p115_before, p115_after)
+        observability_metadata = {
+            "stage_elapsed_seconds_by_stage": _metric_by_stage(
+                task.metadata.get("stage_elapsed_seconds_by_stage"),
+                task.current_stage,
+                timing_metadata["stage_elapsed_seconds"],
+            )
+        }
+        if "p115_stage_request_count" in p115_metadata:
+            observability_metadata["p115_request_counts_by_stage"] = _metric_by_stage(
+                task.metadata.get("p115_request_counts_by_stage"),
+                task.current_stage,
+                p115_metadata["p115_stage_request_count"],
+            )
         if result.outcome == StageOutcome.COMPLETE:
             self.store.record_event(
                 task.id,
                 task.current_stage,
                 TaskStatus.SUCCEEDED,
                 result.message,
-                metadata_patch=_without_defer_metadata(result.metadata | timing_metadata),
+                metadata_patch=_without_defer_metadata(result.metadata | timing_metadata | p115_metadata | observability_metadata),
                 metadata_delete_keys=_DEFER_METADATA_KEYS,
                 clear_claim=True,
             )
@@ -307,6 +380,8 @@ class TaskRunner:
             metadata_patch = {
                 **result.metadata,
                 **timing_metadata,
+                **p115_metadata,
+                **observability_metadata,
                 "_defer_stage": task.current_stage.value,
                 "_defer_message": result.message,
                 "_defer_count": defer_count,
@@ -377,7 +452,7 @@ class TaskRunner:
                 task.current_stage,
                 TaskStatus.NEEDS_ACTION,
                 result.message,
-                metadata_patch=_without_defer_metadata(result.metadata | timing_metadata),
+                metadata_patch=_without_defer_metadata(result.metadata | timing_metadata | p115_metadata | observability_metadata),
                 metadata_delete_keys=_DEFER_METADATA_KEYS,
                 error_type=result.error_type or "needs_action",
                 error_summary=result.message,
@@ -390,7 +465,7 @@ class TaskRunner:
             task.current_stage,
             TaskStatus.FAILED,
             result.message,
-            metadata_patch=_without_defer_metadata(result.metadata | timing_metadata),
+            metadata_patch=_without_defer_metadata(result.metadata | timing_metadata | p115_metadata | observability_metadata),
             metadata_delete_keys=_DEFER_METADATA_KEYS,
             error_type=result.error_type or "stage_failed",
             error_summary=result.message,

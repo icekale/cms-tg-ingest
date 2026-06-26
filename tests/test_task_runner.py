@@ -30,6 +30,55 @@ class InspectingWorkflow(FakeWorkflow):
         return super().run_stage(task)
 
 
+class CountingP115:
+    def __init__(self, request_count=0):
+        self.request_count = request_count
+
+
+class CountingWorkflow:
+    def __init__(self, p115, result, increment=0):
+        self.p115 = p115
+        self.result = result
+        self.increment = increment
+
+    def run_stage(self, task):
+        self.p115.request_count += self.increment
+        return self.result
+
+
+class RiskCountingWorkflow:
+    def __init__(self, p115, increment=0):
+        self.p115 = p115
+        self.increment = increment
+
+    def run_stage(self, task):
+        self.p115.request_count += self.increment
+        raise P115RiskControlError("操作过于频繁，请稍后再试")
+
+
+class ExplodingCountingWorkflow:
+    def __init__(self, p115, increment=0):
+        self.p115 = p115
+        self.increment = increment
+
+    def run_stage(self, task):
+        self.p115.request_count += self.increment
+        raise RuntimeError("boom")
+
+
+class TimeAdvancingCountingWorkflow:
+    def __init__(self, p115, clock, results):
+        self.p115 = p115
+        self.clock = clock
+        self.results = list(results)
+
+    def run_stage(self, task):
+        result, p115_increment, elapsed_seconds = self.results.pop(0)
+        self.p115.request_count += p115_increment
+        self.clock[0] += elapsed_seconds
+        return result
+
+
 class TaskRunnerTests(unittest.TestCase):
     def test_run_once_completes_stage_and_enqueues_next_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -64,6 +113,132 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.status, TaskStatus.RUNNING)
             self.assertEqual(updated.next_run_at, 35.0)
             self.assertEqual(updated.claimed_by, "")
+
+    def test_run_once_records_p115_stage_and_total_request_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=5.0)
+            p115 = CountingP115(request_count=10)
+            runner = TaskRunner(
+                store,
+                CountingWorkflow(p115, StageResult.defer("等待 CMS 整理", delay_seconds=30), increment=3),
+                worker_id="worker-1",
+                now=lambda: 5.0,
+                p115_client=p115,
+            )
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(updated.metadata["p115_stage_request_count"], 3)
+            self.assertEqual(updated.metadata["p115_total_request_count"], 3)
+            self.assertEqual(updated.metadata["p115_request_count_snapshot"], 13)
+
+    def test_run_once_accumulates_p115_request_counts_across_stages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "等待 CMS 整理",
+                metadata_patch={"p115_total_request_count": 4, "p115_request_count_snapshot": 10},
+            )
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=5.0)
+            p115 = CountingP115(request_count=10)
+            runner = TaskRunner(
+                store,
+                CountingWorkflow(p115, StageResult.complete("已找到"), increment=2),
+                worker_id="worker-1",
+                now=lambda: 5.0,
+                p115_client=p115,
+            )
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(updated.metadata["p115_stage_request_count"], 2)
+            self.assertEqual(updated.metadata["p115_total_request_count"], 6)
+            self.assertEqual(updated.metadata["p115_request_count_snapshot"], 12)
+
+    def test_run_once_accumulates_per_stage_observability_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=5.0)
+            p115 = CountingP115(request_count=0)
+            current_time = [5.0]
+            runner = TaskRunner(
+                store,
+                TimeAdvancingCountingWorkflow(
+                    p115,
+                    current_time,
+                    [
+                        (StageResult.complete("已找到 CMS 整理目录"), 2, 3.0),
+                        (StageResult.defer("等待人工分类", delay_seconds=30), 1, 4.0),
+                    ],
+                ),
+                worker_id="worker-1",
+                now=lambda: current_time[0],
+                p115_client=p115,
+            )
+
+            self.assertTrue(runner.run_once())
+            current_time[0] = 10.0
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(updated.metadata["stage_elapsed_seconds_by_stage"]["organizing"], 3.0)
+            self.assertEqual(updated.metadata["stage_elapsed_seconds_by_stage"]["recognizing"], 4.0)
+            self.assertEqual(updated.metadata["p115_request_counts_by_stage"]["organizing"], 2)
+            self.assertEqual(updated.metadata["p115_request_counts_by_stage"]["recognizing"], 1)
+
+    def test_run_once_records_p115_counts_when_risk_control_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            p115 = CountingP115(request_count=4)
+            runner = TaskRunner(
+                store,
+                RiskCountingWorkflow(p115, increment=2),
+                worker_id="worker-1",
+                now=lambda: 1.0,
+                p115_client=p115,
+                risk_cooldown_seconds=60,
+            )
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(updated.error_type, "p115_risk_control")
+            self.assertEqual(updated.metadata["p115_stage_request_count"], 2)
+            self.assertEqual(updated.metadata["p115_total_request_count"], 2)
+            self.assertEqual(updated.metadata["p115_request_count_snapshot"], 6)
+
+    def test_run_once_records_p115_counts_when_stage_exception_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            p115 = CountingP115(request_count=4)
+            runner = TaskRunner(
+                store,
+                ExplodingCountingWorkflow(p115, increment=2),
+                worker_id="worker-1",
+                now=lambda: 1.0,
+                p115_client=p115,
+            )
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(updated.error_type, "stage_exception")
+            self.assertEqual(updated.metadata["p115_stage_request_count"], 2)
+            self.assertEqual(updated.metadata["p115_total_request_count"], 2)
+            self.assertEqual(updated.metadata["p115_request_count_snapshot"], 6)
 
     def test_run_once_stores_global_lock_metadata_before_workflow_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
