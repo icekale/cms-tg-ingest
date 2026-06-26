@@ -22,6 +22,13 @@ class WebAdminTests(unittest.TestCase):
 
             html = render_task_list(store)
 
+            self.assertIn("运行概览", html)
+            self.assertIn("需要关注", html)
+            self.assertIn("当前队列", html)
+            self.assertIn("处理中", html)
+            self.assertIn("需处理/失败", html)
+            self.assertIn("等待资源", html)
+            self.assertIn("已完成历史", html)
             self.assertIn("活跃/问题任务 2 个", html)
             self.assertIn("已完成历史 1 个", html)
             self.assertIn("运行中电影", html)
@@ -52,6 +59,10 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn('action="/history/clear"', html)
             self.assertIn("只清除已结束任务记录", html)
             self.assertIn("清除历史记录", html)
+            self.assertIn("需要关注", html)
+            self.assertIn("未找到 STRM", html)
+            self.assertIn("查看详情", html)
+            self.assertIn("status-failed", html)
 
 
     def test_render_task_title_prefers_folder_name_over_share_code(self):

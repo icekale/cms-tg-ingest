@@ -23,22 +23,95 @@ def _page(title: str, body: str) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(title)}</title>
 <style>
-body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 24px; background: #f7f7f8; color: #161616; }}
-a {{ color: #0b63ce; text-decoration: none; }}
-table {{ border-collapse: collapse; width: 100%; background: white; }}
-th, td {{ border-bottom: 1px solid #e7e7e8; padding: 10px; text-align: left; }}
-.card {{ background: white; border: 1px solid #e7e7e8; border-radius: 12px; padding: 16px; margin: 12px 0; }}
-.error {{ color: #b42318; }}
-button {{ padding: 8px 12px; border: 0; border-radius: 8px; background: #0b63ce; color: white; }}
-code {{ background: #eee; padding: 2px 4px; border-radius: 4px; }}
-.actions form {{ display: inline-block; margin: 0 8px 8px 0; }}
+:root {{
+  color-scheme: light;
+  --bg: #f5f7fb;
+  --surface: #ffffff;
+  --surface-muted: #f8fafc;
+  --border: #dfe5ee;
+  --border-soft: #edf1f6;
+  --text: #111827;
+  --muted: #64748b;
+  --muted-strong: #475569;
+  --primary: #2563eb;
+  --primary-dark: #1d4ed8;
+  --success-bg: #dcfce7;
+  --success-text: #166534;
+  --warning-bg: #fef3c7;
+  --warning-text: #92400e;
+  --danger-bg: #fee2e2;
+  --danger-text: #991b1b;
+  --info-bg: #dbeafe;
+  --info-text: #1e40af;
+}}
+* {{ box-sizing: border-box; }}
+body {{
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  line-height: 1.5;
+}}
+a {{ color: var(--primary); text-decoration: none; }}
+a:hover {{ color: var(--primary-dark); text-decoration: underline; }}
+.shell {{ width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 28px 0 40px; }}
+.topbar {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }}
+.eyebrow {{ color: var(--muted); font-size: 13px; margin: 0 0 4px; }}
+h1 {{ font-size: 28px; line-height: 1.2; margin: 0; letter-spacing: -0.02em; }}
+h2 {{ font-size: 18px; margin: 0; }}
+p {{ margin: 0; }}
+.subtle {{ color: var(--muted); }}
+.panel {{ background: var(--surface); border: 1px solid var(--border); border-radius: 18px; padding: 18px; margin: 14px 0; }}
+.panel-header {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }}
+.stats-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }}
+.stat-card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 16px; }}
+.stat-label {{ color: var(--muted); font-size: 13px; margin-bottom: 6px; }}
+.stat-value {{ font-size: 28px; line-height: 1; font-weight: 700; letter-spacing: -0.02em; }}
+.badge {{ display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 9px; font-size: 12px; font-weight: 650; white-space: nowrap; }}
+.status-succeeded, .status-healthy {{ background: var(--success-bg); color: var(--success-text); }}
+.status-running, .status-pending, .status-busy {{ background: var(--info-bg); color: var(--info-text); }}
+.status-needs_action, .status-attention {{ background: var(--warning-bg); color: var(--warning-text); }}
+.status-failed {{ background: var(--danger-bg); color: var(--danger-text); }}
+.task-list {{ display: grid; gap: 10px; }}
+.task-row {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 14px; border: 1px solid var(--border-soft); border-radius: 14px; background: var(--surface-muted); }}
+.task-title {{ font-weight: 650; margin-bottom: 4px; overflow-wrap: anywhere; }}
+.task-meta {{ display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 13px; }}
+.task-message {{ margin-top: 6px; color: var(--muted-strong); font-size: 13px; overflow-wrap: anywhere; }}
+.task-message.error {{ color: var(--danger-text); }}
+.empty-state {{ padding: 22px; text-align: center; color: var(--muted); background: var(--surface-muted); border: 1px dashed var(--border); border-radius: 14px; }}
+.actions {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
+.actions form {{ display: inline-block; margin: 0; }}
+.button, button {{ display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-weight: 650; cursor: pointer; }}
+.button:hover, button:hover {{ border-color: #cbd5e1; text-decoration: none; }}
+.button-primary {{ border-color: var(--primary); background: var(--primary); color: white; }}
+.button-danger {{ border-color: #fecaca; background: var(--danger-bg); color: var(--danger-text); }}
+.table-wrap {{ overflow-x: auto; }}
+table {{ border-collapse: collapse; width: 100%; min-width: 760px; }}
+th, td {{ border-bottom: 1px solid var(--border-soft); padding: 11px 10px; text-align: left; vertical-align: top; }}
+th {{ color: var(--muted); font-size: 12px; font-weight: 700; }}
+code {{ background: #eef2f7; padding: 2px 5px; border-radius: 6px; }}
+.diagnostic {{ margin: 0; padding: 16px; border-radius: 14px; background: #0f172a; color: #e5edf8; overflow: auto; font-size: 13px; line-height: 1.6; }}
+.detail-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
+.detail-item {{ background: var(--surface-muted); border: 1px solid var(--border-soft); border-radius: 12px; padding: 12px; }}
+.detail-label {{ color: var(--muted); font-size: 12px; margin-bottom: 4px; }}
+.detail-value {{ overflow-wrap: anywhere; }}
+.timeline {{ list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }}
+.timeline li {{ padding: 12px; border: 1px solid var(--border-soft); border-radius: 12px; background: var(--surface-muted); }}
+@media (max-width: 760px) {{
+  .shell {{ width: min(100% - 20px, 1180px); padding-top: 18px; }}
+  .topbar {{ display: grid; }}
+  .stats-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+  .task-row {{ grid-template-columns: 1fr; }}
+  .detail-grid {{ grid-template-columns: 1fr; }}
+}}
 </style>
 </head>
 <body>
+<main class="shell">
 {body}
+</main>
 </body>
 </html>"""
-
 
 def _task_lock_label(task: Any) -> str:
     reason = str(task.metadata.get("_lock_reason") or "").strip()
@@ -82,43 +155,134 @@ def parse_task_id_from_path(path: str) -> int | None:
         return None
 
 
+
+def _status_class(status: TaskStatus | str) -> str:
+    value = status.value if isinstance(status, TaskStatus) else str(status)
+    return "status-" + value.lower().replace(".", "_").replace("-", "_")
+
+
+def _badge(label: str, class_name: str = "") -> str:
+    classes = "badge" + (f" {class_name}" if class_name else "")
+    return f'<span class="{classes}">{html.escape(label)}</span>'
+
+
+def _task_wait_message(task: Any) -> str:
+    lock_label = _task_lock_label(task)
+    if lock_label != "-":
+        return lock_label
+    message = str(task.metadata.get("_defer_message") or "").strip()
+    if message:
+        count = task.metadata.get("_defer_count")
+        suffix = f"（第 {count} 次）" if count else ""
+        return message + suffix
+    return ""
+
+
+def _task_issue_message(task: Any) -> str:
+    error = str(getattr(task, "error_summary", "") or "").strip()
+    if error:
+        return error
+    return _task_wait_message(task)
+
+
+def _task_counts(tasks: list[Any]) -> dict[str, int]:
+    return {
+        "active": sum(1 for task in tasks if task.status in {TaskStatus.RUNNING, TaskStatus.PENDING}),
+        "problem": sum(1 for task in tasks if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION}),
+        "waiting": sum(1 for task in tasks if _task_wait_message(task)),
+        "completed": sum(1 for task in tasks if task.status == TaskStatus.SUCCEEDED),
+    }
+
+
+def _overall_status(counts: dict[str, int]) -> tuple[str, str]:
+    if counts["problem"]:
+        return "需要关注", "status-attention"
+    if counts["active"] or counts["waiting"]:
+        return "正在处理", "status-busy"
+    return "运行正常", "status-healthy"
+
+
+def _render_task_row(task: Any, *, compact: bool = False) -> str:
+    title = task_display_title(task)
+    stage = stage_display_name(task.current_stage)
+    status_label = task.status.value
+    message = _task_issue_message(task)
+    message_class = " error" if task.status == TaskStatus.FAILED else ""
+    message_html = f'<div class="task-message{message_class}">{html.escape(message)}</div>' if message else ""
+    detail_label = "查看详情" if compact else f"查看详情 #{task.id}"
+    return (
+        '<div class="task-row">'
+        '<div>'
+        f'<div class="task-title">{html.escape(title)}</div>'
+        '<div class="task-meta">'
+        f'<span>#{task.id}</span>'
+        f'<span>{html.escape(stage)}</span>'
+        f'{_badge(status_label, _status_class(task.status))}'
+        '</div>'
+        f'{message_html}'
+        '</div>'
+        f'<a class="button" href="/task/{task.id}">{detail_label}</a>'
+        '</div>'
+    )
+
+
 def render_task_list(store: TaskStore) -> str:
-    rows = []
     tasks = store.list_recent_tasks(limit=100)
     visible_tasks = [task for task in tasks if task.status != TaskStatus.SUCCEEDED]
-    completed_count = sum(1 for task in tasks if task.status == TaskStatus.SUCCEEDED)
-    hidden_summary = (
-        f'<div class="card">活跃/问题任务 {len(visible_tasks)} 个；已完成历史 {completed_count} 个。'
-        "已完成任务默认折叠，可用“清除历史记录”删除本地记录。</div>"
-    )
-    for task in visible_tasks:
-        title = task_display_title(task)
-        lock_label = _task_lock_label(task)
-        rows.append(
-            "<tr>"
-            f'<td><a href="/task/{task.id}">#{task.id}</a></td>'
-            f"<td>{html.escape(title)}</td>"
-            f"<td>{html.escape(stage_display_name(task.current_stage))}</td>"
-            f"<td>{html.escape(task.status.value)}</td>"
-            f"<td>{html.escape(lock_label)}</td>"
-            f'<td class="error">{html.escape(task.error_summary)}</td>'
-            "</tr>"
-        )
-    body = (
-        "<h1>cms-tg-ingest 任务</h1>"
-        '<div class="actions">'
-        '<a href="/quality">TaskStore 本地轻量巡检</a> '
-        '<a href="/health">TaskStore 本地健康</a> '
-        '<form method="post" action="/history/clear" onsubmit="return confirm(\'只清除已结束任务记录，不删除文件。确定继续？\')">'
-        '<button type="submit">清除历史记录</button></form>'
-        "</div>"
-        + hidden_summary +
-        "<table><thead><tr><th>ID</th><th>标题</th><th>阶段</th><th>状态</th><th>资源锁</th><th>错误</th></tr></thead><tbody>"
-        + "".join(rows)
-        + "</tbody></table>"
-    )
-    return _page("任务列表", body)
+    attention_tasks = [
+        task
+        for task in visible_tasks
+        if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or _task_wait_message(task)
+    ]
+    counts = _task_counts(tasks)
+    overall_label, overall_class = _overall_status(counts)
 
+    attention_html = "".join(_render_task_row(task, compact=True) for task in attention_tasks[:8])
+    if not attention_html:
+        attention_html = '<div class="empty-state">暂无需要处理的任务</div>'
+
+    queue_rows = "".join(_render_task_row(task) for task in visible_tasks[:25])
+    if not queue_rows:
+        queue_rows = '<div class="empty-state">当前没有运行中或失败任务</div>'
+
+    body = f"""
+<div class="topbar">
+  <div>
+    <p class="eyebrow">Telegram 115 入库外挂 / 自分享 STRM 工作流</p>
+    <h1>cms-tg-ingest 运行概览</h1>
+  </div>
+  {_badge(overall_label, overall_class)}
+</div>
+
+<section class="stats-grid" aria-label="任务概览">
+  <div class="stat-card"><div class="stat-label">处理中</div><div class="stat-value">{counts['active']}</div></div>
+  <div class="stat-card"><div class="stat-label">需处理/失败</div><div class="stat-value">{counts['problem']}</div></div>
+  <div class="stat-card"><div class="stat-label">等待资源</div><div class="stat-value">{counts['waiting']}</div></div>
+  <div class="stat-card"><div class="stat-label">已完成历史</div><div class="stat-value">{counts['completed']}</div></div>
+</section>
+
+<section class="panel">
+  <div class="panel-header">
+    <div><h2>需要关注</h2><p class="subtle">失败、需人工处理、等待资源锁或等待本地文件稳定的任务会出现在这里。</p></div>
+  </div>
+  <div class="task-list">{attention_html}</div>
+</section>
+
+<section class="panel">
+  <div class="panel-header">
+    <div><h2>当前队列</h2><p class="subtle">活跃/问题任务 {len(visible_tasks)} 个；已完成历史 {counts['completed']} 个。已完成任务默认折叠。</p></div>
+    <div class="actions">
+      <a class="button" href="/quality">本地轻量巡检</a>
+      <a class="button" href="/health">本地健康</a>
+      <form method="post" action="/history/clear" onsubmit="return confirm('只清除已结束任务记录，不删除文件。确定继续？')">
+        <button class="button-danger" type="submit">清除历史记录</button>
+      </form>
+    </div>
+  </div>
+  <div class="task-list">{queue_rows}</div>
+</section>
+"""
+    return _page("运行概览", body)
 
 def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | None = None) -> str:
     task = store.find_task(task_id)
