@@ -25,6 +25,7 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("运行概览", html)
             self.assertIn("需要关注", html)
             self.assertIn("当前队列", html)
+            self.assertIn("overview-grid", html)
             self.assertIn("处理中", html)
             self.assertIn("需处理/失败", html)
             self.assertIn("等待资源", html)

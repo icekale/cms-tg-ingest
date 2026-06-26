@@ -64,6 +64,7 @@ p {{ margin: 0; }}
 .panel {{ background: var(--surface); border: 1px solid var(--border); border-radius: 18px; padding: 18px; margin: 14px 0; }}
 .panel-header {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }}
 .stats-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }}
+.overview-grid {{ display: grid; grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.25fr); gap: 14px; align-items: start; }}
 .stat-card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 16px; }}
 .stat-label {{ color: var(--muted); font-size: 13px; margin-bottom: 6px; }}
 .stat-value {{ font-size: 28px; line-height: 1; font-weight: 700; letter-spacing: -0.02em; }}
@@ -101,6 +102,7 @@ code {{ background: #eef2f7; padding: 2px 5px; border-radius: 6px; }}
   .shell {{ width: min(100% - 20px, 1180px); padding-top: 18px; }}
   .topbar {{ display: grid; }}
   .stats-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+  .overview-grid {{ grid-template-columns: 1fr; }}
   .task-row {{ grid-template-columns: 1fr; }}
   .detail-grid {{ grid-template-columns: 1fr; }}
 }}
@@ -261,26 +263,28 @@ def render_task_list(store: TaskStore) -> str:
   <div class="stat-card"><div class="stat-label">已完成历史</div><div class="stat-value">{counts['completed']}</div></div>
 </section>
 
-<section class="panel">
-  <div class="panel-header">
-    <div><h2>需要关注</h2><p class="subtle">失败、需人工处理、等待资源锁或等待本地文件稳定的任务会出现在这里。</p></div>
-  </div>
-  <div class="task-list">{attention_html}</div>
-</section>
-
-<section class="panel">
-  <div class="panel-header">
-    <div><h2>当前队列</h2><p class="subtle">活跃/问题任务 {len(visible_tasks)} 个；已完成历史 {counts['completed']} 个。已完成任务默认折叠。</p></div>
-    <div class="actions">
-      <a class="button" href="/quality">本地轻量巡检</a>
-      <a class="button" href="/health">本地健康</a>
-      <form method="post" action="/history/clear" onsubmit="return confirm('只清除已结束任务记录，不删除文件。确定继续？')">
-        <button class="button-danger" type="submit">清除历史记录</button>
-      </form>
+<div class="overview-grid">
+  <section class="panel">
+    <div class="panel-header">
+      <div><h2>需要关注</h2><p class="subtle">失败、需人工处理、等待资源锁或等待本地文件稳定的任务会出现在这里。</p></div>
     </div>
-  </div>
-  <div class="task-list">{queue_rows}</div>
-</section>
+    <div class="task-list">{attention_html}</div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-header">
+      <div><h2>当前队列</h2><p class="subtle">活跃/问题任务 {len(visible_tasks)} 个；已完成历史 {counts['completed']} 个。已完成任务默认折叠。</p></div>
+      <div class="actions">
+        <a class="button" href="/quality">本地轻量巡检</a>
+        <a class="button" href="/health">本地健康</a>
+        <form method="post" action="/history/clear" onsubmit="return confirm('只清除已结束任务记录，不删除文件。确定继续？')">
+          <button class="button-danger" type="submit">清除历史记录</button>
+        </form>
+      </div>
+    </div>
+    <div class="task-list">{queue_rows}</div>
+  </section>
+</div>
 """
     return _page("运行概览", body)
 
