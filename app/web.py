@@ -355,18 +355,27 @@ def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | N
 def render_quality_page(store: TaskStore) -> str:
     report = format_task_quality_report(scan_task_quality(store))
     body = f"""
-<h1>TaskStore 本地轻量巡检</h1>
-<div class="card"><pre>{html.escape(report)}</pre></div>
-<div class="actions">
-<form method="post" action="/quality/fix" onsubmit="return confirm('将按巡检结果入队修复：缺失目录恢复 STRM，直链 STRM 从头重跑。确定继续？')">
-<button type="submit">修复全部巡检问题</button>
-</form>
+<div class="topbar">
+  <div>
+    <p class="eyebrow">本地质量巡检</p>
+    <h1>TaskStore 本地轻量巡检</h1>
+    <p class="subtle">只读取本地 TaskStore 和 STRM 文件路径，不会扫描 115。</p>
+  </div>
+  <a class="button" href="/">返回运行概览</a>
 </div>
-<p>只读取本地 TaskStore 和 STRM 文件路径，不扫描 115。</p>
-<p><a href="/">返回任务列表</a></p>
+<section class="panel">
+  <div class="panel-header">
+    <div><h2>巡检结果</h2><p class="subtle">发现缺失目录或直链 STRM 时，可以入队执行安全修复。</p></div>
+    <div class="actions">
+      <form method="post" action="/quality/fix" onsubmit="return confirm('将按巡检结果入队修复：缺失目录恢复 STRM，直链 STRM 从头重跑。确定继续？')">
+        <button class="button-primary" type="submit">修复全部巡检问题</button>
+      </form>
+    </div>
+  </div>
+  <pre class="diagnostic">{html.escape(report)}</pre>
+</section>
 """
     return _page("质量巡检", body)
-
 
 def fix_quality_issues(store: TaskStore) -> int:
     fixed_task_ids: set[int] = set()
@@ -396,13 +405,20 @@ def fix_quality_issues(store: TaskStore) -> int:
 def render_health_page(store: TaskStore) -> str:
     report = format_taskstore_health(store, enabled=True)
     body = f"""
-<h1>TaskStore 本地健康</h1>
-<div class="card"><pre>{html.escape(report)}</pre></div>
-<p>只读取本地 TaskStore 队列状态，不扫描 115。</p>
-<p><a href="/">返回任务列表</a></p>
+<div class="topbar">
+  <div>
+    <p class="eyebrow">本地队列健康</p>
+    <h1>TaskStore 本地健康</h1>
+    <p class="subtle">只展示本地 TaskStore 状态，不会主动请求 115、CMS 或 Emby。</p>
+  </div>
+  <a class="button" href="/">返回运行概览</a>
+</div>
+<section class="panel">
+  <div class="panel-header"><h2>健康报告</h2></div>
+  <pre class="diagnostic">{html.escape(report)}</pre>
+</section>
 """
-    return _page("健康检查", body)
-
+    return _page("本地健康", body)
 
 class WebApp:
     def __init__(self, store: TaskStore, web_token: str = "", submission_store: Any | None = None):

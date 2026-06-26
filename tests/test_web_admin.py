@@ -321,6 +321,9 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn(str(dest / "movie.strm"), html)
             self.assertIn('action="/quality/fix"', html)
             self.assertIn("修复全部巡检问题", html)
+            self.assertIn("本地质量巡检", html)
+            self.assertIn("diagnostic", html)
+            self.assertIn("不会扫描 115", html)
 
     def test_quality_fix_endpoint_restores_missing_dest_and_reprocesses_bad_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -407,6 +410,9 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("运行中: 1", html)
             self.assertIn("失败/需处理: 1", html)
             self.assertIn("最近问题: #3 失败电影", html)
+            self.assertIn("本地队列健康", html)
+            self.assertIn("diagnostic", html)
+            self.assertIn("只展示本地 TaskStore 状态", html)
 
     def test_health_page_shows_taskstore_wait_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
