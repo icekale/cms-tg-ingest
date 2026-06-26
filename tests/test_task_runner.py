@@ -349,6 +349,31 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.claimed_by, "")
             self.assertEqual(updated.metadata["retry_stage"], TaskStage.STRM_READY.value)
 
+    def test_run_once_records_stage_timing_metadata_on_success(self):
+        now_value = 13.5
+
+        def now():
+            return now_value
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.CLEANED, next_run_at=10.0)
+            runner = TaskRunner(
+                store,
+                FakeWorkflow([StageResult.complete("清理完成")]),
+                worker_id="worker-1",
+                now=now,
+            )
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(updated.metadata["stage_started_at"], 13.5)
+            self.assertEqual(updated.metadata["stage_finished_at"], 13.5)
+            self.assertEqual(updated.metadata["stage_elapsed_seconds"], 0.0)
+            self.assertEqual(updated.metadata["stage_wait_seconds"], 3.5)
+
     def test_complete_stage_clears_stale_defer_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

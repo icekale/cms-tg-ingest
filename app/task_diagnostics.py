@@ -29,6 +29,18 @@ def _defer_count(metadata: dict) -> int:
         return 0
 
 
+def _seconds_label(value: object) -> str:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if seconds <= 0:
+        return "0 秒"
+    if seconds < 60:
+        return f"{seconds:g} 秒"
+    return _duration(seconds)
+
+
 def describe_task_wait(task: TaskSnapshot, *, now: float) -> str:
     reason = str(task.metadata.get("_defer_message") or task.error_summary or "等待执行")
     wait_from = task.updated_at or task.created_at or now
@@ -42,6 +54,12 @@ def describe_task_wait(task: TaskSnapshot, *, now: float) -> str:
     ]
     if defer_count:
         parts.append(f"第 {defer_count} 次")
+    elapsed = _seconds_label(task.metadata.get("stage_elapsed_seconds"))
+    if elapsed:
+        parts.append(f"执行 {elapsed}")
+    waited = _seconds_label(task.metadata.get("stage_wait_seconds"))
+    if waited:
+        parts.append(f"排队/等待 {waited}")
     return "，".join(parts)
 
 

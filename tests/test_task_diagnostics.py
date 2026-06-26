@@ -42,6 +42,22 @@ class TaskDiagnosticsTests(unittest.TestCase):
         self.assertIn("下次检查 15 秒后", description)
         self.assertIn("第 3 次", description)
 
+    def test_describe_task_wait_includes_stage_timing_when_present(self):
+        task = make_task(
+            metadata={
+                "_defer_message": "等待自有分享 STRM",
+                "stage_elapsed_seconds": 12.5,
+                "stage_wait_seconds": 30.0,
+            },
+            updated_at=100.0,
+            next_run_at=145.0,
+        )
+
+        description = describe_task_wait(task, now=130.0)
+
+        self.assertIn("执行 12.5 秒", description)
+        self.assertIn("排队/等待 30 秒", description)
+
     def test_describe_task_wait_ignores_non_numeric_defer_count(self):
         task = make_task(
             metadata={"_defer_message": "等待自有分享 STRM", "_defer_count": "not-a-number"},

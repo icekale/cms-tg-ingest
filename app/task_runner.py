@@ -39,6 +39,17 @@ def _without_defer_metadata(metadata: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in metadata.items() if key not in _DEFER_METADATA_KEYS}
 
 
+def _stage_timing_metadata(task: TaskSnapshot, finished_at: float) -> dict[str, float]:
+    started_at = float(task.claimed_at or finished_at)
+    next_run_at = float(task.next_run_at if task.next_run_at is not None else started_at)
+    return {
+        "stage_started_at": started_at,
+        "stage_finished_at": float(finished_at),
+        "stage_elapsed_seconds": round(max(0.0, float(finished_at) - started_at), 3),
+        "stage_wait_seconds": round(max(0.0, started_at - next_run_at), 3),
+    }
+
+
 def _lock_metadata_for_task(task: TaskSnapshot) -> dict[str, object]:
     if task.current_stage in _GLOBAL_115_LOCK_STAGES:
         return {
@@ -224,13 +235,14 @@ class TaskRunner:
             )
             return
         now = self.now()
+        timing_metadata = _stage_timing_metadata(task, now)
         if result.outcome == StageOutcome.COMPLETE:
             self.store.record_event(
                 task.id,
                 task.current_stage,
                 TaskStatus.SUCCEEDED,
                 result.message,
-                metadata_patch=_without_defer_metadata(result.metadata),
+                metadata_patch=_without_defer_metadata(result.metadata | timing_metadata),
                 metadata_delete_keys=_DEFER_METADATA_KEYS,
                 clear_claim=True,
             )
@@ -242,6 +254,7 @@ class TaskRunner:
             defer_count = _defer_count(task.metadata, task.current_stage.value, result.message)
             metadata_patch = {
                 **result.metadata,
+                **timing_metadata,
                 "_defer_stage": task.current_stage.value,
                 "_defer_message": result.message,
                 "_defer_count": defer_count,
@@ -312,7 +325,7 @@ class TaskRunner:
                 task.current_stage,
                 TaskStatus.NEEDS_ACTION,
                 result.message,
-                metadata_patch=_without_defer_metadata(result.metadata),
+                metadata_patch=_without_defer_metadata(result.metadata | timing_metadata),
                 metadata_delete_keys=_DEFER_METADATA_KEYS,
                 error_type=result.error_type or "needs_action",
                 error_summary=result.message,
@@ -325,7 +338,7 @@ class TaskRunner:
             task.current_stage,
             TaskStatus.FAILED,
             result.message,
-            metadata_patch=_without_defer_metadata(result.metadata),
+            metadata_patch=_without_defer_metadata(result.metadata | timing_metadata),
             metadata_delete_keys=_DEFER_METADATA_KEYS,
             error_type=result.error_type or "stage_failed",
             error_summary=result.message,
