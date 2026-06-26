@@ -58,6 +58,15 @@ class V02DocsTests(unittest.TestCase):
         self.assertIn("legacy SubmissionStore path keeps compatibility behavior", env)
         self.assertNotIn("Task engine path cleans only after own share, STRM move/library, and Emby confirmation", env)
 
+    def test_docs_describe_115_pressure_guards(self):
+        env = (ROOT / ".env.example").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("P115_RISK_COOLDOWN_SECONDS=900", env)
+        self.assertIn("115 风控冷却", readme)
+        self.assertIn("分层搜索早停", readme)
+        self.assertIn("整理目录扫描预算", readme)
+
 
 if __name__ == "__main__":
     unittest.main()

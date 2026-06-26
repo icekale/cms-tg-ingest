@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.clients.cms import CmsClient
-from app.clients.p115 import P115WebClient, category_for_115_parent_id
+from app.clients.p115 import P115RiskControlError, P115WebClient, category_for_115_parent_id, is_p115_risk_control_message
 from app.config import MovePlan, SelfShareConfig, default_library_roots, is_relative_to, safe_resolve
 from app.media.classify import (
     apply_tmdb_hint_resolution,
@@ -56,8 +56,10 @@ def as_float(value: Any, default: float = 0.0) -> float:
 
 
 def is_115_receive_restricted_error(exc: Exception) -> bool:
+    if isinstance(exc, P115RiskControlError):
+        return True
     text = str(exc or "")
-    return any(token in text for token in ("限制接收", "被限制接收", "操作过于频繁", "风控"))
+    return is_p115_risk_control_message(text)
 
 
 def has_authoritative_category(row: dict[str, Any], recognition: dict[str, Any]) -> bool:

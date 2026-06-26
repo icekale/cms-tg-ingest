@@ -94,6 +94,16 @@ class P115WebClientTests(unittest.TestCase):
         self.assertEqual(http.calls[1][2]["file_id"], "fid-1")
         self.assertEqual(http.calls[1][2]["cid"], "pending-cid")
 
+    def test_115_risk_control_response_raises_specific_error(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                return {"state": False, "error": "操作过于频繁，请稍后再试"}
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        with self.assertRaises(bridge.P115RiskControlError):
+            client.search_files("蜘蛛侠")
+
 
 class OrganizedFolderSelectionTests(unittest.TestCase):
     def test_selects_tmdb_folder_outside_pending_redundant_and_exists_bins(self):
@@ -214,6 +224,35 @@ class OrganizedFolderSelectionTests(unittest.TestCase):
         self.assertEqual(selected["file_id"], "target")
         self.assertEqual(http.scan_calls, 0)
 
+    def test_find_organized_folder_stops_after_tmdb_search_hit(self):
+        class FakeHttp:
+            def __init__(self):
+                self.queries = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                query = (params or {}).get("search_value", "")
+                self.queries.append(query)
+                if query == "556509":
+                    return {
+                        "state": True,
+                        "data": [
+                            {"cid": "target", "n": "S-娑婆诃-2019-[tmdb=556509]", "pid": "asia-parent", "tu": "1782050000"},
+                        ],
+                    }
+                raise AssertionError(f"unexpected extra 115 search: {query}")
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        selected = client.find_organized_folder(
+            {"tmdb_id": "556509", "title": "娑婆诃"},
+            "娑婆诃 (2019) {tmdb-556509}",
+            scan_parent_ids={"exists-root"},
+        )
+
+        self.assertEqual(selected["file_id"], "target")
+        self.assertEqual(http.queries, ["556509"])
+
     def test_find_organized_folder_falls_back_to_exists_tree_after_search_index_misses(self):
         class FakeHttp:
             def __init__(self):
@@ -257,6 +296,32 @@ class OrganizedFolderSelectionTests(unittest.TestCase):
         self.assertEqual(selected["category"], "欧美电影")
         self.assertEqual(http.file_cids, ["exists-root", "movie-root", "western-root"])
         self.assertEqual(http.searches, ["蜘蛛侠4k原盘remuxhdr国英双语内封简英双字", "蜘蛛侠"])
+
+    def test_scan_organized_folders_respects_list_call_budget(self):
+        class FakeHttp:
+            def __init__(self):
+                self.file_cids = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                cid = (params or {}).get("cid", "")
+                self.file_cids.append(cid)
+                tree = {
+                    "exists-root": [
+                        {"cid": "movie-root", "pid": "exists-root", "n": "Movie"},
+                        {"cid": "tv-root", "pid": "exists-root", "n": "TV"},
+                    ],
+                    "movie-root": [{"cid": "western-root", "pid": "movie-root", "n": "欧美电影"}],
+                    "tv-root": [{"cid": "foreign-tv-root", "pid": "tv-root", "n": "外国电视"}],
+                }
+                return {"state": True, "data": tree.get(cid, [])}
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        folders = client.scan_organized_folders({"exists-root"}, max_list_calls=2)
+
+        self.assertEqual(http.file_cids, ["exists-root", "movie-root"])
+        self.assertEqual([folder["cid"] for folder in folders], ["movie-root", "tv-root", "western-root"])
 
     def test_find_organized_folder_uses_search_before_scan_fallback(self):
         class FakeHttp:

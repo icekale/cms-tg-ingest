@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.clients.p115 import P115RiskControlError
 from app.models import TaskStage, TaskStatus
 from app.task_runner import StageResult, TaskRunner
 from app.task_store import TaskStore
@@ -443,6 +444,79 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertIn("boom", updated.error_summary)
             self.assertEqual(updated.claimed_by, "")
             self.assertIn("Task stage failed task_id=1 stage=strm_ready", logs.output[0])
+
+    def test_run_once_stops_115_risk_control_without_retrying(self):
+        class RiskControlledWorkflow:
+            def run_stage(self, task):
+                raise P115RiskControlError("操作过于频繁，请稍后再试")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "等待 CMS 整理完成",
+                metadata_patch={
+                    "_lock_key": "115:global",
+                    "_lock_reason": "115/CMS 全局阶段",
+                    "_lock_waiting": False,
+                },
+                next_run_at=1.0,
+                clear_claim=True,
+            )
+            runner = TaskRunner(store, RiskControlledWorkflow(), worker_id="worker-1", now=lambda: 1.0)
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(updated.current_stage, TaskStage.NEEDS_ACTION)
+            self.assertEqual(updated.status, TaskStatus.NEEDS_ACTION)
+            self.assertEqual(updated.error_type, "p115_risk_control")
+            self.assertIn("115 风控", updated.error_summary)
+            self.assertEqual(updated.retry_count, 0)
+            self.assertEqual(updated.claimed_by, "")
+            self.assertEqual(updated.metadata["_lock_key"], "")
+            self.assertFalse(updated.metadata["_lock_waiting"])
+
+    def test_run_once_defers_following_115_tasks_during_risk_cooldown(self):
+        class RiskThenUnexpectedWorkflow:
+            def __init__(self):
+                self.calls = 0
+
+            def run_stage(self, task):
+                self.calls += 1
+                if self.calls == 1:
+                    raise P115RiskControlError("操作过于频繁，请稍后再试")
+                raise AssertionError("workflow should not run during 115 cooldown")
+
+        now_value = 1.0
+
+        def now():
+            return now_value
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            first = store.upsert_task("first", "", "https://115cdn.com/s/first")
+            second = store.upsert_task("second", "", "https://115cdn.com/s/second")
+            store.enqueue_task(first.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            store.enqueue_task(second.id, TaskStage.ORGANIZING, next_run_at=2.0)
+            workflow = RiskThenUnexpectedWorkflow()
+            runner = TaskRunner(store, workflow, worker_id="worker-1", now=now, risk_cooldown_seconds=60)
+
+            self.assertTrue(runner.run_once())
+            now_value = 2.0
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(second.id)
+
+            self.assertEqual(workflow.calls, 1)
+            self.assertEqual(updated.current_stage, TaskStage.ORGANIZING)
+            self.assertEqual(updated.status, TaskStatus.RUNNING)
+            self.assertEqual(updated.next_run_at, 61.0)
+            self.assertEqual(updated.claimed_by, "")
+            self.assertEqual(updated.metadata["p115_risk_cooldown_until"], 61.0)
+            self.assertIn("115 风控冷却", updated.error_summary)
 
     def test_run_once_records_explicit_failure_and_clears_claim(self):
         with tempfile.TemporaryDirectory() as tmp:

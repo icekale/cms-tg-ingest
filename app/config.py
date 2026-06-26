@@ -53,6 +53,7 @@ class Config:
     workflow_mode: str = "direct"
     p115_cookie_path: str = "/config/115-cookies.txt"
     p115_min_request_interval_seconds: float = 2.0
+    p115_risk_cooldown_seconds: int = 900
     self_share_receive_cid: str = ""
     self_share_strm_root: str = "/mnt/user/Unraid/strm/share"
     self_share_cms_local_path: str = "/media/share"
@@ -115,6 +116,7 @@ class Config:
             workflow_mode=os.environ.get("WORKFLOW_MODE", "direct").strip().lower() or "direct",
             p115_cookie_path=os.environ.get("P115_COOKIE_PATH", "/config/115-cookies.txt"),
             p115_min_request_interval_seconds=env_float("P115_MIN_REQUEST_INTERVAL_SECONDS", 2.0),
+            p115_risk_cooldown_seconds=int(os.environ.get("P115_RISK_COOLDOWN_SECONDS", "900")),
             self_share_receive_cid=os.environ.get("SELF_SHARE_RECEIVE_CID", ""),
             self_share_strm_root=os.environ.get("SELF_SHARE_STRM_ROOT", "/mnt/user/Unraid/strm/share"),
             self_share_cms_local_path=os.environ.get("SELF_SHARE_CMS_LOCAL_PATH", "/media/share"),

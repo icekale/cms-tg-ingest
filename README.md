@@ -24,6 +24,7 @@
 - **TG/Web 运维按钮**：查看详情、重试当前阶段、查 Emby、恢复 STRM、从头重跑。
 - **本地质量巡检**：检查缺失 STRM、直链 STRM、目标目录异常等问题；巡检只读本地 TaskStore 和 STRM 文件，不扫描 115。
 - **安全清理 115 空间**：在 `TASK_ENGINE_ENABLED=true` 的 TaskRunner 路径中，自己的永久分享创建成功后即可删除 115 转存源，不会取消自己的 115 永久分享；后续 STRM 只使用自己的分享链接生成。
+- **115 压力保护**：整理文件夹查找使用分层搜索早停和整理目录扫描预算；遇到 115 风控冷却会暂停新的 115/CMS 全局阶段，避免连续重试。
 - **离线诊断**：`doctor.py` 可检查配置、挂载路径、数据库质量和常见部署问题。
 - **可选兜底识别**：可接入 OpenAI 兼容接口，但默认思路仍是尽量依赖 CMS 分类。
 
@@ -53,6 +54,8 @@ TASK_MAX_RETRIES=3
 ### 运行稳定性
 
 TaskRunner 会记录每个阶段的等待原因、等待次数和下一次检查时间。`/status` 和 Web `/health` 会显示这些本地状态；长时间等待会进入 `NEEDS_ACTION`，方便从当前阶段安全重试。STRM 等待使用本地目录条件检查，不增加 115 扫描频率。
+
+115 查询会优先按 TMDB/标题候选词逐个搜索，一旦找到高置信整理目录就停止后续搜索；搜索索引未命中时才进入整理目录扫描，扫描有预算上限，避免大树反复遍历。任意 115 API 返回“操作过于频繁 / 风控 / 限制接收”等提示时，TaskRunner 会进入 115 风控冷却，把当前任务标记为需要人工稍后重试，并在冷却结束前暂停新的 115/CMS 全局阶段。
 
 自分享最终 STRM 必须来自自己的 115 永久分享；移动前会校验 `.strm` 内容包含自己的 `/s/<own_share_code>_<receive_code>_` marker，并拒绝 `/d/` 直链 STRM。CMS 普通同步直链 STRM 最多只作为分类参考，不作为最终入库来源。
 
@@ -99,6 +102,7 @@ python3 -W error::ResourceWarning -m unittest discover -s tests -v
 WORKFLOW_MODE=self_share_sync
 P115_COOKIE_PATH=/config/115-cookies.txt
 P115_MIN_REQUEST_INTERVAL_SECONDS=2
+P115_RISK_COOLDOWN_SECONDS=900
 SELF_SHARE_RECEIVE_CID=
 SELF_SHARE_STRM_ROOT=/mnt/user/Unraid/strm/share
 SELF_SHARE_CMS_LOCAL_PATH=/media/share
@@ -134,7 +138,7 @@ volumes:
 `CMS_PARENT_CID_CATEGORY_MAP` 用于把 CMS 整理后的 115 父目录 CID 映射到分类。这个值和个人 115 目录强相关；不配置时禁用父目录分类推断。
 
 `SELF_SHARE_RECEIVE_CID` 是 CMS 自动整理监听的 115 待整理目录 CID；必须配置为你自己的待整理目录，不要配置媒体库或根目录。
-`P115_MIN_REQUEST_INTERVAL_SECONDS` 用于限制外挂访问 115 API 的频率，账号被风控后建议临时调到 `3` 或 `5`。
+`P115_MIN_REQUEST_INTERVAL_SECONDS` 用于限制外挂访问 115 API 的频率，账号被风控后建议临时调到 `3` 或 `5`。`P115_RISK_COOLDOWN_SECONDS` 控制 115 风控冷却时长，默认 `900` 秒。
 
 ```env
 CMS_PARENT_CID_CATEGORY_MAP=3260485903797190075=欧美电影,3254119954860998447=外国电视

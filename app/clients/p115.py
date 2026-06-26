@@ -10,6 +10,27 @@ from app.media.classify import candidate_tokens, extract_tmdb_id_from_name, extr
 
 LOG = logging.getLogger("cms-tg-ingest")
 CMS_PARENT_CID_CATEGORY_MAP: dict[str, str] = {}
+DEFAULT_ORGANIZED_SCAN_MAX_LIST_CALLS = 80
+
+
+class P115RiskControlError(RuntimeError):
+    """Raised when 115 asks callers to slow down or stops automated actions."""
+
+
+def is_p115_risk_control_message(value: str) -> bool:
+    text = str(value or "")
+    return any(
+        token in text
+        for token in (
+            "限制接收",
+            "被限制接收",
+            "操作过于频繁",
+            "访问过于频繁",
+            "请求过于频繁",
+            "稍后再试",
+            "风控",
+        )
+    )
 
 
 def as_float(value: Any, default: float = 0.0) -> float:
@@ -262,7 +283,10 @@ class P115WebClient:
             return resp
         if "state" not in resp and resp.get("code") in {0, "", None}:
             return resp
-        raise RuntimeError(str(resp.get("error") or resp.get("message") or fallback))
+        message = str(resp.get("error") or resp.get("message") or fallback)
+        if is_p115_risk_control_message(message):
+            raise P115RiskControlError(message)
+        raise RuntimeError(message)
 
     def search_files(self, search_value: str, limit: int = 20) -> list[dict[str, Any]]:
         resp = self._request(
@@ -328,11 +352,13 @@ class P115WebClient:
         share_name: str = "",
         excluded_parent_ids: set[str] | None = None,
         allowed_parent_ids: set[str] | None = None,
+        max_list_calls: int = DEFAULT_ORGANIZED_SCAN_MAX_LIST_CALLS,
     ) -> list[dict[str, Any]]:
         root_parent_ids = {str(parent_id) for parent_id in parent_ids if str(parent_id)}
         queue: list[tuple[str, list[str], int]] = [(parent_id, [], 0) for parent_id in root_parent_ids]
         seen: set[str] = set()
         folders: list[dict[str, Any]] = []
+        list_calls = 0
         while queue:
             batch: list[tuple[str, list[str], int]] = []
             while queue:
@@ -345,6 +371,10 @@ class P115WebClient:
                 break
             level_folders: list[dict[str, Any]] = []
             for parent_id, parts, depth in batch:
+                if max_list_calls > 0 and list_calls >= max_list_calls:
+                    folders.extend(level_folders)
+                    return folders
+                list_calls += 1
                 for item in self.list_files(parent_id, limit=limit):
                     if not p115_is_folder(item):
                         continue
@@ -410,9 +440,9 @@ class P115WebClient:
                 continue
             seen.add(value)
             items.extend(self.search_files(value, limit=20))
-        selected = select_organized_115_folder(items, recognition, share_name, excluded_parent_ids=excluded_parent_ids)
-        if selected:
-            return selected
+            selected = select_organized_115_folder(items, recognition, share_name, excluded_parent_ids=excluded_parent_ids)
+            if selected:
+                return selected
         if scan_parent_ids:
             try:
                 scanned = self.scan_organized_folders(

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Protocol
 
+from .clients.p115 import P115RiskControlError
 from .models import TaskSnapshot, TaskStage, TaskStatus, next_stage_after_success
 from .task_store import TaskStore
 
@@ -150,27 +151,55 @@ class TaskRunner:
         *,
         worker_id: str = "task-runner",
         interval_seconds: float = 5,
+        risk_cooldown_seconds: float = 900,
         now: Callable[[], float] | None = None,
     ):
         self.store = store
         self.workflow = workflow
         self.worker_id = worker_id
         self.interval_seconds = max(0.1, float(interval_seconds))
+        self.risk_cooldown_seconds = max(1.0, float(risk_cooldown_seconds))
         self.now = now or time.time
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._startup_claims_cleared = False
+        self._p115_risk_cooldown_until = 0.0
 
     def run_once(self) -> bool:
         self._clear_startup_claims_once()
         task = self.store.claim_next_runnable(self.worker_id, now=self.now())
         if task is None:
             return False
+        if self._defer_for_p115_risk_cooldown(task):
+            return True
         task = self._prepare_lock(task)
         if task is None:
             return True
         try:
             result = self.workflow.run_stage(task)
+        except P115RiskControlError as exc:
+            self._p115_risk_cooldown_until = self.now() + self.risk_cooldown_seconds
+            message = "115 风控/频率限制，已暂停自动重试；请稍后在 TG/Web 手动重试。"
+            metadata_patch = {
+                "retry_from_stage": task.current_stage.value,
+                "retry_stage": task.current_stage.value,
+                "p115_risk_cooldown_until": self._p115_risk_cooldown_until,
+                "_lock_key": "",
+                "_lock_waiting": False,
+                "_lock_owner_task_id": "",
+            }
+            self.store.record_event(
+                task.id,
+                TaskStage.NEEDS_ACTION,
+                TaskStatus.NEEDS_ACTION,
+                message,
+                metadata_patch=metadata_patch,
+                error_type="p115_risk_control",
+                error_summary=message,
+                error_detail=str(exc),
+                clear_claim=True,
+            )
+            return True
         except Exception as exc:
             LOG.exception("Task stage failed task_id=%s stage=%s", task.id, task.current_stage.value)
             self.store.record_event(
@@ -186,6 +215,29 @@ class TaskRunner:
             )
             return True
         self._apply_result(task, result)
+        return True
+
+    def _defer_for_p115_risk_cooldown(self, task: TaskSnapshot) -> bool:
+        now = self.now()
+        if task.current_stage not in _GLOBAL_115_LOCK_STAGES or now >= self._p115_risk_cooldown_until:
+            return False
+        message = "115 风控冷却中，暂停 115/CMS 阶段自动执行"
+        self.store.record_event(
+            task.id,
+            task.current_stage,
+            TaskStatus.RUNNING,
+            message,
+            metadata_patch={
+                "p115_risk_cooldown_until": self._p115_risk_cooldown_until,
+                "_lock_key": "",
+                "_lock_waiting": False,
+                "_lock_owner_task_id": "",
+            },
+            next_run_at=self._p115_risk_cooldown_until,
+            error_type="p115_risk_cooldown",
+            error_summary=message,
+            clear_claim=True,
+        )
         return True
 
     def _clear_startup_claims_once(self) -> None:

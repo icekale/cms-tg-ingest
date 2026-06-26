@@ -23,6 +23,7 @@ from app.clients.emby import EmbyClient
 from app.clients.http import FormHttp, HttpJson, load_cookie_value
 from app.clients.p115 import (
     CMS_PARENT_CID_CATEGORY_MAP,
+    P115RiskControlError,
     P115WebClient,
     category_for_115_parent_id,
     infer_category_from_115_item,
@@ -2425,7 +2426,12 @@ def run_forever(config: Config) -> None:
             cleanup_client=p115 if self_share_config.cleanup_after_emby else None,
             receive_cid=config.self_share_receive_cid,
         )
-        task_runner = TaskRunner(task_store, task_workflow, interval_seconds=config.task_worker_interval_seconds)
+        task_runner = TaskRunner(
+            task_store,
+            task_workflow,
+            interval_seconds=config.task_worker_interval_seconds,
+            risk_cooldown_seconds=config.p115_risk_cooldown_seconds,
+        )
         task_runner.start()
         LOG.info("Task engine worker started interval_seconds=%s", config.task_worker_interval_seconds)
         if config.status_repair_enabled:

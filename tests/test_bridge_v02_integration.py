@@ -25,6 +25,7 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             "WEB_TOKEN": "secret",
             "TASK_MAX_RETRIES": "5",
             "TASK_ENGINE_ENABLED": "true",
+            "P115_RISK_COOLDOWN_SECONDS": "1200",
             "TMDB_API_KEY": "tmdb-test-key",
             "TMDB_BEARER_TOKEN": "tmdb-test-token",
         }
@@ -39,6 +40,7 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             self.assertEqual(cfg.web_port, 8787)
             self.assertEqual(cfg.web_token, "secret")
             self.assertEqual(cfg.task_max_retries, 5)
+            self.assertEqual(cfg.p115_risk_cooldown_seconds, 1200)
             self.assertEqual(cfg.tmdb_api_key, "tmdb-test-key")
             self.assertEqual(cfg.tmdb_bearer_token, "tmdb-test-token")
 
@@ -193,6 +195,7 @@ class BridgeV02IntegrationTests(unittest.TestCase):
                 self.assertEqual(seen[0]["workflow"].receive_cid, "pending-cid")
                 self.assertIsNone(seen[0]["workflow"].cleanup_client)
                 self.assertEqual(seen[0]["interval_seconds"], 7)
+                self.assertEqual(seen[0]["kwargs"]["risk_cooldown_seconds"], 1200)
                 self.assertTrue(seen[0]["started"])
 
     def test_run_forever_passes_cleanup_client_to_task_workflow_when_enabled(self):
