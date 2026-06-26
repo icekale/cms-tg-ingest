@@ -128,6 +128,20 @@ class OrganizedFolderSelectionTests(unittest.TestCase):
 
         self.assertIsNone(selected)
 
+    def test_select_organized_folder_rejects_mismatched_year_for_broad_chinese_token(self):
+        items = [
+            {"cid": "wrong", "n": "0-007：黑日危机-1999-[tmdb=36643]", "pid": "movie_root", "tu": "1782466088"},
+        ]
+
+        selected = bridge.select_organized_115_folder(
+            items,
+            {"ok": False, "title": "", "tmdb_id": ""},
+            "危机13小时 (2016)",
+            excluded_parent_ids=set(),
+        )
+
+        self.assertIsNone(selected)
+
     def test_find_organized_folder_searches_short_chinese_title_from_quality_folder_name(self):
         class FakeHttp:
             def __init__(self):

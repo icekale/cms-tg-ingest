@@ -86,6 +86,7 @@ def select_organized_115_folder(
     allowed = {str(value) for value in (allowed_parent_ids or set()) if str(value)}
     tokens = candidate_tokens(recognition, share_name)
     tmdb_id = str(recognition.get("tmdb_id") or extract_tmdb_id_from_name(share_name) or "").strip()
+    share_year = extract_year_from_name(share_name) or extract_year_from_name(str(recognition.get("title") or ""))
     if tmdb_id:
         tokens.insert(0, tmdb_id)
     matches: list[tuple[int, float, dict[str, str]]] = []
@@ -101,7 +102,10 @@ def select_organized_115_folder(
             continue
         norm_name = normalize_text(name)
         name_tmdb = extract_tmdb_id_from_name(name)
+        name_year = extract_year_from_name(name)
         if tmdb_id and name_tmdb and name_tmdb != tmdb_id:
+            continue
+        if not tmdb_id and share_year and name_year and name_year != share_year:
             continue
         score = 0
         if tmdb_id and tmdb_id in name:
