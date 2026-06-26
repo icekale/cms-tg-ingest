@@ -792,6 +792,8 @@ class BridgeSelfShareTaskWorkflow:
             "dest_path": str(plan.dest_path) if plan.dest_path else "",
             "category": category,
         }
+        if plan.metadata:
+            metadata.update(plan.metadata)
         if is_move_plan_retryable(plan):
             return StageResult.defer(
                 plan.reason,

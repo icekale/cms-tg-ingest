@@ -1246,6 +1246,26 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(recognizing.metadata["category"], "亚洲电影")
             self.assertEqual(self.telegram.messages, [])
 
+    def test_moved_stage_exposes_strm_stability_wait_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            library_root = Path(tmp) / "library" / "movies"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"华语电影": library_root}, stable_seconds=30),
+            )
+            row = self._self_share_row()
+            source = self.config.strm_root / row["own_share_file_name"]
+            self._write_strm(source)
+            task = self._claim_task("abc", "1234", TaskStage.MOVED, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(result.message, "STRM 源目录仍在更新")
+            self.assertIn("stable_remaining_seconds", result.metadata)
+            self.assertGreaterEqual(result.metadata["stable_remaining_seconds"], 0)
+            self.assertEqual(result.metadata["source_path"], str(bridge.safe_resolve(source)))
+
     def test_moved_stage_merges_own_share_strm_folder_into_category_library(self):
         with tempfile.TemporaryDirectory() as tmp:
             library_root = Path(tmp) / "library" / "movies"

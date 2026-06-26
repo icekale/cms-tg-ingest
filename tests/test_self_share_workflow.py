@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import sys
 import tempfile
 import time
@@ -1431,6 +1432,34 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class StrmStabilityTests(unittest.TestCase):
+    def test_plan_strm_move_reports_stability_remaining_seconds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "S-示例电影-2025-[tmdb=123456]"
+            target_root = root / "Movie"
+            source.mkdir(parents=True)
+            strm = source / "示例.strm"
+            strm.write_text("http://cms/s/demo", encoding="utf-8")
+            now = time.time()
+            recent = now - 10
+            os.utime(source, (recent, recent))
+            os.utime(strm, (recent, recent))
+            config = bridge.MoveConfig(
+                source_roots=[root / "share"],
+                library_roots={"欧美电影": target_root},
+                stable_seconds=30,
+            )
+
+            plan = bridge.plan_strm_move(source, "欧美电影", config)
+
+            self.assertEqual(plan.status, "skipped")
+            self.assertEqual(plan.reason, "STRM 源目录仍在更新")
+            self.assertGreaterEqual(plan.metadata["stable_remaining_seconds"], 1)
+            self.assertLessEqual(plan.metadata["stable_remaining_seconds"], 30)
+            self.assertGreaterEqual(plan.metadata["newest_mtime"], recent)
+
 
 class P115FailureHandlingTests(unittest.TestCase):
     def test_exact_self_share_folder_name_prevents_broad_sibling_scan(self):

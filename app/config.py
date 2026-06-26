@@ -166,6 +166,7 @@ class MovePlan:
     source_path: Path | None = None
     dest_path: Path | None = None
     category: str | None = None
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass

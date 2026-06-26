@@ -61,6 +61,18 @@ def is_directory_stable(path: Path, stable_seconds: int) -> bool:
     return bool(mtime and time.time() - mtime >= stable_seconds)
 
 
+def directory_stability_metadata(path: Path, stable_seconds: int) -> dict[str, float]:
+    mtime = newest_mtime(path)
+    age = max(0.0, time.time() - mtime) if mtime else 0.0
+    remaining = max(0.0, float(stable_seconds) - age)
+    return {
+        "newest_mtime": mtime,
+        "stable_age_seconds": round(age, 3),
+        "stable_required_seconds": float(max(0, int(stable_seconds))),
+        "stable_remaining_seconds": round(remaining, 3),
+    }
+
+
 def destination_for_category(category: str, media_dir_name: str, config: MoveConfig) -> Path | None:
     root = config.library_roots.get(category)
     if not root:
@@ -201,7 +213,13 @@ def plan_strm_move(source_path: Path | None, category: str, config: MoveConfig) 
     if not has_strm_file(source):
         return MovePlan(status="skipped", reason="源目录不包含 STRM 文件", source_path=source, category=category)
     if not is_directory_stable(source, config.stable_seconds):
-        return MovePlan(status="skipped", reason="STRM 源目录仍在更新", source_path=source, category=category)
+        return MovePlan(
+            status="skipped",
+            reason="STRM 源目录仍在更新",
+            source_path=source,
+            category=category,
+            metadata=directory_stability_metadata(source, config.stable_seconds),
+        )
     dest = destination_for_category(category, source.name, config)
     if not dest:
         return MovePlan(status="skipped", reason=f"分类未映射到媒体库：{category}", source_path=source, category=category)
