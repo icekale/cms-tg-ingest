@@ -84,7 +84,14 @@ def parse_task_id_from_path(path: str) -> int | None:
 
 def render_task_list(store: TaskStore) -> str:
     rows = []
-    for task in store.list_recent_tasks(limit=100):
+    tasks = store.list_recent_tasks(limit=100)
+    visible_tasks = [task for task in tasks if task.status != TaskStatus.SUCCEEDED]
+    completed_count = sum(1 for task in tasks if task.status == TaskStatus.SUCCEEDED)
+    hidden_summary = (
+        f'<div class="card">活跃/问题任务 {len(visible_tasks)} 个；已完成历史 {completed_count} 个。'
+        "已完成任务默认折叠，可用“清除历史记录”删除本地记录。</div>"
+    )
+    for task in visible_tasks:
         title = task_display_title(task)
         lock_label = _task_lock_label(task)
         rows.append(
@@ -105,6 +112,7 @@ def render_task_list(store: TaskStore) -> str:
         '<form method="post" action="/history/clear" onsubmit="return confirm(\'只清除已结束任务记录，不删除文件。确定继续？\')">'
         '<button type="submit">清除历史记录</button></form>'
         "</div>"
+        + hidden_summary +
         "<table><thead><tr><th>ID</th><th>标题</th><th>阶段</th><th>状态</th><th>资源锁</th><th>错误</th></tr></thead><tbody>"
         + "".join(rows)
         + "</tbody></table>"

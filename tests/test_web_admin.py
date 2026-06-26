@@ -10,6 +10,24 @@ from app.web import WebApp, render_task_detail, render_task_list
 
 
 class WebAdminTests(unittest.TestCase):
+    def test_render_task_list_folds_completed_history_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            done = store.upsert_task("done", "", "https://115cdn.com/s/done")
+            store.record_event(done.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done", title="已完成电影")
+            running = store.upsert_task("running", "", "https://115cdn.com/s/running")
+            store.record_event(running.id, TaskStage.MOVED, TaskStatus.RUNNING, "moving", title="运行中电影")
+            failed = store.upsert_task("failed", "", "https://115cdn.com/s/failed")
+            store.record_event(failed.id, TaskStage.STRM_READY, TaskStatus.FAILED, "failed", title="失败电影", error_summary="失败原因")
+
+            html = render_task_list(store)
+
+            self.assertIn("活跃/问题任务 2 个", html)
+            self.assertIn("已完成历史 1 个", html)
+            self.assertIn("运行中电影", html)
+            self.assertIn("失败电影", html)
+            self.assertNotIn("已完成电影</td>", html)
+
     def test_render_task_list_contains_task_stage_and_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
