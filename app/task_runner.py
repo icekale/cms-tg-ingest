@@ -32,6 +32,11 @@ _STAGE_MAX_DEFER_COUNT = {
     TaskStage.STRM_READY: 20,
     TaskStage.EMBY_CONFIRMED: 20,
 }
+_DEFER_METADATA_KEYS = ("_defer_stage", "_defer_message", "_defer_count")
+
+
+def _without_defer_metadata(metadata: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in metadata.items() if key not in _DEFER_METADATA_KEYS}
 
 
 def _lock_metadata_for_task(task: TaskSnapshot) -> dict[str, object]:
@@ -225,7 +230,8 @@ class TaskRunner:
                 task.current_stage,
                 TaskStatus.SUCCEEDED,
                 result.message,
-                metadata_patch=result.metadata,
+                metadata_patch=_without_defer_metadata(result.metadata),
+                metadata_delete_keys=_DEFER_METADATA_KEYS,
                 clear_claim=True,
             )
             next_stage = next_stage_after_success(task.current_stage)
@@ -260,7 +266,8 @@ class TaskRunner:
                     TaskStage.NEEDS_ACTION,
                     TaskStatus.NEEDS_ACTION,
                     "CMS 整理等待超时，请人工检查分享内容或稍后重试",
-                    metadata_patch=metadata_patch,
+                    metadata_patch=_without_defer_metadata(metadata_patch),
+                    metadata_delete_keys=_DEFER_METADATA_KEYS,
                     error_type="organizing_timeout",
                     error_summary="CMS 整理等待超时，请人工检查分享内容或稍后重试",
                     clear_claim=True,
@@ -282,7 +289,8 @@ class TaskRunner:
                     TaskStage.NEEDS_ACTION,
                     TaskStatus.NEEDS_ACTION,
                     error_summary,
-                    metadata_patch=metadata_patch,
+                    metadata_patch=_without_defer_metadata(metadata_patch),
+                    metadata_delete_keys=_DEFER_METADATA_KEYS,
                     error_type="stage_wait_timeout",
                     error_summary=error_summary,
                     clear_claim=True,
@@ -304,7 +312,8 @@ class TaskRunner:
                 task.current_stage,
                 TaskStatus.NEEDS_ACTION,
                 result.message,
-                metadata_patch=result.metadata,
+                metadata_patch=_without_defer_metadata(result.metadata),
+                metadata_delete_keys=_DEFER_METADATA_KEYS,
                 error_type=result.error_type or "needs_action",
                 error_summary=result.message,
                 error_detail=result.error_detail,
@@ -316,7 +325,8 @@ class TaskRunner:
             task.current_stage,
             TaskStatus.FAILED,
             result.message,
-            metadata_patch=result.metadata,
+            metadata_patch=_without_defer_metadata(result.metadata),
+            metadata_delete_keys=_DEFER_METADATA_KEYS,
             error_type=result.error_type or "stage_failed",
             error_summary=result.message,
             error_detail=result.error_detail,

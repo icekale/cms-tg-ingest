@@ -349,6 +349,39 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.claimed_by, "")
             self.assertEqual(updated.metadata["retry_stage"], TaskStage.STRM_READY.value)
 
+    def test_complete_stage_clears_stale_defer_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.RUNNING,
+                "等待清理确认",
+                metadata_patch={
+                    "_defer_stage": TaskStage.CLEANED.value,
+                    "_defer_message": "等待清理确认",
+                    "_defer_count": 6,
+                    "source_path": "/mnt/share/movie",
+                },
+                next_run_at=1.0,
+                clear_claim=True,
+            )
+            runner = TaskRunner(
+                store,
+                FakeWorkflow([StageResult.complete("115 转存源已删除，自有分享保留")]),
+                worker_id="worker-1",
+                now=lambda: 1.0,
+            )
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertNotIn("_defer_stage", updated.metadata)
+            self.assertNotIn("_defer_message", updated.metadata)
+            self.assertNotIn("_defer_count", updated.metadata)
+            self.assertEqual(updated.metadata["source_path"], "/mnt/share/movie")
+
     def test_run_once_records_needs_action_on_current_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
