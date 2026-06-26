@@ -150,6 +150,11 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("恢复 STRM", html)
             self.assertIn(f'action="/task/{task.id}/reprocess"', html)
             self.assertIn("从头重跑", html)
+            self.assertIn("任务详情", html)
+            self.assertIn("任务摘要", html)
+            self.assertIn("处理时间线", html)
+            self.assertIn("detail-grid", html)
+            self.assertIn("timeline", html)
 
     def test_task_routes_return_404_for_malformed_task_ids(self):
         with tempfile.TemporaryDirectory() as tmp:

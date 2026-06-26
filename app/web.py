@@ -292,41 +292,65 @@ def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | N
             task = sync_task_from_submission(store, row, message="打开详情页时懒回填旧记录")
     if not task:
         return _page("任务不存在", "<h1>任务不存在</h1>")
+
     events = store.list_events(task.id)
     event_items = "".join(
-        f"<li><code>{html.escape(event['stage'])}</code> {html.escape(event['status'])} - {html.escape(event['message'])}</li>"
+        "<li>"
+        f'<div class="task-meta"><code>{html.escape(event["stage"])}</code>{_badge(str(event["status"]), "")}</div>'
+        f'<div class="task-message">{html.escape(event["message"])}</div>'
+        "</li>"
         for event in events
     )
     decision = decide_retry(task)
     retry_form = ""
     if decision.action == RetryAction.RETRY_CURRENT_STAGE:
-        retry_form = f'<form method="post" action="/task/{task.id}/retry"><button type="submit">重试当前阶段</button></form>'
+        retry_form = f'<form method="post" action="/task/{task.id}/retry"><button class="button-primary" type="submit">重试当前阶段</button></form>'
     emby_form = f'<form method="post" action="/task/{task.id}/emby"><button type="submit">查 Emby</button></form>'
     restore_form = f'<form method="post" action="/task/{task.id}/restore"><button type="submit">恢复 STRM</button></form>'
-    reprocess_form = f'<form method="post" action="/task/{task.id}/reprocess"><button type="submit">从头重跑</button></form>'
+    reprocess_form = (
+        f'<form method="post" action="/task/{task.id}/reprocess" '
+        "onsubmit=\"return confirm('将从接收阶段重新执行该任务。确定继续？')\">"
+        '<button class="button-danger" type="submit">从头重跑</button></form>'
+    )
+    media_library = str(task.metadata.get("emby_parent") or task.metadata.get("emby_refresh_library") or "-")
+    dest_path = str(task.metadata.get("dest_path") or task.metadata.get("emby_path") or "-")
+    error_summary = str(task.error_summary or "-")
+    wait_label = _task_wait_message(task) or _task_lock_label(task)
     body = f"""
-<h1>任务 #{task.id}</h1>
-<div class="card">
-<p>标题：{html.escape(task_display_title(task))}</p>
-<p>阶段：{html.escape(stage_display_name(task.current_stage))}</p>
-<p>状态：{html.escape(task.status.value)}</p>
-<p class="error">错误：{html.escape(task.error_summary)}</p>
-<p>媒体库：{html.escape(str(task.metadata.get("emby_parent") or task.metadata.get("emby_refresh_library") or "-"))}</p>
-<p>路径：{html.escape(str(task.metadata.get("dest_path") or task.metadata.get("emby_path") or "-"))}</p>
-<p>资源锁：{html.escape(_task_lock_label(task))}</p>
-<p>重试建议：{html.escape(decision.reason)}</p>
-<div class="actions">
-{retry_form}
-{emby_form}
-{restore_form}
-{reprocess_form}
+<div class="topbar">
+  <div>
+    <p class="eyebrow">任务详情</p>
+    <h1>#{task.id} {html.escape(task_display_title(task))}</h1>
+  </div>
+  {_badge(task.status.value, _status_class(task.status))}
 </div>
-</div>
-<div class="card"><h2>时间线</h2><ul>{event_items}</ul></div>
-<p><a href="/">返回任务列表</a></p>
+
+<section class="panel">
+  <div class="panel-header"><h2>任务摘要</h2></div>
+  <div class="detail-grid">
+    <div class="detail-item"><div class="detail-label">当前阶段</div><div class="detail-value">{html.escape(stage_display_name(task.current_stage))}</div></div>
+    <div class="detail-item"><div class="detail-label">媒体库</div><div class="detail-value">{html.escape(media_library)}</div></div>
+    <div class="detail-item"><div class="detail-label">路径</div><div class="detail-value">{html.escape(dest_path)}</div></div>
+    <div class="detail-item"><div class="detail-label">资源/等待</div><div class="detail-value">{html.escape(wait_label)}</div></div>
+    <div class="detail-item"><div class="detail-label">错误</div><div class="detail-value">{html.escape(error_summary)}</div></div>
+    <div class="detail-item"><div class="detail-label">重试建议</div><div class="detail-value">{html.escape(decision.reason)}</div></div>
+  </div>
+  <div class="actions" style="margin-top: 14px;">
+    {retry_form}
+    {emby_form}
+    {restore_form}
+    {reprocess_form}
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-header"><h2>处理时间线</h2></div>
+  <ul class="timeline">{event_items}</ul>
+</section>
+
+<p><a class="button" href="/">返回运行概览</a></p>
 """
     return _page("任务详情", body)
-
 
 def render_quality_page(store: TaskStore) -> str:
     report = format_task_quality_report(scan_task_quality(store))
