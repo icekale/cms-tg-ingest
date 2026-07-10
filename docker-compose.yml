@@ -14,6 +14,8 @@ services:
       - /mnt/user/Unraid/strm:/mnt/user/Unraid/strm:rw
       # 115 cookie file exported from your CMS/115 environment.
       - /mnt/user/appdata/cloud-media-sync/config/115-cookies.txt:/config/115-cookies.txt:ro
+      # Read-only CMS metadata used to map a direct STRM back to its 115 media folder.
+      - /mnt/user/appdata/cloud-media-sync/config/cms-online.db:/cms/cms-online.db:ro
     healthcheck:
       test: ["CMD", "python", "/app/doctor.py", "--quiet"]
       interval: 5m

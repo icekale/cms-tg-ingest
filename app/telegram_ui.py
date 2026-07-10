@@ -13,6 +13,9 @@ from app.task_engine import stage_display_name
 from app.workflows.self_share import format_task_label
 
 
+_SERIES_UPDATE_CATEGORIES = {"国产电视", "外国电视", "番剧"}
+
+
 def format_history(rows: list[dict[str, Any]]) -> str:
     if not rows:
         return "暂无历史记录。"
@@ -195,6 +198,15 @@ def task_action_keyboard(tasks: list[Any], limit: int = 5) -> dict[str, Any] | N
             row.append({"text": f"重试 #{task.id}", "callback_data": f"task_retry:{task.id}"})
         row.append({"text": f"恢复 STRM #{task.id}", "callback_data": f"task_restore:{task.id}"})
         row.append({"text": f"从头重跑 #{task.id}", "callback_data": f"task_reprocess:{task.id}"})
+        category = str(task.category or task.metadata.get("category") or task.metadata.get("category_final") or "").strip()
+        submission_id = task.submission_id or task.metadata.get("submission_id")
+        if (
+            task.status == TaskStatus.SUCCEEDED
+            and task.current_stage == TaskStage.CLEANED
+            and category in _SERIES_UPDATE_CATEGORIES
+            and submission_id not in (None, "")
+        ):
+            row.append({"text": f"追更 #{task.id}", "callback_data": f"task_update:{task.id}"})
         buttons.append(row)
     return {"inline_keyboard": buttons} if buttons else None
 

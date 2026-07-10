@@ -116,6 +116,25 @@ class TaskDiagnosticsTests(unittest.TestCase):
         self.assertEqual(issue.stage, TaskStage.ORGANIZING)
         self.assertIn("等待 CMS 整理完成", issue.message)
 
+    def test_unscheduled_running_task_reports_not_in_dispatch_queue(self):
+        task = make_task(
+            current_stage=TaskStage.CMS_SUBMITTED,
+            status=TaskStatus.RUNNING,
+            updated_at=0.0,
+            next_run_at=-1.0,
+            claimed_by="",
+        )
+
+        issue = classify_stuck_task(task, now=3600.0)
+        description = describe_task_wait(task, now=3600.0)
+        slow_reason = explain_task_slowness(task, now=3600.0)
+
+        self.assertEqual(issue.code, "stuck_stage")
+        self.assertIn("不在自动调度队列", issue.message)
+        self.assertIn("不在自动调度队列", description)
+        self.assertNotIn("下次检查 0 秒后", description)
+        self.assertIn("不在自动调度队列", slow_reason)
+
     def test_classify_stuck_task_ignores_recent_task(self):
         task = make_task(updated_at=100.0)
 

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from app.clients.cms import CmsClient
+from app.cms_cloud_index import CmsCloudDataIndex
 from app.clients.p115 import P115RiskControlError, P115WebClient, category_for_115_parent_id, is_p115_risk_control_message
 from app.config import MovePlan, SelfShareConfig, default_library_roots, is_relative_to, safe_resolve
 from app.media.classify import (
@@ -25,13 +27,14 @@ from app.media.classify import (
 from app.media.strm import (
     category_from_existing_library_folder,
     category_from_existing_library_match,
-    cleanup_direct_strm_for_organized_folder,
+    find_recent_direct_library_strm_source_dir,
     find_self_share_strm_source_dir,
     has_strm_file,
     merge_self_share_strm_folder,
     move_config_for_workflow_source,
     plan_strm_move,
     restore_missing_self_share_library_folder,
+    validate_self_share_strm_destination,
     validate_self_share_strm_source,
 )
 from app.models import TaskStage
@@ -317,6 +320,7 @@ class BridgeSelfShareTaskWorkflow:
         pending_title_prefix="",
         fallback_category="",
         task_db_path=None,
+        cms_cloud_index: CmsCloudDataIndex | None = None,
     ):
         self.cms = cms
         self.telegram = telegram
@@ -335,6 +339,7 @@ class BridgeSelfShareTaskWorkflow:
         self.pending_title_prefix = str(pending_title_prefix or "").strip()
         self.fallback_category = str(fallback_category or "").strip()
         self.task_db_path = task_db_path
+        self.cms_cloud_index = cms_cloud_index
 
     def run_stage(self, task):
         if task.current_stage == TaskStage.RECEIVED:
@@ -394,13 +399,16 @@ class BridgeSelfShareTaskWorkflow:
             workflow_mode="self_share_sync",
             workflow_phase="received_to_pending",
         ) or row
+        metadata = {
+            "submission_id": int(row["id"]),
+            "received_title": title,
+            "received_file_ids": received.get("file_ids") or [],
+        }
+        if self._is_pending_update_run(task.metadata):
+            metadata["update_received_run"] = int(task.metadata.get("update_requested_run") or 0)
         return StageResult.complete(
             "已接收 115 分享到待整理",
-            {
-                "submission_id": int(row["id"]),
-                "received_title": title,
-                "received_file_ids": received.get("file_ids") or [],
-            },
+            metadata,
         )
 
     def _stage_organizing(self, task):
@@ -423,9 +431,16 @@ class BridgeSelfShareTaskWorkflow:
         excluded_parent_ids = set(self.self_share_config.excluded_parent_ids or set())
         if self.receive_cid:
             excluded_parent_ids.add(self.receive_cid)
+        min_update_time = float(row.get("created_at") or 0)
+        try:
+            update_started_at = float(task.metadata.get("update_started_at") or 0)
+        except (TypeError, ValueError):
+            update_started_at = 0
+        if update_started_at:
+            min_update_time = max(min_update_time, update_started_at - 5)
         find_kwargs = {
             "excluded_parent_ids": excluded_parent_ids,
-            "min_update_time": float(row.get("created_at") or 0),
+            "min_update_time": min_update_time,
         }
         if self.self_share_config.organized_scan_parent_ids:
             find_kwargs.update(
@@ -436,6 +451,36 @@ class BridgeSelfShareTaskWorkflow:
                     else set(default_library_roots()),
                 }
             )
+        direct_strm_removed = 0
+        direct_signal = None
+        if folder is None:
+            direct_signal = find_recent_direct_library_strm_source_dir(self.move_config, row, recognition, title)
+            if direct_signal:
+                direct_source, direct_category = direct_signal
+                direct_recognition = dict(recognition)
+                direct_tmdb = extract_tmdb_id_from_name(str(direct_source))
+                direct_recognition.update(
+                    {
+                        "ok": True,
+                        "title": direct_source.name,
+                        "share_name": str(direct_recognition.get("share_name") or title),
+                        "category": direct_category or str(direct_recognition.get("category") or ""),
+                        "category_status": "cms_direct_strm_resolved",
+                    }
+                )
+                if direct_tmdb:
+                    direct_recognition["tmdb_id"] = direct_tmdb
+                if direct_category and hasattr(self.store, "update_category"):
+                    row = self.store.update_category(int(row["id"]), direct_category, "selected") or row
+                if hasattr(self.store, "update_recognition"):
+                    row = self.store.update_recognition(int(row["id"]), direct_recognition, "cms_direct_strm_resolved") or row
+                recognition = direct_recognition
+                if self.cms_cloud_index and direct_tmdb:
+                    folder = self.cms_cloud_index.folder_for_direct_strm(direct_source, direct_tmdb)
+                    if folder:
+                        folder = dict(folder)
+                        if direct_category:
+                            folder["category"] = direct_category
         if folder is None:
             folder = self.p115.find_organized_folder(recognition, title, **find_kwargs)
         if folder and is_unverified_received_source(folder, task.metadata, self.receive_cid):
@@ -460,13 +505,12 @@ class BridgeSelfShareTaskWorkflow:
             return StageResult.defer(
                 "等待 CMS 整理完成",
                 self.self_share_config.auto_organize_retry_seconds or 30,
-                {"submission_id": int(row["id"])},
+                {"submission_id": int(row["id"]), "direct_strm_removed": direct_strm_removed},
             )
         existing_library_category = category_from_existing_library_folder(self.move_config, folder)
         if existing_library_category and not str(folder.get("category") or "").strip():
             folder = dict(folder)
             folder["category"] = existing_library_category
-        direct_strm_removed = cleanup_direct_strm_for_organized_folder(self.move_config, folder)
         row = self.store.update_self_share(
             int(row["id"]),
             workflow_phase="organized_found",
@@ -665,8 +709,20 @@ class BridgeSelfShareTaskWorkflow:
                 self._own_share_metadata(row) | {"own_share_file_id": ""},
             )
         created = False
+        direct_file_share = False
+        direct_relative_path = ""
         if not row.get("own_share_code"):
-            share = self.p115.create_long_share(file_id)
+            try:
+                share = self.p115.create_long_share(file_id)
+            except RuntimeError as exc:
+                direct_file_id, direct_relative_path = self._direct_file_share_details(task)
+                if not direct_file_id or not self._is_gone_share_source_error(exc):
+                    raise
+                if not hasattr(self.store, "replace_self_share_source_file_id"):
+                    raise
+                row = self.store.replace_self_share_source_file_id(int(row["id"]), direct_file_id) or row
+                share = self.p115.create_long_share(direct_file_id)
+                direct_file_share = True
             row = self.store.update_self_share(
                 int(row["id"]),
                 workflow_phase="own_share_created",
@@ -684,7 +740,16 @@ class BridgeSelfShareTaskWorkflow:
                     metadata=self._own_share_metadata(row),
                 )
         message = "已创建自有 115 分享" if created else "已存在自有 115 分享"
-        return StageResult.complete(message, self._own_share_metadata(row))
+        metadata = self._own_share_metadata(row)
+        if direct_file_share:
+            metadata.update(
+                {
+                    "direct_file_share": True,
+                    "direct_file_share_file_id": direct_file_id,
+                    "direct_file_share_relative_path": direct_relative_path,
+                }
+            )
+        return StageResult.complete(message, metadata)
 
     def _stage_share_sync_submitted(self, task):
         row = self._submission_row(task)
@@ -718,6 +783,8 @@ class BridgeSelfShareTaskWorkflow:
         recognition = self._recognition_from_row(row)
         share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
         source = find_self_share_strm_source_dir(self.self_share_config, row, recognition, share_name)
+        if not source and task.metadata.get("direct_file_share"):
+            source = self._prepare_direct_file_share_strm(task, row)
         metadata = {
             "submission_id": int(row["id"]),
             "category": final_category_for_move(row, recognition),
@@ -739,11 +806,6 @@ class BridgeSelfShareTaskWorkflow:
                         row = self.store.update_recognition(int(row["id"]), recognition, "self_share_resolved") or row
                     metadata["category"] = cms_category
                     metadata["recognition"] = recognition
-                removed = cleanup_direct_strm_for_organized_folder(
-                    self.move_config,
-                    {"file_name": folder_name},
-                )
-                metadata["direct_strm_removed"] = removed
             return StageResult.defer(
                 "等待自有分享 STRM 源目录生成",
                 min(self.self_share_config.auto_organize_retry_seconds or 30, 5),
@@ -770,14 +832,10 @@ class BridgeSelfShareTaskWorkflow:
         if str(row.get("move_status") or "").lower() == "moved":
             metadata = self._move_metadata(row, task.metadata)
             dest_path = str(metadata.get("dest_path") or "").strip()
-            if self._strm_destination_ready(dest_path):
+            if self._strm_destination_ready(dest_path, row, task.metadata):
                 metadata.update(self._request_emby_refresh_once(task, dest_path))
                 return StageResult.complete("STRM 已移动到媒体库", metadata)
-            return StageResult.defer(
-                "等待已移动 STRM 目标目录可用",
-                self.self_share_config.auto_organize_retry_seconds or 30,
-                metadata,
-            )
+            return self._restore_missing_moved_destination(task, row, metadata)
         recognition = self._recognition_from_row(row)
         share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
         source = find_self_share_strm_source_dir(self.self_share_config, row, recognition, share_name)
@@ -842,31 +900,8 @@ class BridgeSelfShareTaskWorkflow:
         if str(row.get("move_status") or "").lower() == "moved":
             metadata = self._move_metadata(row, task.metadata)
             dest_path = str(metadata.get("dest_path") or "").strip()
-            if dest_path and not self._strm_destination_ready(dest_path):
-                restore_status, restore_metadata = restore_missing_self_share_library_folder(
-                    self.store,
-                    self.cms,
-                    row,
-                    self.self_share_config,
-                    self.move_config,
-                )
-                if restore_status in {"restore_submitted", "waiting_source"}:
-                    return StageResult.defer(
-                        "目标 STRM 被 CMS 同步删除，等待自有分享 STRM 重新生成",
-                        self.self_share_config.auto_organize_retry_seconds or 30,
-                        restore_metadata,
-                    )
-                if restore_status == "restored":
-                    return StageResult.defer(
-                        "目标 STRM 被 CMS 同步删除，已用自有分享 STRM 恢复",
-                        self.self_share_config.auto_organize_retry_seconds or 30,
-                        restore_metadata,
-                    )
-                return StageResult.defer(
-                    "等待已移动 STRM 目标目录恢复",
-                    self.self_share_config.auto_organize_retry_seconds or 30,
-                    metadata,
-                )
+            if dest_path and not self._strm_destination_ready(dest_path, row, task.metadata):
+                return self._restore_missing_moved_destination(task, row, metadata)
         recognition = self._recognition_from_row(row)
         share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
         recognition.setdefault("share_name", share_name)
@@ -889,35 +924,6 @@ class BridgeSelfShareTaskWorkflow:
             return StageResult.needs_action("等待 STRM 移动确认后再清理", {"submission_id": int(row["id"])})
         if str(row.get("emby_status") or "").lower() != "confirmed":
             return StageResult.needs_action("等待 Emby 确认后再清理", {"submission_id": int(row["id"])})
-        if str(row.get("move_status") or "").lower() == "moved":
-            metadata = self._move_metadata(row, task.metadata)
-            dest_path = str(metadata.get("dest_path") or "").strip()
-            if dest_path and not self._strm_destination_ready(dest_path):
-                restore_status, restore_metadata = restore_missing_self_share_library_folder(
-                    self.store,
-                    self.cms,
-                    row,
-                    self.self_share_config,
-                    self.move_config,
-                )
-                if restore_status in {"restore_submitted", "waiting_source"}:
-                    return StageResult.defer(
-                        "目标 STRM 被 CMS 同步删除，等待自有分享 STRM 重新生成",
-                        self.self_share_config.auto_organize_retry_seconds or 30,
-                        restore_metadata,
-                    )
-                if restore_status == "restored":
-                    return StageResult.defer(
-                        "目标 STRM 被 CMS 同步删除，已用自有分享 STRM 恢复",
-                        self.self_share_config.auto_organize_retry_seconds or 30,
-                        restore_metadata,
-                    )
-                return StageResult.needs_action(
-                    "任务状态已完成，但目标 STRM 不存在，请检查媒体库目录",
-                    metadata,
-                )
-        if str(row.get("cleanup_status") or "").lower() == "deleted":
-            return StageResult.complete("115 转存源已删除，自有分享保留", self._cleanup_metadata(row))
         if not self.cleanup_client:
             updated = row
             if hasattr(self.store, "update_cleanup"):
@@ -930,6 +936,13 @@ class BridgeSelfShareTaskWorkflow:
             return StageResult.failed("缺少自有分享码，拒绝清理 115 转存源", error_type="own_share_missing")
         if not str(row.get("own_share_file_id") or "").strip():
             return StageResult.failed("缺少自有分享文件夹 ID", error_type="own_share_file_missing")
+        if str(row.get("move_status") or "").lower() == "moved":
+            metadata = self._move_metadata(row, task.metadata)
+            dest_path = str(metadata.get("dest_path") or "").strip()
+            if dest_path and not self._strm_destination_ready(dest_path, row, task.metadata):
+                return self._restore_missing_moved_destination(task, row, metadata, terminal=True)
+        if str(row.get("cleanup_status") or "").lower() == "deleted":
+            return StageResult.complete("115 转存源已删除，自有分享保留", self._cleanup_metadata(row))
         updated, line = cleanup_own_share_source(self.store, row, self.cleanup_client)
         cleanup_status = str(updated.get("cleanup_status") or "").lower()
         if cleanup_status == "deleted":
@@ -949,16 +962,79 @@ class BridgeSelfShareTaskWorkflow:
             recognition = {}
         return recognition if isinstance(recognition, dict) else {}
 
+    @staticmethod
+    def _is_gone_share_source_error(exc: Exception) -> bool:
+        message = str(exc or "").lower()
+        return "已被移动或删除" in str(exc or "") or "moved or deleted" in message
+
+    @staticmethod
+    def _direct_file_share_details(task) -> tuple[str, str]:
+        folder = task.metadata.get("organized_folder")
+        folder = folder if isinstance(folder, dict) else {}
+        file_id = str(folder.get("direct_file_id") or task.metadata.get("direct_file_share_file_id") or "").strip()
+        relative_path = str(folder.get("direct_relative_path") or task.metadata.get("direct_file_share_relative_path") or "").strip()
+        relative = Path(relative_path)
+        if not file_id or not relative_path or relative.is_absolute() or ".." in relative.parts:
+            return "", ""
+        return file_id, relative_path
+
+    def _prepare_direct_file_share_strm(self, task, row: dict[str, Any]) -> Path | None:
+        _file_id, relative_path = self._direct_file_share_details(task)
+        folder_name = str(row.get("own_share_file_name") or "").strip()
+        own_share_code = str(row.get("own_share_code") or "").strip()
+        receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+        if not relative_path or not folder_name or not own_share_code:
+            return None
+        source_root = safe_resolve(self.self_share_config.strm_root / folder_name)
+        relative = Path(relative_path)
+        target = safe_resolve(source_root / relative)
+        if target.exists():
+            return source_root
+        marker = f"/s/{own_share_code}_{receive_code}_"
+        candidates: list[Path] = []
+        if self.self_share_config.strm_root.exists():
+            for strm_path in self.self_share_config.strm_root.rglob("*.strm"):
+                try:
+                    text = strm_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                if marker in text:
+                    candidates.append(strm_path)
+        if not candidates:
+            return None
+        source_file = max(candidates, key=lambda path: path.stat().st_mtime)
+        if safe_resolve(source_file) == target:
+            return source_root
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_file, target)
+            source_file.unlink()
+        except OSError:
+            return None
+        return source_root
+
     def _should_reuse_received_self_share_state(
         self,
         row: dict[str, Any] | None,
         task_metadata: dict[str, Any] | None = None,
     ) -> bool:
+        if self._is_pending_update_run(task_metadata):
+            return False
         if not self._has_received_self_share_state(row):
             return False
         if not (task_metadata or {}).get("force_reprocess"):
             return True
         return self._has_downstream_self_share_state(row)
+
+    @staticmethod
+    def _is_pending_update_run(task_metadata: dict[str, Any] | None = None) -> bool:
+        metadata = task_metadata or {}
+        try:
+            requested = int(metadata.get("update_requested_run") or 0)
+            received = int(metadata.get("update_received_run") or 0)
+        except (TypeError, ValueError):
+            return False
+        return requested > received
 
     def _has_received_self_share_state(self, row: dict[str, Any] | None) -> bool:
         if not row or row.get("workflow_mode") != "self_share_sync":
@@ -1074,20 +1150,68 @@ class BridgeSelfShareTaskWorkflow:
             metadata["emby_refresh_error"] = str(task_metadata.get("emby_refresh_error") or "")
         return metadata
 
-    def _strm_destination_ready(self, dest_path: str) -> bool:
+    @staticmethod
+    def _required_direct_file_share_relative_path(task_metadata: dict[str, Any] | None = None) -> str:
+        metadata = task_metadata or {}
+        if not metadata.get("direct_file_share"):
+            return ""
+        return str(metadata.get("direct_file_share_relative_path") or "").strip()
+
+    def _restore_missing_moved_destination(self, task, row: dict[str, Any], metadata: dict[str, Any], terminal: bool = False):
+        required_relative_path = self._required_direct_file_share_relative_path(task.metadata)
+        if required_relative_path:
+            self._prepare_direct_file_share_strm(task, row)
+        restore_status, restore_metadata = restore_missing_self_share_library_folder(
+            self.store,
+            self.cms,
+            row,
+            self.self_share_config,
+            self.move_config,
+            required_relative_path=required_relative_path,
+        )
+        delay = self.self_share_config.auto_organize_retry_seconds or 30
+        if restore_status in {"restore_submitted", "waiting_source"}:
+            return StageResult.defer(
+                "目标 STRM 被 CMS 同步删除或不是当前自有分享，等待自有分享 STRM 重新生成",
+                delay,
+                restore_metadata,
+            )
+        if restore_status == "restored":
+            restored_dest = str(restore_metadata.get("dest_path") or metadata.get("dest_path") or "")
+            restore_metadata.update(self._request_emby_refresh_once(task, restored_dest, force=True))
+            return StageResult.defer(
+                "目标 STRM 被 CMS 同步删除，已用自有分享 STRM 恢复",
+                delay,
+                restore_metadata,
+            )
+        if terminal:
+            return StageResult.needs_action(
+                "任务状态已完成，但目标 STRM 未通过自有分享校验，请检查媒体库目录",
+                metadata,
+            )
+        return StageResult.defer(
+            "等待已移动 STRM 目标目录恢复",
+            delay,
+            metadata,
+        )
+
+    def _strm_destination_ready(
+        self,
+        dest_path: str,
+        row: dict[str, Any],
+        task_metadata: dict[str, Any] | None = None,
+    ) -> bool:
         if not dest_path:
             return False
         dest = safe_resolve(Path(dest_path))
-        if not dest.exists():
-            return False
-        if dest.is_file():
-            return dest.suffix.lower() == ".strm"
-        if not dest.is_dir():
-            return False
-        return has_strm_file(dest)
+        return not validate_self_share_strm_destination(
+            dest,
+            row,
+            self._required_direct_file_share_relative_path(task_metadata),
+        )
 
-    def _request_emby_refresh_once(self, task, dest_path: str) -> dict[str, Any]:
-        if not dest_path or task.metadata.get("emby_refresh_requested"):
+    def _request_emby_refresh_once(self, task, dest_path: str, force: bool = False) -> dict[str, Any]:
+        if not dest_path or (task.metadata.get("emby_refresh_requested") and not force):
             return {}
         if not self.emby or not getattr(self.emby, "enabled", False):
             return {}

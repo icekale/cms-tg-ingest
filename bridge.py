@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from app.clients.cms import CmsClient
+from app.cms_cloud_index import CmsCloudDataIndex
 from app.clients.emby import EmbyClient
 from app.clients.http import FormHttp, HttpJson, load_cookie_value
 from app.clients.p115 import (
@@ -114,6 +115,7 @@ from app.media.strm import (
     restore_missing_self_share_library_folder,
     restore_missing_self_share_library_folders,
     select_move_source_for_workflow,
+    validate_self_share_strm_destination,
     validate_self_share_strm_source,
 )
 
@@ -170,7 +172,7 @@ LINK_RE = re.compile(r"https?://(?:www\.)?(?:115cdn|115|anxia)\.com/s/[^\s<>'\"]
 TRAILING_PUNCT = ".,;)。），]】》>"
 LOG = logging.getLogger("cms-tg-ingest")
 LAST_TELEGRAM_TRANSIENT_ERROR_AT: str | None = None
-HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 链接\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- /status 查看最近任务\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd"""
+HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 链接\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”\n- /status 查看最近任务\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd"""
 MENU_BUTTONS = {
     "📊 统计": "/metrics",
     "📋 最近任务": "/status",
@@ -584,6 +586,60 @@ class SubmissionStore:
                     time.time(),
                     row_id,
                 ),
+            )
+            row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
+        return self._row_to_dict(row)
+
+    def reset_self_share_for_update(self, row_id: int) -> dict[str, Any] | None:
+        """Keep stable media identity while clearing only one self-share execution's state."""
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """
+                UPDATE submissions
+                SET cms_task_id = NULL,
+                    status = 'received',
+                    last_error = NULL,
+                    workflow_mode = 'self_share_sync',
+                    workflow_phase = 'update_requested',
+                    own_share_file_id = NULL,
+                    own_share_file_name = NULL,
+                    own_share_code = NULL,
+                    own_share_receive_code = NULL,
+                    own_share_url = NULL,
+                    share_sync_status = NULL,
+                    source_path = NULL,
+                    dest_path = NULL,
+                    move_status = NULL,
+                    move_error = NULL,
+                    move_started_at = NULL,
+                    move_finished_at = NULL,
+                    category_final = NULL,
+                    emby_status = NULL,
+                    emby_item_id = NULL,
+                    emby_title = NULL,
+                    emby_path = NULL,
+                    emby_parent = NULL,
+                    cleanup_status = NULL,
+                    cleanup_file_id = NULL,
+                    cleanup_error = NULL,
+                    cleanup_finished_at = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (time.time(), row_id),
+            )
+            row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
+        return self._row_to_dict(row)
+
+    def replace_self_share_source_file_id(self, row_id: int, file_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """
+                UPDATE submissions
+                SET own_share_file_id = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (str(file_id), time.time(), row_id),
             )
             row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
         return self._row_to_dict(row)
@@ -1353,7 +1409,7 @@ def handle_callback_query(
     task_action = parse_task_action_callback(data)
     if task_action:
         action, task_id = task_action
-        if handle_task_action_callback(action, task_id, callback_id, chat_id, telegram, task_store):
+        if handle_task_action_callback(action, task_id, callback_id, chat_id, telegram, task_store, store):
             return
     recheck_row_id = parse_emby_recheck_callback(data)
     if recheck_row_id is not None:
@@ -1607,13 +1663,20 @@ def retry_stage_for_intake(task) -> TaskStage:
     return TaskStage.RECEIVED
 
 
-def completion_drift_retry_stage(task) -> TaskStage | None:
+def completion_drift_retry_stage(task, submission: dict[str, Any] | None = None) -> TaskStage | None:
     if task.status != TaskStatus.SUCCEEDED or task.current_stage != TaskStage.CLEANED:
         return None
     dest_path = str(task.metadata.get("dest_path") or "").strip()
     if not dest_path:
         return None
     dest = safe_resolve(Path(dest_path))
+    if submission and str(submission.get("workflow_mode") or "") == "self_share_sync":
+        required_relative_path = ""
+        if task.metadata.get("direct_file_share"):
+            required_relative_path = str(task.metadata.get("direct_file_share_relative_path") or "").strip()
+        if not validate_self_share_strm_destination(dest, submission, required_relative_path):
+            return None
+        return TaskStage.EMBY_CONFIRMED
     if dest.exists() and (dest.is_file() or has_strm_file(dest)):
         return None
     return TaskStage.EMBY_CONFIRMED
@@ -1801,7 +1864,7 @@ def sync_cleanup_task_event(task_store: TaskStore | None, row: dict[str, Any]):
     )
 def parse_task_action_callback(data: str) -> tuple[str, int] | None:
     parts = str(data or "").split(":")
-    if len(parts) != 2 or parts[0] not in {"task_detail", "task_retry", "task_emby", "task_restore", "task_reprocess"}:
+    if len(parts) != 2 or parts[0] not in {"task_detail", "task_retry", "task_emby", "task_restore", "task_reprocess", "task_update"}:
         return None
     try:
         return parts[0], int(parts[1])
@@ -1816,6 +1879,7 @@ def handle_task_action_callback(
     chat_id: int | str,
     telegram: Any,
     task_store: TaskStore | None,
+    store: SubmissionStore | None = None,
 ) -> bool:
     if task_store is None:
         telegram.answer_callback_query(callback_id, "任务引擎未启用", show_alert=True)
@@ -1871,6 +1935,97 @@ def handle_task_action_callback(
         updated = task_store.reprocess_task(task_id, message="TG 按钮触发从头重跑", next_run_at=0)
         telegram.answer_callback_query(callback_id, "已从头重跑", show_alert=False)
         telegram.send_message(chat_id, f"已从头重跑：{format_task_snapshot(updated)}")
+        return True
+    if action == "task_update":
+        submission_id = task.submission_id or task.metadata.get("submission_id")
+        if store is None or submission_id in (None, ""):
+            telegram.answer_callback_query(callback_id, "缺少原任务记录", show_alert=True)
+            return True
+        if task.status != TaskStatus.SUCCEEDED or task.current_stage != TaskStage.CLEANED:
+            telegram.answer_callback_query(callback_id, "当前任务尚未完成，暂不能追更", show_alert=True)
+            return True
+        category = str(task.category or task.metadata.get("category") or task.metadata.get("category_final") or "").strip()
+        if category not in {"国产电视", "外国电视", "番剧"}:
+            telegram.answer_callback_query(callback_id, "仅已完成的剧集任务支持追更", show_alert=True)
+            return True
+        row = store.find_by_id(int(submission_id))
+        if not row or str(row.get("workflow_mode") or "") != "self_share_sync":
+            telegram.answer_callback_query(callback_id, "原自分享任务记录不可用", show_alert=True)
+            return True
+        try:
+            previous_requested = int(task.metadata.get("update_requested_run") or 0)
+            previous_received = int(task.metadata.get("update_received_run") or 0)
+        except (TypeError, ValueError):
+            previous_requested = previous_received = 0
+        update_run = max(previous_requested, previous_received) + 1
+        update_started_at = time.time()
+        previous_share_code = str(row.get("own_share_code") or "").strip()
+        task_store.record_event(
+            task.id,
+            TaskStage.RECEIVED,
+            TaskStatus.PENDING,
+            "TG 按钮开始追更，准备接收当前分享内容",
+            title=str(row.get("title") or task.title or "") or None,
+            tmdb_id=str(task.tmdb_id or "") or None,
+            category=category,
+            submission_id=int(row["id"]),
+            metadata_patch={
+                "submission_id": int(row["id"]),
+                "update_requested_run": update_run,
+                "update_received_run": update_run - 1,
+                "update_started_at": update_started_at,
+                "previous_own_share_code": previous_share_code,
+            },
+            metadata_delete_keys=(
+                "own_share_file_id",
+                "own_share_file_name",
+                "own_share_code",
+                "own_share_receive_code",
+                "own_share_url",
+                "share_sync_status",
+                "source_path",
+                "dest_path",
+                "category_final",
+                "move_status",
+                "move_error",
+                "emby_status",
+                "emby_item_id",
+                "emby_title",
+                "emby_path",
+                "emby_parent",
+                "cleanup_status",
+                "cleanup_file_id",
+                "cleanup_error",
+                "emby_refresh_requested",
+                "emby_refresh_library",
+                "emby_refresh_error",
+                "organized_folder",
+                "recognition",
+                "received_file_ids",
+                "direct_strm_removed",
+                "_defer_stage",
+                "_defer_message",
+                "_defer_count",
+            ),
+            next_run_at=-1,
+            clear_claim=True,
+        )
+        updated_row = store.reset_self_share_for_update(int(row["id"]))
+        if not updated_row:
+            task_store.record_event(
+                task.id,
+                TaskStage.FAILED,
+                TaskStatus.FAILED,
+                "追更准备失败：原任务记录不存在",
+                error_type="submission_missing",
+                error_summary="原任务记录不存在",
+                clear_claim=True,
+            )
+            telegram.answer_callback_query(callback_id, "追更准备失败", show_alert=True)
+            return True
+        updated = task_store.enqueue_task(task.id, TaskStage.RECEIVED, message="追更已入队", next_run_at=0)
+        telegram.answer_callback_query(callback_id, "已开始追更", show_alert=False)
+        telegram.send_message(chat_id, f"已开始追更：{format_task_snapshot(updated)}\n将重新接收当前分享内容并合并新增剧集。")
         return True
     return False
 
@@ -2244,7 +2399,14 @@ def handle_update(
                 raise RuntimeError("TaskStore is required when TASK_ENGINE_ENABLED=true for self_share_sync")
             if self_share_workflow and task_engine_enabled and task_store is not None:
                 task = task_store.upsert_task(key.share_code, key.receive_code, link, chat_id=str(chat_id or ""))
-                drift_stage = completion_drift_retry_stage(task)
+                submission = None
+                submission_id = task.submission_id or task.metadata.get("submission_id")
+                if submission_id not in (None, ""):
+                    try:
+                        submission = store.find_by_id(int(submission_id))
+                    except (TypeError, ValueError):
+                        submission = None
+                drift_stage = completion_drift_retry_stage(task, submission)
                 if drift_stage:
                     task = task_store.record_event(
                         task.id,
@@ -2425,6 +2587,7 @@ def run_forever(config: Config) -> None:
             tmdb_resolver=tmdb_resolver,
             cleanup_client=p115 if self_share_config.cleanup_after_emby else None,
             receive_cid=config.self_share_receive_cid,
+            cms_cloud_index=CmsCloudDataIndex(self_share_config.cms_state_db_path),
         )
         task_runner = TaskRunner(
             task_store,

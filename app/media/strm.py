@@ -286,12 +286,50 @@ def validate_self_share_strm_source(source: Path, row: dict[str, Any]) -> str:
     receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
     expected_marker = f"/s/{own_share_code}_{receive_code}_"
     for path in sorted(iter_strm_files(source)):
-        text = path.read_text(encoding="utf-8", errors="replace").strip()
-        if "/d/" in text:
-            return f"发现直链 STRM：{path}"
-        if expected_marker not in text:
-            return f"STRM 不是预期的分享链接：{path}"
+        issue = validate_self_share_strm_file(path, expected_marker)
+        if issue:
+            return issue
     return ""
+
+
+def validate_self_share_strm_file(path: Path, expected_marker: str) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return f"无法读取 STRM：{path}"
+    if "/d/" in text:
+        return f"发现直链 STRM：{path}"
+    if expected_marker not in text:
+        return f"STRM 不是预期的分享链接：{path}"
+    return ""
+
+
+def validate_self_share_strm_destination(
+    destination: Path,
+    row: dict[str, Any],
+    required_relative_path: str = "",
+) -> str:
+    if str(row.get("workflow_mode") or "") != "self_share_sync":
+        return ""
+    destination = safe_resolve(destination)
+    if not destination.exists() or not destination.is_dir():
+        return "目标 STRM 目录不存在"
+    own_share_code = str(row.get("own_share_code") or "").strip()
+    if not own_share_code:
+        return "等待自有分享码，暂不确认目标 STRM"
+    receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+    expected_marker = f"/s/{own_share_code}_{receive_code}_"
+    if required_relative_path:
+        relative = Path(required_relative_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            return "单集 STRM 相对路径无效"
+        target = safe_resolve(destination / relative)
+        if not is_relative_to(target, destination) or not target.is_file():
+            return f"目标自有分享 STRM 不存在：{relative}"
+        return validate_self_share_strm_file(target, expected_marker)
+    if not has_strm_file(destination):
+        return "目标目录不包含 STRM 文件"
+    return validate_self_share_strm_source(destination, row)
 
 
 def remove_direct_strm_files(path: Path) -> int:
@@ -311,6 +349,115 @@ def remove_direct_strm_files(path: Path) -> int:
             continue
         removed += 1
     return removed
+
+
+def _strm_has_direct_link(path: Path) -> bool:
+    try:
+        return "/d/" in path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def find_recent_direct_library_strm_source_dir(
+    config: MoveConfig,
+    row: dict[str, Any],
+    recognition: dict[str, Any],
+    share_name: str = "",
+) -> tuple[Path, str] | None:
+    try:
+        since = float(row.get("created_at") or row.get("updated_at") or 0) - 60
+    except (TypeError, ValueError):
+        since = 0
+    explicit_tmdb = ""
+    for value in (row.get("title"), share_name, row.get("url")):
+        explicit_tmdb = extract_tmdb_id_from_name(str(value or ""))
+        if explicit_tmdb:
+            break
+    expected_tmdb = expected_task_tmdb_id(recognition, row)
+    tokens = candidate_tokens(recognition, share_name)
+    candidates: dict[Path, tuple[str, float, bool, bool]] = {}
+    for category, root in config.library_roots.items():
+        root = safe_resolve(root)
+        if not root.exists():
+            continue
+        try:
+            media_roots = [child for child in root.iterdir() if child.is_dir()]
+        except OSError:
+            continue
+        for media_root in media_roots:
+            media_root = safe_resolve(media_root)
+            try:
+                media_mtime = media_root.stat().st_mtime
+            except OSError:
+                continue
+            folder_tmdb = extract_tmdb_id_from_name(str(media_root))
+            exact_tmdb_folder = bool(expected_tmdb and folder_tmdb and expected_tmdb == folder_tmdb)
+            if since and media_mtime < since and not exact_tmdb_folder:
+                continue
+            for strm_path in iter_strm_files(media_root):
+                try:
+                    mtime = strm_path.stat().st_mtime
+                except OSError:
+                    continue
+                if since and mtime < since:
+                    continue
+                if not _strm_has_direct_link(strm_path):
+                    continue
+                if explicit_tmdb and folder_tmdb and explicit_tmdb != folder_tmdb:
+                    continue
+                try:
+                    text = strm_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    text = ""
+                haystack = normalize_text(f"{media_root} {text}")
+                token_match = bool(tokens and any(token in haystack for token in tokens))
+                tmdb_match = bool(expected_tmdb and folder_tmdb and expected_tmdb == folder_tmdb)
+                old = candidates.get(media_root)
+                if not old or mtime > old[1] or token_match or tmdb_match:
+                    candidates[media_root] = (category, mtime, token_match, tmdb_match)
+    if not candidates and not since:
+        for category, root in config.library_roots.items():
+            root = safe_resolve(root)
+            if not root.exists():
+                continue
+            for strm_path in iter_strm_files(root):
+                try:
+                    mtime = strm_path.stat().st_mtime
+                except OSError:
+                    continue
+                if not _strm_has_direct_link(strm_path):
+                    continue
+                media = library_media_root_for_path(strm_path.parent, config)
+                if not media:
+                    continue
+                media_root, category = media
+                folder_tmdb = extract_tmdb_id_from_name(str(media_root))
+                if explicit_tmdb and folder_tmdb and explicit_tmdb != folder_tmdb:
+                    continue
+                try:
+                    text = strm_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    text = ""
+                haystack = normalize_text(f"{media_root} {text}")
+                token_match = bool(tokens and any(token in haystack for token in tokens))
+                tmdb_match = bool(expected_tmdb and folder_tmdb and expected_tmdb == folder_tmdb)
+                old = candidates.get(media_root)
+                if not old or mtime > old[1] or token_match or tmdb_match:
+                    candidates[media_root] = (category, mtime, token_match, tmdb_match)
+    if not candidates:
+        return None
+    exact_matches = [(path, data) for path, data in candidates.items() if data[3]]
+    if len(exact_matches) == 1:
+        path, (category, _mtime, _token_match, _tmdb_match) = exact_matches[0]
+        return safe_resolve(path), category
+    token_matches = [(path, data) for path, data in candidates.items() if data[2]]
+    if len(token_matches) == 1:
+        path, (category, _mtime, _token_match, _tmdb_match) = token_matches[0]
+        return safe_resolve(path), category
+    if len(candidates) == 1:
+        path, (category, _mtime, _token_match, _tmdb_match) = next(iter(candidates.items()))
+        return safe_resolve(path), category
+    return None
 
 
 def category_from_existing_library_folder(config: MoveConfig, folder: dict[str, Any]) -> str:
@@ -339,6 +486,68 @@ def cleanup_direct_strm_for_organized_folder(config: MoveConfig, folder: dict[st
     return removed
 
 
+def cleanup_direct_strm_for_task_identity(
+    config: MoveConfig,
+    row: dict[str, Any],
+    recognition: dict[str, Any] | None = None,
+) -> int:
+    dest_path = str(row.get("dest_path") or "").strip()
+    if not dest_path:
+        return 0
+    reference = safe_resolve(Path(dest_path))
+    relative_paths = self_share_strm_relative_paths(reference, row)
+    if not relative_paths:
+        return 0
+    recognition = recognition or parse_recognition_json(row)
+    tmdb_id = expected_task_tmdb_id(recognition, row)
+    if not tmdb_id:
+        return remove_direct_strm_relative_paths(reference, relative_paths)
+    removed = 0
+    for root in config.library_roots.values():
+        root = safe_resolve(root)
+        if not root.exists():
+            continue
+        try:
+            media_roots = [child for child in root.iterdir() if child.is_dir()]
+        except OSError:
+            continue
+        for media_root in media_roots:
+            if extract_tmdb_id_from_name(media_root.name) == tmdb_id:
+                removed += remove_direct_strm_relative_paths(safe_resolve(media_root), relative_paths)
+    return removed
+
+
+def self_share_strm_relative_paths(path: Path, row: dict[str, Any]) -> set[Path]:
+    own_share_code = str(row.get("own_share_code") or "").strip()
+    if not own_share_code or not path.exists() or not path.is_dir():
+        return set()
+    receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+    marker = f"/s/{own_share_code}_{receive_code}_"
+    relative_paths: set[Path] = set()
+    for strm_path in iter_strm_files(path):
+        try:
+            text = strm_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if marker in text:
+            relative_paths.add(strm_path.relative_to(path))
+    return relative_paths
+
+
+def remove_direct_strm_relative_paths(path: Path, relative_paths: set[Path]) -> int:
+    removed = 0
+    for relative_path in relative_paths:
+        target = safe_resolve(path / relative_path)
+        if not is_relative_to(target, path) or not target.is_file() or not _strm_has_direct_link(target):
+            continue
+        try:
+            target.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
 def merge_self_share_strm_folder(plan: MovePlan, store: Any, row: dict[str, Any]) -> dict[str, Any]:
     if plan.status in {"pending", "conflict"} and plan.source_path and plan.dest_path:
         source = safe_resolve(plan.source_path)
@@ -361,7 +570,6 @@ def merge_self_share_strm_folder(plan: MovePlan, store: Any, row: dict[str, Any]
     if not dest.exists() or not dest.is_dir():
         return execute_strm_move(MovePlan("pending", "ready", source, dest, plan.category), store, row)
     try:
-        remove_direct_strm_files(dest)
         for child in source.rglob("*"):
             if not child.is_file():
                 continue
@@ -490,6 +698,7 @@ def restore_missing_self_share_library_folder(
     row: dict[str, Any],
     self_share_config: SelfShareConfig,
     move_config: MoveConfig,
+    required_relative_path: str = "",
 ) -> tuple[str, dict[str, Any]]:
     metadata = {
         "submission_id": int(row["id"]),
@@ -497,8 +706,15 @@ def restore_missing_self_share_library_folder(
         "category": category_for_self_share_row(row),
     }
     dest = safe_resolve(Path(str(row.get("dest_path") or "")))
-    if dest.exists() and has_strm_file(dest):
+    destination_issue = validate_self_share_strm_destination(dest, row, required_relative_path)
+    if not destination_issue:
+        metadata["direct_strm_removed"] = cleanup_direct_strm_for_task_identity(
+            move_config,
+            row,
+            parse_recognition_json(row),
+        )
         return "ready", metadata
+    metadata["destination_validation_error"] = destination_issue
     category = category_for_self_share_row(row)
     folder_name = str(row.get("own_share_file_name") or "").strip()
     if not category or not folder_name:
@@ -529,6 +745,11 @@ def restore_missing_self_share_library_folder(
             }
         )
         if str(updated.get("move_status") or "").lower() == "moved":
+            metadata["direct_strm_removed"] = cleanup_direct_strm_for_task_identity(
+                move_config,
+                updated,
+                parse_recognition_json(updated),
+            )
             return "restored", metadata
         return "move_failed", metadata
     if plan.status == "skipped" and plan.reason in MISSING_SELF_SHARE_SOURCE_REASONS:

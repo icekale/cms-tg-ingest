@@ -152,6 +152,51 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("CMS 整理 2次", detail_html)
             self.assertIn("STRM 生成 1次", detail_html)
 
+    def test_render_task_list_treats_unscheduled_running_task_as_attention_not_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("orphan", "", "https://115cdn.com/s/orphan")
+            store.record_event(
+                task.id,
+                TaskStage.CMS_SUBMITTED,
+                TaskStatus.RUNNING,
+                "链接已存在",
+                title="历史遗留任务",
+            )
+
+            html = render_task_list(store)
+            detail_html = render_task_detail(store, task.id)
+
+            self.assertIn('<div class="stat-label">处理中</div><div class="stat-value">0</div>', html)
+            self.assertIn('<div class="stat-label">需处理/失败</div><div class="stat-value">1</div>', html)
+            self.assertIn("不在自动调度队列", html)
+            self.assertIn('<span class="badge status-attention">需处理</span>', html)
+            self.assertIn('<span class="badge status-attention">需处理</span>', detail_html)
+            self.assertIn("历史遗留任务", html)
+
+    def test_render_task_list_does_not_count_cleared_lock_reason_as_waiting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("manual", "", "https://115cdn.com/s/manual")
+            store.record_event(
+                task.id,
+                TaskStage.NEEDS_ACTION,
+                TaskStatus.NEEDS_ACTION,
+                "需要人工检查",
+                title="人工任务",
+                metadata_patch={
+                    "_defer_message": "等待 CMS 整理完成",
+                    "_lock_reason": "115/CMS 全局阶段",
+                    "_lock_waiting": False,
+                },
+                error_summary="需要人工检查",
+            )
+
+            html = render_task_list(store)
+
+            self.assertIn('<div class="stat-label">等待资源</div><div class="stat-value">0</div>', html)
+            self.assertIn("需要人工检查", html)
+
     def test_clear_history_endpoint_removes_finished_tasks_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
@@ -479,6 +524,27 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertIn("等待自有分享 STRM", html)
             self.assertIn("第 2 次", html)
+
+    def test_health_page_treats_unscheduled_running_task_as_problem(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("orphan", "", "https://115cdn.com/s/orphan")
+            store.record_event(
+                task.id,
+                TaskStage.CMS_SUBMITTED,
+                TaskStatus.RUNNING,
+                "链接已存在",
+                title="历史遗留任务",
+            )
+            app = WebApp(store, web_token="")
+
+            status, _headers, body = app.handle_request("GET", "/health", {}, b"")
+            html = body.decode("utf-8")
+
+            self.assertEqual(status, 200)
+            self.assertIn("运行中: 0", html)
+            self.assertIn("失败/需处理: 1", html)
+            self.assertIn("不在自动调度队列", html)
 
     def test_health_page_shows_active_115_risk_cooldown(self):
         with tempfile.TemporaryDirectory() as tmp:

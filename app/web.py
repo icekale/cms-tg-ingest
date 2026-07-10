@@ -10,7 +10,12 @@ from urllib.parse import parse_qs, urlparse
 
 from .models import RetryAction, TaskStage, TaskStatus
 from .task_bridge import sync_task_from_submission
-from .task_diagnostics import format_stage_observability, format_task_observability
+from .task_diagnostics import (
+    format_stage_observability,
+    format_task_observability,
+    is_dispatchable_active_task,
+    is_unscheduled_active_task,
+)
 from .task_engine import decide_retry, stage_display_name
 from .task_health import format_taskstore_health
 from .quality import format_task_quality_report, scan_task_quality
@@ -118,13 +123,13 @@ code {{ background: #eef2f7; padding: 2px 5px; border-radius: 6px; }}
 </html>"""
 
 def _task_lock_label(task: Any) -> str:
+    if not task.metadata.get("_lock_waiting"):
+        return "-"
     reason = str(task.metadata.get("_lock_reason") or "").strip()
     if not reason:
         return "-"
-    if task.metadata.get("_lock_waiting"):
-        owner = str(task.metadata.get("_lock_owner_task_id") or "").strip()
-        return f"等待资源锁: #{owner} {reason}" if owner else f"等待资源锁: {reason}"
-    return reason
+    owner = str(task.metadata.get("_lock_owner_task_id") or "").strip()
+    return f"等待资源锁: #{owner} {reason}" if owner else f"等待资源锁: {reason}"
 
 
 def task_display_title(task: Any) -> str:
@@ -195,9 +200,9 @@ def _task_observability_lines(task: Any, *, now: float | None = None) -> list[st
 
 def _task_counts(tasks: list[Any]) -> dict[str, int]:
     return {
-        "active": sum(1 for task in tasks if task.status in {TaskStatus.RUNNING, TaskStatus.PENDING}),
-        "problem": sum(1 for task in tasks if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION}),
-        "waiting": sum(1 for task in tasks if _task_wait_message(task)),
+        "active": sum(1 for task in tasks if is_dispatchable_active_task(task)),
+        "problem": sum(1 for task in tasks if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or is_unscheduled_active_task(task)),
+        "waiting": sum(1 for task in tasks if is_dispatchable_active_task(task) and _task_wait_message(task)),
         "completed": sum(1 for task in tasks if task.status == TaskStatus.SUCCEEDED),
     }
 
@@ -213,7 +218,8 @@ def _overall_status(counts: dict[str, int]) -> tuple[str, str]:
 def _render_task_row(task: Any, *, compact: bool = False) -> str:
     title = task_display_title(task)
     stage = stage_display_name(task.current_stage)
-    status_label = task.status.value
+    status_label = "需处理" if is_unscheduled_active_task(task) else task.status.value
+    status_class = "status-attention" if is_unscheduled_active_task(task) else _status_class(task.status)
     message = _task_issue_message(task)
     message_class = " error" if task.status == TaskStatus.FAILED else ""
     message_html = f'<div class="task-message{message_class}">{html.escape(message)}</div>' if message else ""
@@ -229,7 +235,7 @@ def _render_task_row(task: Any, *, compact: bool = False) -> str:
         '<div class="task-meta">'
         f'<span>#{task.id}</span>'
         f'<span>{html.escape(stage)}</span>'
-        f'{_badge(status_label, _status_class(task.status))}'
+        f'{_badge(status_label, status_class)}'
         '</div>'
         f'{message_html}'
         f'{observability_html}'
@@ -245,7 +251,7 @@ def render_task_list(store: TaskStore) -> str:
     attention_tasks = [
         task
         for task in visible_tasks
-        if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or _task_wait_message(task)
+        if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or _task_wait_message(task) or is_unscheduled_active_task(task)
     ]
     counts = _task_counts(tasks)
     overall_label, overall_class = _overall_status(counts)
@@ -344,7 +350,7 @@ def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | N
     <p class="eyebrow">任务详情</p>
     <h1>#{task.id} {html.escape(task_display_title(task))}</h1>
   </div>
-  {_badge(task.status.value, _status_class(task.status))}
+  {_badge("需处理" if is_unscheduled_active_task(task) else task.status.value, "status-attention" if is_unscheduled_active_task(task) else _status_class(task.status))}
 </div>
 
 <section class="panel">

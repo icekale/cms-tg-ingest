@@ -1,4 +1,6 @@
 import tempfile
+import os
+import time
 import unittest
 from pathlib import Path
 
@@ -158,6 +160,16 @@ class FakeTmdbHintResolver(FakeTmdbResolver):
         return {"ok": False}
 
 
+class FakeCmsCloudIndex:
+    def __init__(self, folder=None):
+        self.folder = folder
+        self.calls = []
+
+    def folder_for_direct_strm(self, source, tmdb_id):
+        self.calls.append((Path(source), tmdb_id))
+        return self.folder
+
+
 class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
     def _workflow(
         self,
@@ -169,6 +181,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
         self_share_config=None,
         emby=None,
         cleanup_client=None,
+        cms_cloud_index=None,
     ):
         self.cms = FakeCms()
         self.p115 = FakeP115()
@@ -197,6 +210,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             tmdb_resolver,
             cleanup_client=cleanup_client,
             receive_cid=receive_cid,
+            cms_cloud_index=cms_cloud_index,
         )
 
     def _claim_task(self, share_code, receive_code, stage, metadata=None, submission_id=None):
@@ -318,6 +332,50 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["submission_id"], row["id"])
             self.assertEqual(result.metadata["received_file_ids"], ["file-a", "file-b"])
             self.assertEqual(updated["workflow_phase"], "received_to_pending")
+
+    def test_update_run_receives_again_after_completed_self_share(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            row = self._self_share_row(title="J-追更剧集-2026-[tmdb=1416]", category="外国电视", tmdb_id="1416")
+            self.submissions.reset_self_share_for_update(int(row["id"]))
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECEIVED,
+                {
+                    "submission_id": row["id"],
+                    "update_requested_run": 1,
+                    "update_received_run": 0,
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            updated = self.submissions.find_by_key(bridge.ShareKey("abc", "1234"))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(self.p115.received, [("abc", "1234", "pending-cid")])
+            self.assertEqual(result.metadata["update_received_run"], 1)
+            self.assertEqual(updated["workflow_phase"], "received_to_pending")
+
+    def test_update_run_only_searches_for_organize_results_after_update_started(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            row = self._row()
+            self.submissions.reset_self_share_for_update(int(row["id"]))
+            update_started_at = 2000000000.0
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {"submission_id": row["id"], "update_started_at": update_started_at},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(self.p115.find_organized_calls[0][3], update_started_at - 5)
 
     def test_organizing_stage_defers_when_folder_not_found(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1112,7 +1170,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(stored["move_status"], "error")
             self.assertTrue(source.exists())
 
-    def test_strm_ready_stage_removes_late_direct_library_strm_while_waiting_for_share_strm(self):
+    def test_strm_ready_stage_keeps_late_direct_library_strm_while_waiting_for_share_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
             western_root = Path(tmp) / "library" / "western"
             workflow = self._workflow(
@@ -1128,8 +1186,8 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
 
             self.assertEqual(result.outcome, StageOutcome.DEFER)
             self.assertIn("等待自有分享 STRM", result.message)
-            self.assertFalse((direct_dir / "movie.strm").exists())
-            self.assertEqual(result.metadata["direct_strm_removed"], 1)
+            self.assertTrue((direct_dir / "movie.strm").exists())
+            self.assertNotIn("direct_strm_removed", result.metadata)
 
     def test_strm_ready_stage_uses_late_direct_strm_library_as_cms_category_signal(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1158,8 +1216,8 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(stored["category_status"], "self_share_resolved")
             self.assertEqual(recognition["category"], "亚洲电影")
             self.assertEqual(recognition["category_status"], "self_share_resolved")
-            self.assertFalse((direct_dir / "movie.strm").exists())
-            self.assertEqual(result.metadata["direct_strm_removed"], 1)
+            self.assertTrue((direct_dir / "movie.strm").exists())
+            self.assertNotIn("direct_strm_removed", result.metadata)
 
     def test_organizing_stage_triggers_auto_organize_only_once_while_waiting(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1193,7 +1251,125 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["organized_folder"]["file_id"], "folder-id")
             self.assertEqual(self.cms.auto_organize_calls, 0)
 
-    def test_organizing_stage_removes_direct_strm_from_cms_sync_folder(self):
+    def test_organizing_stage_uses_cms_cloud_index_for_new_direct_strm_in_old_series_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tv_root = Path(tmp) / "library" / "tv"
+            folder_name = "Q-权力的游戏前传：龙族-2022-[tmdb=94997]"
+            cms_index = FakeCmsCloudIndex(
+                {"file_id": "series-id", "file_name": folder_name, "parent_id": "tv-parent"}
+            )
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"外国电视": tv_root}),
+                cms_cloud_index=cms_index,
+            )
+            row = self._row()
+            row = self.submissions.update_status(
+                int(row["id"]),
+                "received",
+                title="House.of.the.Dragon.S03.2022.2160p.HMAX.WEB-DL",
+            ) or row
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {"title": "权力的游戏前传：龙族", "type": "tv", "tmdb_id": "94997", "category": "外国电视"},
+                "tmdb_search_resolved",
+            ) or row
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="auto_organize_submitted",
+            ) or row
+            direct_dir = tv_root / folder_name / "Season 03"
+            self._write_strm(direct_dir, content="http://cms/d/direct-pick.mkv?/episode.mkv")
+            old_time = time.time() - 86400
+            os.utime(direct_dir.parent, (old_time, old_time))
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["organized_folder"]["file_id"], "series-id")
+            self.assertEqual(cms_index.calls, [(bridge.safe_resolve(direct_dir.parent), "94997")])
+            self.assertEqual(self.p115.find_organized_calls, [])
+            self.assertTrue((direct_dir / "movie.strm").exists())
+
+    def test_own_share_stage_falls_back_to_direct_file_when_folder_is_gone(self):
+        class FolderGoneP115(FakeP115):
+            def create_long_share(self, file_id):
+                self.created_shares.append(file_id)
+                if file_id == "series-id":
+                    raise RuntimeError("分享的文件(夹)已被移动或删除")
+                return {
+                    "share_code": "file-share",
+                    "receive_code": "1212",
+                    "share_url": "https://115cdn.com/s/file-share?password=1212",
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            workflow.p115 = FolderGoneP115()
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="organized_found",
+                own_share_file_id="series-id",
+                own_share_file_name="Q-权力的游戏前传：龙族-2022-[tmdb=94997]",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {
+                    "submission_id": row["id"],
+                    "organized_folder": {
+                        "file_id": "series-id",
+                        "direct_file_id": "episode-id",
+                        "direct_relative_path": "Season 03/权力的游戏前传：龙族 (2022) - S03E03.strm",
+                    },
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            updated = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(workflow.p115.created_shares, ["series-id", "episode-id"])
+            self.assertEqual(updated["own_share_file_id"], "episode-id")
+            self.assertEqual(updated["own_share_code"], "file-share")
+            self.assertTrue(result.metadata["direct_file_share"])
+
+    def test_strm_ready_stage_places_direct_file_share_in_canonical_episode_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._self_share_row(title="Q-权力的游戏前传：龙族-2022-[tmdb=94997]", category="外国电视", tmdb_id="94997")
+            row = self.submissions.replace_self_share_source_file_id(int(row["id"]), "episode-id") or row
+            source_file = self.config.strm_root / "权力的游戏前传：龙族 (2022) - S03E03.strm"
+            self._write_strm(source_file.parent, source_file.name, content="https://115cdn.com/s/owncode_ownpwd_/episode.mkv")
+            relative = "Season 03/权力的游戏前传：龙族 (2022) - S03E03.strm"
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.STRM_READY,
+                {
+                    "submission_id": row["id"],
+                    "direct_file_share": True,
+                    "direct_file_share_file_id": "episode-id",
+                    "direct_file_share_relative_path": relative,
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            expected = self.config.strm_root / row["own_share_file_name"] / relative
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["source_path"], str(bridge.safe_resolve(expected.parent.parent)))
+            self.assertTrue(expected.exists())
+            self.assertFalse(source_file.exists())
+
+    def test_organizing_stage_keeps_direct_strm_until_share_strm_is_ready(self):
         with tempfile.TemporaryDirectory() as tmp:
             western_root = Path(tmp) / "library" / "western"
             workflow = self._workflow(
@@ -1214,7 +1390,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             result = workflow.run_stage(task)
 
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
-            self.assertFalse((direct_dir / "movie.strm").exists())
+            self.assertTrue((direct_dir / "movie.strm").exists())
             self.assertTrue(direct_dir.exists())
 
     def test_organizing_stage_uses_direct_strm_library_as_cms_category_signal(self):
@@ -1241,10 +1417,67 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
 
             self.assertEqual(organizing.outcome, StageOutcome.COMPLETE)
             self.assertEqual(organizing.metadata["organized_folder"]["category"], "亚洲电影")
-            self.assertFalse((direct_dir / "movie.strm").exists())
+            self.assertTrue((direct_dir / "movie.strm").exists())
             self.assertEqual(recognizing.outcome, StageOutcome.COMPLETE)
             self.assertEqual(recognizing.metadata["category"], "亚洲电影")
             self.assertEqual(self.telegram.messages, [])
+
+    def test_organizing_stage_uses_recent_direct_strm_to_recover_wrong_tmdb_search(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bangumi_root = Path(tmp) / "library" / "bangumi"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"番剧": bangumi_root}),
+            )
+            row = self._row()
+            row = self.submissions.update_status(
+                int(row["id"]),
+                "received",
+                title="JoJo's.Bizarre.Adventure.S06.1080p.NF.WEB-DL.AAC2.0.H.264-HiveWeb",
+            ) or row
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {
+                    "ok": True,
+                    "title": "JOJO的奇妙冒险OVA",
+                    "type": "tv",
+                    "category": "番剧",
+                    "tmdb_id": "60862",
+                    "category_status": "tmdb_search_resolved",
+                },
+                "tmdb_search_resolved",
+            ) or row
+            row = self.submissions.update_category(int(row["id"]), "番剧", "selected") or row
+            folder_name = "J-JOJO的奇妙冒险-2012-[tmdb=45790]"
+            direct_dir = bangumi_root / folder_name
+            self._write_strm(direct_dir / "Season 06", content="http://cms/d/direct-link/jojo.mkv")
+            calls = []
+
+            def find_organized_folder(recognition, title, excluded_parent_ids=None, min_update_time=0, **kwargs):
+                calls.append((dict(recognition), title))
+                if recognition.get("tmdb_id") == "45790":
+                    return {
+                        "file_id": "folder-id",
+                        "file_name": folder_name,
+                        "parent_id": "bangumi-parent",
+                        "category": "番剧",
+                    }
+                return None
+
+            self.p115.find_organized_folder = find_organized_folder
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            recognition = bridge.parse_recognition_json(stored)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(calls[-1][0]["tmdb_id"], "45790")
+            self.assertEqual(result.metadata["organized_folder"]["file_id"], "folder-id")
+            self.assertEqual(result.metadata["direct_strm_removed"], 0)
+            self.assertTrue((direct_dir / "Season 06" / "movie.strm").exists())
+            self.assertEqual(recognition["tmdb_id"], "45790")
+            self.assertEqual(stored["own_share_file_name"], folder_name)
 
     def test_moved_stage_exposes_strm_stability_wait_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1386,6 +1619,122 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["category"], "华语电影")
             self.assertFalse(source.exists())
             self.assertEqual(self.telegram.messages, [])
+
+    def test_moved_stage_requires_expected_direct_file_share_episode_before_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tv_root = Path(tmp) / "library" / "tv"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"外国电视": tv_root}),
+            )
+            row = self._self_share_row(
+                title="Q-权力的游戏前传：龙族-2022-[tmdb=94997]",
+                category="外国电视",
+                tmdb_id="94997",
+            )
+            row = self.submissions.replace_self_share_source_file_id(int(row["id"]), "episode-id") or row
+            dest = tv_root / row["own_share_file_name"]
+            episode_dir = dest / "Season 03"
+            self._write_strm(
+                episode_dir,
+                name="权力的游戏前传：龙族 (2022) - S03E02.strm",
+                content="https://115.com/s/owncode_ownpwd_/S03E02.mkv",
+            )
+            self._write_strm(
+                episode_dir,
+                name="权力的游戏前传：龙族 (2022) - S03E03.strm",
+                content="https://115.com/d/direct/S03E03.mkv",
+            )
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(self.config.strm_root / row["own_share_file_name"]),
+                dest_path=str(dest),
+                category_final="外国电视",
+            ) or row
+            relative_path = "Season 03/权力的游戏前传：龙族 (2022) - S03E03.strm"
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.MOVED,
+                {
+                    "submission_id": row["id"],
+                    "direct_file_share": True,
+                    "direct_file_share_file_id": "episode-id",
+                    "direct_file_share_relative_path": relative_path,
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            updated = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIn("重新生成", result.message)
+            self.assertTrue((episode_dir / "权力的游戏前传：龙族 (2022) - S03E03.strm").exists())
+            self.assertEqual(self.cms.share_sync_calls, [("owncode", "ownpwd", "0", "/media/share")])
+            self.assertEqual(updated["workflow_phase"], "restore_share_sync_submitted")
+
+    def test_moved_stage_restores_expected_direct_file_share_episode_before_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tv_root = Path(tmp) / "library" / "tv"
+            emby = FakeEmby()
+            workflow = self._workflow(
+                tmp,
+                emby=emby,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"外国电视": tv_root}),
+            )
+            row = self._self_share_row(
+                title="Q-权力的游戏前传：龙族-2022-[tmdb=94997]",
+                category="外国电视",
+                tmdb_id="94997",
+            )
+            row = self.submissions.replace_self_share_source_file_id(int(row["id"]), "episode-id") or row
+            dest = tv_root / row["own_share_file_name"]
+            episode_dir = dest / "Season 03"
+            self._write_strm(
+                episode_dir,
+                name="权力的游戏前传：龙族 (2022) - S03E03.strm",
+                content="https://115.com/d/direct/S03E03.mkv",
+            )
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(self.config.strm_root / row["own_share_file_name"]),
+                dest_path=str(dest),
+                category_final="外国电视",
+            ) or row
+            relative_path = "Season 03/权力的游戏前传：龙族 (2022) - S03E03.strm"
+            generated = self.config.strm_root / "权力的游戏前传：龙族 (2022) - S03E03.strm"
+            self._write_strm(
+                generated.parent,
+                generated.name,
+                content="https://115.com/s/owncode_ownpwd_/S03E03.mkv",
+            )
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.MOVED,
+                {
+                    "submission_id": row["id"],
+                    "direct_file_share": True,
+                    "direct_file_share_file_id": "episode-id",
+                    "direct_file_share_relative_path": relative_path,
+                    "emby_refresh_requested": True,
+                },
+                row["id"],
+            )
+
+            restored = workflow.run_stage(task)
+            completed = workflow.run_stage(task)
+
+            target = episode_dir / "权力的游戏前传：龙族 (2022) - S03E03.strm"
+            self.assertEqual(restored.outcome, StageOutcome.DEFER)
+            self.assertEqual(completed.outcome, StageOutcome.COMPLETE)
+            self.assertIn("/s/owncode_ownpwd_", target.read_text(encoding="utf-8"))
+            self.assertFalse(generated.exists())
+            self.assertEqual(self.cms.share_sync_calls, [])
+            self.assertEqual(emby.refreshed_paths, [str(bridge.safe_resolve(dest))])
 
     def test_moved_stage_requests_emby_refresh_for_destination_once(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -66,6 +66,7 @@ class Config:
     status_repair_limit: int = 50
     cms_parent_cid_category_map: str = ""
     self_share_organized_scan_parent_ids: str = ""
+    cms_state_db_path: str = "/cms/cms-online.db"
     task_db_path: str = "/data/tasks.db"
     task_engine_enabled: bool = False
     web_enabled: bool = False
@@ -129,6 +130,7 @@ class Config:
             status_repair_limit=int(os.environ.get("STATUS_REPAIR_LIMIT", "50")),
             cms_parent_cid_category_map=os.environ.get("CMS_PARENT_CID_CATEGORY_MAP", ""),
             self_share_organized_scan_parent_ids=os.environ.get("SELF_SHARE_ORGANIZED_SCAN_PARENT_IDS", ""),
+            cms_state_db_path=os.environ.get("CMS_STATE_DB_PATH", "/cms/cms-online.db"),
             task_db_path=os.environ.get("TASK_DB_PATH", "/data/tasks.db"),
             task_engine_enabled=parse_bool_env(os.environ.get("TASK_ENGINE_ENABLED"), False),
             web_enabled=parse_bool_env(os.environ.get("WEB_ENABLED"), False),
@@ -183,6 +185,7 @@ class SelfShareConfig:
     auto_organize_retry_seconds: int = 90
     parent_cid_category_map: dict[str, str] | None = None
     organized_scan_parent_ids: set[str] | None = None
+    cms_state_db_path: Path = Path("/cms/cms-online.db")
 
     @classmethod
     def from_config(cls, config: Config, cms: Any | None = None) -> "SelfShareConfig":
@@ -209,6 +212,7 @@ class SelfShareConfig:
             auto_organize_retry_seconds=max(0, int(config.self_share_auto_organize_retry_seconds)),
             parent_cid_category_map=parse_parent_cid_category_map(config.cms_parent_cid_category_map),
             organized_scan_parent_ids=organized_scan_parent_ids,
+            cms_state_db_path=Path(config.cms_state_db_path).expanduser(),
         )
 
 

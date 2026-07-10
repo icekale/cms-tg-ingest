@@ -1509,6 +1509,161 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertEqual(cms.sync_payloads, [])
             self.assertEqual(updated["move_status"], "moved")
 
+    def test_restore_single_episode_preserves_unrelated_direct_episode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            tv_root = root / "TV"
+            folder_name = "Q-Show-2022-[tmdb=94997]"
+            source = share_root / folder_name / "Season 03"
+            dest = tv_root / folder_name / "Season 03"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            (source / "Show - S03E03.strm").write_text(
+                "http://cms/s/owncode_ownpwd_S03E03.mkv",
+                encoding="utf-8",
+            )
+            preserved = dest / "Show - S03E02.strm"
+            preserved.write_text("http://cms/d/direct/S03E02.mkv", encoding="utf-8")
+            store = bridge.SubmissionStore(root / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("dummyshare007", "pass007"),
+                "https://115cdn.com/s/dummyshare007?password=pass007",
+                "submitted",
+                title="Show S03",
+            )
+            store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_name=folder_name,
+                own_share_code="owncode",
+                own_share_receive_code="ownpwd",
+                share_sync_status="restore_submitted",
+            )
+            store.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": folder_name, "type": "tv", "category": "外国电视", "tmdb_id": "94997"},
+                "self_share_resolved",
+            )
+            store.update_category(int(row["id"]), "外国电视", "selected")
+            store.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(share_root / folder_name),
+                dest_path=str(tv_root / folder_name),
+                category_final="外国电视",
+            )
+
+            status, _metadata = bridge.restore_missing_self_share_library_folder(
+                store,
+                cms=None,
+                row=store.find_by_id(int(row["id"])),
+                self_share_config=bridge.SelfShareConfig(enabled=True, strm_root=share_root),
+                move_config=bridge.MoveConfig(source_roots=[share_root], library_roots={"外国电视": tv_root}, stable_seconds=0),
+                required_relative_path="Season 03/Show - S03E03.strm",
+            )
+
+            self.assertEqual(status, "restored")
+            self.assertTrue(preserved.exists())
+            self.assertEqual(preserved.read_text(encoding="utf-8"), "http://cms/d/direct/S03E02.mkv")
+            self.assertIn("/s/owncode_ownpwd_", (dest / "Show - S03E03.strm").read_text(encoding="utf-8"))
+
+    def test_restore_missing_self_share_library_folder_removes_duplicate_direct_tmdb_strm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            bangumi_root = root / "Dongman"
+            source = share_root / "J-JOJO的奇妙冒险-2012-[tmdb=45790]"
+            dest = bangumi_root / "J-JOJO的奇妙冒险-2012-[tmdb=45790]"
+            duplicate = bangumi_root / "J-JOJO的奇妙冒险(2012)[tmdbid=45790]"
+            source.mkdir(parents=True)
+            duplicate.mkdir(parents=True)
+            (source / "jojo.strm").write_text("http://cms/s/swslig43wul_1212_1.mkv", encoding="utf-8")
+            (duplicate / "jojo.strm").write_text("http://cms/d/direct.mkv", encoding="utf-8")
+            store = bridge.SubmissionStore(root / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("dummyshare005", "pass005"),
+                "https://115cdn.com/s/dummyshare005?password=pass005",
+                "submitted",
+                title="JoJo's.Bizarre.Adventure.S06",
+            )
+            store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_name=source.name,
+                own_share_code="swslig43wul",
+                own_share_receive_code="1212",
+                share_sync_status="restore_submitted",
+            )
+            store.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": source.name, "type": "tv", "category": "番剧", "tmdb_id": "45790"},
+                "self_share_resolved",
+            )
+            store.update_category(int(row["id"]), "番剧", "selected")
+            store.update_move(int(row["id"]), "moved", source_path=str(source), dest_path=str(dest), category_final="番剧")
+            store.update_cleanup(int(row["id"]), "deleted", file_id="3466183474711365370")
+
+            restored = bridge.restore_missing_self_share_library_folders(
+                store,
+                cms=None,
+                self_share_config=bridge.SelfShareConfig(enabled=True, strm_root=share_root),
+                move_config=bridge.MoveConfig(source_roots=[share_root], library_roots={"番剧": bangumi_root}, stable_seconds=0),
+                limit=10,
+            )
+
+            self.assertEqual(restored, 1)
+            self.assertFalse((duplicate / "jojo.strm").exists())
+            self.assertEqual((dest / "jojo.strm").read_text(encoding="utf-8"), "http://cms/s/swslig43wul_1212_1.mkv")
+
+    def test_existing_self_share_library_folder_removes_duplicate_direct_tmdb_strm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            bangumi_root = root / "Dongman"
+            dest = bangumi_root / "J-JOJO的奇妙冒险-2012-[tmdb=45790]"
+            duplicate = bangumi_root / "J-JOJO的奇妙冒险(2012)[tmdbid=45790]"
+            dest.mkdir(parents=True)
+            duplicate.mkdir(parents=True)
+            (dest / "jojo.strm").write_text("http://cms/s/swslig43wul_1212_1.mkv", encoding="utf-8")
+            (duplicate / "jojo.strm").write_text("http://cms/d/direct.mkv", encoding="utf-8")
+            store = bridge.SubmissionStore(root / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("dummyshare006", "pass006"),
+                "https://115cdn.com/s/dummyshare006?password=pass006",
+                "submitted",
+                title="JoJo's.Bizarre.Adventure.S06",
+            )
+            store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_name=dest.name,
+                own_share_code="swslig43wul",
+                own_share_receive_code="1212",
+                share_sync_status="submitted",
+            )
+            store.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": dest.name, "type": "tv", "category": "番剧", "tmdb_id": "45790"},
+                "self_share_resolved",
+            )
+            store.update_category(int(row["id"]), "番剧", "selected")
+            store.update_move(int(row["id"]), "moved", source_path=str(share_root / dest.name), dest_path=str(dest), category_final="番剧")
+            store.update_emby(int(row["id"]), "confirmed", path=str(dest / "jojo.strm"), parent="Strm番剧")
+            store.update_cleanup(int(row["id"]), "deleted", file_id="3466183474711365370")
+
+            restored = bridge.restore_missing_self_share_library_folders(
+                store,
+                cms=None,
+                self_share_config=bridge.SelfShareConfig(enabled=True, strm_root=share_root),
+                move_config=bridge.MoveConfig(source_roots=[share_root], library_roots={"番剧": bangumi_root}, stable_seconds=0),
+                limit=10,
+            )
+
+            self.assertEqual(restored, 0)
+            self.assertFalse((duplicate / "jojo.strm").exists())
+            self.assertEqual((dest / "jojo.strm").read_text(encoding="utf-8"), "http://cms/s/swslig43wul_1212_1.mkv")
+
 
 if __name__ == "__main__":
     unittest.main()

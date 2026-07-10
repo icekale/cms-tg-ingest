@@ -81,7 +81,25 @@ def _stage_metric_summary(values: object, *, suffix: str = "") -> str:
     return "，".join(parts)
 
 
+def is_unscheduled_active_task(task: TaskSnapshot) -> bool:
+    return (
+        task.status in (TaskStatus.RUNNING, TaskStatus.PENDING)
+        and float(task.next_run_at or 0) < 0
+        and not str(task.claimed_by or "").strip()
+    )
+
+
+def is_dispatchable_active_task(task: TaskSnapshot) -> bool:
+    if task.status not in (TaskStatus.RUNNING, TaskStatus.PENDING):
+        return False
+    return not is_unscheduled_active_task(task)
+
+
 def describe_task_wait(task: TaskSnapshot, *, now: float) -> str:
+    if is_unscheduled_active_task(task):
+        wait_from = task.updated_at or task.created_at or now
+        return f"不在自动调度队列，需要手动重试或从头重跑，已等待 {_duration(now - wait_from)}"
+
     reason = str(task.metadata.get("_defer_message") or task.error_summary or "等待执行")
     wait_from = task.updated_at or task.created_at or now
     next_run_at = task.next_run_at or now
@@ -108,6 +126,9 @@ def describe_task_wait(task: TaskSnapshot, *, now: float) -> str:
 
 def explain_task_slowness(task: TaskSnapshot, *, now: float) -> str:
     metadata = task.metadata or {}
+    if is_unscheduled_active_task(task):
+        return "不在自动调度队列，需要手动重试或从头重跑"
+
     lock_reason = str(metadata.get("_lock_reason") or "").strip()
     if metadata.get("_lock_waiting"):
         holder = str(metadata.get("_lock_owner_task_id") or "").strip()
@@ -179,6 +200,13 @@ def classify_stuck_task(
     stage_started_at = task.updated_at if task.updated_at is not None else (task.created_at or now)
     if now - stage_started_at <= threshold_seconds:
         return StuckTaskIssue()
+
+    if is_unscheduled_active_task(task):
+        return StuckTaskIssue(
+            code="stuck_stage",
+            stage=task.current_stage,
+            message=f"不在自动调度队列，需要手动重试或从头重跑，已等待 {_duration(now - stage_started_at)}",
+        )
 
     reason = str(task.metadata.get("_defer_message") or task.error_summary or task.current_stage.value)
     return StuckTaskIssue(

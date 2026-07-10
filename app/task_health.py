@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass, replace
 
 from .models import TaskSnapshot, TaskStatus
-from .task_diagnostics import _duration, describe_task_wait
+from .task_diagnostics import _duration, describe_task_wait, is_dispatchable_active_task, is_unscheduled_active_task
 from .task_engine import stage_display_name
 from .task_store import TaskStore
 
@@ -52,7 +52,7 @@ def build_task_health(store: TaskStore | None, *, enabled: bool, limit: int = 10
         )
     queue = store.queue_summary(limit=limit)
     tasks = store.list_recent_tasks(limit=limit)
-    problems = [task for task in tasks if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION}]
+    problems = [task for task in tasks if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or is_unscheduled_active_task(task)]
     now = time.time()
     wait_tasks = [task for task in tasks if task.status in {TaskStatus.RUNNING, TaskStatus.PENDING}]
     cooldown_until = 0.0
@@ -70,10 +70,10 @@ def build_task_health(store: TaskStore | None, *, enabled: bool, limit: int = 10
     return TaskHealthSummary(
         enabled=enabled,
         recent_count=queue.recent_count,
-        pending_count=queue.pending_count,
-        running_count=queue.running_count,
+        pending_count=sum(1 for task in tasks if task.status == TaskStatus.PENDING and is_dispatchable_active_task(task)),
+        running_count=sum(1 for task in tasks if task.status == TaskStatus.RUNNING and is_dispatchable_active_task(task)),
         needs_action_count=queue.needs_action_count,
-        problem_count=queue.failed_count + queue.needs_action_count,
+        problem_count=len(problems),
         lock_wait_count=queue.lock_wait_count,
         latest_problem=problems[0] if problems else None,
         latest_lock_wait=queue.latest_lock_wait,

@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -64,6 +65,36 @@ class BridgeV02IntegrationTests(unittest.TestCase):
 
             self.assertEqual(task.share_code, "abc")
             self.assertTrue(Path(cfg.task_db_path).exists())
+
+    def test_completion_drift_rechecks_direct_file_share_target_not_any_strm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            dest = Path(tmp) / "library" / "show"
+            target = dest / "Season 03" / "Show - S03E03.strm"
+            target.parent.mkdir(parents=True)
+            target.write_text("https://115.com/d/direct/S03E03.mkv", encoding="utf-8")
+            task = store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            task = store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "115 转存源已删除，自有分享保留",
+                submission_id=42,
+                metadata_patch={
+                    "dest_path": str(dest),
+                    "direct_file_share": True,
+                    "direct_file_share_relative_path": "Season 03/Show - S03E03.strm",
+                },
+            )
+            row = {
+                "workflow_mode": "self_share_sync",
+                "own_share_code": "owncode",
+                "own_share_receive_code": "ownpwd",
+            }
+
+            stage = bridge.completion_drift_retry_stage(task, row)
+
+            self.assertEqual(stage, TaskStage.EMBY_CONFIRMED)
 
     def test_maybe_start_web_server_only_when_enabled(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):
@@ -954,6 +985,105 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertIn({"text": "查 Emby #1", "callback_data": "task_emby:1"}, buttons)
             self.assertIn({"text": "恢复 STRM #1", "callback_data": "task_restore:1"}, buttons)
             self.assertIn({"text": "从头重跑 #1", "callback_data": "task_reprocess:1"}, buttons)
+
+    def test_completed_tv_task_exposes_update_button_and_resets_for_new_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            row = submission_store.upsert_submission(
+                bridge.ShareKey("abc", "1234"),
+                "https://115cdn.com/s/abc?password=1234",
+                "completed",
+                title="追更剧集",
+            )
+            recognition = {"title": "追更剧集", "tmdb_id": "1416", "category": "外国电视", "type": "tv"}
+            row = submission_store.update_recognition(int(row["id"]), recognition, "selected")
+            row = submission_store.update_category(int(row["id"]), "外国电视", "selected")
+            row = submission_store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="share_sync_submitted",
+                own_share_file_id="old-folder",
+                own_share_file_name="J-追更剧集-2026-[tmdb=1416]",
+                own_share_code="old-share",
+                own_share_receive_code="1212",
+                own_share_url="https://115cdn.com/s/old-share?password=1212",
+                share_sync_status="submitted",
+            )
+            row = submission_store.update_move(
+                int(row["id"]),
+                "moved",
+                source_path="/strm/share/J-追更剧集",
+                dest_path="/strm/TV/J-追更剧集",
+                category_final="外国电视",
+            )
+            row = submission_store.update_emby(int(row["id"]), "confirmed", item_id="emby-id", title="追更剧集", path="/strm/TV/J-追更剧集", parent="剧集")
+            row = submission_store.update_cleanup(int(row["id"]), "deleted", file_id="old-folder")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
+            task_store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "清理完成",
+                title="追更剧集",
+                tmdb_id="1416",
+                category="外国电视",
+                metadata_patch={
+                    "submission_id": int(row["id"]),
+                    "own_share_code": "old-share",
+                    "dest_path": "/strm/TV/J-追更剧集",
+                },
+            )
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("/status"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                task_engine_enabled=True,
+            )
+
+            buttons = [button for button_row in telegram.messages[-1][2]["inline_keyboard"] for button in button_row]
+            self.assertIn({"text": f"追更 #{task.id}", "callback_data": f"task_update:{task.id}"}, buttons)
+
+            bridge.handle_update(
+                {
+                    "callback_query": {
+                        "id": "task-update-1",
+                        "from": {"id": 464100862},
+                        "message": {"chat": {"id": 464100862}},
+                        "data": f"task_update:{task.id}",
+                    }
+                },
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                task_engine_enabled=True,
+            )
+
+            updated_task = task_store.find_task(task.id)
+            updated_row = submission_store.find_by_id(int(row["id"]))
+            self.assertEqual(updated_task.status, TaskStatus.PENDING)
+            self.assertEqual(updated_task.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(updated_task.metadata["update_requested_run"], 1)
+            self.assertEqual(updated_task.metadata["update_received_run"], 0)
+            self.assertNotIn("own_share_code", updated_task.metadata)
+            self.assertEqual(updated_row["workflow_phase"], "update_requested")
+            self.assertEqual(updated_row["category_choice"], "外国电视")
+            self.assertEqual(updated_row["recognition_json"], json.dumps(recognition, ensure_ascii=False, sort_keys=True))
+            self.assertIsNone(updated_row["own_share_code"])
+            self.assertIsNone(updated_row["move_status"])
+            self.assertIsNone(updated_row["emby_status"])
+            self.assertIsNone(updated_row["cleanup_status"])
+            self.assertEqual(telegram.answers[-1][1], "已开始追更")
+            self.assertIn("已开始追更", telegram.messages[-1][1])
 
     def test_task_retry_callback_requeues_failed_task(self):
         with tempfile.TemporaryDirectory() as tmp:
