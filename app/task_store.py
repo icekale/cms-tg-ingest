@@ -187,6 +187,7 @@ class TaskStore:
                 SELECT 1 FROM tasks
                 WHERE status IN (?, ?)
                   AND current_stage NOT IN (?, ?)
+                  AND next_run_at >= 0
                 LIMIT 1
                 """,
                 (

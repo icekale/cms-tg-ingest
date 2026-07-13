@@ -4,6 +4,7 @@ from pathlib import Path
 
 import bridge
 from app.clients.p115 import P115RiskControlError, P115ShareUnavailableError
+from app.models import TaskStage
 from app.self_share_health import probe_invalid_self_shares, probe_invalid_self_shares_if_idle
 from app.task_store import TaskStore
 
@@ -153,7 +154,8 @@ class InvalidShareCleanupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store, row, destination, move_config = self._row_with_share_strm(tmp)
             task_store = TaskStore(Path(tmp) / "tasks.db")
-            task_store.upsert_task("another-share", "", "https://115cdn.com/s/another-share")
+            active = task_store.upsert_task("another-share", "", "https://115cdn.com/s/another-share")
+            task_store.enqueue_task(active.id, TaskStage.RECEIVED)
             p115 = InvalidShareP115()
 
             summary = probe_invalid_self_shares_if_idle(
@@ -171,3 +173,27 @@ class InvalidShareCleanupTests(unittest.TestCase):
             self.assertEqual(p115.calls, 0)
             self.assertTrue(destination.exists())
             self.assertEqual(store.find_by_id(int(row["id"]))["move_status"], "moved")
+
+    def test_probes_when_only_unscheduled_taskstore_records_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, row, destination, move_config = self._row_with_share_strm(tmp)
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task_store.upsert_task("stale-share", "", "https://115cdn.com/s/stale-share")
+            p115 = InvalidShareP115()
+
+            summary = probe_invalid_self_shares_if_idle(
+                store,
+                task_store,
+                p115,
+                FakeEmby(),
+                FakeTelegram(),
+                "chat-id",
+                move_config,
+                limit=1,
+            )
+
+            self.assertEqual(summary.checked_count, 1)
+            self.assertEqual(summary.cleaned_count, 1)
+            self.assertEqual(p115.calls, 1)
+            self.assertFalse(destination.exists())
+            self.assertEqual(store.find_by_id(int(row["id"]))["move_status"], "invalid_share_cleaned")
