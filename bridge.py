@@ -25,6 +25,7 @@ from app.clients.http import FormHttp, HttpJson, load_cookie_value
 from app.clients.p115 import (
     CMS_PARENT_CID_CATEGORY_MAP,
     P115RiskControlError,
+    P115ShareUnavailableError,
     P115WebClient,
     category_for_115_parent_id,
     infer_category_from_115_item,
@@ -124,6 +125,7 @@ from app.quality import format_task_quality_report, scan_task_quality
 from app.task_bridge import ensure_task_for_link, record_failure, record_submission_event, sync_task_from_submission
 from app.task_engine import decide_retry, stage_display_name
 from app.task_health import format_taskstore_health
+from app.self_share_health import start_invalid_self_share_probe_loop
 from app.telegram_ui import (
     clear_history_keyboard,
     format_counts,
@@ -183,8 +185,8 @@ MENU_BUTTONS = {
     "❓ 帮助": "/help",
 }
 TERMINAL_STATUS_KEYWORDS = ("done", "finish", "success", "complete", "完成", "成功", "failed", "error", "失败", "timeout", "超时")
-TERMINAL_EMBY_STATUSES = {"confirmed", "timeout", "disabled", "failed", "error"}
-TERMINAL_MOVE_STATUSES = {"moved", "skipped", "failed", "error", "conflict"}
+TERMINAL_EMBY_STATUSES = {"confirmed", "timeout", "disabled", "failed", "error", "invalid_share_cleaned"}
+TERMINAL_MOVE_STATUSES = {"moved", "skipped", "failed", "error", "conflict", "invalid_share_cleaned"}
 OPENAI_CATEGORY_LABELS = ["华语电影", "欧美电影", "亚洲电影", "动漫电影", "国产电视", "外国电视", "番剧", "纪录片"]
 
 
@@ -325,6 +327,12 @@ class SubmissionStore:
             )
             conn.execute(
                 """
+                CREATE INDEX IF NOT EXISTS idx_submissions_self_share_probe
+                ON submissions(workflow_mode, move_status, emby_status, share_probe_at)
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS parent_category_memory (
                     parent_id TEXT PRIMARY KEY,
                     category TEXT NOT NULL,
@@ -365,6 +373,9 @@ class SubmissionStore:
             "cleanup_file_id": "TEXT",
             "cleanup_error": "TEXT",
             "cleanup_finished_at": "REAL",
+            "share_probe_at": "REAL",
+            "share_invalid_at": "REAL",
+            "share_invalid_reason": "TEXT",
         }
         for name, definition in columns.items():
             if name not in existing:
@@ -751,6 +762,55 @@ class SubmissionStore:
                 (max(1, int(limit)),),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def self_share_probe_candidates(self, limit: int = 3) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM submissions
+                WHERE workflow_mode = 'self_share_sync'
+                  AND lower(COALESCE(move_status, '')) = 'moved'
+                  AND lower(COALESCE(emby_status, '')) = 'confirmed'
+                  AND COALESCE(dest_path, '') <> ''
+                  AND COALESCE(own_share_code, '') <> ''
+                ORDER BY COALESCE(share_probe_at, 0) ASC, id ASC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_share_probe(self, row_id: int) -> dict[str, Any] | None:
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """
+                UPDATE submissions
+                SET share_probe_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (time.time(), time.time(), row_id),
+            )
+            row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
+        return self._row_to_dict(row)
+
+    def mark_invalid_share_cleaned(self, row_id: int, reason: str) -> dict[str, Any] | None:
+        now = time.time()
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """
+                UPDATE submissions
+                SET move_status = 'invalid_share_cleaned',
+                    move_error = ?,
+                    emby_status = 'invalid_share_cleaned',
+                    share_invalid_at = ?,
+                    share_invalid_reason = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (reason, now, reason, now, row_id),
+            )
+            row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
+        return self._row_to_dict(row)
 
     def stale_for_repair(self, limit: int = 50) -> list[dict[str, Any]]:
         repair_emby_statuses = ("timeout", "failed", "error")
@@ -2598,14 +2658,17 @@ def run_forever(config: Config) -> None:
         )
         task_runner.start()
         LOG.info("Task engine worker started interval_seconds=%s", config.task_worker_interval_seconds)
-        if config.status_repair_enabled:
-            start_self_share_maintenance_loop(
+        if config.self_share_invalid_cleanup_enabled:
+            start_invalid_self_share_probe_loop(
                 store,
-                cms,
-                self_share_config,
+                task_store,
+                p115,
+                emby,
+                telegram,
+                config.tg_allowed_chat_id,
                 move_config,
-                interval_seconds=max(1, int(self_share_config.auto_organize_retry_seconds or config.task_worker_interval_seconds)),
-                limit=max(1, int(config.status_repair_limit)),
+                interval_seconds=config.self_share_invalid_check_interval_seconds,
+                limit=config.self_share_invalid_check_limit,
             )
     offset = None
     LOG.info("cms-tg-ingest started db_path=%s", config.db_path)

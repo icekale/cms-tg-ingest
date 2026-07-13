@@ -37,7 +37,7 @@ from app.media.strm import (
     validate_self_share_strm_destination,
     validate_self_share_strm_source,
 )
-from app.models import TaskStage
+from app.models import TaskStage, TaskStatus
 from app.task_runner import StageResult
 
 LOG = logging.getLogger("cms-tg-ingest")
@@ -760,6 +760,16 @@ class BridgeSelfShareTaskWorkflow:
         if not own_code:
             return StageResult.failed("缺少自有分享码", error_type="own_share_missing")
         if row.get("share_sync_status") != "submitted":
+            waiting_task = self._pending_cms_share_sync_task(task)
+            if waiting_task:
+                return StageResult.defer(
+                    "等待上一条 CMS 分享同步完成",
+                    5,
+                    {
+                        "submission_id": int(row["id"]),
+                        "share_sync_wait_task_id": waiting_task.id,
+                    },
+                )
             self.cms.add_share115_sync_task(
                 own_code,
                 own_pwd,
@@ -773,8 +783,25 @@ class BridgeSelfShareTaskWorkflow:
             ) or row
         return StageResult.complete(
             "已提交 CMS 分享同步",
-            {"submission_id": int(row["id"]), "share_sync_status": row.get("share_sync_status") or "submitted"},
+            {
+                "submission_id": int(row["id"]),
+                "share_sync_status": row.get("share_sync_status") or "submitted",
+                "share_sync_wait_task_id": "",
+            },
         )
+
+    def _pending_cms_share_sync_task(self, task):
+        for candidate in self.task_store.list_recent_tasks(limit=100):
+            if candidate.id == task.id:
+                continue
+            if candidate.current_stage != TaskStage.STRM_READY:
+                continue
+            if candidate.status not in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+                continue
+            if candidate.next_run_at < 0:
+                continue
+            return candidate
+        return None
 
     def _stage_strm_ready(self, task):
         row = self._submission_row(task)

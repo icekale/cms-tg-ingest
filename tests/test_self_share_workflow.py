@@ -13,6 +13,18 @@ spec.loader.exec_module(bridge)
 
 
 class P115WebClientTests(unittest.TestCase):
+    def test_share_snap_raises_unavailable_for_permanently_invalid_share(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.url = url
+                self.params = params
+                return {"state": False, "error": "分享已失效"}
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        with self.assertRaises(bridge.P115ShareUnavailableError):
+            client.share_snap("invalid-share", "1212", limit=1)
+
     def test_requests_are_rate_limited_between_115_api_calls(self):
         class FakeHttp:
             def request(self, url, method="GET", data=None, headers=None, params=None):

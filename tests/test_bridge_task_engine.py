@@ -1023,6 +1023,39 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.cms.share_sync_calls, [("owncode", "ownpwd", "0", "/media/share")])
             self.assertEqual(self.cms.plain_share_down_calls, [])
 
+    def test_share_sync_stage_waits_for_another_task_to_finish_cms_share_sync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            waiting = self.tasks.upsert_task("previous", "1111", "https://115cdn.com/s/previous?password=1111")
+            self.tasks.record_event(
+                waiting.id,
+                TaskStage.STRM_READY,
+                TaskStatus.RUNNING,
+                "等待自有分享 STRM 源目录生成",
+                next_run_at=10.0,
+            )
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_code="owncode",
+                own_share_receive_code="ownpwd",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.SHARE_SYNC_SUBMITTED,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIn("等待上一条 CMS 分享同步完成", result.message)
+            self.assertEqual(result.metadata["share_sync_wait_task_id"], waiting.id)
+            self.assertEqual(self.cms.share_sync_calls, [])
+
     def test_own_share_stage_rejects_unvalidated_received_file_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp, receive_cid="pending-cid")

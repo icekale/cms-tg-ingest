@@ -61,6 +61,9 @@ class Config:
     self_share_cleanup_after_emby: bool = False
     self_share_source_cleanup_parent_ids: str = ""
     self_share_auto_organize_retry_seconds: int = 15
+    self_share_invalid_cleanup_enabled: bool = False
+    self_share_invalid_check_interval_seconds: int = 21600
+    self_share_invalid_check_limit: int = 3
     status_repair_enabled: bool = True
     status_repair_interval_seconds: int = 300
     status_repair_limit: int = 50
@@ -125,6 +128,9 @@ class Config:
             self_share_cleanup_after_emby=parse_bool_env(os.environ.get("SELF_SHARE_CLEANUP_AFTER_EMBY"), False),
             self_share_source_cleanup_parent_ids=os.environ.get("SELF_SHARE_SOURCE_CLEANUP_PARENT_IDS", ""),
             self_share_auto_organize_retry_seconds=int(os.environ.get("SELF_SHARE_AUTO_ORGANIZE_RETRY_SECONDS", "15")),
+            self_share_invalid_cleanup_enabled=parse_bool_env(os.environ.get("SELF_SHARE_INVALID_CLEANUP_ENABLED"), False),
+            self_share_invalid_check_interval_seconds=max(60, int(os.environ.get("SELF_SHARE_INVALID_CHECK_INTERVAL_SECONDS", "21600"))),
+            self_share_invalid_check_limit=max(1, int(os.environ.get("SELF_SHARE_INVALID_CHECK_LIMIT", "3"))),
             status_repair_enabled=parse_bool_env(os.environ.get("STATUS_REPAIR_ENABLED"), True),
             status_repair_interval_seconds=int(os.environ.get("STATUS_REPAIR_INTERVAL_SECONDS", "300")),
             status_repair_limit=int(os.environ.get("STATUS_REPAIR_LIMIT", "50")),

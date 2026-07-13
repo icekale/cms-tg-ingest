@@ -44,12 +44,30 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             self.assertEqual(cfg.p115_risk_cooldown_seconds, 1200)
             self.assertEqual(cfg.tmdb_api_key, "tmdb-test-key")
             self.assertEqual(cfg.tmdb_bearer_token, "tmdb-test-token")
+            self.assertFalse(cfg.self_share_invalid_cleanup_enabled)
+            self.assertEqual(cfg.self_share_invalid_check_interval_seconds, 21600)
+            self.assertEqual(cfg.self_share_invalid_check_limit, 3)
 
     def test_config_reads_task_engine_enabled(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):
             cfg = bridge.Config.from_env()
 
             self.assertTrue(cfg.task_engine_enabled)
+
+    def test_config_reads_invalid_self_share_cleanup_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            env.update({
+                "SELF_SHARE_INVALID_CLEANUP_ENABLED": "true",
+                "SELF_SHARE_INVALID_CHECK_INTERVAL_SECONDS": "21600",
+                "SELF_SHARE_INVALID_CHECK_LIMIT": "3",
+            })
+            with patch.dict(os.environ, env, clear=True):
+                cfg = bridge.Config.from_env()
+
+            self.assertTrue(cfg.self_share_invalid_cleanup_enabled)
+            self.assertEqual(cfg.self_share_invalid_check_interval_seconds, 21600)
+            self.assertEqual(cfg.self_share_invalid_check_limit, 3)
 
     def test_self_share_retry_default_is_fast_for_task_engine(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):
@@ -340,8 +358,64 @@ class BridgeV02IntegrationTests(unittest.TestCase):
 
                 self.assertEqual(task_runner_started, [True])
                 self.assertEqual(repair_calls, [])
-                self.assertEqual(len(maintenance_calls), 1)
-                self.assertEqual(maintenance_calls[0][1]["interval_seconds"], 15)
+                self.assertEqual(maintenance_calls, [])
+
+    def test_run_forever_starts_invalid_self_share_probe_only_when_explicitly_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            env.update({
+                "WORKFLOW_MODE": "self_share_sync",
+                "TASK_ENGINE_ENABLED": "true",
+                "SELF_SHARE_RECEIVE_CID": "pending-cid",
+                "SELF_SHARE_INVALID_CLEANUP_ENABLED": "true",
+                "SELF_SHARE_INVALID_CHECK_INTERVAL_SECONDS": "21600",
+                "SELF_SHARE_INVALID_CHECK_LIMIT": "3",
+            })
+            with patch.dict(os.environ, env, clear=True):
+                cfg = bridge.Config.from_env()
+                probe_calls = []
+                p115 = object()
+
+                class OneUpdateTelegram:
+                    def __init__(self, token, timeout=60):
+                        self.calls = 0
+
+                    def get_updates(self, offset=None, timeout=30):
+                        if self.calls:
+                            raise KeyboardInterrupt()
+                        self.calls += 1
+                        return []
+
+                    def send_message(self, *args, **kwargs):
+                        return {"ok": True}
+
+                class FakeTaskRunner:
+                    def __init__(self, *args, **kwargs):
+                        pass
+
+                    def start(self):
+                        return "task-thread"
+
+                with patch.object(bridge, "TelegramClient", OneUpdateTelegram), \
+                     patch.object(bridge, "CmsClient", lambda config: object()), \
+                     patch.object(bridge, "EmbyClient", lambda *args, **kwargs: object()), \
+                     patch.object(bridge, "OpenAIClassifier", lambda config: object()), \
+                     patch.object(bridge, "TmdbWebResolver", lambda timeout=20: object()), \
+                     patch.object(bridge, "P115WebClient", lambda *args, **kwargs: p115), \
+                     patch.object(bridge, "maybe_start_web_server", lambda config, task_store: None), \
+                     patch.object(bridge, "start_status_repair_loop", lambda *args, **kwargs: None), \
+                     patch.object(bridge, "start_invalid_self_share_probe_loop", lambda *args, **kwargs: probe_calls.append((args, kwargs)), create=True), \
+                     patch.object(bridge, "write_metrics_snapshot", lambda *args, **kwargs: None), \
+                     patch.object(bridge, "normalize_emby_parents", lambda *args, **kwargs: 0), \
+                     patch.object(bridge, "TaskRunner", FakeTaskRunner):
+                    with self.assertRaises(KeyboardInterrupt):
+                        bridge.run_forever(cfg)
+
+            self.assertEqual(len(probe_calls), 1)
+            args, kwargs = probe_calls[0]
+            self.assertIs(args[2], p115)
+            self.assertEqual(kwargs["interval_seconds"], 21600)
+            self.assertEqual(kwargs["limit"], 3)
 
     def test_run_forever_starts_status_repair_when_task_engine_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:

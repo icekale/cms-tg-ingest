@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Any
 
@@ -17,6 +18,10 @@ class P115RiskControlError(RuntimeError):
     """Raised when 115 asks callers to slow down or stops automated actions."""
 
 
+class P115ShareUnavailableError(RuntimeError):
+    """Raised when 115 confirms that a share no longer exists or is invalid."""
+
+
 def is_p115_risk_control_message(value: str) -> bool:
     text = str(value or "")
     return any(
@@ -29,6 +34,21 @@ def is_p115_risk_control_message(value: str) -> bool:
             "请求过于频繁",
             "稍后再试",
             "风控",
+        )
+    )
+
+
+def is_p115_share_unavailable_message(value: str) -> bool:
+    text = str(value or "")
+    return any(
+        token in text
+        for token in (
+            "分享不存在",
+            "分享已失效",
+            "分享已取消",
+            "分享已过期",
+            "链接已失效",
+            "链接不存在",
         )
     )
 
@@ -252,6 +272,7 @@ class P115WebClient:
         self.clock = clock or time.monotonic
         self.sleeper = sleeper or time.sleep
         self._last_request_at: float | None = None
+        self._request_lock = threading.Lock()
         self.request_count = 0
         if not self.cookie:
             raise RuntimeError("115 cookie is empty")
@@ -275,9 +296,10 @@ class P115WebClient:
         self._last_request_at = float(self.clock())
 
     def _request(self, url: str, method: str = "GET", data: dict | None = None, params: dict | None = None) -> dict:
-        self._rate_limit()
-        self.request_count += 1
-        return self.http.request(url, method=method, data=data, params=params, headers=self._headers())
+        with self._request_lock:
+            self._rate_limit()
+            self.request_count += 1
+            return self.http.request(url, method=method, data=data, params=params, headers=self._headers())
 
     @staticmethod
     def _ensure_state(resp: dict, fallback: str) -> dict:
@@ -309,7 +331,17 @@ class P115WebClient:
                 "limit": limit,
             },
         )
-        self._ensure_state(resp, "115 share snap failed")
+        try:
+            self._ensure_state(resp, "115 share snap failed")
+        except RuntimeError as exc:
+            if is_p115_share_unavailable_message(str(exc)):
+                raise P115ShareUnavailableError(str(exc)) from exc
+            raise
+        data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
+        share_info = data.get("shareinfo") if isinstance(data.get("shareinfo"), dict) else {}
+        share_state = str(share_info.get("share_state") or "").strip().lower()
+        if share_state and share_state not in {"1", "true"}:
+            raise P115ShareUnavailableError(f"115 分享状态不可用: {share_state}")
         return resp
 
     def receive_share_to_cid(self, share_code: str, receive_code: str, target_cid: str) -> dict[str, Any]:

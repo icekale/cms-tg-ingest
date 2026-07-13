@@ -180,6 +180,24 @@ class TaskStore:
             latest_lock_wait=lock_waits[0] if lock_waits else None,
         )
 
+    def has_active_task_work(self) -> bool:
+        with self._lock, self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM tasks
+                WHERE status IN (?, ?)
+                  AND current_stage NOT IN (?, ?)
+                LIMIT 1
+                """,
+                (
+                    TaskStatus.PENDING.value,
+                    TaskStatus.RUNNING.value,
+                    TaskStage.NEEDS_ACTION.value,
+                    TaskStage.FAILED.value,
+                ),
+            ).fetchone()
+        return row is not None
+
     def find_active_lock_holder(
         self,
         lock_key: str,
