@@ -1089,6 +1089,100 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(updated.metadata["update_requested_run"], 1)
             self.assertEqual(updated.metadata["update_received_run"], 0)
 
+    def test_explicit_series_update_command_requeues_completed_series(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            row = submission_store.upsert_submission(
+                bridge.ShareKey("abc", "1234"),
+                "https://115cdn.com/s/abc?password=1234",
+                "completed",
+                title="追更剧集",
+            )
+            row = submission_store.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            task_store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "清理完成",
+                category="外国电视",
+                submission_id=int(row["id"]),
+            )
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("追更 https://115cdn.com/s/abc?password=1234"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                task_engine_enabled=True,
+            )
+
+            updated = task_store.find_task(task.id)
+            self.assertEqual(updated.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.metadata["update_requested_run"], 1)
+            self.assertIn("已开始追更", telegram.messages[-1][1])
+
+    def test_explicit_series_update_command_falls_back_to_new_intake(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("追更 https://115cdn.com/s/new?password=1234"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                task_engine_enabled=True,
+            )
+
+            task = task_store.find_task_by_share_key("new", "1234")
+            self.assertIsNotNone(task)
+            self.assertEqual(task.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(task.status, TaskStatus.PENDING)
+
+    def test_explicit_series_update_command_keeps_completed_movie_in_normal_intake(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("movie", "1234", "https://115cdn.com/s/movie?password=1234")
+            task_store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "清理完成",
+                category="欧美电影",
+            )
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("追更 https://115cdn.com/s/movie?password=1234"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                task_engine_enabled=True,
+            )
+
+            unchanged = task_store.find_task(task.id)
+            self.assertEqual(unchanged.current_stage, TaskStage.CLEANED)
+            self.assertEqual(unchanged.status, TaskStatus.SUCCEEDED)
+            self.assertIn("任务已完成", telegram.messages[-1][1])
+
     def test_completed_tv_task_exposes_update_button_and_resets_for_new_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")

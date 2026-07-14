@@ -174,7 +174,7 @@ LINK_RE = re.compile(r"https?://(?:www\.)?(?:115cdn|115|anxia)\.com/s/[^\s<>'\"]
 TRAILING_PUNCT = ".,;)。），]】》>"
 LOG = logging.getLogger("cms-tg-ingest")
 LAST_TELEGRAM_TRANSIENT_ERROR_AT: str | None = None
-HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 链接\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”\n- /status 查看最近任务\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd"""
+HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 链接\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- /status 查看最近任务\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd"""
 MENU_BUTTONS = {
     "📊 统计": "/metrics",
     "📋 最近任务": "/status",
@@ -2479,6 +2479,9 @@ def handle_update(
         )
         return
 
+    explicit_series_update = text.startswith("追更")
+    if explicit_series_update:
+        text = text.removeprefix("追更").lstrip(" ：:")
     links = extract_share_links(text)
     if not links:
         return
@@ -2490,6 +2493,20 @@ def handle_update(
             if self_share_workflow and task_engine_enabled and task_store is None:
                 raise RuntimeError("TaskStore is required when TASK_ENGINE_ENABLED=true for self_share_sync")
             if self_share_workflow and task_engine_enabled and task_store is not None:
+                if explicit_series_update:
+                    existing_task = task_store.find_task_by_share_key(key.share_code, key.receive_code)
+                    updated_task, update_result = start_series_update_task(
+                        existing_task,
+                        store,
+                        task_store,
+                        source="文本追更",
+                    )
+                    if update_result == "started":
+                        result_lines.append(f"{index}. 已开始追更：{format_task_snapshot(updated_task)}")
+                        continue
+                    if update_result == "failed":
+                        result_lines.append(f"{index}. 追更失败：{format_task_snapshot(updated_task)}")
+                        continue
                 task = task_store.upsert_task(key.share_code, key.receive_code, link, chat_id=str(chat_id or ""))
                 submission = None
                 submission_id = task.submission_id or task.metadata.get("submission_id")
