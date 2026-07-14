@@ -1060,6 +1060,35 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertIn({"text": "恢复 STRM #1", "callback_data": "task_restore:1"}, buttons)
             self.assertIn({"text": "从头重跑 #1", "callback_data": "task_reprocess:1"}, buttons)
 
+    def test_start_series_update_task_requeues_completed_series(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            row = submission_store.upsert_submission(
+                bridge.ShareKey("abc", "1234"),
+                "https://115cdn.com/s/abc?password=1234",
+                "completed",
+                title="追更剧集",
+            )
+            row = submission_store.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            task = task_store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "清理完成",
+                category="外国电视",
+                submission_id=int(row["id"]),
+            )
+
+            updated, result = bridge.start_series_update_task(task, submission_store, task_store, source="文本追更")
+
+            self.assertEqual(result, "started")
+            self.assertEqual(updated.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.metadata["update_requested_run"], 1)
+            self.assertEqual(updated.metadata["update_received_run"], 0)
+
     def test_completed_tv_task_exposes_update_button_and_resets_for_new_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")

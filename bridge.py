@@ -1932,6 +1932,111 @@ def parse_task_action_callback(data: str) -> tuple[str, int] | None:
         return None
 
 
+def start_series_update_task(
+    task: Any | None,
+    store: SubmissionStore | None,
+    task_store: TaskStore | None,
+    *,
+    source: str,
+) -> tuple[Any | None, str]:
+    if task is None or store is None or task_store is None:
+        return None, "not_eligible"
+    if task.status != TaskStatus.SUCCEEDED or task.current_stage != TaskStage.CLEANED:
+        return None, "not_eligible"
+    category = str(task.category or task.metadata.get("category") or task.metadata.get("category_final") or "").strip()
+    if category not in {"国产电视", "外国电视", "番剧"}:
+        return None, "not_eligible"
+    submission_id = task.submission_id or task.metadata.get("submission_id")
+    if submission_id in (None, ""):
+        return None, "not_eligible"
+    row = store.find_by_id(int(submission_id))
+    if not row:
+        failed = task_store.record_event(
+            task.id,
+            TaskStage.FAILED,
+            TaskStatus.FAILED,
+            "追更准备失败：原任务记录不存在",
+            error_type="submission_missing",
+            error_summary="原任务记录不存在",
+            clear_claim=True,
+        )
+        return failed, "failed"
+    if str(row.get("workflow_mode") or "") != "self_share_sync":
+        return None, "not_eligible"
+    try:
+        previous_requested = int(task.metadata.get("update_requested_run") or 0)
+        previous_received = int(task.metadata.get("update_received_run") or 0)
+    except (TypeError, ValueError):
+        previous_requested = previous_received = 0
+    update_run = max(previous_requested, previous_received) + 1
+    update_started_at = time.time()
+    previous_share_code = str(row.get("own_share_code") or "").strip()
+    task_store.record_event(
+        task.id,
+        TaskStage.RECEIVED,
+        TaskStatus.PENDING,
+        f"{source}开始追更，准备接收当前分享内容",
+        title=str(row.get("title") or task.title or "") or None,
+        tmdb_id=str(task.tmdb_id or "") or None,
+        category=category,
+        submission_id=int(row["id"]),
+        metadata_patch={
+            "submission_id": int(row["id"]),
+            "update_requested_run": update_run,
+            "update_received_run": update_run - 1,
+            "update_started_at": update_started_at,
+            "previous_own_share_code": previous_share_code,
+        },
+        metadata_delete_keys=(
+            "own_share_file_id",
+            "own_share_file_name",
+            "own_share_code",
+            "own_share_receive_code",
+            "own_share_url",
+            "share_sync_status",
+            "source_path",
+            "dest_path",
+            "category_final",
+            "move_status",
+            "move_error",
+            "emby_status",
+            "emby_item_id",
+            "emby_title",
+            "emby_path",
+            "emby_parent",
+            "cleanup_status",
+            "cleanup_file_id",
+            "cleanup_error",
+            "emby_refresh_requested",
+            "emby_refresh_library",
+            "emby_refresh_error",
+            "organized_folder",
+            "recognition",
+            "received_file_ids",
+            "direct_strm_removed",
+            "_defer_stage",
+            "_defer_message",
+            "_defer_count",
+        ),
+        next_run_at=-1,
+        clear_claim=True,
+    )
+    updated_row = store.reset_self_share_for_update(int(row["id"]))
+    if not updated_row:
+        failed = task_store.record_event(
+            task.id,
+            TaskStage.FAILED,
+            TaskStatus.FAILED,
+            "追更准备失败：原任务记录不存在",
+            error_type="submission_missing",
+            error_summary="原任务记录不存在",
+            clear_claim=True,
+        )
+        return failed, "failed"
+    updated = task_store.enqueue_task(task.id, TaskStage.RECEIVED, message="追更已入队", next_run_at=0)
+    return updated, "started"
+
+
 def handle_task_action_callback(
     action: str,
     task_id: int,
@@ -1997,10 +2102,6 @@ def handle_task_action_callback(
         telegram.send_message(chat_id, f"已从头重跑：{format_task_snapshot(updated)}")
         return True
     if action == "task_update":
-        submission_id = task.submission_id or task.metadata.get("submission_id")
-        if store is None or submission_id in (None, ""):
-            telegram.answer_callback_query(callback_id, "缺少原任务记录", show_alert=True)
-            return True
         if task.status != TaskStatus.SUCCEEDED or task.current_stage != TaskStage.CLEANED:
             telegram.answer_callback_query(callback_id, "当前任务尚未完成，暂不能追更", show_alert=True)
             return True
@@ -2008,82 +2109,13 @@ def handle_task_action_callback(
         if category not in {"国产电视", "外国电视", "番剧"}:
             telegram.answer_callback_query(callback_id, "仅已完成的剧集任务支持追更", show_alert=True)
             return True
-        row = store.find_by_id(int(submission_id))
-        if not row or str(row.get("workflow_mode") or "") != "self_share_sync":
+        updated, result = start_series_update_task(task, store, task_store, source="TG 按钮")
+        if result == "not_eligible":
             telegram.answer_callback_query(callback_id, "原自分享任务记录不可用", show_alert=True)
             return True
-        try:
-            previous_requested = int(task.metadata.get("update_requested_run") or 0)
-            previous_received = int(task.metadata.get("update_received_run") or 0)
-        except (TypeError, ValueError):
-            previous_requested = previous_received = 0
-        update_run = max(previous_requested, previous_received) + 1
-        update_started_at = time.time()
-        previous_share_code = str(row.get("own_share_code") or "").strip()
-        task_store.record_event(
-            task.id,
-            TaskStage.RECEIVED,
-            TaskStatus.PENDING,
-            "TG 按钮开始追更，准备接收当前分享内容",
-            title=str(row.get("title") or task.title or "") or None,
-            tmdb_id=str(task.tmdb_id or "") or None,
-            category=category,
-            submission_id=int(row["id"]),
-            metadata_patch={
-                "submission_id": int(row["id"]),
-                "update_requested_run": update_run,
-                "update_received_run": update_run - 1,
-                "update_started_at": update_started_at,
-                "previous_own_share_code": previous_share_code,
-            },
-            metadata_delete_keys=(
-                "own_share_file_id",
-                "own_share_file_name",
-                "own_share_code",
-                "own_share_receive_code",
-                "own_share_url",
-                "share_sync_status",
-                "source_path",
-                "dest_path",
-                "category_final",
-                "move_status",
-                "move_error",
-                "emby_status",
-                "emby_item_id",
-                "emby_title",
-                "emby_path",
-                "emby_parent",
-                "cleanup_status",
-                "cleanup_file_id",
-                "cleanup_error",
-                "emby_refresh_requested",
-                "emby_refresh_library",
-                "emby_refresh_error",
-                "organized_folder",
-                "recognition",
-                "received_file_ids",
-                "direct_strm_removed",
-                "_defer_stage",
-                "_defer_message",
-                "_defer_count",
-            ),
-            next_run_at=-1,
-            clear_claim=True,
-        )
-        updated_row = store.reset_self_share_for_update(int(row["id"]))
-        if not updated_row:
-            task_store.record_event(
-                task.id,
-                TaskStage.FAILED,
-                TaskStatus.FAILED,
-                "追更准备失败：原任务记录不存在",
-                error_type="submission_missing",
-                error_summary="原任务记录不存在",
-                clear_claim=True,
-            )
+        if result == "failed":
             telegram.answer_callback_query(callback_id, "追更准备失败", show_alert=True)
             return True
-        updated = task_store.enqueue_task(task.id, TaskStage.RECEIVED, message="追更已入队", next_run_at=0)
         telegram.answer_callback_query(callback_id, "已开始追更", show_alert=False)
         telegram.send_message(chat_id, f"已开始追更：{format_task_snapshot(updated)}\n将重新接收当前分享内容并合并新增剧集。")
         return True
