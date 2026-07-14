@@ -158,6 +158,14 @@ class TaskStore:
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return self._snapshot(row) if row else None
 
+    def find_task_by_share_key(self, share_code: str, receive_code: str) -> TaskSnapshot | None:
+        with self._lock, self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM tasks WHERE share_code = ? AND receive_code = ?",
+                (str(share_code), str(receive_code)),
+            ).fetchone()
+        return self._snapshot(row) if row else None
+
     def list_recent_tasks(self, limit: int = 20) -> list[TaskSnapshot]:
         with self._lock, self._connection() as conn:
             rows = conn.execute("SELECT * FROM tasks ORDER BY updated_at DESC, id DESC LIMIT ?", (limit,)).fetchall()

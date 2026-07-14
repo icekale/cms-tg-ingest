@@ -34,6 +34,17 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(second.current_stage, TaskStage.RECEIVED)
             self.assertEqual(second.status, TaskStatus.PENDING)
 
+    def test_find_task_by_share_key_returns_only_matching_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            expected = store.upsert_task("series", "pass", "https://115cdn.com/s/series?password=pass")
+            store.upsert_task("series", "other", "https://115cdn.com/s/series?password=other")
+
+            found = store.find_task_by_share_key("series", "pass")
+
+            self.assertEqual(found.id, expected.id)
+            self.assertIsNone(store.find_task_by_share_key("missing", "pass"))
+
     def test_record_stage_event_updates_current_task_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
