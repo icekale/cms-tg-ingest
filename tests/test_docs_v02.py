@@ -41,11 +41,11 @@ class V02DocsTests(unittest.TestCase):
         self.assertIn("0.2.0-alpha.2", changelog)
         self.assertIn("真实工作流进度写入 TaskStore", changelog)
 
-    def test_readme_documents_cleanup_after_own_share(self):
+    def test_readme_documents_cleanup_after_share_validation(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("在 `TASK_ENGINE_ENABLED=true` 的 TaskRunner 路径中", readme)
-        self.assertIn("自己的永久分享创建成功后立即删除 115 转存源", readme)
+        self.assertIn("自己的永久分享状态验证通过后立即删除 115 转存源", readme)
         self.assertIn("后续 STRM 只使用自己的分享链接生成", readme)
         self.assertIn("旧 SubmissionStore + 轮询路径是兼容回滚路径", readme)
         self.assertNotIn("只会在 STRM 已移动且 Emby 确认入库后删除", readme)

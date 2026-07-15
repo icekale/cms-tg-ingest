@@ -47,6 +47,7 @@ def is_p115_share_unavailable_message(value: str) -> bool:
             "分享已失效",
             "分享已取消",
             "分享已过期",
+            "分享已拒绝",
             "链接已失效",
             "链接不存在",
         )
@@ -307,7 +308,7 @@ class P115WebClient:
             return resp
         if "state" not in resp and resp.get("code") in {0, "", None}:
             return resp
-        message = str(resp.get("error") or resp.get("message") or fallback)
+        message = str(resp.get("error") or resp.get("message") or resp.get("msg") or fallback)
         if is_p115_risk_control_message(message):
             raise P115RiskControlError(message)
         raise RuntimeError(message)
@@ -340,9 +341,22 @@ class P115WebClient:
         data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
         share_info = data.get("shareinfo") if isinstance(data.get("shareinfo"), dict) else {}
         share_state = str(share_info.get("share_state") or "").strip().lower()
-        if share_state and share_state not in {"1", "true"}:
+        if share_state and share_state not in {"0", "1", "true"}:
             raise P115ShareUnavailableError(f"115 分享状态不可用: {share_state}")
         return resp
+
+    def inspect_share(self, share_code: str, receive_code: str) -> dict[str, Any]:
+        snap = self.share_snap(share_code, receive_code, cid="0", limit=1)
+        data = snap.get("data") if isinstance(snap.get("data"), dict) else {}
+        share_info = data.get("shareinfo") if isinstance(data.get("shareinfo"), dict) else {}
+        share_state = str(share_info.get("share_state") or "").strip().lower()
+        raw_vio = share_info.get("have_vio_file", data.get("have_vio_file", 0))
+        have_vio_file = str(raw_vio).strip().lower() in {"1", "true", "yes"}
+        return {
+            "available": True,
+            "share_state": share_state,
+            "have_vio_file": have_vio_file,
+        }
 
     def receive_share_to_cid(self, share_code: str, receive_code: str, target_cid: str) -> dict[str, Any]:
         snap = self.share_snap(share_code, receive_code, cid="0", limit=100)
@@ -538,6 +552,14 @@ class P115WebClient:
         )
         self._ensure_state(update, "115 update share failed")
         return {"share_code": share_code, "receive_code": receive_code or "1212", "share_url": share_url}
+
+    def rename_file(self, file_id: str, file_name: str) -> dict:
+        resp = self._request(
+            "https://webapi.115.com/files/edit",
+            method="POST",
+            data={"fid": str(file_id), "file_name": str(file_name)},
+        )
+        return self._ensure_state(resp, "115 rename failed")
 
     def delete_file(self, file_id: str) -> dict:
         resp = self._request(

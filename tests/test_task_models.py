@@ -10,9 +10,12 @@ class TaskModelTests(unittest.TestCase):
         self.assertEqual(TaskStage.ORGANIZING.value, "organizing")
         self.assertEqual(TaskStage.RECOGNIZING.value, "recognizing")
         self.assertEqual(TaskStage.ORGANIZED.value, "organized")
+        self.assertEqual(TaskStage.SHARE_ALIAS_PREPARED.value, "share_alias_prepared")
         self.assertEqual(TaskStage.OWN_SHARE_CREATED.value, "own_share_created")
+        self.assertEqual(TaskStage.SHARE_VALIDATED.value, "share_validated")
         self.assertEqual(TaskStage.SHARE_SYNC_SUBMITTED.value, "share_sync_submitted")
         self.assertEqual(TaskStage.STRM_READY.value, "strm_ready")
+        self.assertEqual(TaskStage.CMS_DELETE_SETTLED.value, "cms_delete_settled")
         self.assertEqual(TaskStage.MOVED.value, "moved")
         self.assertEqual(TaskStage.EMBY_CONFIRMED.value, "emby_confirmed")
         self.assertEqual(TaskStage.CLEANED.value, "cleaned")
@@ -22,17 +25,20 @@ class TaskModelTests(unittest.TestCase):
     def test_success_next_stage_flow_for_authoritative_self_share(self):
         self.assertEqual(next_stage_after_success(TaskStage.RECEIVED), TaskStage.ORGANIZING)
         self.assertEqual(next_stage_after_success(TaskStage.ORGANIZING), TaskStage.RECOGNIZING)
-        self.assertEqual(next_stage_after_success(TaskStage.RECOGNIZING), TaskStage.OWN_SHARE_CREATED)
-        self.assertEqual(next_stage_after_success(TaskStage.OWN_SHARE_CREATED), TaskStage.SHARE_SYNC_SUBMITTED)
+        self.assertEqual(next_stage_after_success(TaskStage.RECOGNIZING), TaskStage.SHARE_ALIAS_PREPARED)
+        self.assertEqual(next_stage_after_success(TaskStage.SHARE_ALIAS_PREPARED), TaskStage.OWN_SHARE_CREATED)
+        self.assertEqual(next_stage_after_success(TaskStage.OWN_SHARE_CREATED), TaskStage.SHARE_VALIDATED)
+        self.assertEqual(next_stage_after_success(TaskStage.SHARE_VALIDATED), TaskStage.SHARE_SYNC_SUBMITTED)
         self.assertEqual(next_stage_after_success(TaskStage.SHARE_SYNC_SUBMITTED), TaskStage.STRM_READY)
-        self.assertEqual(next_stage_after_success(TaskStage.STRM_READY), TaskStage.MOVED)
+        self.assertEqual(next_stage_after_success(TaskStage.STRM_READY), TaskStage.CMS_DELETE_SETTLED)
+        self.assertEqual(next_stage_after_success(TaskStage.CMS_DELETE_SETTLED), TaskStage.MOVED)
         self.assertEqual(next_stage_after_success(TaskStage.MOVED), TaskStage.EMBY_CONFIRMED)
         self.assertEqual(next_stage_after_success(TaskStage.EMBY_CONFIRMED), TaskStage.CLEANED)
         self.assertIsNone(next_stage_after_success(TaskStage.CLEANED))
 
     def test_legacy_cms_stage_still_maps_forward(self):
         self.assertEqual(next_stage_after_success(TaskStage.CMS_SUBMITTED), TaskStage.ORGANIZED)
-        self.assertEqual(next_stage_after_success(TaskStage.ORGANIZED), TaskStage.OWN_SHARE_CREATED)
+        self.assertEqual(next_stage_after_success(TaskStage.ORGANIZED), TaskStage.SHARE_ALIAS_PREPARED)
 
     def test_status_and_retry_action_values_are_stable(self):
         self.assertEqual(TaskStatus.PENDING.value, "pending")

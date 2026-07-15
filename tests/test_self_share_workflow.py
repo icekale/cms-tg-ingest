@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -24,6 +25,61 @@ class P115WebClientTests(unittest.TestCase):
 
         with self.assertRaises(bridge.P115ShareUnavailableError):
             client.share_snap("invalid-share", "1212", limit=1)
+
+    def test_share_snap_raises_unavailable_when_115_rejects_share_in_msg(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                return {"state": False, "msg": "分享已拒绝", "errno": 4100009}
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        with self.assertRaises(bridge.P115ShareUnavailableError):
+            client.share_snap("rejected-share", "1212", limit=1)
+
+    def test_share_snap_accepts_zero_share_state_when_request_succeeds(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                return {"state": True, "data": {"shareinfo": {"share_state": "0"}}}
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        response = client.share_snap("valid-share", "1212", limit=1)
+
+        self.assertTrue(response["state"])
+
+    def test_inspect_share_reports_violation_flag_as_warning_not_invalid(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                return {
+                    "state": True,
+                    "data": {"shareinfo": {"share_state": "0", "have_vio_file": "1"}},
+                }
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        status = client.inspect_share("valid-share", "1212")
+
+        self.assertTrue(status["available"])
+        self.assertTrue(status["have_vio_file"])
+        self.assertEqual(status["share_state"], "0")
+
+    def test_rename_file_uses_115_edit_endpoint(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, method, data))
+                return {"state": True}
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        client.rename_file("fid-1", "asset-42-abcd")
+
+        self.assertEqual(http.calls[0][0], "https://webapi.115.com/files/edit")
+        self.assertEqual(http.calls[0][1], "POST")
+        self.assertEqual(http.calls[0][2], {"fid": "fid-1", "file_name": "asset-42-abcd"})
 
     def test_requests_are_rate_limited_between_115_api_calls(self):
         class FakeHttp:
@@ -1520,6 +1576,69 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertEqual((dest / "一战再战.strm").read_text(encoding="utf-8"), "http://cms/s/swsw43a3wul_1212_3455387345258282790.mkv")
             self.assertEqual(cms.sync_payloads, [])
             self.assertEqual(updated["move_status"], "moved")
+
+    def test_restore_alias_share_strm_uses_canonical_library_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            movie_root = root / "Movie"
+            canonical_name = "T-特洛伊-2004-[tmdb=652]"
+            alias_name = "asset-42-abcd1234"
+            source = share_root / alias_name
+            dest = movie_root / canonical_name
+            source.mkdir(parents=True)
+            (source / "asset-42-001.strm").write_text(
+                "http://cms/s/owncode_1212_file.mkv",
+                encoding="utf-8",
+            )
+            store = bridge.SubmissionStore(root / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("external", "pass"),
+                "https://115cdn.com/s/external?password=pass",
+                "submitted",
+                title="特洛伊",
+            )
+            manifest = {
+                "version": 1,
+                "root_name": canonical_name,
+                "alias_name": alias_name,
+                "category": "欧美电影",
+                "tmdb_id": "652",
+                "entries": [
+                    {
+                        "file_id": "video-id",
+                        "canonical_path": "Troy.2004.mkv",
+                        "alias_path": "asset-42-001.mkv",
+                    }
+                ],
+            }
+            store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_name=canonical_name,
+                own_share_code="owncode",
+                own_share_receive_code="1212",
+                share_sync_status="restore_submitted",
+                share_alias_name=alias_name,
+                share_alias_level=2,
+                canonical_manifest_json=json.dumps(manifest, ensure_ascii=False),
+            )
+            store.update_category(int(row["id"]), "欧美电影", "selected")
+            store.update_move(int(row["id"]), "moved", dest_path=str(dest), category_final="欧美电影")
+            current = store.find_by_id(int(row["id"]))
+
+            status, metadata = bridge.restore_missing_self_share_library_folder(
+                store,
+                object(),
+                current,
+                bridge.SelfShareConfig(enabled=True, strm_root=share_root),
+                bridge.MoveConfig(source_roots=[], library_roots={"欧美电影": movie_root}, stable_seconds=0),
+            )
+
+            self.assertEqual(status, "restored")
+            self.assertEqual(metadata["dest_path"], str(bridge.safe_resolve(dest)))
+            self.assertTrue((dest / "Troy.2004.strm").is_file())
+            self.assertFalse((movie_root / alias_name).exists())
 
     def test_restore_single_episode_preserves_unrelated_direct_episode(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -376,6 +376,11 @@ class SubmissionStore:
             "share_probe_at": "REAL",
             "share_invalid_at": "REAL",
             "share_invalid_reason": "TEXT",
+            "canonical_manifest_json": "TEXT",
+            "share_alias_name": "TEXT",
+            "share_alias_level": "INTEGER",
+            "share_validation_status": "TEXT",
+            "share_validation_error": "TEXT",
         }
         for name, definition in columns.items():
             if name not in existing:
@@ -569,6 +574,11 @@ class SubmissionStore:
         own_share_receive_code: str | None = None,
         own_share_url: str | None = None,
         share_sync_status: str | None = None,
+        canonical_manifest_json: str | None = None,
+        share_alias_name: str | None = None,
+        share_alias_level: int | None = None,
+        share_validation_status: str | None = None,
+        share_validation_error: str | None = None,
     ) -> dict[str, Any] | None:
         with self._lock, self._connection() as conn:
             conn.execute(
@@ -582,6 +592,11 @@ class SubmissionStore:
                     own_share_receive_code = COALESCE(?, own_share_receive_code),
                     own_share_url = COALESCE(?, own_share_url),
                     share_sync_status = COALESCE(?, share_sync_status),
+                    canonical_manifest_json = COALESCE(?, canonical_manifest_json),
+                    share_alias_name = COALESCE(?, share_alias_name),
+                    share_alias_level = COALESCE(?, share_alias_level),
+                    share_validation_status = COALESCE(?, share_validation_status),
+                    share_validation_error = COALESCE(?, share_validation_error),
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -594,6 +609,11 @@ class SubmissionStore:
                     own_share_receive_code,
                     own_share_url,
                     share_sync_status,
+                    canonical_manifest_json,
+                    share_alias_name,
+                    share_alias_level,
+                    share_validation_status,
+                    share_validation_error,
                     time.time(),
                     row_id,
                 ),
@@ -618,6 +638,11 @@ class SubmissionStore:
                     own_share_receive_code = NULL,
                     own_share_url = NULL,
                     share_sync_status = NULL,
+                    canonical_manifest_json = NULL,
+                    share_alias_name = NULL,
+                    share_alias_level = NULL,
+                    share_validation_status = NULL,
+                    share_validation_error = NULL,
                     source_path = NULL,
                     dest_path = NULL,
                     move_status = NULL,
@@ -1994,6 +2019,11 @@ def start_series_update_task(
             "own_share_receive_code",
             "own_share_url",
             "share_sync_status",
+            "canonical_manifest_json",
+            "share_alias_name",
+            "share_alias_level",
+            "share_validation_status",
+            "share_validation_error",
             "source_path",
             "dest_path",
             "category_final",

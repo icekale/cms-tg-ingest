@@ -17,12 +17,15 @@ LOG = logging.getLogger(__name__)
 _GLOBAL_115_LOCK_STAGES = {
     TaskStage.RECEIVED,
     TaskStage.ORGANIZING,
+    TaskStage.SHARE_ALIAS_PREPARED,
     TaskStage.OWN_SHARE_CREATED,
+    TaskStage.SHARE_VALIDATED,
     TaskStage.SHARE_SYNC_SUBMITTED,
     TaskStage.CLEANED,
 }
 _DESTINATION_LOCK_STAGES = {
     TaskStage.STRM_READY,
+    TaskStage.CMS_DELETE_SETTLED,
     TaskStage.MOVED,
     TaskStage.EMBY_CONFIRMED,
 }
@@ -31,6 +34,7 @@ _ORGANIZING_MAX_DEFER_COUNT = 30
 _STAGE_MAX_DEFER_COUNT = {
     TaskStage.ORGANIZING: 30,
     TaskStage.STRM_READY: 20,
+    TaskStage.CMS_DELETE_SETTLED: 30,
     TaskStage.EMBY_CONFIRMED: 20,
 }
 _DEFER_METADATA_KEYS = ("_defer_stage", "_defer_message", "_defer_count")

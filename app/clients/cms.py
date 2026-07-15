@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import urllib.parse
+import urllib.request
 from typing import Any
 
 from app.clients.http import HttpJson
@@ -116,6 +117,15 @@ class CmsClient:
         if resp.get("code") != 200:
             raise RuntimeError(resp.get("msg") or "CMS share115 sync failed")
         return resp
+
+    def probe_strm_url(self, url: str) -> bool:
+        request = urllib.request.Request(
+            str(url),
+            headers={"Range": "bytes=0-0", "User-Agent": "cms-tg-ingest/1.0"},
+            method="GET",
+        )
+        with urllib.request.urlopen(request, timeout=self.config.http_timeout) as response:
+            return int(getattr(response, "status", response.getcode())) in {200, 206}
 
     def auto_organize_excluded_parent_ids(self) -> set[str]:
         resp = self._authorized("/api/config/auto_organize", method="GET")

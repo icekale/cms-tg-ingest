@@ -33,10 +33,14 @@ def _runtime_metadata(row: dict[str, Any], extra: dict[str, Any]) -> dict[str, A
     keys = (
         "own_share_file_id",
         "own_share_file_name",
+        "share_alias_name",
+        "share_alias_level",
         "own_share_code",
         "own_share_receive_code",
         "own_share_url",
         "share_sync_status",
+        "share_validation_status",
+        "share_validation_error",
         "source_path",
         "dest_path",
         "category_final",
@@ -151,10 +155,12 @@ def sync_task_from_submission(
     emby_status = _text(row.get("emby_status")).lower()
     move_status = _text(row.get("move_status")).lower()
     share_sync_status = _text(row.get("share_sync_status")).lower()
+    share_validation_status = _text(row.get("share_validation_status")).lower()
+    share_alias_name = _text(row.get("share_alias_name"))
     own_share_code = _text(row.get("own_share_code"))
     status = _text(row.get("status")).lower()
 
-    if cleanup_status == "deleted":
+    if cleanup_status in {"deleted", "skipped"} and move_status == "moved" and emby_status == "confirmed":
         return record_submission_event(task_store, row, TaskStage.CLEANED, TaskStatus.SUCCEEDED, message)
     if emby_status == "confirmed":
         return record_submission_event(task_store, row, TaskStage.EMBY_CONFIRMED, TaskStatus.SUCCEEDED, message)
@@ -189,8 +195,12 @@ def sync_task_from_submission(
         )
     if share_sync_status in {"submitted", "restore_submitted"}:
         return record_submission_event(task_store, row, TaskStage.SHARE_SYNC_SUBMITTED, TaskStatus.RUNNING, message)
+    if share_validation_status in {"valid", "warning"}:
+        return record_submission_event(task_store, row, TaskStage.SHARE_VALIDATED, TaskStatus.SUCCEEDED, message)
     if own_share_code:
         return record_submission_event(task_store, row, TaskStage.OWN_SHARE_CREATED, TaskStatus.SUCCEEDED, message)
+    if share_alias_name:
+        return record_submission_event(task_store, row, TaskStage.SHARE_ALIAS_PREPARED, TaskStatus.SUCCEEDED, message)
     if status in {"submitted", "pending", "unknown", "done", "success", "completed"}:
         return record_submission_event(task_store, row, TaskStage.CMS_SUBMITTED, TaskStatus.RUNNING, message)
     if status in {"failed", "error"}:

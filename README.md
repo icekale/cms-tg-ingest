@@ -23,7 +23,8 @@
 - **TaskStore 任务引擎**：SQLite 记录任务阶段、时间线、错误、重试次数和运行状态，支持 `/status`、`/history`、`/metrics`、`/health`、`/quality`、`/clear_history`。
 - **TG/Web 运维按钮**：查看详情、重试当前阶段、查 Emby、恢复 STRM、从头重跑。
 - **本地质量巡检**：检查缺失 STRM、直链 STRM、目标目录异常等问题；巡检只读本地 TaskStore 和 STRM 文件，不扫描 115。
-- **安全清理 115 空间**：在 `TASK_ENGINE_ENABLED=true` 的 TaskRunner 路径中，自己的永久分享创建成功后即可删除 115 转存源，不会取消自己的 115 永久分享；后续 STRM 只使用自己的分享链接生成。
+- **共享别名保护**：CMS 完成整理和分类后，外挂用中性名称创建 115 分享，并用 canonical manifest 在本地恢复 CMS 标准目录名；115 风险标记只作为预警，最终以分享状态和 STRM 实际播放验证为准。
+- **安全清理 115 空间**：在 `TASK_ENGINE_ENABLED=true` 的 TaskRunner 路径中，自己的永久分享状态验证通过后即可删除 115 转存源，不会取消自己的 115 永久分享；后续 STRM 只使用自己的分享链接生成。
 - **115 压力保护**：整理文件夹查找使用分层搜索早停和整理目录扫描预算；遇到 115 风控冷却会暂停新的 115/CMS 全局阶段，避免连续重试。
 - **离线诊断**：`doctor.py` 可检查配置、挂载路径、数据库质量和常见部署问题。
 - **可选兜底识别**：可接入 OpenAI 兼容接口，但默认思路仍是尽量依赖 CMS 分类。
@@ -57,7 +58,7 @@ TaskRunner 会记录每个阶段的等待原因、等待次数和下一次检查
 
 115 查询会优先按 TMDB/标题候选词逐个搜索，一旦找到高置信整理目录就停止后续搜索；搜索索引未命中时才进入整理目录扫描，扫描有预算上限，避免大树反复遍历。任意 115 API 返回“操作过于频繁 / 风控 / 限制接收”等提示时，TaskRunner 会进入 115 风控冷却，把当前任务标记为需要人工稍后重试，并在冷却结束前暂停新的 115/CMS 全局阶段。
 
-自分享最终 STRM 必须来自自己的 115 永久分享；移动前会校验 `.strm` 内容包含自己的 `/s/<own_share_code>_<receive_code>_` marker，并拒绝 `/d/` 直链 STRM。CMS 普通同步直链 STRM 最多只作为分类参考，不作为最终入库来源。
+自分享最终 STRM 必须来自自己的 115 永久分享；移动前会校验 `.strm` 内容包含自己的 `/s/<own_share_code>_<receive_code>_` marker，拒绝 `/d/` 直链 STRM，并通过 Range 请求验证 CMS 跳转后的媒体端点可访问。CMS 普通同步直链 STRM 最多只作为分类参考，不作为最终入库来源。新分享尚未完成这些验证时，已有媒体库 STRM 不会被替换。
 
 ## 快速开始
 
@@ -116,13 +117,14 @@ MOVE_CONFLICT_POLICY=merge
 1. 你把 115 分享链接发给 Telegram bot。
 2. 外挂用 115 接口把外部分享接收到 `SELF_SHARE_RECEIVE_CID` 指定的待整理目录，不提交 CMS 普通同步。
 3. 外挂触发 CMS 自动整理，并找到整理后的 115 文件夹。
-4. 外挂为该文件夹创建你自己的 115 永久分享，提取码默认 `1212`。
-5. 外挂调用 CMS 分享同步，使用你自己的分享链接生成 STRM。
-6. CMS 把 STRM 写入 `SELF_SHARE_STRM_ROOT`。
-7. 外挂把 STRM 文件夹移动或合并到目标媒体库目录。
-8. 外挂通过 Emby API 确认媒体已入库，并返回媒体库名称。
-9. 如果启用清理，在 `TASK_ENGINE_ENABLED=true` 的 TaskRunner 路径中，外挂会在自己的永久分享创建成功后立即删除 115 转存源文件或源文件夹，不取消你自己的永久分享。
-10. 如果配置了 `SELF_SHARE_SOURCE_CLEANUP_PARENT_IDS`，外挂还会在这些 115 父目录中删除同一任务的接收阶段残留文件。
+4. 外挂保存 CMS 标准目录、分类和 TMDB 信息，用中性 `asset-*` 别名创建你自己的 115 永久分享，提取码默认 `1212`。
+5. 外挂检查分享状态；若 115 标记名称风险，只在当前任务目录内尝试一次中性视频文件名，不扫描整个网盘。`have_vio_file` 只记录为风险提示，不会单独判定分享失效。
+6. 分享验证通过后，外挂删除 115 转存源但保留永久分享，并触发 CMS 消化删除事件。
+7. 外挂调用 CMS 分享同步，使用你自己的分享链接生成 STRM；CMS 把结果写入 `SELF_SHARE_STRM_ROOT`。
+8. 外挂校验 STRM 分享码并实际探测播放端点，再按 manifest 恢复 CMS 标准目录名和剧集文件名。
+9. CMS 删除事件落库后，外挂把 STRM 文件夹移动或合并到目标媒体库目录，避免后续同步误删刚入库的 STRM。
+10. 外挂通过 Emby API 确认媒体已入库，并返回媒体库名称。
+11. 如果配置了 `SELF_SHARE_SOURCE_CLEANUP_PARENT_IDS`，外挂还会在这些 115 父目录中删除同一任务的接收阶段残留文件。
 
 ## 路径映射
 
@@ -202,7 +204,7 @@ python /app/doctor.py
 - 不要公开 `.env`、115 cookie、Telegram token、Emby API key、OpenAI API key。
 - 生产环境建议固定版本号，不建议盲目使用 `latest`。
 - 批量使用前，先用一个小体量链接测试完整流程。
-- `SELF_SHARE_CLEANUP_AFTER_EMBY=true` 在 `TASK_ENGINE_ENABLED=true` 的 TaskRunner 路径中会在自己的永久分享创建成功后立即删除 115 转存源，不会取消你自己的永久分享；旧 SubmissionStore + 轮询路径是兼容回滚路径，不提供同等清理顺序保证。变量名保留历史兼容。
+- `SELF_SHARE_CLEANUP_AFTER_EMBY=true` 在 `TASK_ENGINE_ENABLED=true` 的 TaskRunner 路径中会在自己的永久分享状态验证通过后立即删除 115 转存源，不会取消你自己的永久分享；旧 SubmissionStore + 轮询路径是兼容回滚路径，不提供同等清理顺序保证。变量名保留历史兼容。
 - `SELF_SHARE_SOURCE_CLEANUP_PARENT_IDS` 是额外清理白名单，只会扫描你显式配置的 115 父目录 CID；不要配置整个媒体库根目录。
 - 本项目依赖 CMS、115、Telegram、Emby 等第三方接口，这些服务的行为可能变化。
 

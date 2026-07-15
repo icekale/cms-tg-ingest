@@ -67,6 +67,25 @@ class TaskBridgeTests(unittest.TestCase):
             self.assertEqual(task.status, TaskStatus.SUCCEEDED)
             self.assertIn("同步完成状态", [event["message"] for event in store.list_events(task.id)])
 
+    def test_early_source_cleanup_does_not_mark_task_completed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            row = {
+                "share_code": "abc",
+                "receive_code": "",
+                "url": "https://115cdn.com/s/abc",
+                "status": "done",
+                "own_share_code": "own",
+                "share_alias_name": "asset-1-abcd",
+                "share_validation_status": "valid",
+                "cleanup_status": "deleted",
+            }
+
+            task = sync_task_from_submission(store, row)
+
+            self.assertEqual(task.current_stage, TaskStage.SHARE_VALIDATED)
+            self.assertEqual(task.status, TaskStatus.SUCCEEDED)
+
     def test_record_failure_works_with_link_key_dict(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

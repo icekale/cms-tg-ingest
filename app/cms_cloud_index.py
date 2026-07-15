@@ -16,6 +16,16 @@ class CmsCloudDataIndex:
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
 
+    def has_file_id(self, file_id: str) -> bool:
+        file_id = str(file_id or "").strip()
+        if not file_id or not self.db_path.is_file():
+            return False
+        try:
+            with sqlite3.connect(f"{self.db_path.resolve().as_uri()}?mode=ro", uri=True) as conn:
+                return conn.execute("SELECT 1 FROM cloud_data WHERE fid = ? LIMIT 1", (file_id,)).fetchone() is not None
+        except (OSError, sqlite3.Error):
+            return False
+
     def folder_for_direct_strm(self, source: Path, tmdb_id: str) -> dict[str, str] | None:
         tmdb_id = str(tmdb_id or "").strip()
         if not tmdb_id or not self.db_path.is_file() or not source.is_dir():

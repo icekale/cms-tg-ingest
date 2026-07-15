@@ -65,6 +65,14 @@ class CmsCloudDataIndexTests(unittest.TestCase):
 
             self.assertIsNone(folder)
 
+    def test_reports_whether_file_id_is_still_indexed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._db(tmp)
+            index = CmsCloudDataIndex(db_path)
+
+            self.assertTrue(index.has_file_id("series"))
+            self.assertFalse(index.has_file_id("missing"))
+
     def test_prefers_the_most_recent_direct_strm_in_an_existing_series_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._db(tmp)

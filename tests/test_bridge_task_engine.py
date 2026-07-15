@@ -1,3 +1,4 @@
+import json
 import tempfile
 import os
 import time
@@ -15,6 +16,8 @@ class FakeCms:
         self.plain_share_down_calls = []
         self.auto_organize_calls = 0
         self.share_sync_calls = []
+        self.playback_results = []
+        self.playback_calls = []
 
     def add_share_down(self, share_code, receive_code, *args, **kwargs):
         self.plain_share_down_calls.append((share_code, receive_code, args, kwargs))
@@ -25,6 +28,10 @@ class FakeCms:
     def add_share115_sync_task(self, own_code, own_pwd, cid, local_path):
         self.share_sync_calls.append((own_code, own_pwd, cid, local_path))
 
+    def probe_strm_url(self, url):
+        self.playback_calls.append(url)
+        return self.playback_results.pop(0) if self.playback_results else True
+
 
 class FakeP115:
     def __init__(self):
@@ -32,6 +39,9 @@ class FakeP115:
         self.folder = None
         self.created_shares = []
         self.find_organized_calls = []
+        self.renamed = []
+        self.share_statuses = []
+        self.files_by_parent = {}
 
     def receive_share_to_cid(self, share_code, receive_code, receive_cid):
         self.received.append((share_code, receive_code, receive_cid))
@@ -43,11 +53,24 @@ class FakeP115:
 
     def create_long_share(self, file_id):
         self.created_shares.append(file_id)
+        suffix = len(self.created_shares)
         return {
-            "share_code": "owncode",
+            "share_code": "owncode" if suffix == 1 else f"owncode{suffix}",
             "receive_code": "ownpwd",
-            "share_url": "https://115.com/s/owncode?password=ownpwd",
+            "share_url": f"https://115.com/s/owncode{'' if suffix == 1 else suffix}?password=ownpwd",
         }
+
+    def rename_file(self, file_id, file_name):
+        self.renamed.append((str(file_id), str(file_name)))
+        return {"state": True}
+
+    def inspect_share(self, share_code, receive_code):
+        if self.share_statuses:
+            return self.share_statuses.pop(0)
+        return {"available": True, "share_state": "0", "have_vio_file": False}
+
+    def list_files(self, parent_id, limit=100):
+        return list(self.files_by_parent.get(str(parent_id), []))
 
 
 class FakeTelegram:
@@ -161,13 +184,17 @@ class FakeTmdbHintResolver(FakeTmdbResolver):
 
 
 class FakeCmsCloudIndex:
-    def __init__(self, folder=None):
+    def __init__(self, folder=None, indexed_file_ids=None):
         self.folder = folder
         self.calls = []
+        self.indexed_file_ids = set(indexed_file_ids or [])
 
     def folder_for_direct_strm(self, source, tmdb_id):
         self.calls.append((Path(source), tmdb_id))
         return self.folder
+
+    def has_file_id(self, file_id):
+        return str(file_id) in self.indexed_file_ids
 
 
 class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
@@ -1116,7 +1143,146 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
             self.assertEqual(self.p115.created_shares, [])
 
-    def test_own_share_stage_deletes_115_source_immediately_after_share_created(self):
+    def test_share_alias_stage_renames_root_and_persists_canonical_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._self_share_row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_phase="organized_found",
+                own_share_code="",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.SHARE_ALIAS_PREPARED,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            manifest = json.loads(stored["canonical_manifest_json"])
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertTrue(stored["share_alias_name"].startswith(f"asset-{task.id}-"))
+            self.assertEqual(self.p115.renamed, [("folder-id", stored["share_alias_name"])])
+            self.assertEqual(manifest["root_name"], "S-双喜-2025-[tmdb=123456]")
+            self.assertEqual(manifest["category"], "华语电影")
+            self.assertEqual(manifest["tmdb_id"], "123456")
+            self.assertEqual(manifest["entries"], [])
+
+    def test_share_alias_stage_keeps_direct_file_fallback_when_folder_is_gone(self):
+        class FolderGoneP115(FakeP115):
+            def rename_file(self, file_id, file_name):
+                raise RuntimeError("分享的文件(夹)已被移动或删除")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            workflow.p115 = FolderGoneP115()
+            row = self._self_share_row()
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.SHARE_ALIAS_PREPARED,
+                {
+                    "submission_id": row["id"],
+                    "organized_folder": {
+                        "file_id": "folder-id",
+                        "file_name": row["own_share_file_name"],
+                        "direct_file_id": "episode-id",
+                        "direct_relative_path": "Season 03/Episode 02.strm",
+                    },
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertTrue(result.metadata["direct_file_share_fallback"])
+            self.assertFalse(stored["share_alias_name"])
+
+    def test_share_validation_upgrades_violation_warning_to_neutral_video_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._self_share_row(title="T-特洛伊-2004-[tmdb=652]", category="欧美电影", tmdb_id="652")
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_phase="own_share_created",
+                share_alias_name="asset-1-folder",
+                share_alias_level=1,
+                canonical_manifest_json=json.dumps(
+                    {
+                        "version": 1,
+                        "root_name": row["own_share_file_name"],
+                        "alias_name": "asset-1-folder",
+                        "category": "欧美电影",
+                        "tmdb_id": "652",
+                        "entries": [],
+                    },
+                    ensure_ascii=False,
+                ),
+            ) or row
+            self.p115.share_statuses = [
+                {"available": True, "share_state": "0", "have_vio_file": True},
+            ]
+            self.p115.files_by_parent = {
+                "folder-id": [{"cid": "season-id", "n": "Season 03"}],
+                "season-id": [{"fid": "episode-id", "n": "Troy.S03E02.2160p.mkv"}],
+            }
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.SHARE_VALIDATED,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            manifest = json.loads(stored["canonical_manifest_json"])
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(stored["share_alias_level"], 2)
+            self.assertEqual(self.p115.renamed[-1][0], "episode-id")
+            self.assertIn("S03E02", self.p115.renamed[-1][1])
+            self.assertEqual(stored["own_share_code"], "owncode")
+            self.assertEqual(manifest["entries"][0]["canonical_path"], "Season 03/Troy.S03E02.2160p.mkv")
+            self.assertTrue(manifest["entries"][0]["alias_path"].endswith(".mkv"))
+
+    def test_level_two_violation_warning_is_accepted_as_risk_when_share_is_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = FakeCleanupClient()
+            workflow = self._workflow(tmp, cleanup_client=cleanup)
+            row = self._self_share_row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                share_alias_name="asset-1-folder",
+                share_alias_level=2,
+                share_validation_status="pending",
+            ) or row
+            self.p115.share_statuses = [
+                {"available": True, "share_state": "0", "have_vio_file": True},
+            ]
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.SHARE_VALIDATED,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(stored["share_validation_status"], "warning")
+            self.assertEqual(cleanup.deleted, ["folder-id"])
+            self.assertEqual(stored["cleanup_status"], "deleted")
+
+    def test_own_share_stage_waits_for_validation_before_deleting_115_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             cleanup = FakeCleanupClient()
             workflow = self._workflow(tmp, cleanup_client=cleanup)
@@ -1139,10 +1305,70 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             stored = self.submissions.find_by_id(int(row["id"]))
 
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
-            self.assertEqual(cleanup.deleted, ["folder-id"])
+            self.assertEqual(cleanup.deleted, [])
             self.assertEqual(stored["own_share_code"], "owncode")
+            self.assertNotEqual(stored["cleanup_status"], "deleted")
+
+            self.tasks.enqueue_task(task.id, TaskStage.SHARE_VALIDATED, next_run_at=1.0)
+            validation_task = self.tasks.claim_next_runnable("worker-2", now=1.0)
+            validated = workflow.run_stage(validation_task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(validated.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(cleanup.deleted, ["folder-id"])
             self.assertEqual(stored["cleanup_status"], "deleted")
-            self.assertEqual(result.metadata["cleanup_status"], "deleted")
+            self.assertEqual(self.cms.auto_organize_calls, 1)
+            self.assertTrue(validated.metadata["cleanup_sync_requested"])
+
+    def test_strm_ready_restores_canonical_name_and_does_not_move_when_playback_probe_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            library_root = Path(tmp) / "library" / "movies"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"欧美电影": library_root}),
+            )
+            row = self._self_share_row(title="T-特洛伊-2004-[tmdb=652]", category="欧美电影", tmdb_id="652")
+            alias_name = "asset-1-folder"
+            alias_video = "asset-1-001.mkv"
+            manifest = {
+                "version": 1,
+                "root_name": row["own_share_file_name"],
+                "alias_name": alias_name,
+                "category": "欧美电影",
+                "tmdb_id": "652",
+                "entries": [
+                    {
+                        "file_id": "video-id",
+                        "canonical_path": "Troy.2004.2160p.mkv",
+                        "alias_path": alias_video,
+                    }
+                ],
+            }
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                share_alias_name=alias_name,
+                share_alias_level=2,
+                canonical_manifest_json=json.dumps(manifest, ensure_ascii=False),
+                share_validation_status="warning",
+            ) or row
+            source = self.config.strm_root / alias_name
+            self._write_strm(source, name="asset-1-001.strm")
+            self.cms.playback_results = [False]
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.STRM_READY,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIn("播放验证", result.message)
+            self.assertTrue((source / "Troy.2004.2160p.strm").exists())
+            self.assertFalse((source / "asset-1-001.strm").exists())
+            self.assertFalse((library_root / row["own_share_file_name"]).exists())
 
     def test_strm_ready_stage_defers_until_own_share_strm_source_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1558,6 +1784,85 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["source_path"], str(bridge.safe_resolve(source)))
             self.assertEqual(result.metadata["category"], "华语电影")
             self.assertEqual(len(self.telegram.messages), 1)
+
+    def test_cms_delete_settled_stage_waits_before_move_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            library_root = Path(tmp) / "library" / "movies"
+            cms_index = FakeCmsCloudIndex(indexed_file_ids={"folder-id"})
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"华语电影": library_root}),
+                cms_cloud_index=cms_index,
+            )
+            row = self._self_share_row()
+            row = self.submissions.update_cleanup(int(row["id"]), "deleted", file_id="folder-id") or row
+            source = self.config.strm_root / row["own_share_file_name"]
+            self._write_strm(source)
+            task = self._claim_task("abc", "1234", TaskStage.CMS_DELETE_SETTLED, {"submission_id": row["id"]}, row["id"])
+
+            waiting = workflow.run_stage(task)
+            cms_index.indexed_file_ids.clear()
+            settled = workflow.run_stage(task)
+            self.tasks.enqueue_task(task.id, TaskStage.MOVED, next_run_at=1.0)
+            move_task = self.tasks.claim_next_runnable("worker-2", now=1.0)
+            moved = workflow.run_stage(move_task)
+
+            self.assertEqual(waiting.outcome, StageOutcome.DEFER)
+            self.assertIn("CMS 清理源目录", waiting.message)
+            self.assertEqual(settled.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(moved.outcome, StageOutcome.COMPLETE)
+            self.assertFalse(source.exists())
+            self.assertTrue((library_root / row["own_share_file_name"] / "movie.strm").exists())
+
+    def test_alias_share_strm_moves_into_canonical_library_folder_after_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            library_root = Path(tmp) / "library" / "movies"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"欧美电影": library_root}),
+            )
+            row = self._self_share_row(title="T-特洛伊-2004-[tmdb=652]", category="欧美电影", tmdb_id="652")
+            alias_name = "asset-1-folder"
+            manifest = {
+                "version": 1,
+                "root_name": row["own_share_file_name"],
+                "alias_name": alias_name,
+                "category": "欧美电影",
+                "tmdb_id": "652",
+                "entries": [],
+            }
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                share_alias_name=alias_name,
+                share_alias_level=1,
+                canonical_manifest_json=json.dumps(manifest, ensure_ascii=False),
+                share_validation_status="valid",
+            ) or row
+            source = self.config.strm_root / alias_name
+            self._write_strm(source)
+            ready_task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.STRM_READY,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+
+            ready = workflow.run_stage(ready_task)
+            self.tasks.enqueue_task(ready_task.id, TaskStage.CMS_DELETE_SETTLED, next_run_at=1.0)
+            settle_task = self.tasks.claim_next_runnable("worker-2", now=1.0)
+            settled = workflow.run_stage(settle_task)
+            self.tasks.enqueue_task(ready_task.id, TaskStage.MOVED, next_run_at=1.0)
+            move_task = self.tasks.claim_next_runnable("worker-3", now=1.0)
+            moved = workflow.run_stage(move_task)
+
+            canonical_dest = library_root / row["own_share_file_name"]
+            self.assertEqual(ready.outcome, StageOutcome.COMPLETE)
+            self.assertTrue(ready.metadata["share_playback_validated"])
+            self.assertEqual(settled.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(moved.outcome, StageOutcome.COMPLETE)
+            self.assertTrue((canonical_dest / "movie.strm").is_file())
+            self.assertFalse((library_root / alias_name).exists())
 
     def test_moved_stage_keeps_authoritative_cms_category_even_when_same_tmdb_exists_elsewhere(self):
         with tempfile.TemporaryDirectory() as tmp:

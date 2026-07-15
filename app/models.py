@@ -12,9 +12,12 @@ class TaskStage(str, Enum):
     ORGANIZING = "organizing"
     RECOGNIZING = "recognizing"
     ORGANIZED = "organized"
+    SHARE_ALIAS_PREPARED = "share_alias_prepared"
     OWN_SHARE_CREATED = "own_share_created"
+    SHARE_VALIDATED = "share_validated"
     SHARE_SYNC_SUBMITTED = "share_sync_submitted"
     STRM_READY = "strm_ready"
+    CMS_DELETE_SETTLED = "cms_delete_settled"
     MOVED = "moved"
     EMBY_CONFIRMED = "emby_confirmed"
     CLEANED = "cleaned"
@@ -111,12 +114,15 @@ class TaskSnapshot:
 _SUCCESS_FLOW = {
     TaskStage.RECEIVED: TaskStage.ORGANIZING,
     TaskStage.ORGANIZING: TaskStage.RECOGNIZING,
-    TaskStage.RECOGNIZING: TaskStage.OWN_SHARE_CREATED,
+    TaskStage.RECOGNIZING: TaskStage.SHARE_ALIAS_PREPARED,
     TaskStage.CMS_SUBMITTED: TaskStage.ORGANIZED,
-    TaskStage.ORGANIZED: TaskStage.OWN_SHARE_CREATED,
-    TaskStage.OWN_SHARE_CREATED: TaskStage.SHARE_SYNC_SUBMITTED,
+    TaskStage.ORGANIZED: TaskStage.SHARE_ALIAS_PREPARED,
+    TaskStage.SHARE_ALIAS_PREPARED: TaskStage.OWN_SHARE_CREATED,
+    TaskStage.OWN_SHARE_CREATED: TaskStage.SHARE_VALIDATED,
+    TaskStage.SHARE_VALIDATED: TaskStage.SHARE_SYNC_SUBMITTED,
     TaskStage.SHARE_SYNC_SUBMITTED: TaskStage.STRM_READY,
-    TaskStage.STRM_READY: TaskStage.MOVED,
+    TaskStage.STRM_READY: TaskStage.CMS_DELETE_SETTLED,
+    TaskStage.CMS_DELETE_SETTLED: TaskStage.MOVED,
     TaskStage.MOVED: TaskStage.EMBY_CONFIRMED,
     TaskStage.EMBY_CONFIRMED: TaskStage.CLEANED,
 }

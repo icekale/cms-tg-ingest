@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,7 +11,16 @@ from typing import Any
 
 from app.clients.cms import CmsClient
 from app.cms_cloud_index import CmsCloudDataIndex
-from app.clients.p115 import P115RiskControlError, P115WebClient, category_for_115_parent_id, is_p115_risk_control_message
+from app.clients.p115 import (
+    P115RiskControlError,
+    P115ShareUnavailableError,
+    P115WebClient,
+    category_for_115_parent_id,
+    is_p115_risk_control_message,
+    p115_file_id,
+    p115_file_name,
+    p115_is_folder,
+)
 from app.config import MovePlan, SelfShareConfig, default_library_roots, is_relative_to, safe_resolve
 from app.media.classify import (
     apply_tmdb_hint_resolution,
@@ -33,6 +44,7 @@ from app.media.strm import (
     merge_self_share_strm_folder,
     move_config_for_workflow_source,
     plan_strm_move,
+    restore_canonical_strm_paths,
     restore_missing_self_share_library_folder,
     validate_self_share_strm_destination,
     validate_self_share_strm_source,
@@ -42,6 +54,7 @@ from app.task_runner import StageResult
 
 LOG = logging.getLogger("cms-tg-ingest")
 OPENAI_CATEGORY_LABELS = ["华语电影", "欧美电影", "亚洲电影", "动漫电影", "国产电视", "外国电视", "番剧", "纪录片"]
+VIDEO_SUFFIXES = {".mkv", ".mp4", ".ts", ".iso", ".avi", ".mov", ".wmv", ".m2ts"}
 
 
 @dataclass(frozen=True)
@@ -348,12 +361,18 @@ class BridgeSelfShareTaskWorkflow:
             return self._stage_organizing(task)
         if task.current_stage == TaskStage.RECOGNIZING:
             return self._stage_recognizing(task)
+        if task.current_stage == TaskStage.SHARE_ALIAS_PREPARED:
+            return self._stage_share_alias_prepared(task)
         if task.current_stage == TaskStage.OWN_SHARE_CREATED:
             return self._stage_own_share_created(task)
+        if task.current_stage == TaskStage.SHARE_VALIDATED:
+            return self._stage_share_validated(task)
         if task.current_stage == TaskStage.SHARE_SYNC_SUBMITTED:
             return self._stage_share_sync_submitted(task)
         if task.current_stage == TaskStage.STRM_READY:
             return self._stage_strm_ready(task)
+        if task.current_stage == TaskStage.CMS_DELETE_SETTLED:
+            return self._stage_cms_delete_settled(task)
         if task.current_stage == TaskStage.MOVED:
             return self._stage_moved(task)
         if task.current_stage == TaskStage.EMBY_CONFIRMED:
@@ -690,6 +709,54 @@ class BridgeSelfShareTaskWorkflow:
                 return name
         return ""
 
+    def _stage_share_alias_prepared(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        file_id = str(task.metadata.get("own_share_file_id") or row.get("own_share_file_id") or "").strip()
+        canonical_name = str(row.get("own_share_file_name") or "").strip()
+        if not file_id or not canonical_name:
+            return StageResult.failed("缺少 CMS 整理后的文件夹", error_type="organized_folder_missing")
+        alias_name = str(row.get("share_alias_name") or "").strip()
+        if alias_name:
+            return StageResult.complete("分享目录别名已准备", self._own_share_metadata(row))
+        short_id = hashlib.sha1(f"{task.id}:{file_id}".encode("utf-8")).hexdigest()[:8]
+        alias_name = f"asset-{task.id}-{short_id}"
+        recognition = self._recognition_from_row(row)
+        manifest = {
+            "version": 1,
+            "root_name": canonical_name,
+            "alias_name": alias_name,
+            "category": final_category_for_move(row, recognition),
+            "tmdb_id": expected_task_tmdb_id(recognition, row),
+            "entries": [],
+        }
+        try:
+            self.p115.rename_file(file_id, alias_name)
+        except RuntimeError as exc:
+            direct_file_id, direct_relative_path = self._direct_file_share_details(task)
+            if not direct_file_id or not self._is_gone_share_source_error(exc):
+                raise
+            metadata = self._own_share_metadata(row)
+            metadata.update(
+                {
+                    "direct_file_share_fallback": True,
+                    "direct_file_share_file_id": direct_file_id,
+                    "direct_file_share_relative_path": direct_relative_path,
+                }
+            )
+            return StageResult.complete("CMS 整理目录已移动，保留单集文件分享兜底", metadata)
+        row = self.store.update_self_share(
+            int(row["id"]),
+            workflow_phase="share_alias_prepared",
+            canonical_manifest_json=json.dumps(manifest, ensure_ascii=False, sort_keys=True),
+            share_alias_name=alias_name,
+            share_alias_level=1,
+            share_validation_status="pending",
+            share_validation_error="",
+        ) or row
+        return StageResult.complete("已准备中性分享目录名", self._own_share_metadata(row))
+
     def _stage_own_share_created(self, task):
         row = self._submission_row(task)
         if not row:
@@ -731,14 +798,6 @@ class BridgeSelfShareTaskWorkflow:
                 own_share_url=share.get("share_url"),
             ) or row
             created = True
-        if self.cleanup_client:
-            row, cleanup_line = cleanup_own_share_source(self.store, row, self.cleanup_client)
-            if str(row.get("cleanup_status") or "").lower() == "error":
-                return StageResult.failed(
-                    str(row.get("cleanup_error") or cleanup_line or "115 转存源删除失败"),
-                    error_type="cleanup_failed",
-                    metadata=self._own_share_metadata(row),
-                )
         message = "已创建自有 115 分享" if created else "已存在自有 115 分享"
         metadata = self._own_share_metadata(row)
         if direct_file_share:
@@ -750,6 +809,126 @@ class BridgeSelfShareTaskWorkflow:
                 }
             )
         return StageResult.complete(message, metadata)
+
+    def _stage_share_validated(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        if int(row.get("share_alias_level") or 0) >= 2 and str(row.get("share_validation_status") or "") == "aliasing_files":
+            row = self._complete_level_two_alias(task, row)
+            return StageResult.defer("已完成文件别名并重建分享，等待 115 状态稳定", 5, self._own_share_metadata(row))
+        own_code = str(row.get("own_share_code") or "").strip()
+        own_pwd = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+        if not own_code:
+            return StageResult.failed("缺少自有分享码", error_type="own_share_missing")
+        try:
+            status = self.p115.inspect_share(own_code, own_pwd)
+        except P115ShareUnavailableError as exc:
+            if int(row.get("share_alias_level") or 0) < 2:
+                upgraded = self._prepare_level_two_alias(task, row)
+                return StageResult.defer("分享被 115 拒绝，已升级文件别名并重建分享", 5, self._own_share_metadata(upgraded))
+            row = self.store.update_self_share(
+                int(row["id"]),
+                share_validation_status="invalid",
+                share_validation_error=str(exc)[:200],
+            ) or row
+            return StageResult.needs_action("中性文件名分享仍被 115 拒绝，已保留现有 STRM", self._own_share_metadata(row))
+        have_vio_file = bool(status.get("have_vio_file"))
+        if have_vio_file and int(row.get("share_alias_level") or 0) < 2:
+            upgraded = self._prepare_level_two_alias(task, row)
+            return StageResult.defer("分享含风险标记，已升级文件别名并重建分享", 5, self._own_share_metadata(upgraded))
+        validation_status = "warning" if have_vio_file else "valid"
+        row = self.store.update_self_share(
+            int(row["id"]),
+            workflow_phase="share_validated",
+            share_validation_status=validation_status,
+            share_validation_error="" if not have_vio_file else "115 标记 have_vio_file，实际播放仍需验证",
+        ) or row
+        if self.cleanup_client:
+            row, cleanup_line = cleanup_own_share_source(self.store, row, self.cleanup_client)
+            if str(row.get("cleanup_status") or "").lower() == "error":
+                return StageResult.failed(
+                    str(row.get("cleanup_error") or cleanup_line or "115 转存源删除失败"),
+                    error_type="cleanup_failed",
+                    metadata=self._own_share_metadata(row),
+                )
+        metadata = self._own_share_metadata(row)
+        metadata["share_have_vio_file"] = have_vio_file
+        if str(row.get("cleanup_status") or "").lower() == "deleted" and not task.metadata.get("cleanup_sync_requested"):
+            self.cms.run_auto_organize()
+            metadata["cleanup_sync_requested"] = True
+        message = "自有分享验证通过" if not have_vio_file else "自有分享当前有效，存在 115 风险标记"
+        return StageResult.complete(message, metadata)
+
+    def _prepare_level_two_alias(self, task, row: dict[str, Any]) -> dict[str, Any]:
+        manifest = self._canonical_manifest(row)
+        if not manifest.get("entries"):
+            entries = []
+            queue: list[tuple[str, Path]] = [(str(row.get("own_share_file_id") or ""), Path())]
+            list_calls = 0
+            file_index = 0
+            while queue:
+                parent_id, relative_parent = queue.pop(0)
+                list_calls += 1
+                if list_calls > 25:
+                    raise RuntimeError("115 分享目录层级过多，停止文件别名扫描")
+                for item in sorted(self.p115.list_files(parent_id, limit=500), key=p115_file_name):
+                    item_id = p115_file_id(item)
+                    name = p115_file_name(item)
+                    if not item_id or not name:
+                        continue
+                    canonical_path = relative_parent / name
+                    if p115_is_folder(item):
+                        queue.append((item_id, canonical_path))
+                        continue
+                    if Path(name).suffix.lower() not in VIDEO_SUFFIXES:
+                        continue
+                    file_index += 1
+                    episode = re.search(r"(?i)(S\d{1,2}E\d{1,3})", name)
+                    episode_part = f"-{episode.group(1).upper()}" if episode else ""
+                    alias_name = f"asset-{task.id}-{file_index:03d}{episode_part}{Path(name).suffix.lower()}"
+                    entries.append(
+                        {
+                            "file_id": item_id,
+                            "canonical_path": canonical_path.as_posix(),
+                            "alias_path": (relative_parent / alias_name).as_posix(),
+                        }
+                    )
+            manifest["entries"] = entries
+        row = self.store.update_self_share(
+            int(row["id"]),
+            canonical_manifest_json=json.dumps(manifest, ensure_ascii=False, sort_keys=True),
+            share_alias_level=2,
+            share_validation_status="aliasing_files",
+        ) or row
+        return self._complete_level_two_alias(task, row)
+
+    def _complete_level_two_alias(self, task, row: dict[str, Any]) -> dict[str, Any]:
+        manifest = self._canonical_manifest(row)
+        for entry in manifest.get("entries") or []:
+            file_id = str(entry.get("file_id") or "").strip()
+            alias_name = Path(str(entry.get("alias_path") or "")).name
+            if file_id and alias_name:
+                self.p115.rename_file(file_id, alias_name)
+        share = self.p115.create_long_share(str(row.get("own_share_file_id") or ""))
+        return self.store.update_self_share(
+            int(row["id"]),
+            workflow_phase="own_share_created",
+            own_share_code=share.get("share_code"),
+            own_share_receive_code=share.get("receive_code"),
+            own_share_url=share.get("share_url"),
+            share_sync_status="",
+            share_validation_status="pending",
+            share_validation_error="",
+        ) or row
+
+    @staticmethod
+    def _canonical_manifest(row: dict[str, Any]) -> dict[str, Any]:
+        try:
+            manifest = json.loads(row.get("canonical_manifest_json") or "{}")
+        except (TypeError, ValueError):
+            manifest = {}
+        return manifest if isinstance(manifest, dict) else {}
 
     def _stage_share_sync_submitted(self, task):
         row = self._submission_row(task)
@@ -838,6 +1017,9 @@ class BridgeSelfShareTaskWorkflow:
                 min(self.self_share_config.auto_organize_retry_seconds or 30, 5),
                 metadata,
             )
+        restored = restore_canonical_strm_paths(source, row)
+        if restored:
+            metadata["canonical_strm_paths_restored"] = restored
         metadata["source_path"] = str(source)
         issue = validate_self_share_strm_source(source, row)
         if issue:
@@ -850,7 +1032,39 @@ class BridgeSelfShareTaskWorkflow:
                     error=issue,
                 )
             return StageResult.failed(issue, error_type="invalid_strm_source", metadata=metadata)
-        return StageResult.complete("已找到自有分享 STRM 源目录", metadata)
+        if not task.metadata.get("share_playback_validated") and hasattr(self.cms, "probe_strm_url"):
+            strm_files = sorted(source.rglob("*.strm"))
+            try:
+                strm_url = strm_files[0].read_text(encoding="utf-8", errors="replace").strip() if strm_files else ""
+                playback_ok = bool(strm_url and self.cms.probe_strm_url(strm_url))
+            except Exception:
+                LOG.debug("Self-share STRM playback probe failed", exc_info=True)
+                playback_ok = False
+            if not playback_ok:
+                return StageResult.defer("等待自有分享 STRM 播放验证", 15, metadata)
+            metadata["share_playback_validated"] = True
+        return StageResult.complete("已找到并验证自有分享 STRM 源目录", metadata)
+
+    def _stage_cms_delete_settled(self, task):
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        cleanup_file_id = str(row.get("cleanup_file_id") or row.get("own_share_file_id") or "").strip()
+        if (
+            str(row.get("cleanup_status") or "").lower() == "deleted"
+            and cleanup_file_id
+            and self.cms_cloud_index
+            and self.cms_cloud_index.has_file_id(cleanup_file_id)
+        ):
+            return StageResult.defer(
+                "等待 CMS 清理源目录同步完成",
+                min(self.self_share_config.auto_organize_retry_seconds or 30, 5),
+                {"submission_id": int(row["id"]), "cleanup_file_id": cleanup_file_id},
+            )
+        return StageResult.complete(
+            "CMS 源目录清理状态已稳定",
+            {"submission_id": int(row["id"]), "cleanup_file_id": cleanup_file_id, "cms_delete_settled": True},
+        )
 
     def _stage_moved(self, task):
         row = self._submission_row(task)
@@ -872,7 +1086,8 @@ class BridgeSelfShareTaskWorkflow:
             category = existing_category
             row = self.store.update_category(int(row["id"]), category, "selected") or row
         move_config = move_config_for_workflow_source(self.move_config, source, self.self_share_config)
-        plan = plan_strm_move(source, category, move_config)
+        canonical_name = str(self._canonical_manifest(row).get("root_name") or row.get("own_share_file_name") or "").strip()
+        plan = plan_strm_move(source, category, move_config, destination_name=canonical_name)
         metadata = {
             "submission_id": int(row["id"]),
             "source_path": str(plan.source_path) if plan.source_path else "",
@@ -1067,7 +1282,16 @@ class BridgeSelfShareTaskWorkflow:
         if not row or row.get("workflow_mode") != "self_share_sync":
             return False
         phase = str(row.get("workflow_phase") or "").strip()
-        if phase in {"received", "received_to_pending", "auto_organize_submitted", "organized_found", "own_share_created", "share_sync_submitted"}:
+        if phase in {
+            "received",
+            "received_to_pending",
+            "auto_organize_submitted",
+            "organized_found",
+            "share_alias_prepared",
+            "own_share_created",
+            "share_validated",
+            "share_sync_submitted",
+        }:
             return True
         return self._has_downstream_self_share_state(row)
 
@@ -1075,13 +1299,15 @@ class BridgeSelfShareTaskWorkflow:
         if not row:
             return False
         phase = str(row.get("workflow_phase") or "").strip()
-        if phase in {"organized_found", "own_share_created", "share_sync_submitted"}:
+        if phase in {"organized_found", "share_alias_prepared", "own_share_created", "share_validated", "share_sync_submitted"}:
             return True
         return any(
             row.get(key)
             for key in (
                 "own_share_file_id",
                 "own_share_code",
+                "share_alias_name",
+                "share_validation_status",
                 "share_sync_status",
                 "source_path",
                 "dest_path",
@@ -1151,12 +1377,16 @@ class BridgeSelfShareTaskWorkflow:
             "submission_id": int(row["id"]),
             "own_share_file_id": row.get("own_share_file_id"),
             "own_share_file_name": row.get("own_share_file_name"),
+            "share_alias_name": row.get("share_alias_name"),
+            "share_alias_level": row.get("share_alias_level"),
             "own_share_code": row.get("own_share_code"),
             "own_share_receive_code": row.get("own_share_receive_code"),
             "own_share_url": row.get("own_share_url"),
             "cleanup_status": row.get("cleanup_status"),
             "cleanup_file_id": row.get("cleanup_file_id"),
             "cleanup_error": row.get("cleanup_error"),
+            "share_validation_status": row.get("share_validation_status"),
+            "share_validation_error": row.get("share_validation_error"),
         }
 
     def _move_metadata(self, row: dict[str, Any], task_metadata: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import time
 from pathlib import Path
@@ -204,7 +205,12 @@ def category_from_existing_library_match(
     return category
 
 
-def plan_strm_move(source_path: Path | None, category: str, config: MoveConfig) -> MovePlan:
+def plan_strm_move(
+    source_path: Path | None,
+    category: str,
+    config: MoveConfig,
+    destination_name: str = "",
+) -> MovePlan:
     if not source_path:
         return MovePlan(status="skipped", reason="未找到 STRM 源目录", category=category)
     source = safe_resolve(source_path)
@@ -220,7 +226,7 @@ def plan_strm_move(source_path: Path | None, category: str, config: MoveConfig) 
             category=category,
             metadata=directory_stability_metadata(source, config.stable_seconds),
         )
-    dest = destination_for_category(category, source.name, config)
+    dest = destination_for_category(category, destination_name or source.name, config)
     if not dest:
         return MovePlan(status="skipped", reason=f"分类未映射到媒体库：{category}", source_path=source, category=category)
     if not is_under_any_root(dest, list(config.library_roots.values())):
@@ -604,13 +610,51 @@ def find_self_share_strm_source_dir(
     share_name: str,
 ) -> Path | None:
     move_config = MoveConfig(source_roots=[config.strm_root], library_roots={}, stable_seconds=0)
-    folder_name = str(row.get("own_share_file_name") or "").strip()
+    folder_name = str(row.get("share_alias_name") or row.get("own_share_file_name") or "").strip()
     if folder_name:
         candidate = safe_resolve(config.strm_root / folder_name)
         if candidate.exists() and has_strm_file(candidate):
             return candidate
         return None
     return find_strm_source_dir(move_config, recognition, share_name=share_name)
+
+
+def restore_canonical_strm_paths(source: Path, row: dict[str, Any]) -> int:
+    try:
+        manifest = json.loads(row.get("canonical_manifest_json") or "{}")
+    except (TypeError, ValueError):
+        return 0
+    if not isinstance(manifest, dict):
+        return 0
+    restored = 0
+    source = safe_resolve(source)
+    for entry in manifest.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        alias_path = Path(str(entry.get("alias_path") or ""))
+        canonical_path = Path(str(entry.get("canonical_path") or ""))
+        if alias_path.is_absolute() or canonical_path.is_absolute() or ".." in alias_path.parts or ".." in canonical_path.parts:
+            continue
+        alias_strm = safe_resolve(source / alias_path.with_suffix(".strm"))
+        canonical_strm = safe_resolve(source / canonical_path.with_suffix(".strm"))
+        if not is_relative_to(alias_strm, source) or not is_relative_to(canonical_strm, source) or not alias_strm.is_file():
+            continue
+        canonical_strm.parent.mkdir(parents=True, exist_ok=True)
+        alias_strm.replace(canonical_strm)
+        restored += 1
+    return restored
+
+
+def canonical_self_share_root_name(row: dict[str, Any]) -> str:
+    try:
+        manifest = json.loads(row.get("canonical_manifest_json") or "{}")
+    except (TypeError, ValueError):
+        manifest = {}
+    if isinstance(manifest, dict):
+        root_name = str(manifest.get("root_name") or "").strip()
+        if root_name:
+            return root_name
+    return str(row.get("own_share_file_name") or "").strip()
 
 
 def select_move_source_for_workflow(
@@ -675,12 +719,14 @@ def repair_stranded_self_share_moves(store: Any, move_config: MoveConfig, limit:
     repaired = 0
     for row in store.stranded_self_share_move_candidates(limit=max(1, int(limit))):
         category = category_for_self_share_row(row)
-        folder_name = str(row.get("own_share_file_name") or "").strip()
-        if not category or not folder_name:
+        source_name = str(row.get("share_alias_name") or row.get("own_share_file_name") or "").strip()
+        canonical_name = canonical_self_share_root_name(row)
+        if not category or not source_name or not canonical_name:
             continue
         for source_root in move_config.source_roots:
-            source = safe_resolve(Path(source_root) / folder_name)
-            plan = plan_strm_move(source, category, move_config)
+            source = safe_resolve(Path(source_root) / source_name)
+            restore_canonical_strm_paths(source, row)
+            plan = plan_strm_move(source, category, move_config, destination_name=canonical_name)
             if plan.status in {"pending", "conflict"}:
                 updated = merge_self_share_strm_folder(plan, store, row)
                 if updated.get("move_status") == "moved":
@@ -716,17 +762,19 @@ def restore_missing_self_share_library_folder(
         return "ready", metadata
     metadata["destination_validation_error"] = destination_issue
     category = category_for_self_share_row(row)
-    folder_name = str(row.get("own_share_file_name") or "").strip()
-    if not category or not folder_name:
+    canonical_name = canonical_self_share_root_name(row)
+    source_name = str(row.get("share_alias_name") or row.get("own_share_file_name") or "").strip()
+    if not category or not canonical_name or not source_name:
         return "skipped", metadata
-    source = safe_resolve(self_share_config.strm_root / folder_name)
+    source = safe_resolve(self_share_config.strm_root / source_name)
+    restore_canonical_strm_paths(source, row)
     restore_move_config = MoveConfig(
         source_roots=[self_share_config.strm_root],
         library_roots=move_config.library_roots,
         conflict_policy=move_config.conflict_policy,
         stable_seconds=move_config.stable_seconds,
     )
-    plan = plan_strm_move(source, category, restore_move_config)
+    plan = plan_strm_move(source, category, restore_move_config, destination_name=canonical_name)
     metadata.update(
         {
             "source_path": str(plan.source_path or source),

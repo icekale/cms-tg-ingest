@@ -145,10 +145,16 @@ def explain_task_slowness(task: TaskSnapshot, *, now: float) -> str:
     stage = task.current_stage
     if stage == TaskStage.ORGANIZING or "CMS 整理" in reason:
         return "等 CMS 整理"
+    if stage == TaskStage.SHARE_ALIAS_PREPARED:
+        return "等 115 准备分享别名"
+    if stage == TaskStage.SHARE_VALIDATED:
+        return "等 115 分享状态验证"
     if stage == TaskStage.STRM_READY or "STRM" in reason:
         if "稳定" in reason:
             return "等分享 STRM 文件稳定"
         return "等分享 STRM 生成"
+    if stage == TaskStage.CMS_DELETE_SETTLED:
+        return "等 CMS 清理源目录落库"
     if stage == TaskStage.EMBY_CONFIRMED or "Emby" in reason:
         return "等 Emby 入库"
     if reason:

@@ -59,4 +59,7 @@ class TaskEngineTests(unittest.TestCase):
         self.assertEqual(stage_display_name(TaskStage.CMS_SUBMITTED), "提交 CMS")
         self.assertEqual(stage_display_name(TaskStage.ORGANIZING), "CMS 整理")
         self.assertEqual(stage_display_name(TaskStage.RECOGNIZING), "识别分类")
+        self.assertEqual(stage_display_name(TaskStage.SHARE_ALIAS_PREPARED), "准备分享别名")
+        self.assertEqual(stage_display_name(TaskStage.SHARE_VALIDATED), "验证自有分享")
+        self.assertEqual(stage_display_name(TaskStage.CMS_DELETE_SETTLED), "等待 CMS 清理落库")
         self.assertEqual(stage_display_name(TaskStage.EMBY_CONFIRMED), "Emby 确认")
