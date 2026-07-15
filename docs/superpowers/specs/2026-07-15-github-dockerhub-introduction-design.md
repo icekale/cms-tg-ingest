@@ -8,7 +8,7 @@
 
 短描述统一为：
 
-> CMS 的 115 分享自动入库外挂：Telegram 裸链接提交、自有分享 STRM、Emby 入库确认与安全清理。
+> CMS 115 分享自动入库外挂：TG 裸链接、自有分享 STRM、Emby 确认与安全清理。
 
 ## GitHub README
 

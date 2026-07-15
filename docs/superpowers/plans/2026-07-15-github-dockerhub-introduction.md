@@ -70,7 +70,7 @@ Run:
 
 ```bash
 gh repo edit icekale/cms-tg-ingest \
-  --description "CMS 的 115 分享自动入库外挂：Telegram 裸链接提交、自有分享 STRM、Emby 入库确认与安全清理" \
+  --description "CMS 115 分享自动入库外挂：TG 裸链接、自有分享 STRM、Emby 确认与安全清理" \
   --homepage "https://hub.docker.com/r/icekale/cms-tg-ingest"
 ```
 
@@ -96,7 +96,7 @@ Expected: description 与统一定位完全一致，homepageUrl 指向 Docker Hu
 Overview 必须包含：产品用途、六步核心流程、四项安全保障、`docker pull`/Compose 快速开始、依赖项、GitHub 文档链接。短描述使用：
 
 ```text
-CMS 的 115 分享自动入库外挂：Telegram 裸链接提交、自有分享 STRM、Emby 入库确认与安全清理
+CMS 115 分享自动入库外挂：TG 裸链接、自有分享 STRM、Emby 确认与安全清理
 ```
 
 - [ ] **Step 2: 通过 Docker Hub API 更新介绍**
