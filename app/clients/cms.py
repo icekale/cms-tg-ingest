@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -9,6 +10,23 @@ from app.clients.http import HttpJson
 from app.config import Config
 
 LOG = logging.getLogger("cms-tg-ingest")
+
+
+class CmsSharePlaybackUnavailableError(RuntimeError):
+    pass
+
+
+def normalize_strm_url(url: str) -> str:
+    parts = urllib.parse.urlsplit(str(url))
+    return urllib.parse.urlunsplit(
+        (
+            parts.scheme,
+            parts.netloc,
+            urllib.parse.quote(parts.path, safe="/%:@"),
+            urllib.parse.quote(parts.query, safe="=&/?%:@"),
+            urllib.parse.quote(parts.fragment, safe="/%:@"),
+        )
+    )
 
 
 def iter_items(data: Any) -> list[dict]:
@@ -120,12 +138,19 @@ class CmsClient:
 
     def probe_strm_url(self, url: str) -> bool:
         request = urllib.request.Request(
-            str(url),
+            normalize_strm_url(url),
             headers={"Range": "bytes=0-0", "User-Agent": "cms-tg-ingest/1.0"},
             method="GET",
         )
-        with urllib.request.urlopen(request, timeout=self.config.http_timeout) as response:
-            return int(getattr(response, "status", response.getcode())) in {200, 206}
+        try:
+            with urllib.request.urlopen(request, timeout=self.config.http_timeout) as response:
+                return int(getattr(response, "status", response.getcode())) in {200, 206}
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", "replace")
+            exc.close()
+            if exc.code == 500 and "获取分享直连失败" in body:
+                raise CmsSharePlaybackUnavailableError("CMS 获取分享直连失败") from exc
+            raise
 
     def auto_organize_excluded_parent_ids(self) -> set[str]:
         resp = self._authorized("/api/config/auto_organize", method="GET")

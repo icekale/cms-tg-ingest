@@ -1,11 +1,16 @@
 import importlib.util
+import io
 import json
 import os
 import sys
 import tempfile
 import time
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest.mock import patch
+
+from app.clients import cms as cms_client
 
 spec = importlib.util.spec_from_file_location("bridge", Path(__file__).resolve().parents[1] / "bridge.py")
 bridge = importlib.util.module_from_spec(spec)
@@ -80,6 +85,67 @@ class P115WebClientTests(unittest.TestCase):
         self.assertEqual(http.calls[0][0], "https://webapi.115.com/files/edit")
         self.assertEqual(http.calls[0][1], "POST")
         self.assertEqual(http.calls[0][2], {"fid": "fid-1", "file_name": "asset-42-abcd"})
+
+
+class CmsPlaybackProbeTests(unittest.TestCase):
+    def _client(self):
+        config = bridge.Config(
+            tg_bot_token="tg",
+            tg_allowed_chat_id="chat",
+            cms_base_url="http://cms",
+            cms_username="user",
+            cms_password="pass",
+        )
+        return bridge.CmsClient(config)
+
+    def test_probe_percent_encodes_unicode_and_spaces(self):
+        captured = []
+
+        class FakeResponse:
+            status = 206
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def getcode(self):
+                return self.status
+
+        def fake_urlopen(request, timeout):
+            captured.append((request.full_url, timeout))
+            return FakeResponse()
+
+        raw_url = "http://cms/s/code_1212_file.mkv?/幼女战记 (2017) - S01E01.mkv"
+        with patch("app.clients.cms.urllib.request.urlopen", side_effect=fake_urlopen):
+            try:
+                result = self._client().probe_strm_url(raw_url)
+            except Exception as exc:
+                self.fail(f"probe rejected an encodable URL: {type(exc).__name__}")
+
+        self.assertTrue(result)
+        self.assertNotIn(" ", captured[0][0])
+        self.assertIn("%E5%B9%BC%E5%A5%B3%E6%88%98%E8%AE%B0", captured[0][0])
+        self.assertIn("%20%282017%29", captured[0][0])
+
+    def test_probe_classifies_cms_share_resolution_failure(self):
+        def fake_urlopen(request, timeout):
+            raise urllib.error.HTTPError(
+                request.full_url,
+                500,
+                "Internal Server Error",
+                {"Content-Type": "application/json"},
+                io.BytesIO('"获取分享直连失败"'.encode("utf-8")),
+            )
+
+        with patch("app.clients.cms.urllib.request.urlopen", side_effect=fake_urlopen):
+            try:
+                self._client().probe_strm_url("http://cms/s/code_1212_file.mkv?/episode.mkv")
+            except Exception as exc:
+                self.assertEqual(type(exc).__name__, "CmsSharePlaybackUnavailableError")
+            else:
+                self.fail("probe did not classify the CMS share resolution failure")
 
     def test_requests_are_rate_limited_between_115_api_calls(self):
         class FakeHttp:

@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 import bridge
+from app.clients import cms as cms_client
 from app.models import TaskStage, TaskStatus
 from app.task_runner import StageOutcome
 from app.task_store import TaskStore
@@ -30,7 +31,10 @@ class FakeCms:
 
     def probe_strm_url(self, url):
         self.playback_calls.append(url)
-        return self.playback_results.pop(0) if self.playback_results else True
+        result = self.playback_results.pop(0) if self.playback_results else True
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
 
 class FakeP115:
@@ -1369,6 +1373,29 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertTrue((source / "Troy.2004.2160p.strm").exists())
             self.assertFalse((source / "asset-1-001.strm").exists())
             self.assertFalse((library_root / row["own_share_file_name"]).exists())
+
+    def test_strm_ready_stops_retrying_when_cms_cannot_resolve_share(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._self_share_row()
+            source = self.config.strm_root / row["own_share_file_name"]
+            self._write_strm(source)
+            error_type = getattr(cms_client, "CmsSharePlaybackUnavailableError", RuntimeError)
+            self.cms.playback_results = [error_type("获取分享直连失败")]
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.STRM_READY,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("停止自动探测", result.message)
+            self.assertIn("115 风控", result.message)
+            self.assertTrue(source.exists())
 
     def test_strm_ready_stage_defers_until_own_share_strm_source_exists(self):
         with tempfile.TemporaryDirectory() as tmp:

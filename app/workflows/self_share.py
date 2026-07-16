@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from app.clients.cms import CmsClient
+from app.clients.cms import CmsClient, CmsSharePlaybackUnavailableError
 from app.cms_cloud_index import CmsCloudDataIndex
 from app.clients.p115 import (
     P115RiskControlError,
@@ -1037,6 +1037,12 @@ class BridgeSelfShareTaskWorkflow:
             try:
                 strm_url = strm_files[0].read_text(encoding="utf-8", errors="replace").strip() if strm_files else ""
                 playback_ok = bool(strm_url and self.cms.probe_strm_url(strm_url))
+            except CmsSharePlaybackUnavailableError as exc:
+                metadata["share_playback_error"] = str(exc)
+                return StageResult.needs_action(
+                    "CMS 获取分享直连失败，可能处于 115 风控；已停止自动探测，请稍后重试当前阶段",
+                    metadata,
+                )
             except Exception:
                 LOG.debug("Self-share STRM playback probe failed", exc_info=True)
                 playback_ok = False
