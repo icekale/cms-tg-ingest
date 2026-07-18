@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import bridge
 from app.models import TaskStage, TaskStatus
@@ -117,7 +118,7 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("1 个活跃任务，1 个需关注", html)
             self.assertIn("运行中电影", html)
             self.assertIn("失败电影", html)
-            self.assertNotIn("已完成电影</td>", html)
+            self.assertNotIn("已完成电影", html)
 
     def test_overview_deduplicates_attention_and_active_queue(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -184,6 +185,108 @@ class WebAdminTests(unittest.TestCase):
                 self.assertNotIn(title, visible_html)
                 self.assertIn(title, overflow_html)
             self.assertIn("<summary>查看其余 2 项</summary>", overflow_html)
+
+    def test_overview_phase_track_spans_task_row_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("phase-row", "", "https://115cdn.com/s/phase-row")
+            store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "waiting",
+                title="阶段布局任务",
+                next_run_at=0,
+            )
+
+            page_html = render_task_list(store)
+            queue_html = page_html.split('data-section="queue"', 1)[1].split('data-section="maintenance"', 1)[0]
+
+            self.assertIn('</a><div class="phase-track"', queue_html)
+            self.assertIn('.task-row > .phase-track { grid-column: 1 / -1;', page_html)
+            self.assertIn('overflow-x: visible;', page_html)
+            self.assertIn('.phase-track { overflow-x: auto; }', page_html)
+
+    def test_overview_does_not_load_queue_event_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("no-events", "", "https://115cdn.com/s/no-events")
+            store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "running",
+                title="无需事件历史",
+                next_run_at=0,
+            )
+
+            with patch.object(store, "list_events", wraps=store.list_events) as list_events:
+                render_task_list(store)
+
+            list_events.assert_not_called()
+
+    def test_overview_shows_active_cooldown_remaining_duration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("cooldown-active", "", "https://115cdn.com/s/cooldown-active")
+            store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "waiting",
+                metadata_patch={"p115_risk_cooldown_until": 1125.0},
+                next_run_at=1125.0,
+            )
+
+            with patch("app.web.time.time", return_value=1000.0):
+                page_html = render_task_list(store)
+
+            self.assertIn("115 风控冷却中，剩余 2 分钟", page_html)
+            self.assertNotIn("115 未冷却", page_html)
+
+    def test_overview_ignores_expired_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("cooldown-expired", "", "https://115cdn.com/s/cooldown-expired")
+            store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "waiting",
+                metadata_patch={"p115_risk_cooldown_until": 999.0},
+                next_run_at=1001.0,
+            )
+
+            with patch("app.web.time.time", return_value=1000.0):
+                page_html = render_task_list(store)
+
+            self.assertIn("115 未冷却", page_html)
+            self.assertNotIn("115 风控冷却中", page_html)
+
+    def test_overview_limits_queue_rows_but_counts_all_active_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            titles = [f"队列任务-{index:02d}" for index in range(26)]
+            for index, title in enumerate(titles):
+                task = store.upsert_task(f"queue-{index}", "", f"https://115cdn.com/s/queue-{index}")
+                store.record_event(
+                    task.id,
+                    TaskStage.ORGANIZING,
+                    TaskStatus.PENDING,
+                    "waiting",
+                    title=title,
+                    next_run_at=0,
+                )
+
+            page_html = render_task_list(store)
+            queue_html = page_html.split('data-section="queue"', 1)[1].split('data-section="maintenance"', 1)[0]
+
+            self.assertEqual(queue_html.count('class="task-row"'), 25)
+            for title in reversed(titles[1:]):
+                self.assertIn(title, queue_html)
+            self.assertNotIn(titles[0], page_html)
+            self.assertIn('<div class="stat-label">运行中</div><div class="stat-value">26</div>', page_html)
+            self.assertIn("26 个活跃任务，0 个需关注", page_html)
 
     def test_render_task_list_contains_task_stage_and_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -321,6 +424,10 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn('<span class="badge status-attention">需处理</span>', html)
             self.assertIn('<span class="badge status-attention">需处理</span>', detail_html)
             self.assertIn("历史遗留任务", html)
+            attention_html = html.split('data-section="attention"', 1)[1].split('data-section="queue"', 1)[0]
+            queue_html = html.split('data-section="queue"', 1)[1].split('data-section="maintenance"', 1)[0]
+            self.assertEqual(attention_html.count("历史遗留任务"), 1)
+            self.assertNotIn("历史遗留任务", queue_html)
 
     def test_render_task_list_does_not_count_cleared_lock_reason_as_waiting(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -894,6 +1001,18 @@ class WebAdminTests(unittest.TestCase):
 
             self.assertEqual(status, 403)
             self.assertIn(b"Forbidden", body)
+
+    def test_overview_endpoint_reports_disabled_task_engine(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            app = WebApp(store, web_token="", task_engine_enabled=False)
+
+            status, headers, body = app.handle_request("GET", "/", {}, b"")
+            page_html = body.decode("utf-8")
+
+            self.assertEqual(status, 200)
+            self.assertIn("任务引擎已停用", page_html)
+            self.assertNotIn("任务引擎正常", page_html)
 
 
 if __name__ == "__main__":

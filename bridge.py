@@ -233,7 +233,10 @@ def create_task_store(config: Config) -> TaskStore:
 def maybe_start_web_server(config: Config, task_store: TaskStore, submission_store: Any | None = None, starter=start_web_server):
     if not config.web_enabled:
         return None
-    kwargs = {"web_token": config.web_token}
+    kwargs = {
+        "web_token": config.web_token,
+        "task_engine_enabled": config.task_engine_enabled,
+    }
     if submission_store is not None:
         kwargs["submission_store"] = submission_store
     server = starter(task_store, config.web_host, config.web_port, **kwargs)

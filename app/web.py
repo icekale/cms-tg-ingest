@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 from .models import RetryAction, TaskStage, TaskStatus
 from .task_bridge import sync_task_from_submission
 from .task_diagnostics import (
+    _duration,
     format_stage_observability,
     format_task_observability,
     is_dispatchable_active_task,
@@ -179,7 +180,8 @@ p {{ margin: 0; }}
 .overflow-tasks > .task-list {{ margin-top: 10px; }}
 .maintenance-panel {{ margin-top: 14px; }}
 .maintenance-actions {{ display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }}
-.phase-track {{ display: grid; grid-template-columns: repeat(8, minmax(72px, 1fr)); gap: 0; margin: 18px 0; overflow-x: auto; }}
+.phase-track {{ display: grid; grid-template-columns: repeat(8, minmax(72px, 1fr)); gap: 0; margin: 18px 0; overflow-x: visible; }}
+.task-row > .phase-track {{ grid-column: 1 / -1; width: 100%; min-width: 0; margin-bottom: 0; }}
 .phase-step {{ position: relative; min-width: 72px; padding: 0 6px; color: var(--muted); text-align: center; font-size: 12px; }}
 .phase-step::before {{ content: ""; position: absolute; top: 7px; right: 50%; left: -50%; height: 2px; background: var(--border); }}
 .phase-step:first-child::before {{ display: none; }}
@@ -226,6 +228,7 @@ code {{ background: #eef2f7; padding: 2px 5px; border-radius: 6px; }}
   .workspace-grid, .overview-grid, .health-grid {{ grid-template-columns: 1fr; }}
   .quality-summary {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
   .task-row {{ grid-template-columns: 1fr; }}
+  .phase-track {{ overflow-x: auto; }}
   .summary-grid, .detail-grid {{ grid-template-columns: 1fr; }}
 }}
 @media (prefers-reduced-motion: reduce) {{
@@ -342,7 +345,7 @@ def _overall_status(counts: dict[str, int]) -> tuple[str, str]:
     return "运行正常", "status-healthy"
 
 
-def _render_task_row(task: Any, *, compact: bool = False, phase_html: str = "") -> str:
+def _render_task_row(task: Any, *, compact: bool = False, phase_html: str = "", now: float | None = None) -> str:
     title = task_display_title(task)
     stage = stage_display_name(task.current_stage)
     status_label = "需处理" if is_unscheduled_active_task(task) else task.status.value
@@ -352,7 +355,7 @@ def _render_task_row(task: Any, *, compact: bool = False, phase_html: str = "") 
     message_html = f'<div class="task-message{message_class}">{html.escape(message)}</div>' if message else ""
     observability_html = "".join(
         f'<div class="task-message">{html.escape(line)}</div>'
-        for line in _task_observability_lines(task)[:3]
+        for line in _task_observability_lines(task, now=now)[:3]
     )
     detail_label = "查看详情" if compact else f"查看详情 #{task.id}"
     return (
@@ -366,25 +369,26 @@ def _render_task_row(task: Any, *, compact: bool = False, phase_html: str = "") 
         '</div>'
         f'{message_html}'
         f'{observability_html}'
-        f'{phase_html}'
         '</div>'
         f'<a class="button" href="/task/{task.id}">{detail_label}</a>'
+        f'{phase_html}'
         '</div>'
     )
 
 
 def render_task_list(store: TaskStore, *, task_engine_enabled: bool = True) -> str:
     tasks = store.list_recent_tasks(limit=100)
+    now = time.time()
     attention_tasks = [task for task in tasks if _is_attention_task(task)]
     queue_tasks = [task for task in tasks if _is_queue_task(task)]
     counts = _task_counts(tasks)
     health = build_task_health(store, enabled=task_engine_enabled, limit=100)
     overall_label, overall_class = _overall_status(counts)
 
-    attention_html = "".join(_render_task_row(task, compact=True) for task in attention_tasks[:8])
+    attention_html = "".join(_render_task_row(task, compact=True, now=now) for task in attention_tasks[:8])
     overflow_tasks = attention_tasks[8:]
     if overflow_tasks:
-        overflow_rows = "".join(_render_task_row(task, compact=True) for task in overflow_tasks)
+        overflow_rows = "".join(_render_task_row(task, compact=True, now=now) for task in overflow_tasks)
         attention_html += (
             '<details class="overflow-tasks">'
             f'<summary>查看其余 {len(overflow_tasks)} 项</summary>'
@@ -397,7 +401,8 @@ def render_task_list(store: TaskStore, *, task_engine_enabled: bool = True) -> s
     queue_rows = "".join(
         _render_task_row(
             task,
-            phase_html=_render_phase_track(task, store.list_events(task.id)),
+            phase_html=_render_phase_track(task, []),
+            now=now,
         )
         for task in queue_tasks[:25]
     )
@@ -405,8 +410,12 @@ def render_task_list(store: TaskStore, *, task_engine_enabled: bool = True) -> s
         queue_rows = '<div class="empty-state">当前没有活跃任务</div>'
 
     engine_label = "任务引擎正常" if health.enabled else "任务引擎已停用"
-    cooldown_label = "115 风控冷却中" if health.p115_cooldown_until > time.time() else "115 未冷却"
-    updated_label = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    cooldown_label = (
+        f"115 风控冷却中，剩余 {_duration(health.p115_cooldown_until - now)}"
+        if health.p115_cooldown_until > now
+        else "115 未冷却"
+    )
+    updated_label = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
 
     body = f"""
 <div class="page-heading">
@@ -611,10 +620,17 @@ def render_health_page(store: TaskStore) -> str:
     return _page("本地健康", body, active="health")
 
 class WebApp:
-    def __init__(self, store: TaskStore, web_token: str = "", submission_store: Any | None = None):
+    def __init__(
+        self,
+        store: TaskStore,
+        web_token: str = "",
+        submission_store: Any | None = None,
+        task_engine_enabled: bool = True,
+    ):
         self.store = store
         self.web_token = web_token
         self.submission_store = submission_store
+        self.task_engine_enabled = task_engine_enabled
 
     def _authorized(self, path: str, headers: dict[str, str]) -> bool:
         if not self.web_token:
@@ -634,7 +650,8 @@ class WebApp:
             return 403, {"Content-Type": "text/plain; charset=utf-8"}, b"Forbidden"
         parsed = urlparse(path)
         if method == "GET" and parsed.path == "/":
-            return 200, {"Content-Type": "text/html; charset=utf-8"}, render_task_list(self.store).encode("utf-8")
+            page = render_task_list(self.store, task_engine_enabled=self.task_engine_enabled)
+            return 200, {"Content-Type": "text/html; charset=utf-8"}, page.encode("utf-8")
         if method == "GET" and parsed.path == "/quality":
             return 200, {"Content-Type": "text/html; charset=utf-8"}, render_quality_page(self.store).encode("utf-8")
         if method == "POST" and parsed.path == "/quality/fix":
@@ -710,8 +727,14 @@ def start_web_server(
     port: int,
     web_token: str = "",
     submission_store: Any | None = None,
+    task_engine_enabled: bool = True,
 ) -> ThreadingHTTPServer:
-    app = WebApp(store, web_token=web_token, submission_store=submission_store)
+    app = WebApp(
+        store,
+        web_token=web_token,
+        submission_store=submission_store,
+        task_engine_enabled=task_engine_enabled,
+    )
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
