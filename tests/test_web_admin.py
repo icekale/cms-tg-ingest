@@ -97,6 +97,46 @@ class WebAdminTests(unittest.TestCase):
 
             self.assertIn(":focus-visible { outline: 3px solid var(--primary-dark); outline-offset: 2px; }", page_html)
 
+    def test_shared_buttons_keep_short_action_labels_on_one_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            page_html = render_task_list(store)
+
+            self.assertRegex(page_html, r"\.button, button\s*\{[^{}]*white-space:\s*nowrap")
+
+    def test_web_ui_includes_responsive_and_accessible_contracts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            markup = render_task_list(store)
+            stylesheet = markup.split("<style>", 1)[1].split("</style>", 1)[0]
+            mobile_css = stylesheet.split("@media (max-width: 760px)", 1)[1].split(
+                "@media (prefers-reduced-motion: reduce)", 1
+            )[0]
+
+            for contract in (
+                "@media (max-width: 760px)",
+                ":focus-visible",
+                "prefers-reduced-motion",
+                'aria-label="主导航"',
+                'aria-label="任务概览"',
+            ):
+                self.assertIn(contract, markup)
+            for prohibited in ("https://fonts.", "<script src=", "linear-gradient"):
+                self.assertNotIn(prohibited, markup.lower())
+
+            self.assertRegex(mobile_css, r"\.workspace-grid[^{}]*\{[^{}]*grid-template-columns:\s*1fr")
+            self.assertRegex(mobile_css, r"\.health-grid[^{}]*\{[^{}]*grid-template-columns:\s*1fr")
+            self.assertRegex(mobile_css, r"\.summary-grid[^{}]*\{[^{}]*grid-template-columns:\s*1fr")
+            self.assertRegex(mobile_css, r"\.metrics-grid[^{}]*\{[^{}]*repeat\(2,\s*minmax\(0,\s*1fr\)\)")
+            self.assertRegex(mobile_css, r"\.task-row[^{}]*\{[^{}]*grid-template-columns:\s*1fr")
+            self.assertRegex(mobile_css, r"\.quality-row[^{}]*\{[^{}]*grid-template-columns:\s*1fr")
+            self.assertRegex(stylesheet, r"\.task-row\s*>\s*div\s*\{[^{}]*min-width:\s*0")
+            self.assertRegex(stylesheet, r"\.phase-track\s*\{[^{}]*repeat\(8,\s*minmax\(")
+            self.assertRegex(stylesheet, r"\.phase-track\s*\{[^{}]*overflow-x:\s*auto")
+            self.assertIn("overflow-wrap: anywhere", stylesheet)
+
     def test_render_task_list_folds_completed_history_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

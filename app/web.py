@@ -245,7 +245,7 @@ p {{ margin: 0; }}
 .empty-state {{ padding: 24px; text-align: center; color: var(--muted); background: var(--surface-muted); border: 1px dashed var(--border); border-radius: 8px; }}
 .actions {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
 .actions form {{ display: inline-block; margin: 0; }}
-.button, button {{ display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; font-weight: 650; cursor: pointer; }}
+.button, button {{ display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; font-weight: 650; white-space: nowrap; cursor: pointer; }}
 .button:hover, button:hover {{ border-color: #aeb3b8; text-decoration: none; }}
 .button-primary {{ border-color: var(--primary); background: var(--primary); color: white; }}
 .button-secondary {{ border-color: var(--border); background: var(--surface); color: var(--text); }}
