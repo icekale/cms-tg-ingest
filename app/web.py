@@ -22,7 +22,73 @@ from .quality import format_task_quality_report, scan_task_quality
 from .task_store import TaskStore
 
 
-def _page(title: str, body: str) -> str:
+_NAV_ITEMS = (
+    ("overview", "/", "运行概览"),
+    ("quality", "/quality", "质量巡检"),
+    ("health", "/health", "本地健康"),
+)
+
+_TASK_PHASES = (
+    ("接收", {TaskStage.RECEIVED, TaskStage.CMS_SUBMITTED}),
+    ("CMS 整理", {TaskStage.ORGANIZING, TaskStage.ORGANIZED}),
+    ("分类识别", {TaskStage.RECOGNIZING}),
+    ("建分享", {TaskStage.SHARE_ALIAS_PREPARED, TaskStage.OWN_SHARE_CREATED, TaskStage.SHARE_VALIDATED}),
+    ("分享 STRM", {TaskStage.SHARE_SYNC_SUBMITTED, TaskStage.STRM_READY, TaskStage.CMS_DELETE_SETTLED}),
+    ("移动入库", {TaskStage.MOVED}),
+    ("Emby 确认", {TaskStage.EMBY_CONFIRMED}),
+    ("清理完成", {TaskStage.CLEANED}),
+)
+
+
+def _navigation(active: str) -> str:
+    links = []
+    for key, href, label in _NAV_ITEMS:
+        current = ' aria-current="page"' if key == active else ""
+        links.append(f'<a href="{href}"{current}>{html.escape(label)}</a>')
+    return (
+        '<header class="app-header"><div class="app-header-inner">'
+        '<a class="app-brand" href="/">CMS 入库助手</a>'
+        f'<nav class="app-nav" aria-label="主导航">{"".join(links)}</nav>'
+        "</div></header>"
+    )
+
+
+def _event_stage(value: object) -> TaskStage | None:
+    try:
+        return TaskStage(str(value))
+    except ValueError:
+        return None
+
+
+def _task_phase_index(task: Any, events: list[dict[str, Any]]) -> int | None:
+    candidates = [task.current_stage]
+    candidates.extend(
+        stage
+        for stage in (_event_stage(event.get("stage")) for event in reversed(events))
+        if stage is not None
+    )
+    for stage in candidates:
+        for index, (_label, stages) in enumerate(_TASK_PHASES):
+            if stage in stages:
+                return index
+    return None
+
+
+def _render_phase_track(task: Any, events: list[dict[str, Any]]) -> str:
+    current = _task_phase_index(task, events)
+    steps = []
+    for index, (label, _stages) in enumerate(_TASK_PHASES):
+        state = ""
+        if current is not None and index < current:
+            state = " is-done"
+        elif current is not None and index == current:
+            state = " is-done" if task.status == TaskStatus.SUCCEEDED else " is-current"
+        steps.append(f'<div class="phase-step{state}"><i></i><span>{html.escape(label)}</span></div>')
+    return f'<div class="phase-track" aria-label="任务处理进度">{"".join(steps)}</div>'
+
+
+def _page(title: str, body: str, *, active: str = "") -> str:
+    navigation = _navigation(active)
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -32,26 +98,26 @@ def _page(title: str, body: str) -> str:
 <style>
 :root {{
   color-scheme: light;
-  --bg: #f5f7fb;
+  --bg: #f4f5f6;
   --surface: #ffffff;
-  --surface-muted: #f8fafc;
-  --border: #dfe5ee;
-  --border-soft: #edf1f6;
-  --text: #111827;
-  --muted: #64748b;
-  --muted-strong: #475569;
-  --primary: #2563eb;
-  --primary-dark: #1d4ed8;
-  --success-bg: #dcfce7;
-  --success-text: #166534;
-  --warning-bg: #fef3c7;
-  --warning-text: #92400e;
-  --danger-bg: #fee2e2;
-  --danger-text: #991b1b;
-  --info-bg: #dbeafe;
-  --info-text: #1e40af;
+  --surface-muted: #f8f9fa;
+  --border: #d7dadd;
+  --border-soft: #e7e9eb;
+  --text: #202124;
+  --muted: #6a6f75;
+  --muted-strong: #4f555b;
+  --primary: #1f5f99;
+  --primary-dark: #174b7a;
+  --success-bg: #e8f4ec;
+  --success-text: #24643b;
+  --warning-bg: #fff4d6;
+  --warning-text: #805d10;
+  --danger-bg: #fbe9e9;
+  --danger-text: #9b2c2c;
+  --info-bg: #e8f1f8;
+  --info-text: #245b85;
 }}
-* {{ box-sizing: border-box; }}
+* {{ box-sizing: border-box; letter-spacing: 0; }}
 body {{
   margin: 0;
   background: var(--bg);
@@ -61,61 +127,95 @@ body {{
 }}
 a {{ color: var(--primary); text-decoration: none; }}
 a:hover {{ color: var(--primary-dark); text-decoration: underline; }}
+.app-header {{ background: var(--surface); border-bottom: 1px solid var(--border); }}
+.app-header-inner {{ width: min(1180px, calc(100% - 32px)); min-height: 60px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 24px; }}
+.app-brand {{ color: var(--text); font-size: 17px; font-weight: 700; white-space: nowrap; }}
+.app-brand:hover {{ color: var(--text); text-decoration: none; }}
+.app-nav {{ align-self: stretch; display: flex; align-items: stretch; gap: 20px; }}
+.app-nav a {{ display: flex; align-items: center; border-bottom: 2px solid transparent; color: var(--muted-strong); font-size: 14px; }}
+.app-nav a:hover {{ color: var(--text); text-decoration: none; }}
+.app-nav a[aria-current="page"] {{ border-bottom-color: var(--primary); color: var(--primary); font-weight: 650; }}
 .shell {{ width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 28px 0 40px; }}
-.topbar {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }}
+.page-heading, .topbar {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }}
 .eyebrow {{ color: var(--muted); font-size: 13px; margin: 0 0 4px; }}
-h1 {{ font-size: 28px; line-height: 1.2; margin: 0; letter-spacing: -0.02em; }}
+h1 {{ font-size: 28px; line-height: 1.2; margin: 0; }}
 h2 {{ font-size: 18px; margin: 0; }}
 p {{ margin: 0; }}
 .subtle {{ color: var(--muted); }}
-.panel {{ background: var(--surface); border: 1px solid var(--border); border-radius: 18px; padding: 18px; margin: 14px 0; }}
-.panel-header {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }}
-.stats-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }}
-.overview-grid {{ display: grid; grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.25fr); gap: 14px; align-items: start; }}
-.stat-card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 16px; }}
+.status-strip {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }}
+.metrics-grid, .stats-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }}
+.metric, .stat-card {{ min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 16px; }}
 .stat-label {{ color: var(--muted); font-size: 13px; margin-bottom: 6px; }}
-.stat-value {{ font-size: 28px; line-height: 1; font-weight: 700; letter-spacing: -0.02em; }}
-.badge {{ display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 9px; font-size: 12px; font-weight: 650; white-space: nowrap; }}
+.stat-value {{ font-size: 28px; line-height: 1; font-weight: 700; }}
+.workspace-grid, .overview-grid {{ display: grid; grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.25fr); gap: 14px; align-items: start; }}
+.panel {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 18px; margin: 14px 0; }}
+.panel-heading, .panel-header {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }}
+.badge {{ display: inline-flex; align-items: center; border: 1px solid transparent; border-radius: 6px; padding: 3px 8px; font-size: 12px; font-weight: 650; white-space: nowrap; }}
 .status-succeeded, .status-healthy {{ background: var(--success-bg); color: var(--success-text); }}
 .status-running, .status-pending, .status-busy {{ background: var(--info-bg); color: var(--info-text); }}
 .status-needs_action, .status-attention {{ background: var(--warning-bg); color: var(--warning-text); }}
 .status-failed {{ background: var(--danger-bg); color: var(--danger-text); }}
 .task-list {{ display: grid; gap: 10px; }}
-.task-row {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 14px; border: 1px solid var(--border-soft); border-radius: 14px; background: var(--surface-muted); }}
+.task-row {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 14px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--surface-muted); }}
 .task-title {{ font-weight: 650; margin-bottom: 4px; overflow-wrap: anywhere; }}
 .task-meta {{ display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 13px; }}
 .task-message {{ margin-top: 6px; color: var(--muted-strong); font-size: 13px; overflow-wrap: anywhere; }}
 .task-message.error {{ color: var(--danger-text); }}
-.empty-state {{ padding: 22px; text-align: center; color: var(--muted); background: var(--surface-muted); border: 1px dashed var(--border); border-radius: 14px; }}
+.phase-track {{ display: grid; grid-template-columns: repeat(8, minmax(72px, 1fr)); gap: 0; margin: 18px 0; overflow-x: auto; }}
+.phase-step {{ position: relative; min-width: 72px; padding: 0 6px; color: var(--muted); text-align: center; font-size: 12px; }}
+.phase-step::before {{ content: ""; position: absolute; top: 7px; right: 50%; left: -50%; height: 2px; background: var(--border); }}
+.phase-step:first-child::before {{ display: none; }}
+.phase-step i {{ position: relative; z-index: 1; display: block; width: 16px; height: 16px; margin: 0 auto 7px; border: 2px solid var(--border); border-radius: 50%; background: var(--surface); }}
+.phase-step.is-done {{ color: var(--success-text); }}
+.phase-step.is-done::before, .phase-step.is-done i {{ border-color: var(--success-text); background: var(--success-text); }}
+.phase-step.is-current {{ color: var(--info-text); font-weight: 650; }}
+.phase-step.is-current::before {{ background: var(--success-text); }}
+.phase-step.is-current i {{ border-color: var(--info-text); background: var(--info-bg); }}
+.summary-grid, .detail-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
+.timeline {{ list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }}
+.timeline li {{ padding: 12px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--surface-muted); }}
+.diagnostic-details {{ border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }}
+.diagnostic-details > summary {{ padding: 12px 14px; cursor: pointer; font-weight: 650; }}
+.danger-zone {{ margin-top: 20px; padding: 14px; border: 1px solid #e2b8b8; border-radius: 6px; background: #fffafa; }}
+.quality-summary {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }}
+.quality-row {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border-soft); }}
+.health-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }}
+.empty-state {{ padding: 24px; text-align: center; color: var(--muted); background: var(--surface-muted); border: 1px dashed var(--border); border-radius: 8px; }}
 .actions {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
 .actions form {{ display: inline-block; margin: 0; }}
-.button, button {{ display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-weight: 650; cursor: pointer; }}
-.button:hover, button:hover {{ border-color: #cbd5e1; text-decoration: none; }}
+.button, button {{ display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; font-weight: 650; cursor: pointer; }}
+.button:hover, button:hover {{ border-color: #aeb3b8; text-decoration: none; }}
 .button-primary {{ border-color: var(--primary); background: var(--primary); color: white; }}
-.button-danger {{ border-color: #fecaca; background: var(--danger-bg); color: var(--danger-text); }}
+.button-danger {{ border-color: #d7a6a6; background: var(--danger-bg); color: var(--danger-text); }}
+:focus-visible {{ outline: 3px solid #79a9d1; outline-offset: 2px; }}
 .table-wrap {{ overflow-x: auto; }}
 table {{ border-collapse: collapse; width: 100%; min-width: 760px; }}
 th, td {{ border-bottom: 1px solid var(--border-soft); padding: 11px 10px; text-align: left; vertical-align: top; }}
 th {{ color: var(--muted); font-size: 12px; font-weight: 700; }}
 code {{ background: #eef2f7; padding: 2px 5px; border-radius: 6px; }}
-.diagnostic {{ margin: 0; padding: 16px; border-radius: 14px; background: #0f172a; color: #e5edf8; overflow: auto; font-size: 13px; line-height: 1.6; }}
-.detail-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
-.detail-item {{ background: var(--surface-muted); border: 1px solid var(--border-soft); border-radius: 12px; padding: 12px; }}
+.diagnostic {{ margin: 0; padding: 16px; border: 1px solid #30363d; border-radius: 6px; background: #202428; color: #f1f3f4; overflow: auto; font-size: 13px; line-height: 1.6; }}
+.detail-item {{ background: var(--surface-muted); border: 1px solid var(--border-soft); border-radius: 6px; padding: 12px; }}
 .detail-label {{ color: var(--muted); font-size: 12px; margin-bottom: 4px; }}
 .detail-value {{ overflow-wrap: anywhere; }}
-.timeline {{ list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }}
-.timeline li {{ padding: 12px; border: 1px solid var(--border-soft); border-radius: 12px; background: var(--surface-muted); }}
 @media (max-width: 760px) {{
+  .app-header-inner {{ width: min(100% - 20px, 1180px); min-height: auto; padding-top: 12px; display: grid; gap: 8px; }}
+  .app-nav {{ min-height: 42px; gap: 16px; overflow-x: auto; }}
+  .app-nav a {{ white-space: nowrap; }}
   .shell {{ width: min(100% - 20px, 1180px); padding-top: 18px; }}
-  .topbar {{ display: grid; }}
-  .stats-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-  .overview-grid {{ grid-template-columns: 1fr; }}
+  .page-heading, .topbar {{ display: grid; }}
+  .metrics-grid, .stats-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+  .workspace-grid, .overview-grid, .health-grid {{ grid-template-columns: 1fr; }}
+  .quality-summary {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
   .task-row {{ grid-template-columns: 1fr; }}
-  .detail-grid {{ grid-template-columns: 1fr; }}
+  .summary-grid, .detail-grid {{ grid-template-columns: 1fr; }}
+}}
+@media (prefers-reduced-motion: reduce) {{
+  *, *::before, *::after {{ animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: 0.01ms !important; }}
 }}
 </style>
 </head>
 <body>
+{navigation}
 <main class="shell">
 {body}
 </main>
@@ -303,7 +403,7 @@ def render_task_list(store: TaskStore) -> str:
   </section>
 </div>
 """
-    return _page("运行概览", body)
+    return _page("运行概览", body, active="overview")
 
 def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | None = None) -> str:
     task = store.find_task(task_id)
@@ -312,7 +412,7 @@ def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | N
         if row:
             task = sync_task_from_submission(store, row, message="打开详情页时懒回填旧记录")
     if not task:
-        return _page("任务不存在", "<h1>任务不存在</h1>")
+        return _page("任务不存在", '<section class="empty-state"><h1>任务不存在</h1></section>')
 
     events = store.list_events(task.id)
     event_items = "".join(
@@ -352,6 +452,8 @@ def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | N
   </div>
   {_badge("需处理" if is_unscheduled_active_task(task) else task.status.value, "status-attention" if is_unscheduled_active_task(task) else _status_class(task.status))}
 </div>
+
+{_render_phase_track(task, events)}
 
 <section class="panel">
   <div class="panel-header"><h2>任务摘要</h2></div>
@@ -408,7 +510,7 @@ def render_quality_page(store: TaskStore) -> str:
   <pre class="diagnostic">{html.escape(report)}</pre>
 </section>
 """
-    return _page("质量巡检", body)
+    return _page("质量巡检", body, active="quality")
 
 def fix_quality_issues(store: TaskStore) -> int:
     fixed_task_ids: set[int] = set()
@@ -451,7 +553,7 @@ def render_health_page(store: TaskStore) -> str:
   <pre class="diagnostic">{html.escape(report)}</pre>
 </section>
 """
-    return _page("本地健康", body)
+    return _page("本地健康", body, active="health")
 
 class WebApp:
     def __init__(self, store: TaskStore, web_token: str = "", submission_store: Any | None = None):

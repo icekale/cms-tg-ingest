@@ -6,10 +6,49 @@ import bridge
 from app.models import TaskStage, TaskStatus
 from app.task_health import format_taskstore_health
 from app.task_store import TaskStore
-from app.web import WebApp, render_task_detail, render_task_list
+from app.web import WebApp, render_health_page, render_quality_page, render_task_detail, render_task_list
 
 
 class WebAdminTests(unittest.TestCase):
+    def test_pages_share_product_navigation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("organizing", "", "https://115cdn.com/s/organizing")
+            store.record_event(task.id, TaskStage.ORGANIZING, TaskStatus.RUNNING, "organizing")
+
+            pages = {
+                "运行概览": render_task_list(store),
+                "质量巡检": render_quality_page(store),
+                "本地健康": render_health_page(store),
+                "任务详情": render_task_detail(store, task.id),
+            }
+
+            for page_name, page_html in pages.items():
+                with self.subTest(page=page_name):
+                    self.assertIn("CMS 入库助手", page_html)
+                    self.assertIn('href="/"', page_html)
+                    self.assertIn('href="/quality"', page_html)
+                    self.assertIn('href="/health"', page_html)
+                    self.assertIn('class="app-nav"', page_html)
+
+            for active_label in ("运行概览", "质量巡检", "本地健康"):
+                self.assertIn(f'aria-current="page">{active_label}</a>', pages[active_label])
+
+    def test_task_detail_renders_eight_user_facing_phases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("recognizing", "", "https://115cdn.com/s/recognizing")
+            store.record_event(task.id, TaskStage.RECEIVED, TaskStatus.SUCCEEDED, "received")
+            store.record_event(task.id, TaskStage.ORGANIZING, TaskStatus.SUCCEEDED, "organized")
+            store.record_event(task.id, TaskStage.RECOGNIZING, TaskStatus.RUNNING, "recognizing")
+
+            page_html = render_task_detail(store, task.id)
+
+            for label in ("接收", "CMS 整理", "分类识别", "建分享", "分享 STRM", "移动入库", "Emby 确认", "清理完成"):
+                self.assertIn(label, page_html)
+            self.assertEqual(page_html.count('class="phase-step'), 8)
+            self.assertIn('class="phase-step is-current"', page_html)
+
     def test_render_task_list_folds_completed_history_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
