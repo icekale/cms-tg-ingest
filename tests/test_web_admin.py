@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import bridge
 from app.models import TaskStage, TaskStatus
+from app.quality import QualityIssue
 from app.task_health import format_taskstore_health
 from app.task_store import TaskStore
 from app.web import (
@@ -941,6 +942,79 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("diagnostic", html)
             self.assertIn("不会扫描 115", html)
 
+    def test_quality_page_groups_file_issues_by_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = TaskStore(root / "tasks.db")
+            dest = root / "direct"
+            dest.mkdir()
+            (dest / "one.strm").write_text("https://115.com/d/one.mkv", encoding="utf-8")
+            (dest / "two.strm").write_text("https://115.com/d/two.mkv", encoding="utf-8")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(
+                task.id,
+                TaskStage.MOVED,
+                TaskStatus.SUCCEEDED,
+                "moved",
+                title="直链电影",
+                metadata_patch={"dest_path": str(dest), "own_share_code": "ownabc"},
+            )
+
+            markup = render_quality_page(store)
+
+            for label in ("问题总数", "受影响任务", "目录/STRM 缺失", "直链 STRM", "异常分享"):
+                self.assertIn(label, markup)
+            self.assertEqual(markup.count('class="quality-row"'), 1)
+            self.assertIn("直链电影", markup)
+            self.assertIn('<span class="quality-count"><span>直链 STRM</span><strong>2</strong></span>', markup)
+            self.assertIn(f'href="/task/{task.id}"', markup)
+            self.assertIn('<details class="diagnostic-details">', markup)
+            self.assertIn("查看完整原始报告（2 条）", markup)
+            self.assertIn(str(dest / "one.strm"), markup)
+            self.assertIn(str(dest / "two.strm"), markup)
+            self.assertIn(".quality-row { grid-template-columns: 1fr;", markup)
+
+    def test_quality_page_aggregates_issue_codes_and_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            issues = [
+                QualityIssue("missing_dest", "目标目录不存在", "/missing", 2, "缺失任务"),
+                QualityIssue("direct_strm", "发现直链 STRM", "/direct-1.strm", 1, "混合任务"),
+                QualityIssue("missing_strm", "目标目录没有 STRM 文件", "/empty", 2, "缺失任务"),
+                QualityIssue("unexpected_strm", "STRM 不是预期的分享链接", "/unexpected.strm", 1, "混合任务"),
+                QualityIssue("direct_strm", "发现直链 STRM", "/direct-2.strm", 1, "混合任务"),
+            ]
+
+            with patch("app.web.scan_task_quality", return_value=issues) as scan:
+                markup = render_quality_page(store)
+
+            scan.assert_called_once_with(store)
+            rows = re.findall(r'<article class="quality-row".*?</article>', markup, re.S)
+            self.assertEqual(len(rows), 2)
+            self.assertIn("#2", rows[0])
+            self.assertIn("缺失任务", rows[0])
+            self.assertIn('<span class="quality-count"><span>目录/STRM 缺失</span><strong>2</strong></span>', rows[0])
+            self.assertIn("共 2 条", rows[0])
+            self.assertIn("#1", rows[1])
+            self.assertIn("混合任务", rows[1])
+            self.assertIn('<span class="quality-count"><span>直链 STRM</span><strong>2</strong></span>', rows[1])
+            self.assertIn('<span class="quality-count"><span>异常分享</span><strong>1</strong></span>', rows[1])
+            self.assertIn("共 3 条", rows[1])
+            self.assertIn('<div class="stat-value">5</div>', markup)
+            self.assertIn("查看完整原始报告（5 条）", markup)
+
+    def test_quality_page_shows_healthy_empty_state_without_fix_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            markup = render_quality_page(store)
+
+            self.assertIn('class="empty-state is-healthy"', markup)
+            self.assertIn("未发现本地 STRM 问题", markup)
+            self.assertNotIn('action="/quality/fix"', markup)
+            self.assertNotIn("修复全部巡检问题", markup)
+            self.assertIn('<a class="button" href="/quality">重新巡检</a>', markup)
+
     def test_quality_fix_endpoint_restores_missing_dest_and_reprocesses_bad_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1029,6 +1103,46 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("本地队列健康", html)
             self.assertIn("diagnostic", html)
             self.assertIn("只展示本地 TaskStore 状态", html)
+            self.assertIn('href="/task/3"', html)
+
+    def test_health_page_renders_structured_local_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("cooldown", "", "https://115cdn.com/s/cooldown")
+            store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "115 风控冷却中",
+                title="冷却电影",
+                metadata_patch={"p115_risk_cooldown_until": 9999999999.0},
+                next_run_at=9999999999.0,
+            )
+
+            markup = render_health_page(store, task_engine_enabled=True)
+
+            self.assertIn('class="health-status is-warning"', markup)
+            self.assertIn("任务引擎运行正常", markup)
+            self.assertIn("115 风控冷却中", markup)
+            self.assertIn("剩余", markup)
+            for label in ("待执行", "运行中", "需人工", "锁等待"):
+                self.assertIn(label, markup)
+            self.assertIn('<details class="diagnostic-details">', markup)
+            self.assertIn("查看完整健康报告", markup)
+            self.assertIn("TaskEngine: ENABLED", markup)
+
+    def test_health_endpoint_reports_disabled_task_engine(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            app = WebApp(store, web_token="", task_engine_enabled=False)
+
+            status, _headers, body = app.handle_request("GET", "/health", {}, b"")
+            markup = body.decode("utf-8")
+
+            self.assertEqual(status, 200)
+            self.assertIn('class="health-status is-warning"', markup)
+            self.assertIn("任务引擎已停用", markup)
+            self.assertIn("TaskEngine: DISABLED", markup)
 
     def test_health_page_shows_taskstore_wait_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1169,6 +1283,7 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertIn("锁等待: 1", html)
             self.assertIn("最近锁等待: #1 等待电影 / 115/CMS 全局阶段 / holder #7", html)
+            self.assertIn('href="/task/1"', html)
 
     def test_retry_endpoint_ignores_completed_cleaned_task(self):
         with tempfile.TemporaryDirectory() as tmp:

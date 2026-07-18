@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .models import RetryAction, TaskStage, TaskStatus
+from .quality import QualityIssue, format_task_quality_report, scan_task_quality
 from .task_bridge import sync_task_from_submission
 from .task_diagnostics import (
     _duration,
@@ -18,8 +19,7 @@ from .task_diagnostics import (
     is_unscheduled_active_task,
 )
 from .task_engine import decide_retry, stage_display_name
-from .task_health import build_task_health, format_taskstore_health
-from .quality import format_task_quality_report, scan_task_quality
+from .task_health import build_task_health, format_task_health
 from .task_store import TaskStore
 
 
@@ -223,9 +223,25 @@ p {{ margin: 0; }}
 .danger-zone .details-content {{ color: var(--muted-strong); }}
 .danger-zone .actions {{ margin-top: 12px; }}
 .danger-zone + p {{ margin-top: 14px; }}
-.quality-summary {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }}
-.quality-row {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border-soft); }}
-.health-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }}
+.quality-summary {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }}
+.quality-list {{ display: grid; }}
+.quality-row {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--border-soft); }}
+.quality-row:last-child {{ border-bottom: 0; }}
+.quality-task {{ min-width: 0; }}
+.quality-issue-counts {{ display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 6px; }}
+.quality-count {{ display: inline-flex; gap: 6px; color: var(--muted-strong); font-size: 13px; }}
+.quality-count strong {{ color: var(--text); font-variant-numeric: tabular-nums; }}
+.quality-row-action {{ display: grid; justify-items: end; gap: 6px; }}
+.quality-total {{ color: var(--muted); font-size: 13px; }}
+.health-status {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px; border: 1px solid var(--border); border-radius: 6px; }}
+.health-status.is-healthy, .empty-state.is-healthy {{ border-color: #b9d8c3; background: var(--success-bg); color: var(--success-text); }}
+.health-status.is-warning {{ border-color: #e1cf9d; background: var(--warning-bg); color: var(--warning-text); }}
+.health-status p {{ margin-top: 3px; }}
+.health-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }}
+.health-item {{ min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }}
+.health-value {{ margin-top: 4px; font-size: 24px; line-height: 1; font-weight: 700; font-variant-numeric: tabular-nums; }}
+.health-notice {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border-soft); }}
+.health-notice:last-child {{ border-bottom: 0; }}
 .empty-state {{ padding: 24px; text-align: center; color: var(--muted); background: var(--surface-muted); border: 1px dashed var(--border); border-radius: 8px; }}
 .actions {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
 .actions form {{ display: inline-block; margin: 0; }}
@@ -254,7 +270,9 @@ code {{ background: #eef2f7; padding: 2px 5px; border-radius: 6px; }}
   .metrics-grid, .stats-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
   .workspace-grid, .overview-grid, .health-grid {{ grid-template-columns: 1fr; }}
   .quality-summary {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-  .task-row {{ grid-template-columns: 1fr; }}
+  .task-row, .health-notice {{ grid-template-columns: 1fr; }}
+  .quality-row {{ grid-template-columns: 1fr; }}
+  .quality-row-action {{ justify-items: start; }}
   .incident-strip {{ align-items: flex-start; flex-direction: column; }}
   .summary-grid, .detail-grid {{ grid-template-columns: 1fr; }}
 }}
@@ -699,8 +717,71 @@ def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | N
 """
     return _page("任务详情", body)
 
+def _group_quality_issues(issues: list[QualityIssue]) -> list[dict[str, Any]]:
+    grouped: dict[int, dict[str, Any]] = {}
+    for issue in issues:
+        row = grouped.setdefault(
+            issue.task_id,
+            {"task_id": issue.task_id, "title": issue.title, "codes": {}, "total": 0},
+        )
+        row["title"] = row["title"] or issue.title
+        row["codes"][issue.code] = row["codes"].get(issue.code, 0) + 1
+        row["total"] += 1
+    return list(grouped.values())
+
+
 def render_quality_page(store: TaskStore) -> str:
-    report = format_task_quality_report(scan_task_quality(store))
+    issues = scan_task_quality(store)
+    report = format_task_quality_report(issues)
+    grouped = _group_quality_issues(issues)
+    category_counts = {
+        "目录/STRM 缺失": sum(issue.code in {"missing_dest", "missing_strm"} for issue in issues),
+        "直链 STRM": sum(issue.code == "direct_strm" for issue in issues),
+        "异常分享": sum(issue.code == "unexpected_strm" for issue in issues),
+    }
+    summary_values = (
+        ("问题总数", len(issues)),
+        ("受影响任务", len(grouped)),
+        *category_counts.items(),
+    )
+    summary_markup = "".join(
+        f'<div class="stat-card"><div class="stat-label">{label}</div><div class="stat-value">{count}</div></div>'
+        for label, count in summary_values
+    )
+    rows = []
+    for row in grouped:
+        codes = row["codes"]
+        type_counts = (
+            ("目录/STRM 缺失", codes.get("missing_dest", 0) + codes.get("missing_strm", 0)),
+            ("直链 STRM", codes.get("direct_strm", 0)),
+            ("异常分享", codes.get("unexpected_strm", 0)),
+        )
+        counts_markup = "".join(
+            f'<span class="quality-count"><span>{label}</span><strong>{count}</strong></span>'
+            for label, count in type_counts
+            if count
+        )
+        task_id = int(row["task_id"])
+        title = html.escape(str(row["title"] or f"任务 #{task_id}"))
+        rows.append(
+            f"""<article class="quality-row">
+  <div class="quality-task">
+    <div class="task-title"><a href="/task/{task_id}">#{task_id} {title}</a></div>
+    <div class="quality-issue-counts">{counts_markup}</div>
+  </div>
+  <div class="quality-row-action"><span class="quality-total">共 {row['total']} 条</span><a class="button" href="/task/{task_id}">查看任务</a></div>
+</article>"""
+        )
+    results_markup = (
+        f'<div class="quality-list">{"".join(rows)}</div>'
+        if rows
+        else '<div class="empty-state is-healthy"><strong>未发现本地 STRM 问题</strong><p>当前本地文件巡检结果健康。</p></div>'
+    )
+    fix_action = ""
+    if issues:
+        fix_action = """<form method="post" action="/quality/fix" onsubmit="return confirm('将按巡检结果入队修复：缺失目录恢复 STRM，直链 STRM 从头重跑。确定继续？')">
+        <button class="button-primary" type="submit">修复全部巡检问题</button>
+      </form>"""
     body = f"""
 <div class="topbar">
   <div>
@@ -708,19 +789,20 @@ def render_quality_page(store: TaskStore) -> str:
     <h1>TaskStore 本地轻量巡检</h1>
     <p class="subtle">只读取本地 TaskStore 和 STRM 文件路径，不会扫描 115。</p>
   </div>
-  <a class="button" href="/">返回运行概览</a>
+  <div class="actions"><a class="button" href="/quality">重新巡检</a><a class="button" href="/">返回运行概览</a></div>
 </div>
+<div class="quality-summary" aria-label="巡检摘要">{summary_markup}</div>
 <section class="panel">
   <div class="panel-header">
     <div><h2>巡检结果</h2><p class="subtle">发现缺失目录或直链 STRM 时，可以入队执行安全修复。</p></div>
-    <div class="actions">
-      <form method="post" action="/quality/fix" onsubmit="return confirm('将按巡检结果入队修复：缺失目录恢复 STRM，直链 STRM 从头重跑。确定继续？')">
-        <button class="button-primary" type="submit">修复全部巡检问题</button>
-      </form>
-    </div>
+    <div class="actions">{fix_action}</div>
   </div>
-  <pre class="diagnostic">{html.escape(report)}</pre>
+  {results_markup}
 </section>
+<details class="diagnostic-details">
+  <summary>查看完整原始报告（{len(issues)} 条）</summary>
+  <div class="details-content"><pre class="diagnostic">{html.escape(report)}</pre></div>
+</details>
 """
     return _page("质量巡检", body, active="quality")
 
@@ -749,21 +831,74 @@ def fix_quality_issues(store: TaskStore) -> int:
     return len(fixed_task_ids)
 
 
-def render_health_page(store: TaskStore) -> str:
-    report = format_taskstore_health(store, enabled=True)
+def _render_health_notice(label: str, task: Any, detail: str) -> str:
+    title = task.title or task.metadata.get("received_title") or task.share_code or f"任务 #{task.id}"
+    return f"""<article class="health-notice">
+  <div><div class="summary-label">{html.escape(label)}</div><div class="task-title">#{task.id} {html.escape(str(title))}</div><p class="task-message">{html.escape(detail)}</p></div>
+  <a class="button" href="/task/{task.id}">查看任务</a>
+</article>"""
+
+
+def render_health_page(store: TaskStore, *, task_engine_enabled: bool = True) -> str:
+    summary = build_task_health(store, enabled=task_engine_enabled)
+    report = format_task_health(summary)
+    now = time.time()
+    cooldown_active = summary.p115_cooldown_until > now
+    warning = not summary.enabled or cooldown_active or summary.problem_count > 0
+    health_class = "is-warning" if warning else "is-healthy"
+    health_title = "任务引擎运行正常" if summary.enabled else "任务引擎已停用"
+    cooldown_text = (
+        f"115 风控冷却中，剩余 {_duration(summary.p115_cooldown_until - now)}"
+        if cooldown_active
+        else "115 未处于风控冷却"
+    )
+    health_values = (
+        ("待执行", summary.pending_count),
+        ("运行中", summary.running_count),
+        ("需人工", summary.needs_action_count),
+        ("锁等待", summary.lock_wait_count),
+    )
+    health_grid = "".join(
+        f'<div class="health-item"><div class="summary-label">{label}</div><div class="health-value">{count}</div></div>'
+        for label, count in health_values
+    )
+    notices = []
+    if summary.latest_problem:
+        problem = summary.latest_problem
+        detail = stage_display_name(problem.current_stage)
+        if problem.error_summary:
+            detail = f"{detail}，{problem.error_summary}"
+        notices.append(_render_health_notice("最近问题", problem, detail))
+    if summary.latest_lock_wait:
+        waiting = summary.latest_lock_wait
+        reason = str(waiting.metadata.get("_lock_reason") or "等待资源锁")
+        holder = str(waiting.metadata.get("_lock_owner_task_id") or "-")
+        notices.append(_render_health_notice("最近锁等待", waiting, f"{reason}，占用任务 #{holder}"))
+    attention_panel = ""
+    if notices:
+        attention_panel = f"""<section class="panel">
+  <div class="panel-header"><h2>需要关注</h2></div>
+  <div>{''.join(notices)}</div>
+</section>"""
     body = f"""
 <div class="topbar">
   <div>
     <p class="eyebrow">本地队列健康</p>
     <h1>TaskStore 本地健康</h1>
-    <p class="subtle">只展示本地 TaskStore 状态，不会主动请求 115、CMS 或 Emby。</p>
+    <p class="subtle">只展示本地 TaskStore 状态，不会向 115、CMS 或 Emby 发起请求。</p>
   </div>
   <a class="button" href="/">返回运行概览</a>
 </div>
-<section class="panel">
-  <div class="panel-header"><h2>健康报告</h2></div>
-  <pre class="diagnostic">{html.escape(report)}</pre>
+<section class="health-status {health_class}">
+  <div><strong>{health_title}</strong><p>{cooldown_text}</p></div>
+  <span>本地任务 {summary.recent_count} 个</span>
 </section>
+<div class="health-grid" aria-label="本地任务状态">{health_grid}</div>
+{attention_panel}
+<details class="diagnostic-details">
+  <summary>查看完整健康报告</summary>
+  <div class="details-content"><pre class="diagnostic">{html.escape(report)}</pre></div>
+</details>
 """
     return _page("本地健康", body, active="health")
 
@@ -806,7 +941,8 @@ class WebApp:
             fix_quality_issues(self.store)
             return 303, {"Location": "/quality"}, b""
         if method == "GET" and parsed.path == "/health":
-            return 200, {"Content-Type": "text/html; charset=utf-8"}, render_health_page(self.store).encode("utf-8")
+            page = render_health_page(self.store, task_engine_enabled=self.task_engine_enabled)
+            return 200, {"Content-Type": "text/html; charset=utf-8"}, page.encode("utf-8")
         if method == "POST" and parsed.path == "/history/clear":
             self.store.clear_finished_tasks()
             return 303, {"Location": "/"}, b""
