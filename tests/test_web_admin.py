@@ -1202,6 +1202,19 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("查看完整健康报告", markup)
             self.assertIn("TaskEngine: ENABLED", markup)
             self.assertIn('<div class="health-grid" role="group" aria-label="本地任务状态">', markup)
+            self.assertIn("最近任务 1 个", markup)
+
+    def test_health_page_marks_recent_window_limit_as_at_least_100(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            for index in range(100):
+                task = store.upsert_task(f"done-{index}", "", f"https://115cdn.com/s/done-{index}")
+                store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+
+            markup = render_health_page(store)
+
+            self.assertIn("最近任务 100+ 个", markup)
+            self.assertNotIn("本地任务 100 个", markup)
 
     def test_health_endpoint_reports_disabled_task_engine(self):
         with tempfile.TemporaryDirectory() as tmp:

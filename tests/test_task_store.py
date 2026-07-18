@@ -2,6 +2,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.models import TaskStage, TaskStatus
 from app.task_store import TaskStore
@@ -136,6 +137,8 @@ class TaskStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
             pending = store.upsert_task("pending", "", "https://115cdn.com/s/pending")
+            running = store.upsert_task("running", "", "https://115cdn.com/s/running")
+            store.record_event(running.id, TaskStage.ORGANIZING, TaskStatus.RUNNING, "running")
             failed = store.upsert_task("failed", "", "https://115cdn.com/s/failed")
             store.record_event(failed.id, TaskStage.FAILED, TaskStatus.FAILED, "failed")
             succeeded = store.upsert_task("succeeded", "", "https://115cdn.com/s/succeeded")
@@ -145,11 +148,43 @@ class TaskStoreTests(unittest.TestCase):
 
             open_tasks = store.list_open_tasks()
 
-            self.assertEqual([task.id for task in open_tasks], [manual.id, failed.id, pending.id])
+            self.assertEqual([task.id for task in open_tasks], [manual.id, failed.id, running.id, pending.id])
             self.assertEqual(
                 [task.status for task in open_tasks],
-                [TaskStatus.NEEDS_ACTION, TaskStatus.FAILED, TaskStatus.PENDING],
+                [TaskStatus.NEEDS_ACTION, TaskStatus.FAILED, TaskStatus.RUNNING, TaskStatus.PENDING],
             )
+
+    def test_list_open_tasks_searches_status_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            statements = []
+            original_connect = store._connect
+
+            def traced_connect():
+                conn = original_connect()
+                conn.set_trace_callback(statements.append)
+                return conn
+
+            with patch.object(store, "_connect", side_effect=traced_connect):
+                store.list_open_tasks()
+
+            select_sql = next(
+                statement.strip()
+                for statement in statements
+                if statement.lstrip().startswith("SELECT * FROM tasks")
+            )
+            conn = sqlite3.connect(store.db_path)
+            try:
+                plan = [str(row[3]) for row in conn.execute(f"EXPLAIN QUERY PLAN {select_sql}")]
+            finally:
+                conn.close()
+            normalized_plan = "\n".join(plan).upper()
+
+            self.assertIn("STATUS IN", select_sql.upper())
+            self.assertIn("SEARCH TASKS", normalized_plan)
+            self.assertIn("IDX_TASKS_NEXT_RUN", normalized_plan)
+            self.assertIn("STATUS", normalized_plan)
+            self.assertNotIn("SCAN TASKS USING INDEX IDX_TASKS_UPDATED_AT", normalized_plan)
 
     def test_queue_summary_counts_statuses_and_lock_waits(self):
         with tempfile.TemporaryDirectory() as tmp:

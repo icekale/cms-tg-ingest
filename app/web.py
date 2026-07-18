@@ -856,13 +856,15 @@ def _render_health_notice(label: str, task: Any, detail: str) -> str:
 
 
 def render_health_page(store: TaskStore, *, task_engine_enabled: bool = True) -> str:
+    recent_limit = 100
     now = time.time()
-    summary = build_task_health(store, enabled=task_engine_enabled, now=now)
+    summary = build_task_health(store, enabled=task_engine_enabled, limit=recent_limit, now=now)
     report = format_task_health(summary, now=now)
     cooldown_active = summary.p115_cooldown_until > now
     warning = not summary.enabled or cooldown_active or summary.problem_count > 0
     health_class = "is-warning" if warning else "is-healthy"
     health_title = "任务引擎运行正常" if summary.enabled else "任务引擎已停用"
+    recent_count_label = f"{summary.recent_count}+" if summary.recent_count >= recent_limit else str(summary.recent_count)
     cooldown_text = (
         f"115 风控冷却中，剩余 {_duration(summary.p115_cooldown_until - now)}"
         if cooldown_active
@@ -911,7 +913,7 @@ def render_health_page(store: TaskStore, *, task_engine_enabled: bool = True) ->
 </div>
 <section class="health-status {health_class}">
   <div><strong>{health_title}</strong><p>{cooldown_text}</p></div>
-  <span>本地任务 {summary.recent_count} 个</span>
+  <span>最近任务 {recent_count_label} 个</span>
 </section>
 <div class="health-grid" role="group" aria-label="本地任务状态">{health_grid}</div>
 {attention_panel}

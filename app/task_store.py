@@ -172,10 +172,20 @@ class TaskStore:
         return [self._snapshot(row) for row in rows]
 
     def list_open_tasks(self) -> list[TaskSnapshot]:
+        open_statuses = (
+            TaskStatus.PENDING.value,
+            TaskStatus.RUNNING.value,
+            TaskStatus.FAILED.value,
+            TaskStatus.NEEDS_ACTION.value,
+        )
         with self._lock, self._connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM tasks WHERE status != ? ORDER BY updated_at DESC, id DESC",
-                (TaskStatus.SUCCEEDED.value,),
+                """
+                SELECT * FROM tasks INDEXED BY idx_tasks_next_run
+                WHERE status IN (?, ?, ?, ?)
+                ORDER BY updated_at DESC, id DESC
+                """,
+                open_statuses,
             ).fetchall()
         return [self._snapshot(row) for row in rows]
 
