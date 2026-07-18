@@ -171,6 +171,14 @@ class TaskStore:
             rows = conn.execute("SELECT * FROM tasks ORDER BY updated_at DESC, id DESC LIMIT ?", (limit,)).fetchall()
         return [self._snapshot(row) for row in rows]
 
+    def list_open_tasks(self) -> list[TaskSnapshot]:
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tasks WHERE status != ? ORDER BY updated_at DESC, id DESC",
+                (TaskStatus.SUCCEEDED.value,),
+            ).fetchall()
+        return [self._snapshot(row) for row in rows]
+
     def queue_summary(self, limit: int = 100) -> TaskQueueSummary:
         tasks = self.list_recent_tasks(limit=limit)
         lock_waits = [

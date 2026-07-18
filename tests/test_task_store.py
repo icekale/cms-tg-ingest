@@ -132,6 +132,25 @@ class TaskStoreTests(unittest.TestCase):
 
             self.assertEqual([task.id for task in recent], [two.id, one.id])
 
+    def test_list_open_tasks_excludes_succeeded_and_returns_newest_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            pending = store.upsert_task("pending", "", "https://115cdn.com/s/pending")
+            failed = store.upsert_task("failed", "", "https://115cdn.com/s/failed")
+            store.record_event(failed.id, TaskStage.FAILED, TaskStatus.FAILED, "failed")
+            succeeded = store.upsert_task("succeeded", "", "https://115cdn.com/s/succeeded")
+            store.record_event(succeeded.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            manual = store.upsert_task("manual", "", "https://115cdn.com/s/manual")
+            store.record_event(manual.id, TaskStage.NEEDS_ACTION, TaskStatus.NEEDS_ACTION, "choose")
+
+            open_tasks = store.list_open_tasks()
+
+            self.assertEqual([task.id for task in open_tasks], [manual.id, failed.id, pending.id])
+            self.assertEqual(
+                [task.status for task in open_tasks],
+                [TaskStatus.NEEDS_ACTION, TaskStatus.FAILED, TaskStatus.PENDING],
+            )
+
     def test_queue_summary_counts_statuses_and_lock_waits(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

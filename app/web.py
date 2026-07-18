@@ -730,10 +730,27 @@ def _group_quality_issues(issues: list[QualityIssue]) -> list[dict[str, Any]]:
     return list(grouped.values())
 
 
+def _quality_repair_action(issue: QualityIssue, task: Any | None) -> str | None:
+    if task is None or task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+        return None
+    if issue.code in {"missing_dest", "missing_strm"} and _task_can_use_downstream_actions(task):
+        return "restore"
+    if issue.code in {"direct_strm", "unexpected_strm"} and _task_can_reprocess(task):
+        return "reprocess"
+    return None
+
+
 def render_quality_page(store: TaskStore) -> str:
     issues = scan_task_quality(store)
     report = format_task_quality_report(issues)
     grouped = _group_quality_issues(issues)
+    tasks: dict[int, Any | None] = {}
+    actionable_task_ids: set[int] = set()
+    for issue in issues:
+        if issue.task_id not in tasks:
+            tasks[issue.task_id] = store.find_task(issue.task_id)
+        if _quality_repair_action(issue, tasks[issue.task_id]):
+            actionable_task_ids.add(issue.task_id)
     category_counts = {
         "目录/STRM 缺失": sum(issue.code in {"missing_dest", "missing_strm"} for issue in issues),
         "直链 STRM": sum(issue.code == "direct_strm" for issue in issues),
@@ -778,9 +795,9 @@ def render_quality_page(store: TaskStore) -> str:
         else '<div class="empty-state is-healthy"><strong>未发现本地 STRM 问题</strong><p>当前本地文件巡检结果健康。</p></div>'
     )
     fix_action = ""
-    if issues:
-        fix_action = """<form method="post" action="/quality/fix" onsubmit="return confirm('将按巡检结果入队修复：缺失目录恢复 STRM，直链 STRM 从头重跑。确定继续？')">
-        <button class="button-primary" type="submit">修复全部巡检问题</button>
+    if actionable_task_ids:
+        fix_action = f"""<form method="post" action="/quality/fix" onsubmit="return confirm('将按巡检结果入队修复：缺失目录恢复 STRM，直链 STRM 从头重跑。确定继续？')">
+        <button class="button-primary" type="submit">修复 {len(actionable_task_ids)} 个可处理任务</button>
       </form>"""
     body = f"""
 <div class="topbar">
@@ -791,7 +808,7 @@ def render_quality_page(store: TaskStore) -> str:
   </div>
   <div class="actions"><a class="button" href="/quality">重新巡检</a><a class="button" href="/">返回运行概览</a></div>
 </div>
-<div class="quality-summary" aria-label="巡检摘要">{summary_markup}</div>
+<div class="quality-summary" role="group" aria-label="巡检摘要">{summary_markup}</div>
 <section class="panel">
   <div class="panel-header">
     <div><h2>巡检结果</h2><p class="subtle">发现缺失目录或直链 STRM 时，可以入队执行安全修复。</p></div>
@@ -812,9 +829,8 @@ def fix_quality_issues(store: TaskStore) -> int:
         if issue.task_id in fixed_task_ids:
             continue
         task = store.find_task(issue.task_id)
-        if not task or task.status not in {TaskStatus.SUCCEEDED, TaskStatus.FAILED}:
-            continue
-        if issue.code in {"missing_dest", "missing_strm"}:
+        action = _quality_repair_action(issue, task)
+        if action == "restore":
             store.record_event(
                 task.id,
                 TaskStage.EMBY_CONFIRMED,
@@ -825,7 +841,7 @@ def fix_quality_issues(store: TaskStore) -> int:
             )
             store.enqueue_task(task.id, TaskStage.EMBY_CONFIRMED, message="Web 巡检恢复 STRM 已入队", next_run_at=0)
             fixed_task_ids.add(task.id)
-        elif issue.code in {"direct_strm", "unexpected_strm"}:
+        elif action == "reprocess":
             store.reprocess_task(task.id, message="Web 巡检自动修复：从头重跑", next_run_at=0)
             fixed_task_ids.add(task.id)
     return len(fixed_task_ids)
@@ -840,9 +856,9 @@ def _render_health_notice(label: str, task: Any, detail: str) -> str:
 
 
 def render_health_page(store: TaskStore, *, task_engine_enabled: bool = True) -> str:
-    summary = build_task_health(store, enabled=task_engine_enabled)
-    report = format_task_health(summary)
     now = time.time()
+    summary = build_task_health(store, enabled=task_engine_enabled, now=now)
+    report = format_task_health(summary, now=now)
     cooldown_active = summary.p115_cooldown_until > now
     warning = not summary.enabled or cooldown_active or summary.problem_count > 0
     health_class = "is-warning" if warning else "is-healthy"
@@ -865,7 +881,11 @@ def render_health_page(store: TaskStore, *, task_engine_enabled: bool = True) ->
     notices = []
     if summary.latest_problem:
         problem = summary.latest_problem
-        detail = stage_display_name(problem.current_stage)
+        detail = (
+            "不在自动调度队列，需要人工恢复"
+            if is_unscheduled_active_task(problem)
+            else stage_display_name(problem.current_stage)
+        )
         if problem.error_summary:
             detail = f"{detail}，{problem.error_summary}"
         notices.append(_render_health_notice("最近问题", problem, detail))
@@ -893,7 +913,7 @@ def render_health_page(store: TaskStore, *, task_engine_enabled: bool = True) ->
   <div><strong>{health_title}</strong><p>{cooldown_text}</p></div>
   <span>本地任务 {summary.recent_count} 个</span>
 </section>
-<div class="health-grid" aria-label="本地任务状态">{health_grid}</div>
+<div class="health-grid" role="group" aria-label="本地任务状态">{health_grid}</div>
 {attention_panel}
 <details class="diagnostic-details">
   <summary>查看完整健康报告</summary>
