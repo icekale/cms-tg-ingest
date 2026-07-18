@@ -1,3 +1,4 @@
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -201,11 +202,12 @@ class WebAdminTests(unittest.TestCase):
 
             page_html = render_task_list(store)
             queue_html = page_html.split('data-section="queue"', 1)[1].split('data-section="maintenance"', 1)[0]
+            phase_rules = re.findall(r"\.phase-track\s*\{([^}]*)\}", page_html)
 
             self.assertIn('</a><div class="phase-track"', queue_html)
             self.assertIn('.task-row > .phase-track { grid-column: 1 / -1;', page_html)
-            self.assertIn('overflow-x: visible;', page_html)
-            self.assertIn('.phase-track { overflow-x: auto; }', page_html)
+            self.assertTrue(any("overflow-x: auto" in declarations for declarations in phase_rules))
+            self.assertTrue(all("overflow-x: visible" not in declarations for declarations in phase_rules))
 
     def test_overview_does_not_load_queue_event_history(self):
         with tempfile.TemporaryDirectory() as tmp:

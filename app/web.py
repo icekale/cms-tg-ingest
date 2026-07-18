@@ -180,7 +180,7 @@ p {{ margin: 0; }}
 .overflow-tasks > .task-list {{ margin-top: 10px; }}
 .maintenance-panel {{ margin-top: 14px; }}
 .maintenance-actions {{ display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }}
-.phase-track {{ display: grid; grid-template-columns: repeat(8, minmax(72px, 1fr)); gap: 0; margin: 18px 0; overflow-x: visible; }}
+.phase-track {{ display: grid; grid-template-columns: repeat(8, minmax(72px, 1fr)); gap: 0; margin: 18px 0; overflow-x: auto; }}
 .task-row > .phase-track {{ grid-column: 1 / -1; width: 100%; min-width: 0; margin-bottom: 0; }}
 .phase-step {{ position: relative; min-width: 72px; padding: 0 6px; color: var(--muted); text-align: center; font-size: 12px; }}
 .phase-step::before {{ content: ""; position: absolute; top: 7px; right: 50%; left: -50%; height: 2px; background: var(--border); }}
@@ -228,7 +228,6 @@ code {{ background: #eef2f7; padding: 2px 5px; border-radius: 6px; }}
   .workspace-grid, .overview-grid, .health-grid {{ grid-template-columns: 1fr; }}
   .quality-summary {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
   .task-row {{ grid-template-columns: 1fr; }}
-  .phase-track {{ overflow-x: auto; }}
   .summary-grid, .detail-grid {{ grid-template-columns: 1fr; }}
 }}
 @media (prefers-reduced-motion: reduce) {{
