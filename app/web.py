@@ -40,6 +40,10 @@ _TASK_PHASES = (
     ("清理完成", {TaskStage.CLEANED}),
 )
 
+_DOWNSTREAM_RECOVERY_STAGES = {TaskStage.MOVED, TaskStage.EMBY_CONFIRMED, TaskStage.CLEANED}
+_TERMINAL_ACTION_STATUSES = {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION, TaskStatus.SUCCEEDED}
+_TASK_ACTIONS = {"retry", "emby", "restore", "reprocess"}
+
 
 def _navigation(active: str) -> str:
     links = []
@@ -147,6 +151,7 @@ a:hover {{ color: var(--primary-dark); text-decoration: underline; }}
 .app-nav a[aria-current="page"] {{ border-bottom-color: var(--primary); color: var(--primary); font-weight: 650; }}
 .shell {{ width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 28px 0 40px; }}
 .page-heading, .topbar {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }}
+.topbar > div {{ min-width: 0; }}
 .eyebrow {{ color: var(--muted); font-size: 13px; margin: 0 0 4px; }}
 h1 {{ font-size: 28px; line-height: 1.2; margin: 0; }}
 h2 {{ font-size: 18px; margin: 0; }}
@@ -196,9 +201,11 @@ p {{ margin: 0; }}
 .incident-strip {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }}
 .incident-strip[data-status="failed"] {{ border-color: #e2b8b8; background: #fffafa; }}
 .incident-strip[data-status="needs_action"], .incident-strip[data-status="attention"] {{ border-color: #e1cf9d; background: #fffbef; }}
+.incident-strip.is-neutral {{ border-color: var(--border); background: var(--surface); }}
 .incident-copy {{ min-width: 0; }}
 .incident-summary {{ font-weight: 700; overflow-wrap: anywhere; }}
 .incident-recommendation {{ margin-top: 4px; color: var(--muted-strong); font-size: 13px; overflow-wrap: anywhere; }}
+.task-detail-title {{ max-width: 100%; overflow-wrap: anywhere; }}
 .summary-item {{ min-width: 0; padding: 10px 0; border-bottom: 1px solid var(--border-soft); }}
 .summary-label {{ color: var(--muted); font-size: 12px; margin-bottom: 4px; }}
 .summary-value {{ overflow-wrap: anywhere; }}
@@ -297,13 +304,46 @@ def task_display_title(task: Any) -> str:
 
 
 def parse_task_id_from_path(path: str) -> int | None:
-    parts = str(path or "").strip("/").split("/")
-    if len(parts) < 2 or parts[0] != "task":
+    parts = str(path or "").split("/")
+    if len(parts) != 3 or parts[0] or parts[1] != "task" or not parts[2]:
         return None
     try:
-        return int(parts[1])
+        return int(parts[2])
     except (TypeError, ValueError):
         return None
+
+
+def parse_task_action_path(path: str) -> tuple[int, str] | None:
+    parts = str(path or "").split("/")
+    if len(parts) != 4 or parts[0] or parts[1] != "task" or parts[3] not in _TASK_ACTIONS:
+        return None
+    try:
+        return int(parts[2]), parts[3]
+    except (TypeError, ValueError):
+        return None
+
+
+def _task_can_retry(task: Any, decision: Any | None = None) -> bool:
+    retry_decision = decision or decide_retry(task)
+    return task.status == TaskStatus.FAILED and retry_decision.action == RetryAction.RETRY_CURRENT_STAGE
+
+
+def _task_can_use_downstream_actions(task: Any) -> bool:
+    return (
+        task.current_stage in _DOWNSTREAM_RECOVERY_STAGES
+        and task.status in _TERMINAL_ACTION_STATUSES
+        and not str(task.claimed_by or "").strip()
+    )
+
+
+def _task_is_unscheduled_legacy(task: Any) -> bool:
+    return task.current_stage != TaskStage.RECEIVED and is_unscheduled_active_task(task)
+
+
+def _task_can_reprocess(task: Any) -> bool:
+    if task.status in _TERMINAL_ACTION_STATUSES:
+        return True
+    return _task_is_unscheduled_legacy(task) and not str(task.claimed_by or "").strip()
 
 
 
@@ -514,6 +554,11 @@ def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | N
 
     display_events = list(reversed(events))
     recent_event_items = "".join(render_event(event) for event in display_events[:8])
+    recent_events = (
+        f'<ul class="timeline recent-timeline">{recent_event_items}</ul>'
+        if recent_event_items
+        else '<div class="empty-state">暂无处理事件</div>'
+    )
     older_event_items = "".join(render_event(event) for event in display_events[8:])
     older_events = ""
     if older_event_items:
@@ -522,45 +567,98 @@ def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | N
             f'<ul class="timeline">{older_event_items}</ul></details>'
         )
     decision = decide_retry(task)
+    retry_eligible = _task_can_retry(task, decision)
+    downstream_actions_eligible = _task_can_use_downstream_actions(task)
+    reprocess_eligible = _task_can_reprocess(task)
     retry_form = ""
-    if decision.action == RetryAction.RETRY_CURRENT_STAGE:
+    if retry_eligible:
         retry_form = f'<form method="post" action="/task/{task.id}/retry"><button class="button button-primary" type="submit">重试当前阶段</button></form>'
-    emby_form = f'<form method="post" action="/task/{task.id}/emby"><button class="button button-secondary" type="submit">查 Emby</button></form>'
-    restore_form = f'<form method="post" action="/task/{task.id}/restore"><button class="button button-secondary" type="submit">恢复 STRM</button></form>'
-    reprocess_form = (
-        f'<form method="post" action="/task/{task.id}/reprocess" '
-        "onsubmit=\"return confirm('将从接收阶段重新执行该任务。确定继续？')\">"
-        '<button class="button button-danger" type="submit">从头重跑</button></form>'
-    )
+    secondary_actions = ""
+    if downstream_actions_eligible:
+        emby_form = f'<form method="post" action="/task/{task.id}/emby"><button class="button button-secondary" type="submit">查 Emby</button></form>'
+        restore_form = f'<form method="post" action="/task/{task.id}/restore"><button class="button button-secondary" type="submit">恢复 STRM</button></form>'
+        secondary_actions = f"""
+<section class="panel">
+  <div class="panel-header"><h2>其他操作</h2></div>
+  <div class="actions">{emby_form}{restore_form}</div>
+</section>
+"""
+    danger_zone = ""
+    if reprocess_eligible:
+        reprocess_form = (
+            f'<form method="post" action="/task/{task.id}/reprocess" '
+            "onsubmit=\"return confirm('将从接收阶段重新执行该任务。确定继续？')\">"
+            '<button class="button button-danger" type="submit">从头重跑</button></form>'
+        )
+        danger_zone = f"""
+<details class="danger-zone">
+  <summary>高风险操作</summary>
+  <div class="details-content">
+    <p>从头重跑可能再次调用 115/CMS，并重新执行整个入库流程。</p>
+    <div class="actions">{reprocess_form}</div>
+  </div>
+</details>
+"""
     media_library = str(task.metadata.get("emby_parent") or task.metadata.get("emby_refresh_library") or "-")
     dest_path = str(task.metadata.get("dest_path") or task.metadata.get("emby_path") or "-")
     error_summary = str(task.error_summary or "").strip()
     wait_label = _task_wait_message(task)
-    incident_summary = error_summary or wait_label or decision.reason
+    unscheduled = _task_is_unscheduled_legacy(task)
+    normal_active = task.status in {TaskStatus.PENDING, TaskStatus.RUNNING} and not error_summary and not wait_label and not unscheduled
+    if error_summary:
+        incident_summary = error_summary
+        recommendation = decision.reason if retry_eligible or task.status in _TERMINAL_ACTION_STATUSES else "请关注当前任务状态"
+        incident_tone = "failed" if task.status == TaskStatus.FAILED else "attention"
+    elif wait_label:
+        incident_summary = wait_label
+        recommendation = "任务正在按计划处理" if not unscheduled else "可从头重跑该遗留任务"
+        incident_tone = "attention"
+    elif unscheduled:
+        incident_summary = "任务不在自动调度队列"
+        recommendation = "可从头重跑该遗留任务"
+        incident_tone = "attention"
+    elif normal_active:
+        incident_summary = "等待任务引擎执行" if task.status == TaskStatus.PENDING else "任务正在按计划处理"
+        recommendation = "任务正在按计划处理" if task.status == TaskStatus.PENDING else "当前无需手动操作"
+        incident_tone = "neutral"
+    elif task.status == TaskStatus.FAILED:
+        incident_summary = "任务执行失败"
+        recommendation = decision.reason
+        incident_tone = "failed"
+    elif task.status == TaskStatus.NEEDS_ACTION:
+        incident_summary = "任务需要人工处理"
+        recommendation = decision.reason
+        incident_tone = "attention"
+    else:
+        incident_summary = "任务已完成"
+        recommendation = "可按需检查 Emby 或恢复 STRM" if downstream_actions_eligible else "当前无需手动操作"
+        incident_tone = "neutral"
     observability = _task_observability_lines(task)
     slow_label = next((line.split("：", 1)[1] for line in observability if line.startswith("为什么慢：")), "-")
+    if normal_active:
+        slow_label = "等待任务引擎执行" if task.status == TaskStatus.PENDING else "任务正在按计划处理"
     timing_label = next((line.split("：", 1)[1] for line in observability if line.startswith("耗时：")), "-")
     p115_label = next((line.split("：", 1)[1] for line in observability if line.startswith("115调用：")), "-")
     stage_elapsed_summary, stage_p115_summary = format_stage_observability(task)
     stage_elapsed_summary = stage_elapsed_summary or "-"
     stage_p115_summary = stage_p115_summary or "-"
-    incident_tone = "attention" if is_unscheduled_active_task(task) else task.status.value
+    incident_classes = "incident-strip is-neutral" if incident_tone == "neutral" else "incident-strip"
     body = f"""
 <div class="topbar">
   <div>
     <p class="breadcrumb"><a href="/">运行概览</a> / 任务 #{task.id}</p>
-    <h1>{html.escape(task_display_title(task))}</h1>
+    <h1 class="task-detail-title">{html.escape(task_display_title(task))}</h1>
   </div>
-  {_badge("需处理" if is_unscheduled_active_task(task) else task.status.value, "status-attention" if is_unscheduled_active_task(task) else _status_class(task.status))}
+  {_badge("需处理" if unscheduled else task.status.value, "status-attention" if unscheduled else _status_class(task.status))}
 </div>
 
-<section class="incident-strip" data-status="{html.escape(incident_tone)}">
+<div class="{incident_classes}" data-status="{html.escape(incident_tone)}">
   <div class="incident-copy">
     <p class="incident-summary">{html.escape(incident_summary)}</p>
-    <p class="incident-recommendation">{html.escape(decision.reason)}</p>
+    <p class="incident-recommendation">{html.escape(recommendation)}</p>
   </div>
   <div class="actions">{retry_form}</div>
-</section>
+</div>
 
 {_render_phase_track(task, events)}
 
@@ -572,7 +670,7 @@ def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | N
     <div class="summary-item"><div class="summary-label">为什么慢</div><div class="summary-value">{html.escape(slow_label)}</div></div>
     <div class="summary-item"><div class="summary-label">执行耗时</div><div class="summary-value">{html.escape(timing_label)}</div></div>
     <div class="summary-item"><div class="summary-label">115 调用</div><div class="summary-value">{html.escape(p115_label)}</div></div>
-    <div class="summary-item"><div class="summary-label">推荐操作</div><div class="summary-value">{html.escape(decision.reason)}</div></div>
+    <div class="summary-item"><div class="summary-label">推荐操作</div><div class="summary-value">{html.escape(recommendation)}</div></div>
   </div>
   <details class="diagnostic-details">
     <summary>技术详情与文件路径</summary>
@@ -585,27 +683,15 @@ def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | N
   </details>
 </section>
 
-<section class="panel">
-  <div class="panel-header"><h2>其他操作</h2></div>
-  <div class="actions">
-    {emby_form}
-    {restore_form}
-  </div>
-</section>
+{secondary_actions}
 
 <section class="panel">
   <div class="panel-header"><h2>处理时间线</h2></div>
-  <ul class="timeline recent-timeline">{recent_event_items}</ul>
+  {recent_events}
   {older_events}
 </section>
 
-<details class="danger-zone">
-  <summary>高风险操作</summary>
-  <div class="details-content">
-    <p>从头重跑可能再次调用 115/CMS，并重新执行整个入库流程。</p>
-    <div class="actions">{reprocess_form}</div>
-  </div>
-</details>
+{danger_zone}
 
 <p><a class="button" href="/">返回运行概览</a></p>
 """
@@ -727,19 +813,13 @@ class WebApp:
             if task_id is None:
                 return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
             return 200, {"Content-Type": "text/html; charset=utf-8"}, render_task_detail(self.store, task_id, self.submission_store).encode("utf-8")
-        if method == "POST" and parsed.path.startswith("/task/") and parsed.path.endswith("/emby"):
-            task_id = parse_task_id_from_path(parsed.path)
-            if task_id is None:
-                return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
-            if self.store.find_task(task_id):
-                self.store.enqueue_task(task_id, TaskStage.EMBY_CONFIRMED, message="Web 触发 Emby 检查", next_run_at=0)
-            return 303, {"Location": f"/task/{task_id}"}, b""
-        if method == "POST" and parsed.path.startswith("/task/") and parsed.path.endswith("/restore"):
-            task_id = parse_task_id_from_path(parsed.path)
-            if task_id is None:
-                return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
+        task_action = parse_task_action_path(parsed.path) if method == "POST" else None
+        if task_action is not None:
+            task_id, action = task_action
             task = self.store.find_task(task_id)
-            if task:
+            if task and action == "emby" and _task_can_use_downstream_actions(task):
+                self.store.enqueue_task(task_id, TaskStage.EMBY_CONFIRMED, message="Web 触发 Emby 检查", next_run_at=0)
+            elif task and action == "restore" and _task_can_use_downstream_actions(task):
                 self.store.record_event(
                     task_id,
                     TaskStage.EMBY_CONFIRMED,
@@ -749,22 +829,11 @@ class WebApp:
                     clear_claim=True,
                 )
                 self.store.enqueue_task(task_id, TaskStage.EMBY_CONFIRMED, message="Web STRM 恢复已入队", next_run_at=0)
-            return 303, {"Location": f"/task/{task_id}"}, b""
-        if method == "POST" and parsed.path.startswith("/task/") and parsed.path.endswith("/reprocess"):
-            task_id = parse_task_id_from_path(parsed.path)
-            if task_id is None:
-                return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
-            if self.store.find_task(task_id):
+            elif task and action == "reprocess" and _task_can_reprocess(task):
                 self.store.reprocess_task(task_id, message="Web 触发从头重跑", next_run_at=0)
-            return 303, {"Location": f"/task/{task_id}"}, b""
-        if method == "POST" and parsed.path.startswith("/task/") and parsed.path.endswith("/retry"):
-            task_id = parse_task_id_from_path(parsed.path)
-            if task_id is None:
-                return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
-            task = self.store.find_task(task_id)
-            if task:
+            elif task and action == "retry":
                 decision = decide_retry(task)
-                if decision.action == RetryAction.RETRY_CURRENT_STAGE:
+                if _task_can_retry(task, decision):
                     target_stage = decision.stage or task.current_stage
                     if target_stage in {TaskStage.NEEDS_ACTION, TaskStage.FAILED}:
                         target_stage = TaskStage.RECEIVED
@@ -778,6 +847,8 @@ class WebApp:
                     )
                     self.store.enqueue_task(task_id, target_stage, message="手动重试已入队", next_run_at=0)
             return 303, {"Location": f"/task/{task_id}"}, b""
+        if parsed.path.startswith("/task/"):
+            return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
         return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"Not Found"
 
 
