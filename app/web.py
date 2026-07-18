@@ -17,7 +17,7 @@ from .task_diagnostics import (
     is_unscheduled_active_task,
 )
 from .task_engine import decide_retry, stage_display_name
-from .task_health import format_taskstore_health
+from .task_health import build_task_health, format_taskstore_health
 from .quality import format_task_quality_report, scan_task_quality
 from .task_store import TaskStore
 
@@ -151,12 +151,15 @@ h1 {{ font-size: 28px; line-height: 1.2; margin: 0; }}
 h2 {{ font-size: 18px; margin: 0; }}
 p {{ margin: 0; }}
 .subtle {{ color: var(--muted); }}
-.status-strip {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }}
+.status-strip {{ display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px 20px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }}
+.status-summary, .status-facts {{ display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }}
+.status-facts {{ color: var(--muted-strong); font-size: 13px; }}
 .metrics-grid, .stats-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }}
 .metric, .stat-card {{ min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 16px; }}
 .stat-label {{ color: var(--muted); font-size: 13px; margin-bottom: 6px; }}
 .stat-value {{ font-size: 28px; line-height: 1; font-weight: 700; }}
 .workspace-grid, .overview-grid {{ display: grid; grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.25fr); gap: 14px; align-items: start; }}
+.workspace-grid > .panel {{ margin: 0; }}
 .panel {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 18px; margin: 14px 0; }}
 .panel-heading, .panel-header {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }}
 .badge {{ display: inline-flex; align-items: center; border: 1px solid transparent; border-radius: 6px; padding: 3px 8px; font-size: 12px; font-weight: 650; white-space: nowrap; }}
@@ -166,10 +169,16 @@ p {{ margin: 0; }}
 .status-failed {{ background: var(--danger-bg); color: var(--danger-text); }}
 .task-list {{ display: grid; gap: 10px; }}
 .task-row {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 14px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--surface-muted); }}
+.task-row > div {{ min-width: 0; }}
 .task-title {{ font-weight: 650; margin-bottom: 4px; overflow-wrap: anywhere; }}
 .task-meta {{ display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 13px; }}
 .task-message {{ margin-top: 6px; color: var(--muted-strong); font-size: 13px; overflow-wrap: anywhere; }}
 .task-message.error {{ color: var(--danger-text); }}
+.overflow-tasks {{ margin-top: 10px; border-top: 1px solid var(--border-soft); }}
+.overflow-tasks > summary {{ padding: 12px 2px 2px; color: var(--primary); cursor: pointer; font-weight: 650; }}
+.overflow-tasks > .task-list {{ margin-top: 10px; }}
+.maintenance-panel {{ margin-top: 14px; }}
+.maintenance-actions {{ display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }}
 .phase-track {{ display: grid; grid-template-columns: repeat(8, minmax(72px, 1fr)); gap: 0; margin: 18px 0; overflow-x: auto; }}
 .phase-step {{ position: relative; min-width: 72px; padding: 0 6px; color: var(--muted); text-align: center; font-size: 12px; }}
 .phase-step::before {{ content: ""; position: absolute; top: 7px; right: 50%; left: -50%; height: 2px; background: var(--border); }}
@@ -212,6 +221,7 @@ code {{ background: #eef2f7; padding: 2px 5px; border-radius: 6px; }}
   .app-nav a {{ white-space: nowrap; }}
   .shell {{ width: min(100% - 20px, 1180px); padding-top: 18px; }}
   .page-heading, .topbar {{ display: grid; }}
+  .status-strip {{ align-items: flex-start; }}
   .metrics-grid, .stats-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
   .workspace-grid, .overview-grid, .health-grid {{ grid-template-columns: 1fr; }}
   .quality-summary {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
@@ -316,6 +326,14 @@ def _task_counts(tasks: list[Any]) -> dict[str, int]:
     }
 
 
+def _is_attention_task(task: Any) -> bool:
+    return task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or is_unscheduled_active_task(task)
+
+
+def _is_queue_task(task: Any) -> bool:
+    return is_dispatchable_active_task(task) and not _is_attention_task(task)
+
+
 def _overall_status(counts: dict[str, int]) -> tuple[str, str]:
     if counts["problem"]:
         return "需要关注", "status-attention"
@@ -324,7 +342,7 @@ def _overall_status(counts: dict[str, int]) -> tuple[str, str]:
     return "运行正常", "status-healthy"
 
 
-def _render_task_row(task: Any, *, compact: bool = False) -> str:
+def _render_task_row(task: Any, *, compact: bool = False, phase_html: str = "") -> str:
     title = task_display_title(task)
     stage = stage_display_name(task.current_stage)
     status_label = "需处理" if is_unscheduled_active_task(task) else task.status.value
@@ -348,69 +366,97 @@ def _render_task_row(task: Any, *, compact: bool = False) -> str:
         '</div>'
         f'{message_html}'
         f'{observability_html}'
+        f'{phase_html}'
         '</div>'
         f'<a class="button" href="/task/{task.id}">{detail_label}</a>'
         '</div>'
     )
 
 
-def render_task_list(store: TaskStore) -> str:
+def render_task_list(store: TaskStore, *, task_engine_enabled: bool = True) -> str:
     tasks = store.list_recent_tasks(limit=100)
-    visible_tasks = [task for task in tasks if task.status != TaskStatus.SUCCEEDED]
-    attention_tasks = [
-        task
-        for task in visible_tasks
-        if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or _task_wait_message(task) or is_unscheduled_active_task(task)
-    ]
+    attention_tasks = [task for task in tasks if _is_attention_task(task)]
+    queue_tasks = [task for task in tasks if _is_queue_task(task)]
     counts = _task_counts(tasks)
+    health = build_task_health(store, enabled=task_engine_enabled, limit=100)
     overall_label, overall_class = _overall_status(counts)
 
     attention_html = "".join(_render_task_row(task, compact=True) for task in attention_tasks[:8])
+    overflow_tasks = attention_tasks[8:]
+    if overflow_tasks:
+        overflow_rows = "".join(_render_task_row(task, compact=True) for task in overflow_tasks)
+        attention_html += (
+            '<details class="overflow-tasks">'
+            f'<summary>查看其余 {len(overflow_tasks)} 项</summary>'
+            f'<div class="task-list">{overflow_rows}</div>'
+            '</details>'
+        )
     if not attention_html:
         attention_html = '<div class="empty-state">暂无需要处理的任务</div>'
 
-    queue_rows = "".join(_render_task_row(task) for task in visible_tasks[:25])
+    queue_rows = "".join(
+        _render_task_row(
+            task,
+            phase_html=_render_phase_track(task, store.list_events(task.id)),
+        )
+        for task in queue_tasks[:25]
+    )
     if not queue_rows:
-        queue_rows = '<div class="empty-state">当前没有运行中或失败任务</div>'
+        queue_rows = '<div class="empty-state">当前没有活跃任务</div>'
+
+    engine_label = "任务引擎正常" if health.enabled else "任务引擎已停用"
+    cooldown_label = "115 风控冷却中" if health.p115_cooldown_until > time.time() else "115 未冷却"
+    updated_label = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
     body = f"""
-<div class="topbar">
+<div class="page-heading">
   <div>
-    <p class="eyebrow">Telegram 115 入库外挂 / 自分享 STRM 工作流</p>
-    <h1>cms-tg-ingest 运行概览</h1>
+    <p class="eyebrow">Telegram 115 自分享 STRM 工作流</p>
+    <h1>运行概览</h1>
   </div>
-  {_badge(overall_label, overall_class)}
+  <p class="subtle">本地更新：{updated_label}</p>
 </div>
 
-<section class="stats-grid" aria-label="任务概览">
-  <div class="stat-card"><div class="stat-label">处理中</div><div class="stat-value">{counts['active']}</div></div>
-  <div class="stat-card"><div class="stat-label">需处理/失败</div><div class="stat-value">{counts['problem']}</div></div>
-  <div class="stat-card"><div class="stat-label">等待资源</div><div class="stat-value">{counts['waiting']}</div></div>
-  <div class="stat-card"><div class="stat-label">已完成历史</div><div class="stat-value">{counts['completed']}</div></div>
+<section class="status-strip" aria-label="运行状态">
+  <div class="status-summary">
+    {_badge(overall_label, overall_class)}
+    <span>{len(queue_tasks)} 个活跃任务，{len(attention_tasks)} 个需关注</span>
+  </div>
+  <div class="status-facts"><span>{engine_label}</span><span>{cooldown_label}</span></div>
 </section>
 
-<div class="overview-grid">
-  <section class="panel">
+<section class="metrics-grid" aria-label="任务概览">
+  <div class="metric"><div class="stat-label">运行中</div><div class="stat-value">{counts['active']}</div></div>
+  <div class="metric"><div class="stat-label">需处理/失败</div><div class="stat-value">{counts['problem']}</div></div>
+  <div class="metric"><div class="stat-label">等待资源</div><div class="stat-value">{counts['waiting']}</div></div>
+  <div class="metric"><div class="stat-label">已完成历史</div><div class="stat-value">{counts['completed']}</div></div>
+</section>
+
+<div class="workspace-grid">
+  <section class="panel" data-section="attention">
     <div class="panel-header">
-      <div><h2>需要关注</h2><p class="subtle">失败、需人工处理、等待资源锁或等待本地文件稳定的任务会出现在这里。</p></div>
+      <div><h2>需要关注</h2><p class="subtle">失败、需人工处理或不在自动调度队列的任务。</p></div>
     </div>
     <div class="task-list">{attention_html}</div>
   </section>
 
-  <section class="panel">
+  <section class="panel" data-section="queue">
     <div class="panel-header">
-      <div><h2>当前队列</h2><p class="subtle">活跃/问题任务 {len(visible_tasks)} 个；已完成历史 {counts['completed']} 个。已完成任务默认折叠。</p></div>
-      <div class="actions">
-        <a class="button" href="/quality">本地轻量巡检</a>
-        <a class="button" href="/health">本地健康</a>
-        <form method="post" action="/history/clear" onsubmit="return confirm('只清除已结束任务记录，不删除文件。确定继续？')">
-          <button class="button-danger" type="submit">清除历史记录</button>
-        </form>
-      </div>
+      <div><h2>当前队列</h2><p class="subtle">可调度的待处理和运行中任务，最多显示 25 项。</p></div>
     </div>
     <div class="task-list">{queue_rows}</div>
   </section>
 </div>
+
+<section class="panel maintenance-panel" data-section="maintenance">
+  <div class="panel-header"><div><h2>本地维护</h2><p class="subtle">页面操作只读取或清理本地任务记录。</p></div></div>
+  <div class="maintenance-actions">
+    <a href="/">重新载入页面</a>
+    <form method="post" action="/history/clear" onsubmit="return confirm('只清除已结束任务记录，不删除文件。确定继续？')">
+      <button class="button-danger" type="submit">清理已结束记录</button>
+    </form>
+  </div>
+</section>
 """
     return _page("运行概览", body, active="overview")
 

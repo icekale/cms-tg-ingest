@@ -100,7 +100,7 @@ class WebAdminTests(unittest.TestCase):
             done = store.upsert_task("done", "", "https://115cdn.com/s/done")
             store.record_event(done.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done", title="已完成电影")
             running = store.upsert_task("running", "", "https://115cdn.com/s/running")
-            store.record_event(running.id, TaskStage.MOVED, TaskStatus.RUNNING, "moving", title="运行中电影")
+            store.record_event(running.id, TaskStage.MOVED, TaskStatus.RUNNING, "moving", title="运行中电影", next_run_at=0)
             failed = store.upsert_task("failed", "", "https://115cdn.com/s/failed")
             store.record_event(failed.id, TaskStage.STRM_READY, TaskStatus.FAILED, "failed", title="失败电影", error_summary="失败原因")
 
@@ -109,16 +109,81 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("运行概览", html)
             self.assertIn("需要关注", html)
             self.assertIn("当前队列", html)
-            self.assertIn("overview-grid", html)
-            self.assertIn("处理中", html)
+            self.assertIn("workspace-grid", html)
+            self.assertIn("运行中", html)
             self.assertIn("需处理/失败", html)
             self.assertIn("等待资源", html)
             self.assertIn("已完成历史", html)
-            self.assertIn("活跃/问题任务 2 个", html)
-            self.assertIn("已完成历史 1 个", html)
+            self.assertIn("1 个活跃任务，1 个需关注", html)
             self.assertIn("运行中电影", html)
             self.assertIn("失败电影", html)
             self.assertNotIn("已完成电影</td>", html)
+
+    def test_overview_deduplicates_attention_and_active_queue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            failed = store.upsert_task("failed-only", "", "https://115cdn.com/s/failed-only")
+            store.record_event(
+                failed.id,
+                TaskStage.STRM_READY,
+                TaskStatus.FAILED,
+                "failed",
+                title="只在关注栏",
+                error_summary="需要处理",
+            )
+            pending = store.upsert_task("queue-only", "", "https://115cdn.com/s/queue-only")
+            store.record_event(
+                pending.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "waiting",
+                title="只在队列栏",
+                metadata_patch={"_defer_message": "等待 CMS 整理完成"},
+                next_run_at=9999999999.0,
+            )
+
+            page_html = render_task_list(store)
+
+            self.assertEqual(page_html.count("只在关注栏"), 1)
+            self.assertEqual(page_html.count("只在队列栏"), 1)
+            attention_html = page_html.split('data-section="attention"', 1)[1].split('data-section="queue"', 1)[0]
+            queue_html = page_html.split('data-section="queue"', 1)[1].split('data-section="maintenance"', 1)[0]
+            self.assertIn("只在关注栏", attention_html)
+            self.assertNotIn("只在队列栏", attention_html)
+            self.assertIn("只在队列栏", queue_html)
+            self.assertNotIn("只在关注栏", queue_html)
+
+    def test_overview_keeps_attention_overflow_accessible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            titles = [f"关注任务 {index}" for index in range(10)]
+            for index, title in enumerate(titles):
+                task = store.upsert_task(f"failed-{index}", "", f"https://115cdn.com/s/failed-{index}")
+                store.record_event(
+                    task.id,
+                    TaskStage.STRM_READY,
+                    TaskStatus.FAILED,
+                    "failed",
+                    title=title,
+                    error_summary="需要处理",
+                )
+
+            page_html = render_task_list(store)
+
+            for title in titles:
+                self.assertIn(title, page_html)
+            self.assertIn('data-section="attention"', page_html)
+            self.assertIn('data-section="queue"', page_html)
+            attention_html = page_html.split('data-section="attention"', 1)[1].split('data-section="queue"', 1)[0]
+            visible_html, overflow_html = attention_html.split('<details class="overflow-tasks">', 1)
+            recent_titles = list(reversed(titles))
+            for title in recent_titles[:8]:
+                self.assertIn(title, visible_html)
+                self.assertNotIn(title, overflow_html)
+            for title in recent_titles[8:]:
+                self.assertNotIn(title, visible_html)
+                self.assertIn(title, overflow_html)
+            self.assertIn("<summary>查看其余 2 项</summary>", overflow_html)
 
     def test_render_task_list_contains_task_stage_and_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -139,11 +204,10 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("示例电影", html)
             self.assertIn("STRM 生成", html)
             self.assertIn("未找到 STRM", html)
-            self.assertIn("资源锁", html)
             self.assertIn(f"/task/{task.id}", html)
             self.assertIn('action="/history/clear"', html)
             self.assertIn("只清除已结束任务记录", html)
-            self.assertIn("清除历史记录", html)
+            self.assertIn("清理已结束记录", html)
             self.assertIn("需要关注", html)
             self.assertIn("未找到 STRM", html)
             self.assertIn("查看详情", html)
@@ -251,7 +315,7 @@ class WebAdminTests(unittest.TestCase):
             html = render_task_list(store)
             detail_html = render_task_detail(store, task.id)
 
-            self.assertIn('<div class="stat-label">处理中</div><div class="stat-value">0</div>', html)
+            self.assertIn('<div class="stat-label">运行中</div><div class="stat-value">0</div>', html)
             self.assertIn('<div class="stat-label">需处理/失败</div><div class="stat-value">1</div>', html)
             self.assertIn("不在自动调度队列", html)
             self.assertIn('<span class="badge status-attention">需处理</span>', html)
