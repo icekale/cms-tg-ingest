@@ -399,7 +399,7 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("115调用：本阶段1次/累计6次", list_html)
             self.assertIn("为什么慢", detail_html)
             self.assertIn("等分享 STRM 生成", detail_html)
-            self.assertIn("115调用：本阶段1次/累计6次", detail_html)
+            self.assertIn('<div class="summary-label">115 调用</div><div class="summary-value">本阶段1次/累计6次</div>', detail_html)
             self.assertIn("CMS 整理 3 秒", detail_html)
             self.assertIn("STRM 生成 8.2 秒", detail_html)
             self.assertIn("CMS 整理 2次", detail_html)
@@ -501,6 +501,68 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("处理时间线", html)
             self.assertIn("detail-grid", html)
             self.assertIn("timeline", html)
+
+    def test_task_detail_prioritizes_recommendation_and_isolates_danger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("detail-focus", "", "https://115cdn.com/s/detail-focus")
+            store.record_event(
+                task.id,
+                TaskStage.STRM_READY,
+                TaskStatus.FAILED,
+                "STRM missing",
+                title="示例电影",
+                error_summary="未找到 STRM",
+                metadata_patch={
+                    "dest_path": "/media/示例电影",
+                    "emby_parent": "电影库",
+                },
+            )
+
+            page_html = render_task_detail(store, task.id)
+            self.assertIn('class="incident-strip"', page_html)
+            self.assertIn('<details class="danger-zone">', page_html)
+            incident_html = page_html.split('class="incident-strip"', 1)[1].split("</section>", 1)[0]
+            danger_html = page_html.split('<details class="danger-zone">', 1)[1].split("</details>", 1)[0]
+
+            self.assertIn("示例电影", page_html)
+            self.assertIn("未找到 STRM", incident_html)
+            self.assertIn('<button class="button button-primary" type="submit">重试当前阶段</button>', incident_html)
+            self.assertIn('<details class="diagnostic-details">', page_html)
+            self.assertIn("<summary>技术详情与文件路径</summary>", page_html)
+            self.assertIn("<summary>高风险操作</summary>", danger_html)
+            self.assertEqual(
+                re.findall(r'<div class="summary-label">([^<]+)</div>', page_html),
+                ["当前阶段", "目标媒体库", "为什么慢", "执行耗时", "115 调用", "推荐操作"],
+            )
+            self.assertEqual(page_html.count(f'action="/task/{task.id}/reprocess"'), 1)
+            self.assertIn(f'action="/task/{task.id}/reprocess"', danger_html)
+            self.assertIn("return confirm('将从接收阶段重新执行该任务。确定继续？')", danger_html)
+            self.assertLess(page_html.index("重试当前阶段"), page_html.index("从头重跑"))
+
+    def test_task_detail_shows_recent_events_newest_first_and_folds_older_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("event-order", "", "https://115cdn.com/s/event-order")
+            messages = [f"事件消息 {index:02d}" for index in range(1, 11)]
+            for message in messages:
+                store.record_event(task.id, TaskStage.ORGANIZING, TaskStatus.SUCCEEDED, message)
+
+            page_html = render_task_detail(store, task.id)
+            self.assertIn('<ul class="timeline recent-timeline">', page_html)
+            self.assertIn('<details class="older-events">', page_html)
+            recent_html = page_html.split('<ul class="timeline recent-timeline">', 1)[1].split("</ul>", 1)[0]
+            older_html = page_html.split('<details class="older-events">', 1)[1].split("</details>", 1)[0]
+
+            self.assertLess(recent_html.index(messages[-1]), recent_html.index(messages[-2]))
+            for message in messages[-8:]:
+                self.assertIn(message, recent_html)
+            for message in messages[:2]:
+                self.assertNotIn(message, recent_html)
+                self.assertIn(message, older_html)
+            self.assertIn("<summary>查看更早事件</summary>", older_html)
+            for message in messages:
+                self.assertEqual(page_html.count(message), 1)
 
     def test_task_routes_return_404_for_malformed_task_ids(self):
         with tempfile.TemporaryDirectory() as tmp:

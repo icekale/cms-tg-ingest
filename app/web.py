@@ -192,11 +192,30 @@ p {{ margin: 0; }}
 .phase-step.is-current::before {{ background: var(--success-text); }}
 .phase-step.is-current i {{ border-color: var(--info-text); background: var(--info-bg); }}
 .summary-grid, .detail-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
+.breadcrumb {{ margin-bottom: 6px; color: var(--muted); font-size: 13px; }}
+.incident-strip {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }}
+.incident-strip[data-status="failed"] {{ border-color: #e2b8b8; background: #fffafa; }}
+.incident-strip[data-status="needs_action"], .incident-strip[data-status="attention"] {{ border-color: #e1cf9d; background: #fffbef; }}
+.incident-copy {{ min-width: 0; }}
+.incident-summary {{ font-weight: 700; overflow-wrap: anywhere; }}
+.incident-recommendation {{ margin-top: 4px; color: var(--muted-strong); font-size: 13px; overflow-wrap: anywhere; }}
+.summary-item {{ min-width: 0; padding: 10px 0; border-bottom: 1px solid var(--border-soft); }}
+.summary-label {{ color: var(--muted); font-size: 12px; margin-bottom: 4px; }}
+.summary-value {{ overflow-wrap: anywhere; }}
 .timeline {{ list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }}
 .timeline li {{ padding: 12px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--surface-muted); }}
-.diagnostic-details {{ border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }}
+.timeline-time {{ color: var(--muted); }}
+.older-events {{ margin-top: 12px; border-top: 1px solid var(--border-soft); }}
+.older-events > summary {{ padding: 12px 2px 0; color: var(--primary); cursor: pointer; font-weight: 650; }}
+.older-events > .timeline {{ margin-top: 12px; }}
+.diagnostic-details {{ margin-top: 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }}
 .diagnostic-details > summary {{ padding: 12px 14px; cursor: pointer; font-weight: 650; }}
-.danger-zone {{ margin-top: 20px; padding: 14px; border: 1px solid #e2b8b8; border-radius: 6px; background: #fffafa; }}
+.details-content {{ padding: 0 14px 14px; }}
+.danger-zone {{ margin-top: 20px; border: 1px solid #e2b8b8; border-radius: 6px; background: #fffafa; }}
+.danger-zone > summary {{ padding: 12px 14px; color: var(--danger-text); cursor: pointer; font-weight: 650; }}
+.danger-zone .details-content {{ color: var(--muted-strong); }}
+.danger-zone .actions {{ margin-top: 12px; }}
+.danger-zone + p {{ margin-top: 14px; }}
 .quality-summary {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }}
 .quality-row {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border-soft); }}
 .health-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }}
@@ -206,6 +225,7 @@ p {{ margin: 0; }}
 .button, button {{ display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; font-weight: 650; cursor: pointer; }}
 .button:hover, button:hover {{ border-color: #aeb3b8; text-decoration: none; }}
 .button-primary {{ border-color: var(--primary); background: var(--primary); color: white; }}
+.button-secondary {{ border-color: var(--border); background: var(--surface); color: var(--text); }}
 .button-danger {{ border-color: #d7a6a6; background: var(--danger-bg); color: var(--danger-text); }}
 :focus-visible {{ outline: 3px solid var(--primary-dark); outline-offset: 2px; }}
 .table-wrap {{ overflow-x: auto; }}
@@ -228,6 +248,7 @@ code {{ background: #eef2f7; padding: 2px 5px; border-radius: 6px; }}
   .workspace-grid, .overview-grid, .health-grid {{ grid-template-columns: 1fr; }}
   .quality-summary {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
   .task-row {{ grid-template-columns: 1fr; }}
+  .incident-strip {{ align-items: flex-start; flex-direction: column; }}
   .summary-grid, .detail-grid {{ grid-template-columns: 1fr; }}
 }}
 @media (prefers-reduced-motion: reduce) {{
@@ -478,73 +499,113 @@ def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | N
         return _page("任务不存在", '<section class="empty-state"><h1>任务不存在</h1></section>')
 
     events = store.list_events(task.id)
-    event_items = "".join(
-        "<li>"
-        f'<div class="task-meta"><code>{html.escape(event["stage"])}</code>{_badge(str(event["status"]), "")}</div>'
-        f'<div class="task-message">{html.escape(event["message"])}</div>'
-        "</li>"
-        for event in events
-    )
+
+    def render_event(event: dict[str, Any]) -> str:
+        created_at = float(event.get("created_at") or 0)
+        time_label = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at)) if created_at else ""
+        time_html = f'<span class="timeline-time">{html.escape(time_label)}</span>' if time_label else ""
+        return (
+            "<li>"
+            f'<div class="task-meta"><code>{html.escape(str(event.get("stage") or ""))}</code>'
+            f'{_badge(str(event.get("status") or ""), "")}{time_html}</div>'
+            f'<div class="task-message">{html.escape(str(event.get("message") or ""))}</div>'
+            "</li>"
+        )
+
+    display_events = list(reversed(events))
+    recent_event_items = "".join(render_event(event) for event in display_events[:8])
+    older_event_items = "".join(render_event(event) for event in display_events[8:])
+    older_events = ""
+    if older_event_items:
+        older_events = (
+            '<details class="older-events"><summary>查看更早事件</summary>'
+            f'<ul class="timeline">{older_event_items}</ul></details>'
+        )
     decision = decide_retry(task)
     retry_form = ""
     if decision.action == RetryAction.RETRY_CURRENT_STAGE:
-        retry_form = f'<form method="post" action="/task/{task.id}/retry"><button class="button-primary" type="submit">重试当前阶段</button></form>'
-    emby_form = f'<form method="post" action="/task/{task.id}/emby"><button type="submit">查 Emby</button></form>'
-    restore_form = f'<form method="post" action="/task/{task.id}/restore"><button type="submit">恢复 STRM</button></form>'
+        retry_form = f'<form method="post" action="/task/{task.id}/retry"><button class="button button-primary" type="submit">重试当前阶段</button></form>'
+    emby_form = f'<form method="post" action="/task/{task.id}/emby"><button class="button button-secondary" type="submit">查 Emby</button></form>'
+    restore_form = f'<form method="post" action="/task/{task.id}/restore"><button class="button button-secondary" type="submit">恢复 STRM</button></form>'
     reprocess_form = (
         f'<form method="post" action="/task/{task.id}/reprocess" '
         "onsubmit=\"return confirm('将从接收阶段重新执行该任务。确定继续？')\">"
-        '<button class="button-danger" type="submit">从头重跑</button></form>'
+        '<button class="button button-danger" type="submit">从头重跑</button></form>'
     )
     media_library = str(task.metadata.get("emby_parent") or task.metadata.get("emby_refresh_library") or "-")
     dest_path = str(task.metadata.get("dest_path") or task.metadata.get("emby_path") or "-")
-    error_summary = str(task.error_summary or "-")
-    wait_label = _task_wait_message(task) or _task_lock_label(task)
+    error_summary = str(task.error_summary or "").strip()
+    wait_label = _task_wait_message(task)
+    incident_summary = error_summary or wait_label or decision.reason
     observability = _task_observability_lines(task)
     slow_label = next((line.split("：", 1)[1] for line in observability if line.startswith("为什么慢：")), "-")
     timing_label = next((line.split("：", 1)[1] for line in observability if line.startswith("耗时：")), "-")
-    p115_label = next((line for line in observability if line.startswith("115调用：")), "-")
+    p115_label = next((line.split("：", 1)[1] for line in observability if line.startswith("115调用：")), "-")
     stage_elapsed_summary, stage_p115_summary = format_stage_observability(task)
     stage_elapsed_summary = stage_elapsed_summary or "-"
     stage_p115_summary = stage_p115_summary or "-"
+    incident_tone = "attention" if is_unscheduled_active_task(task) else task.status.value
     body = f"""
 <div class="topbar">
   <div>
-    <p class="eyebrow">任务详情</p>
-    <h1>#{task.id} {html.escape(task_display_title(task))}</h1>
+    <p class="breadcrumb"><a href="/">运行概览</a> / 任务 #{task.id}</p>
+    <h1>{html.escape(task_display_title(task))}</h1>
   </div>
   {_badge("需处理" if is_unscheduled_active_task(task) else task.status.value, "status-attention" if is_unscheduled_active_task(task) else _status_class(task.status))}
 </div>
+
+<section class="incident-strip" data-status="{html.escape(incident_tone)}">
+  <div class="incident-copy">
+    <p class="incident-summary">{html.escape(incident_summary)}</p>
+    <p class="incident-recommendation">{html.escape(decision.reason)}</p>
+  </div>
+  <div class="actions">{retry_form}</div>
+</section>
 
 {_render_phase_track(task, events)}
 
 <section class="panel">
   <div class="panel-header"><h2>任务摘要</h2></div>
-  <div class="detail-grid">
-    <div class="detail-item"><div class="detail-label">当前阶段</div><div class="detail-value">{html.escape(stage_display_name(task.current_stage))}</div></div>
-    <div class="detail-item"><div class="detail-label">媒体库</div><div class="detail-value">{html.escape(media_library)}</div></div>
-    <div class="detail-item"><div class="detail-label">路径</div><div class="detail-value">{html.escape(dest_path)}</div></div>
-    <div class="detail-item"><div class="detail-label">资源/等待</div><div class="detail-value">{html.escape(wait_label)}</div></div>
-    <div class="detail-item"><div class="detail-label">为什么慢</div><div class="detail-value">{html.escape(slow_label)}</div></div>
-    <div class="detail-item"><div class="detail-label">阶段耗时</div><div class="detail-value">{html.escape(timing_label)}</div></div>
-    <div class="detail-item"><div class="detail-label">各阶段耗时</div><div class="detail-value">{html.escape(stage_elapsed_summary)}</div></div>
-    <div class="detail-item"><div class="detail-label">115 调用</div><div class="detail-value">{html.escape(p115_label)}</div></div>
-    <div class="detail-item"><div class="detail-label">各阶段 115 调用</div><div class="detail-value">{html.escape(stage_p115_summary)}</div></div>
-    <div class="detail-item"><div class="detail-label">错误</div><div class="detail-value">{html.escape(error_summary)}</div></div>
-    <div class="detail-item"><div class="detail-label">重试建议</div><div class="detail-value">{html.escape(decision.reason)}</div></div>
+  <div class="summary-grid">
+    <div class="summary-item"><div class="summary-label">当前阶段</div><div class="summary-value">{html.escape(stage_display_name(task.current_stage))}</div></div>
+    <div class="summary-item"><div class="summary-label">目标媒体库</div><div class="summary-value">{html.escape(media_library)}</div></div>
+    <div class="summary-item"><div class="summary-label">为什么慢</div><div class="summary-value">{html.escape(slow_label)}</div></div>
+    <div class="summary-item"><div class="summary-label">执行耗时</div><div class="summary-value">{html.escape(timing_label)}</div></div>
+    <div class="summary-item"><div class="summary-label">115 调用</div><div class="summary-value">{html.escape(p115_label)}</div></div>
+    <div class="summary-item"><div class="summary-label">推荐操作</div><div class="summary-value">{html.escape(decision.reason)}</div></div>
   </div>
-  <div class="actions" style="margin-top: 14px;">
-    {retry_form}
+  <details class="diagnostic-details">
+    <summary>技术详情与文件路径</summary>
+    <div class="details-content detail-grid">
+      <div class="detail-item"><div class="detail-label">目标文件路径</div><div class="detail-value">{html.escape(dest_path)}</div></div>
+      <div class="detail-item"><div class="detail-label">错误摘要</div><div class="detail-value">{html.escape(error_summary or "-")}</div></div>
+      <div class="detail-item"><div class="detail-label">各阶段耗时</div><div class="detail-value">{html.escape(stage_elapsed_summary)}</div></div>
+      <div class="detail-item"><div class="detail-label">各阶段 115 调用</div><div class="detail-value">{html.escape(stage_p115_summary)}</div></div>
+    </div>
+  </details>
+</section>
+
+<section class="panel">
+  <div class="panel-header"><h2>其他操作</h2></div>
+  <div class="actions">
     {emby_form}
     {restore_form}
-    {reprocess_form}
   </div>
 </section>
 
 <section class="panel">
   <div class="panel-header"><h2>处理时间线</h2></div>
-  <ul class="timeline">{event_items}</ul>
+  <ul class="timeline recent-timeline">{recent_event_items}</ul>
+  {older_events}
 </section>
+
+<details class="danger-zone">
+  <summary>高风险操作</summary>
+  <div class="details-content">
+    <p>从头重跑可能再次调用 115/CMS，并重新执行整个入库流程。</p>
+    <div class="actions">{reprocess_form}</div>
+  </div>
+</details>
 
 <p><a class="button" href="/">返回运行概览</a></p>
 """
