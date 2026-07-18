@@ -203,6 +203,7 @@ p {{ margin: 0; }}
 .incident-strip[data-status="needs_action"], .incident-strip[data-status="attention"] {{ border-color: #e1cf9d; background: #fffbef; }}
 .incident-strip.is-neutral {{ border-color: var(--border); background: var(--surface); }}
 .incident-copy {{ min-width: 0; }}
+.incident-strip > .actions {{ flex-shrink: 0; max-width: 50%; }}
 .incident-summary {{ font-weight: 700; overflow-wrap: anywhere; }}
 .incident-recommendation {{ margin-top: 4px; color: var(--muted-strong); font-size: 13px; overflow-wrap: anywhere; }}
 .task-detail-title {{ max-width: 100%; overflow-wrap: anywhere; }}
@@ -245,7 +246,7 @@ p {{ margin: 0; }}
 .empty-state {{ padding: 24px; text-align: center; color: var(--muted); background: var(--surface-muted); border: 1px dashed var(--border); border-radius: 8px; }}
 .actions {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
 .actions form {{ display: inline-block; margin: 0; }}
-.button, button {{ display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; font-weight: 650; white-space: nowrap; cursor: pointer; }}
+.button, button {{ display: inline-flex; align-items: center; justify-content: center; max-width: 100%; min-height: 36px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; font-weight: 650; white-space: normal; overflow-wrap: anywhere; text-align: center; cursor: pointer; }}
 .button:hover, button:hover {{ border-color: #aeb3b8; text-decoration: none; }}
 .button-primary {{ border-color: var(--primary); background: var(--primary); color: white; }}
 .button-secondary {{ border-color: var(--border); background: var(--surface); color: var(--text); }}
@@ -274,6 +275,7 @@ code {{ background: #eef2f7; padding: 2px 5px; border-radius: 6px; }}
   .quality-row {{ grid-template-columns: 1fr; }}
   .quality-row-action {{ justify-items: start; }}
   .incident-strip {{ align-items: flex-start; flex-direction: column; }}
+  .incident-strip > .actions {{ max-width: 100%; }}
   .summary-grid, .detail-grid {{ grid-template-columns: 1fr; }}
 }}
 @media (prefers-reduced-motion: reduce) {{

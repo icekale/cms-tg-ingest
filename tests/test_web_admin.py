@@ -97,13 +97,40 @@ class WebAdminTests(unittest.TestCase):
 
             self.assertIn(":focus-visible { outline: 3px solid var(--primary-dark); outline-offset: 2px; }", page_html)
 
-    def test_shared_buttons_keep_short_action_labels_on_one_line(self):
+    def test_shared_buttons_wrap_long_localized_action_labels_safely(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
 
             page_html = render_task_list(store)
+            shared_rule = re.search(r"\.button, button\s*\{([^{}]*)\}", page_html)
 
-            self.assertRegex(page_html, r"\.button, button\s*\{[^{}]*white-space:\s*nowrap")
+            self.assertIsNotNone(shared_rule)
+            declarations = shared_rule.group(1)
+            for contract in (
+                r"max-width:\s*100%",
+                r"white-space:\s*normal",
+                r"overflow-wrap:\s*anywhere",
+                r"text-align:\s*center",
+                r"min-height:\s*36px",
+            ):
+                self.assertRegex(declarations, contract)
+            self.assertNotRegex(declarations, r"white-space:\s*nowrap")
+
+    def test_incident_actions_keep_a_wrapping_safe_layout_column(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            page_html = render_task_list(store)
+            stylesheet = page_html.split("<style>", 1)[1].split("</style>", 1)[0]
+            mobile_css = stylesheet.split("@media (max-width: 760px)", 1)[1].split(
+                "@media (prefers-reduced-motion: reduce)", 1
+            )[0]
+
+            self.assertRegex(
+                stylesheet,
+                r"\.incident-strip\s*>\s*\.actions\s*\{[^{}]*flex-shrink:\s*0[^{}]*max-width:\s*50%",
+            )
+            self.assertRegex(mobile_css, r"\.incident-strip\s*>\s*\.actions\s*\{[^{}]*max-width:\s*100%")
 
     def test_web_ui_includes_responsive_and_accessible_contracts(self):
         with tempfile.TemporaryDirectory() as tmp:
