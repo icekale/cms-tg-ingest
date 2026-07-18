@@ -54,6 +54,8 @@ def _navigation(active: str) -> str:
 
 
 def _event_stage(value: object) -> TaskStage | None:
+    if isinstance(value, TaskStage):
+        return value
     try:
         return TaskStage(str(value))
     except ValueError:
@@ -79,12 +81,19 @@ def _render_phase_track(task: Any, events: list[dict[str, Any]]) -> str:
     steps = []
     for index, (label, _stages) in enumerate(_TASK_PHASES):
         state = ""
+        attributes = ['role="listitem"']
         if current is not None and index < current:
             state = " is-done"
+            attributes.append(f'aria-label="{html.escape(label)}，已完成"')
         elif current is not None and index == current:
+            attributes.append('aria-current="step"')
             state = " is-done" if task.status == TaskStatus.SUCCEEDED else " is-current"
-        steps.append(f'<div class="phase-step{state}"><i></i><span>{html.escape(label)}</span></div>')
-    return f'<div class="phase-track" aria-label="任务处理进度">{"".join(steps)}</div>'
+            if task.status == TaskStatus.SUCCEEDED:
+                attributes.append(f'aria-label="{html.escape(label)}，已完成"')
+        steps.append(
+            f'<div class="phase-step{state}" {" ".join(attributes)}><i></i><span>{html.escape(label)}</span></div>'
+        )
+    return f'<div class="phase-track" aria-label="任务处理进度" role="list">{"".join(steps)}</div>'
 
 
 def _page(title: str, body: str, *, active: str = "") -> str:
@@ -187,7 +196,7 @@ p {{ margin: 0; }}
 .button:hover, button:hover {{ border-color: #aeb3b8; text-decoration: none; }}
 .button-primary {{ border-color: var(--primary); background: var(--primary); color: white; }}
 .button-danger {{ border-color: #d7a6a6; background: var(--danger-bg); color: var(--danger-text); }}
-:focus-visible {{ outline: 3px solid #79a9d1; outline-offset: 2px; }}
+:focus-visible {{ outline: 3px solid var(--primary-dark); outline-offset: 2px; }}
 .table-wrap {{ overflow-x: auto; }}
 table {{ border-collapse: collapse; width: 100%; min-width: 760px; }}
 th, td {{ border-bottom: 1px solid var(--border-soft); padding: 11px 10px; text-align: left; vertical-align: top; }}

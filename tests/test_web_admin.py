@@ -6,7 +6,16 @@ import bridge
 from app.models import TaskStage, TaskStatus
 from app.task_health import format_taskstore_health
 from app.task_store import TaskStore
-from app.web import WebApp, render_health_page, render_quality_page, render_task_detail, render_task_list
+from app.web import (
+    WebApp,
+    _event_stage,
+    _render_phase_track,
+    _task_phase_index,
+    render_health_page,
+    render_quality_page,
+    render_task_detail,
+    render_task_list,
+)
 
 
 class WebAdminTests(unittest.TestCase):
@@ -43,11 +52,47 @@ class WebAdminTests(unittest.TestCase):
             store.record_event(task.id, TaskStage.RECOGNIZING, TaskStatus.RUNNING, "recognizing")
 
             page_html = render_task_detail(store, task.id)
+            phase_html = _render_phase_track(store.find_task(task.id), store.list_events(task.id))
+            labels = ("接收", "CMS 整理", "分类识别", "建分享", "分享 STRM", "移动入库", "Emby 确认", "清理完成")
 
-            for label in ("接收", "CMS 整理", "分类识别", "建分享", "分享 STRM", "移动入库", "Emby 确认", "清理完成"):
-                self.assertIn(label, page_html)
+            positions = [phase_html.index(f"<span>{label}</span>") for label in labels]
+            self.assertEqual(positions, sorted(positions))
+            self.assertIn(phase_html, page_html)
             self.assertEqual(page_html.count('class="phase-step'), 8)
             self.assertIn('class="phase-step is-current"', page_html)
+            self.assertIn('role="list"', phase_html)
+            self.assertEqual(phase_html.count('role="listitem"'), 8)
+            self.assertIn('aria-current="step"', phase_html)
+            self.assertIn('aria-label="接收，已完成"', phase_html)
+            self.assertIn('aria-label="CMS 整理，已完成"', phase_html)
+
+    def test_event_stage_accepts_task_stage_enum(self):
+        self.assertIs(_event_stage(TaskStage.RECEIVED), TaskStage.RECEIVED)
+
+    def test_result_stage_falls_back_to_latest_enum_valued_flow_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            cases = (
+                (TaskStage.NEEDS_ACTION, TaskStatus.NEEDS_ACTION),
+                (TaskStage.FAILED, TaskStatus.FAILED),
+            )
+
+            for index, (result_stage, result_status) in enumerate(cases):
+                with self.subTest(stage=result_stage):
+                    task = store.upsert_task(f"result-{index}", "", f"https://115cdn.com/s/result-{index}")
+                    task = store.record_event(task.id, result_stage, result_status, "result state")
+
+                    phase_index = _task_phase_index(task, [{"stage": TaskStage.STRM_READY}])
+
+                    self.assertEqual(phase_index, 4)
+
+    def test_shared_focus_ring_uses_contrast_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            page_html = render_task_list(store)
+
+            self.assertIn(":focus-visible { outline: 3px solid var(--primary-dark); outline-offset: 2px; }", page_html)
 
     def test_render_task_list_folds_completed_history_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
