@@ -587,6 +587,51 @@ class WebAdminTests(unittest.TestCase):
             self.assertIsNone(store.claim_next_runnable("worker-2", now=0))
             self.assertEqual(body, b"")
 
+    def test_claimed_failed_task_preserves_owner_until_claim_is_cleared(self):
+        for action in ("retry", "reprocess"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:
+                store = TaskStore(Path(tmp) / "tasks.db")
+                task = store.upsert_task(f"claimed-failed-{action}", "", f"https://115cdn.com/s/claimed-failed-{action}")
+                store.enqueue_task(task.id, TaskStage.STRM_READY, next_run_at=0)
+                store.claim_next_runnable("worker-a", now=0)
+                store.record_event(
+                    task.id,
+                    TaskStage.STRM_READY,
+                    TaskStatus.FAILED,
+                    "STRM missing",
+                    error_summary="未找到 STRM",
+                )
+                before = store.find_task(task.id)
+                events_before = store.list_events(task.id)
+                app = WebApp(store, web_token="")
+
+                page_html = render_task_detail(store, task.id)
+                status, headers, body = app.handle_request("POST", f"/task/{task.id}/{action}", {}, b"")
+
+                self.assertEqual(before.claimed_by, "worker-a")
+                self.assertNotIn(f'action="/task/{task.id}/retry"', page_html)
+                self.assertNotIn(f'action="/task/{task.id}/reprocess"', page_html)
+                self.assertEqual(status, 303)
+                self.assertEqual(headers["Location"], f"/task/{task.id}")
+                self.assertEqual(store.find_task(task.id), before)
+                self.assertEqual(store.list_events(task.id), events_before)
+                self.assertIsNone(store.claim_next_runnable("worker-b", now=0))
+                self.assertEqual(body, b"")
+
+                store.record_event(
+                    task.id,
+                    TaskStage.STRM_READY,
+                    TaskStatus.FAILED,
+                    "已释放失败任务 claim",
+                    error_summary="未找到 STRM",
+                    clear_claim=True,
+                )
+                released_html = render_task_detail(store, task.id)
+
+                self.assertEqual(store.find_task(task.id).claimed_by, "")
+                self.assertIn(f'action="/task/{task.id}/retry"', released_html)
+                self.assertIn(f'action="/task/{task.id}/reprocess"', released_html)
+
     def test_fresh_pending_task_hides_and_rejects_all_recovery_actions(self):
         for action in ("retry", "emby", "restore", "reprocess"):
             with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:
@@ -739,10 +784,24 @@ class WebAdminTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
             task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
-            store.record_event(task.id, TaskStage.STRM_READY, TaskStatus.FAILED, "STRM missing", error_summary="未找到 STRM")
+            store.record_event(
+                task.id,
+                TaskStage.STRM_READY,
+                TaskStatus.FAILED,
+                "STRM missing",
+                error_summary="未找到 STRM",
+                clear_claim=True,
+            )
             store.enqueue_task(task.id, TaskStage.STRM_READY, next_run_at=1.0)
             store.claim_next_runnable("stale-worker", now=1.0)
-            store.record_event(task.id, TaskStage.STRM_READY, TaskStatus.FAILED, "STRM missing", error_summary="未找到 STRM")
+            store.record_event(
+                task.id,
+                TaskStage.STRM_READY,
+                TaskStatus.FAILED,
+                "STRM missing",
+                error_summary="未找到 STRM",
+                clear_claim=True,
+            )
             app = WebApp(store, web_token="")
 
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/retry", {}, b"")

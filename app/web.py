@@ -324,16 +324,16 @@ def parse_task_action_path(path: str) -> tuple[int, str] | None:
 
 
 def _task_can_retry(task: Any, decision: Any | None = None) -> bool:
+    if str(task.claimed_by or "").strip():
+        return False
     retry_decision = decision or decide_retry(task)
     return task.status == TaskStatus.FAILED and retry_decision.action == RetryAction.RETRY_CURRENT_STAGE
 
 
 def _task_can_use_downstream_actions(task: Any) -> bool:
-    return (
-        task.current_stage in _DOWNSTREAM_RECOVERY_STAGES
-        and task.status in _TERMINAL_ACTION_STATUSES
-        and not str(task.claimed_by or "").strip()
-    )
+    if str(task.claimed_by or "").strip():
+        return False
+    return task.current_stage in _DOWNSTREAM_RECOVERY_STAGES and task.status in _TERMINAL_ACTION_STATUSES
 
 
 def _task_is_unscheduled_legacy(task: Any) -> bool:
@@ -341,9 +341,11 @@ def _task_is_unscheduled_legacy(task: Any) -> bool:
 
 
 def _task_can_reprocess(task: Any) -> bool:
+    if str(task.claimed_by or "").strip():
+        return False
     if task.status in _TERMINAL_ACTION_STATUSES:
         return True
-    return _task_is_unscheduled_legacy(task) and not str(task.claimed_by or "").strip()
+    return _task_is_unscheduled_legacy(task)
 
 
 
