@@ -81,7 +81,7 @@ class P115CloudDownloadTests(unittest.TestCase):
         self.assertEqual(http.calls[1]["url"], "https://lixian.115.com/lixian/")
 
     def test_cloud_download_status_maps_completed(self):
-        http = FakeHttp([{"state": True, "tasks": [{"status": 11, "info_hash": "HASH", "cid": "folder", "pid": TARGET_CID}]}])
+        http = FakeHttp([{"state": True, "tasks": [{"status": 2, "info_hash": "HASH", "file_id": "folder", "wp_path_id": TARGET_CID}]}])
         client = P115WebClient("UID=1", http=http, timeout=3)
 
         result = client.cloud_download_status({"info_hash": "HASH"})
@@ -93,6 +93,10 @@ class P115CloudDownloadTests(unittest.TestCase):
         self.assertEqual(http.calls[0]["params"], {"ct": "lixian", "ac": "task_lists", "page": 1, "page_size": 30})
 
     def test_cloud_download_status_maps_running_and_failed(self):
+        self.assertEqual(normalize_cloud_status({"status": 0}), "running")
+        self.assertEqual(normalize_cloud_status({"status": 1}), "running")
+        self.assertEqual(normalize_cloud_status({"status": 2}), "completed")
+        self.assertEqual(normalize_cloud_status({"status": -1}), "failed")
         self.assertEqual(normalize_cloud_status({"status": 12}), "running")
         self.assertEqual(normalize_cloud_status({"status": 9}), "failed")
 

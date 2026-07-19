@@ -83,7 +83,7 @@ def p115_file_id(item: dict[str, Any]) -> str:
 
 
 def p115_parent_id(item: dict[str, Any]) -> str:
-    return str(item.get("pid") or item.get("parent_id") or "").strip()
+    return str(item.get("pid") or item.get("parent_id") or item.get("wp_path_id") or "").strip()
 
 
 def p115_residue_file_id(item: dict[str, Any]) -> str:
@@ -97,11 +97,11 @@ def p115_residue_parent_id(item: dict[str, Any]) -> str:
 def normalize_cloud_status(item: dict[str, Any]) -> str:
     raw = item.get("status", item.get("stat", item.get("state", "")))
     value = str(raw).strip().lower()
-    if value in {"11", "completed", "complete", "success", "succeeded", "done"}:
+    if value in {"2", "11", "completed", "complete", "success", "succeeded", "done"}:
         return "completed"
-    if value in {"12", "running", "downloading", "queued", "pending", "wait"}:
+    if value in {"0", "1", "12", "running", "downloading", "queued", "pending", "wait"}:
         return "running"
-    if value in {"9", "failed", "failure", "error", "cancelled", "canceled"}:
+    if value in {"-1", "9", "failed", "failure", "error", "cancelled", "canceled"}:
         return "failed"
     return "unknown"
 
