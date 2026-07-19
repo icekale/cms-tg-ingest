@@ -9,6 +9,27 @@ from app.task_store import TaskStore
 
 
 class TaskStoreTests(unittest.TestCase):
+    def test_upsert_cloud_task_is_idempotent_by_source_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            first = store.upsert_cloud_task("ed2k:hash:10", "ed2k://source", chat_id="464100862")
+            second = store.upsert_cloud_task("ed2k:hash:10", "ed2k://source", chat_id="464100862")
+
+            self.assertEqual(first.id, second.id)
+            self.assertEqual(second.source_type, "cloud_download")
+            self.assertEqual(second.source_key, "ed2k:hash:10")
+            self.assertEqual(second.current_stage, TaskStage.CLOUD_DOWNLOADING)
+
+    def test_find_task_by_source_returns_cloud_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            expected = store.upsert_cloud_task("btih:abc", "magnet:?xt=urn:btih:abc")
+
+            found = store.find_task_by_source("cloud_download", "btih:abc")
+
+            self.assertEqual(found.id, expected.id)
+
     def test_initializes_tasks_and_events_tables(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "tasks.db"
@@ -547,7 +568,9 @@ class TaskStoreTests(unittest.TestCase):
             task = store.upsert_task("abc", "", "https://115cdn.com/s/abc", chat_id="464100862")
             updated = store.record_event(task.id, TaskStage.RECEIVED, TaskStatus.RUNNING, "收到", submission_id=7)
 
-            self.assertTrue({"chat_id", "submission_id", "next_run_at", "claimed_by", "claimed_at", "metadata_json"} <= columns)
+            self.assertTrue({"chat_id", "submission_id", "next_run_at", "claimed_by", "claimed_at", "metadata_json", "source_type", "source_key"} <= columns)
             self.assertIsNone(legacy_claim)
             self.assertEqual(updated.chat_id, "464100862")
             self.assertEqual(updated.submission_id, 7)
+            self.assertEqual(store.find_task_by_share_key("legacy", "").source_key, "share:legacy:")
+            self.assertEqual(store.find_task_by_share_key("legacy", "").source_type, "share")

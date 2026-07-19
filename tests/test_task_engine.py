@@ -24,6 +24,12 @@ def snapshot(stage, status=TaskStatus.FAILED, error_type="", retry_count=0):
 
 
 class TaskEngineTests(unittest.TestCase):
+    def test_failed_cloud_download_retries_current_stage(self):
+        decision = decide_retry(snapshot(TaskStage.CLOUD_DOWNLOADING), max_retries=3)
+
+        self.assertEqual(decision.action, RetryAction.RETRY_CURRENT_STAGE)
+        self.assertEqual(decision.stage, TaskStage.CLOUD_DOWNLOADING)
+
     def test_failed_strm_stage_retries_current_stage(self):
         decision = decide_retry(snapshot(TaskStage.STRM_READY, error_type="strm_missing"), max_retries=3)
 
@@ -56,6 +62,7 @@ class TaskEngineTests(unittest.TestCase):
         self.assertIn("超过", decision.reason)
 
     def test_stage_display_names_are_chinese(self):
+        self.assertEqual(stage_display_name(TaskStage.CLOUD_DOWNLOADING), "115 云下载")
         self.assertEqual(stage_display_name(TaskStage.CMS_SUBMITTED), "提交 CMS")
         self.assertEqual(stage_display_name(TaskStage.ORGANIZING), "CMS 整理")
         self.assertEqual(stage_display_name(TaskStage.RECOGNIZING), "识别分类")

@@ -78,6 +78,8 @@ class TaskStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     share_code TEXT NOT NULL,
                     receive_code TEXT NOT NULL DEFAULT '',
+                    source_type TEXT NOT NULL DEFAULT 'share',
+                    source_key TEXT NOT NULL DEFAULT '',
                     url TEXT NOT NULL,
                     title TEXT NOT NULL DEFAULT '',
                     tmdb_id TEXT NOT NULL DEFAULT '',
@@ -130,10 +132,17 @@ class TaskStore:
             "claimed_by": "TEXT NOT NULL DEFAULT ''",
             "claimed_at": "REAL NOT NULL DEFAULT 0",
             "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            "source_type": "TEXT NOT NULL DEFAULT 'share'",
+            "source_key": "TEXT NOT NULL DEFAULT ''",
         }
         for name, definition in columns.items():
             if name not in existing:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
+        conn.execute("UPDATE tasks SET source_type = 'share' WHERE source_type IS NULL OR source_type = ''")
+        conn.execute(
+            "UPDATE tasks SET source_key = 'share:' || share_code || ':' || receive_code WHERE source_key IS NULL OR source_key = ''"
+        )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_source_key ON tasks(source_type, source_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(status, next_run_at, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_claim ON tasks(claimed_by, claimed_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_stage_status_next ON tasks(current_stage, status, next_run_at, id)")
@@ -184,18 +193,62 @@ class TaskStore:
         with self._lock, self._connection() as conn:
             conn.execute(
                 """
-                INSERT INTO tasks (share_code, receive_code, url, chat_id, current_stage, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO tasks (share_code, receive_code, source_type, source_key, url, chat_id, current_stage, status, created_at, updated_at)
+                VALUES (?, ?, 'share', ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(share_code, receive_code) DO UPDATE SET
                     url = excluded.url,
                     chat_id = COALESCE(NULLIF(excluded.chat_id, ''), tasks.chat_id),
                     updated_at = excluded.updated_at
                 """,
-                (share_code, receive_code, url, chat_id, TaskStage.RECEIVED.value, TaskStatus.PENDING.value, now, now),
+                (share_code, receive_code, f"share:{share_code}:{receive_code}", url, chat_id, TaskStage.RECEIVED.value, TaskStatus.PENDING.value, now, now),
             )
             row = conn.execute(
                 "SELECT * FROM tasks WHERE share_code = ? AND receive_code = ?",
                 (share_code, receive_code),
+            ).fetchone()
+        return self._snapshot(row)
+
+    def upsert_cloud_task(
+        self,
+        source_key: str,
+        url: str,
+        chat_id: str = "",
+        title: str = "",
+    ) -> TaskSnapshot:
+        now = time.time()
+        source_key = str(source_key).strip()
+        if not source_key:
+            raise ValueError("cloud source key is empty")
+        internal_share_code = f"cloud:{source_key}"
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO tasks (
+                    share_code, receive_code, source_type, source_key, url, title, chat_id,
+                    current_stage, status, created_at, updated_at
+                )
+                VALUES (?, '', 'cloud_download', ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_type, source_key) DO UPDATE SET
+                    url = excluded.url,
+                    title = COALESCE(NULLIF(excluded.title, ''), tasks.title),
+                    chat_id = COALESCE(NULLIF(excluded.chat_id, ''), tasks.chat_id),
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    internal_share_code,
+                    source_key,
+                    url,
+                    title,
+                    chat_id,
+                    TaskStage.CLOUD_DOWNLOADING.value,
+                    TaskStatus.PENDING.value,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM tasks WHERE source_type = ? AND source_key = ?",
+                ("cloud_download", source_key),
             ).fetchone()
         return self._snapshot(row)
 
@@ -209,6 +262,14 @@ class TaskStore:
             row = conn.execute(
                 "SELECT * FROM tasks WHERE share_code = ? AND receive_code = ?",
                 (str(share_code), str(receive_code)),
+            ).fetchone()
+        return self._snapshot(row) if row else None
+
+    def find_task_by_source(self, source_type: str, source_key: str) -> TaskSnapshot | None:
+        with self._lock, self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM tasks WHERE source_type = ? AND source_key = ?",
+                (str(source_type), str(source_key)),
             ).fetchone()
         return self._snapshot(row) if row else None
 

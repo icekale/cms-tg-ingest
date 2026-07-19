@@ -8,6 +8,7 @@ from typing import Any
 
 class TaskStage(str, Enum):
     RECEIVED = "received"
+    CLOUD_DOWNLOADING = "cloud_downloading"
     CMS_SUBMITTED = "cms_submitted"
     ORGANIZING = "organizing"
     RECOGNIZING = "recognizing"
@@ -67,6 +68,8 @@ class TaskSnapshot:
     error_type: str
     error_summary: str
     retry_count: int
+    source_type: str = "share"
+    source_key: str = ""
     chat_id: str = ""
     submission_id: int | None = None
     next_run_at: float = 0
@@ -100,6 +103,8 @@ class TaskSnapshot:
             error_type=str(row.get("error_type") or ""),
             error_summary=str(row.get("error_summary") or ""),
             retry_count=int(row.get("retry_count") or 0),
+            source_type=str(row.get("source_type") or "share"),
+            source_key=str(row.get("source_key") or ""),
             chat_id=str(row.get("chat_id") or ""),
             submission_id=submission_id,
             next_run_at=float(row.get("next_run_at") or 0),
@@ -113,6 +118,7 @@ class TaskSnapshot:
 
 _SUCCESS_FLOW = {
     TaskStage.RECEIVED: TaskStage.ORGANIZING,
+    TaskStage.CLOUD_DOWNLOADING: TaskStage.ORGANIZING,
     TaskStage.ORGANIZING: TaskStage.RECOGNIZING,
     TaskStage.RECOGNIZING: TaskStage.SHARE_ALIAS_PREPARED,
     TaskStage.CMS_SUBMITTED: TaskStage.ORGANIZED,
