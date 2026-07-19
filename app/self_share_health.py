@@ -89,13 +89,15 @@ def start_invalid_self_share_probe_loop(
     *,
     interval_seconds: int,
     limit: int,
+    stop_event: threading.Event | None = None,
 ) -> threading.Thread:
     interval = max(60, int(interval_seconds))
     probe_limit = max(1, int(limit))
 
-    def loop() -> None:
-        # Wait first so startup never adds an immediate 115 request burst.
-        while not stop_event.wait(interval):
+    loop_stop_event = stop_event or threading.Event()
+
+    def run_loop() -> None:
+        while not loop_stop_event.wait(interval):
             try:
                 summary = probe_invalid_self_shares_if_idle(
                     store,
@@ -117,8 +119,8 @@ def start_invalid_self_share_probe_loop(
             except Exception:
                 LOG.exception("Invalid-share probe loop failed; retaining all STRM files")
 
-    stop_event = threading.Event()
-    thread = threading.Thread(target=loop, name="invalid-self-share-probe", daemon=True)
+    # The worker is defined separately so the caller can stop/restart ownership at runtime.
+    thread = threading.Thread(target=run_loop, name="invalid-self-share-probe", daemon=True)
     thread.start()
     LOG.info("Invalid-share probe loop enabled interval_seconds=%s limit=%s", interval, probe_limit)
     return thread

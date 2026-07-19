@@ -193,9 +193,10 @@ MENU_BUTTONS = {
 class _QualityRepairAdapter:
     """Queue quality repairs into the authoritative TaskRunner workflow."""
 
-    def __init__(self, submission_store: Any, task_store: TaskStore):
+    def __init__(self, submission_store: Any, task_store: TaskStore, cleanup_client: Any | None = None):
         self.submission_store = submission_store
         self.task_store = task_store
+        self.cleanup_client = cleanup_client
 
     def restore(self, task: Any, run_id: str) -> bool:
         return True
@@ -217,7 +218,7 @@ class _QualityRepairAdapter:
         row = self.submission_store.find_by_id(int(submission_id))
         if not row:
             return False
-        updated, _message = cleanup_own_share_source(self.submission_store, row, getattr(self, "cleanup_client", None))
+        updated, _message = cleanup_own_share_source(self.submission_store, row, self.cleanup_client)
         return str(updated.get("cleanup_status") or "").lower() == "deleted"
 
 
@@ -2844,6 +2845,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
     task_runner = None
     quality_automation = None
     quality_thread = None
+    probe_stop_events: list[threading.Event] = []
     if config.task_engine_enabled and self_share_config.enabled and p115:
         task_workflow = BridgeSelfShareTaskWorkflow(
             cms=cms,
@@ -2870,21 +2872,24 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         )
         task_runner.start()
         LOG.info("Task engine worker started interval_seconds=%s", config.task_worker_interval_seconds)
-        if config.quality_auto_enabled:
-            quality_automation = QualityAutomation(
-                task_store,
-                config,
-                move_config=move_config,
-                repair_adapter=_QualityRepairAdapter(store, task_store),
-            )
-            quality_thread = start_quality_automation_loop(
-                quality_automation,
-                telegram,
-                config.tg_allowed_chat_id,
-                stop_event,
-            )
-        if config.self_share_invalid_cleanup_enabled and not config.quality_auto_enabled:
-            start_invalid_self_share_probe_loop(
+        probe_holder: dict[str, Any] = {"stop_event": None, "thread": None}
+
+        def set_invalid_probe_enabled(quality_enabled: bool) -> None:
+            if not config.self_share_invalid_cleanup_enabled:
+                return
+            if quality_enabled:
+                previous_stop = probe_holder.get("stop_event")
+                if isinstance(previous_stop, threading.Event):
+                    previous_stop.set()
+                probe_holder["stop_event"] = None
+                probe_holder["thread"] = None
+                return
+            if isinstance(probe_holder.get("stop_event"), threading.Event):
+                return
+            probe_stop = threading.Event()
+            probe_stop_events.append(probe_stop)
+            probe_holder["stop_event"] = probe_stop
+            probe_holder["thread"] = start_invalid_self_share_probe_loop(
                 store,
                 task_store,
                 p115,
@@ -2894,7 +2899,27 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
                 move_config,
                 interval_seconds=config.self_share_invalid_check_interval_seconds,
                 limit=config.self_share_invalid_check_limit,
+                stop_event=probe_stop,
             )
+
+        quality_automation = QualityAutomation(
+            task_store,
+            config,
+            move_config=move_config,
+            repair_adapter=_QualityRepairAdapter(
+                store,
+                task_store,
+                cleanup_client=p115 if self_share_config.cleanup_after_emby else None,
+            ),
+            on_enabled_changed=set_invalid_probe_enabled,
+        )
+        set_invalid_probe_enabled(bool(quality_automation.config.quality_auto_enabled))
+        quality_thread = start_quality_automation_loop(
+            quality_automation,
+            telegram,
+            config.tg_allowed_chat_id,
+            stop_event,
+        )
     web_server = call_maybe_start_web_server(
         config,
         task_store,
@@ -2952,6 +2977,8 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
                 stop_event.wait(5)
     finally:
         stop_event.set()
+        for probe_stop in probe_stop_events:
+            probe_stop.set()
         if task_runner is not None:
             stop = getattr(task_runner, "stop", None)
             if callable(stop):
@@ -2959,6 +2986,8 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
                     stop(join_timeout=5)
                 except TypeError:
                     stop()
+        if quality_thread is not None:
+            quality_thread.join(timeout=5)
         stop_web_server(web_server)
 
 

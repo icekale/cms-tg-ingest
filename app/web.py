@@ -1073,8 +1073,6 @@ class WebApp:
         if method == "POST" and parsed.path == "/quality/run":
             if self.quality_automation is None:
                 return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"quality automation unavailable"
-            if self.quality_automation.status_snapshot().get("status") == "running":
-                return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"quality run already active"
             Thread(target=self.quality_automation.run_now, name="quality-manual-run", daemon=True).start()
             return 303, {"Location": "/quality", **auth_headers}, b""
         if method == "POST" and parsed.path == "/quality/settings/reset":

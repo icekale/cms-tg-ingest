@@ -1028,6 +1028,27 @@ class TaskStore:
                 and row["stage"] in {TaskStage.EMBY_CONFIRMED.value, TaskStage.CLEANED.value}
             )
 
+    def finalize_quality_cleanup(self, task_id: int, run_id: str) -> bool:
+        """Persist an idempotent cleanup marker and release its lease."""
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT metadata_json, claimed_by FROM tasks WHERE id = ?",
+                (int(task_id),),
+            ).fetchone()
+            if row is None or str(row["claimed_by"] or "") != f"quality-cleanup:{run_id}":
+                return False
+            metadata = self._merge_metadata(row["metadata_json"], {"quality_cleanup_completed": True})
+            cursor = conn.execute(
+                """
+                UPDATE tasks
+                SET metadata_json = ?, claimed_by = '', claimed_at = 0, updated_at = ?
+                WHERE id = ? AND claimed_by = ?
+                """,
+                (metadata, time.time(), int(task_id), f"quality-cleanup:{run_id}"),
+            )
+        return int(cursor.rowcount or 0) == 1
+
     def enqueue_task(
         self,
         task_id: int,

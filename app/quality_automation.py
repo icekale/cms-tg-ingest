@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import Config, MoveConfig, is_relative_to, is_under_any_root, safe_resolve
 from .models import TaskSnapshot, TaskStage, TaskStatus
@@ -61,6 +61,7 @@ class QualityAutomation:
         move_config: MoveConfig | None = None,
         allowed_roots: Iterable[str | Path] | None = None,
         repair_adapter: object | None = None,
+        on_enabled_changed: object | None = None,
     ) -> None:
         self.store = store
         self.config = config
@@ -82,6 +83,7 @@ class QualityAutomation:
             roots = list(allowed_roots)
         self.allowed_roots = tuple(safe_resolve(Path(root)) for root in roots)
         self.repair_adapter = repair_adapter
+        self.on_enabled_changed = on_enabled_changed
 
     def _load_runtime_overrides(self) -> None:
         state = self.store.get_runtime_state(self._OVERRIDES_KEY)
@@ -109,7 +111,10 @@ class QualityAutomation:
         check_limit: int,
     ) -> dict[str, object]:
         parsed_time = self._parse_run_time(run_time)
-        timezone = ZoneInfo(str(timezone_name))
+        try:
+            timezone = ZoneInfo(str(timezone_name))
+        except (ValueError, ZoneInfoNotFoundError) as exc:
+            raise ValueError("quality automation timezone must be a valid IANA timezone") from exc
         max_tasks = int(max_tasks)
         check_limit = int(check_limit)
         if max_tasks <= 0 or check_limit <= 0:
@@ -121,19 +126,25 @@ class QualityAutomation:
             "quality_auto_max_tasks": max_tasks,
             "quality_auto_115_check_limit": check_limit,
         }
+        previous_enabled = bool(self.config.quality_auto_enabled)
         for name, value in values.items():
             setattr(self.config, name, value)
         self._timezone = timezone
         self._run_time = parsed_time
         self.store.set_runtime_state(self._OVERRIDES_KEY, json.dumps(values, ensure_ascii=False, sort_keys=True))
+        if previous_enabled != bool(enabled) and callable(self.on_enabled_changed):
+            self.on_enabled_changed(bool(enabled))
         return values
 
     def reset_settings(self) -> dict[str, object]:
+        previous_enabled = bool(self.config.quality_auto_enabled)
         self.store.delete_runtime_state(self._OVERRIDES_KEY)
         for name, value in self._env_defaults.items():
             setattr(self.config, name, value)
         self._timezone = ZoneInfo(str(self.config.quality_auto_timezone))
         self._run_time = self._parse_run_time(str(self.config.quality_auto_time))
+        if previous_enabled != bool(self.config.quality_auto_enabled) and callable(self.on_enabled_changed):
+            self.on_enabled_changed(bool(self.config.quality_auto_enabled))
         return dict(self._env_defaults)
 
     def status_snapshot(self, now: datetime | None = None) -> dict[str, object]:
@@ -582,7 +593,7 @@ class QualityAutomation:
                     clear_claim=True,
                 )
             return QualityCleanupResult("blocked_cleanup", "cleanup_failed")
-        if hasattr(self.store, "record_event"):
+        try:
             self.store.record_event(
                 reserved.id,
                 reserved.current_stage,
@@ -591,6 +602,10 @@ class QualityAutomation:
                 metadata_patch={"quality_cleanup_completed": True},
                 clear_claim=True,
             )
+        except Exception:
+            finalize = getattr(self.store, "finalize_quality_cleanup", None)
+            if not callable(finalize) or not finalize(reserved.id, str(run_id)):
+                return QualityCleanupResult("blocked_cleanup", "cleanup_completion_persist_failed")
         return QualityCleanupResult("cleaned")
 
     def _safe_metadata(self, task: TaskSnapshot) -> bool:
