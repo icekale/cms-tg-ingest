@@ -1787,6 +1787,29 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(status, 403)
             self.assertIn(b"Forbidden", body)
 
+    def test_web_token_bootstraps_cookie_and_cleans_query_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            app = WebApp(store, web_token="secret")
+
+            status, headers, body = app.handle_request("GET", "/?token=secret", {}, b"")
+
+            self.assertEqual(status, 303)
+            self.assertEqual(headers["Location"], "/")
+            self.assertIn("cms_web_token=secret", headers["Set-Cookie"])
+            self.assertEqual(body, b"")
+
+            cookie = headers["Set-Cookie"].split(";", 1)[0]
+            status, _headers, body = app.handle_request("GET", "/health", {"Cookie": cookie}, b"")
+
+            self.assertEqual(status, 200)
+            self.assertIn("本地健康".encode("utf-8"), body)
+
+            status, headers, body = app.handle_request("POST", "/history/clear", {"Cookie": cookie}, b"")
+
+            self.assertEqual(status, 303)
+            self.assertEqual(headers["Location"], "/")
+
     def test_overview_endpoint_reports_disabled_task_engine(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

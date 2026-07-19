@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import signal
 import sqlite3
 import threading
 import time
@@ -255,6 +256,20 @@ def call_maybe_start_web_server(config: Config, task_store: TaskStore, submissio
     if supports_submission_store:
         return maybe_start_web_server(config, task_store, submission_store=submission_store)
     return maybe_start_web_server(config, task_store)
+
+
+def stop_web_server(server: Any | None, join_timeout: float = 5) -> None:
+    if server is None:
+        return
+    shutdown = getattr(server, "shutdown", None)
+    if callable(shutdown):
+        shutdown()
+    close = getattr(server, "server_close", None)
+    if callable(close):
+        close()
+    thread = getattr(server, "_cms_thread", None)
+    if isinstance(thread, threading.Thread) and thread is not threading.current_thread():
+        thread.join(max(0.0, float(join_timeout)))
 
 
 def best_effort_task_sync(action: str, func, *args, **kwargs):
@@ -2680,7 +2695,8 @@ def handle_update(
         LOG.debug("Failed to write metrics snapshot", exc_info=True)
 
 
-def run_forever(config: Config) -> None:
+def run_forever(config: Config, stop_event: threading.Event | None = None) -> None:
+    stop_event = stop_event or threading.Event()
     cms = CmsClient(config)
     telegram = TelegramClient(config.tg_bot_token, timeout=config.http_timeout)
     emby = EmbyClient(config.emby_base_url, config.emby_api_key, config.emby_user_id, timeout=config.http_timeout)
@@ -2693,7 +2709,7 @@ def run_forever(config: Config) -> None:
     )
     store = SubmissionStore(config.db_path)
     task_store = create_task_store(config)
-    call_maybe_start_web_server(config, task_store, submission_store=store)
+    web_server = call_maybe_start_web_server(config, task_store, submission_store=store)
     self_share_config = SelfShareConfig.from_config(config, cms)
     p115 = (
         P115WebClient(
@@ -2714,6 +2730,7 @@ def run_forever(config: Config) -> None:
             conflict_policy=move_config.conflict_policy,
             stable_seconds=move_config.stable_seconds,
         )
+    task_runner = None
     if config.task_engine_enabled and self_share_config.enabled and p115:
         task_workflow = BridgeSelfShareTaskWorkflow(
             cms=cms,
@@ -2772,37 +2789,57 @@ def run_forever(config: Config) -> None:
             interval_seconds=max(1, int(config.status_repair_interval_seconds)),
             limit=max(1, int(config.status_repair_limit)),
         )
-    while True:
-        try:
-            updates = telegram.get_updates(offset=offset, timeout=config.poll_timeout)
-            for update in updates:
-                offset = int(update["update_id"]) + 1
-                handle_update(
-                    update,
-                    cms,
-                    telegram,
-                    config.tg_allowed_chat_id,
-                    store,
-                    status_poll_seconds=config.status_poll_seconds,
-                    status_poll_interval=config.status_poll_interval,
-                    emby=emby,
-                    move_config=move_config,
-                    openai_classifier=openai_classifier,
-                    tmdb_resolver=tmdb_resolver,
-                    self_share_workflow=self_share_workflow,
-                    cleanup_client=p115 if self_share_config.enabled else None,
-                    self_share_receive_cid=config.self_share_receive_cid,
-                    task_store=task_store,
-                    task_engine_enabled=config.task_engine_enabled,
-                )
-        except Exception as exc:
-            log_polling_error(telegram, exc)
-            time.sleep(5)
+    try:
+        while not stop_event.is_set():
+            try:
+                updates = telegram.get_updates(offset=offset, timeout=config.poll_timeout)
+                for update in updates:
+                    offset = int(update["update_id"]) + 1
+                    handle_update(
+                        update,
+                        cms,
+                        telegram,
+                        config.tg_allowed_chat_id,
+                        store,
+                        status_poll_seconds=config.status_poll_seconds,
+                        status_poll_interval=config.status_poll_interval,
+                        emby=emby,
+                        move_config=move_config,
+                        openai_classifier=openai_classifier,
+                        tmdb_resolver=tmdb_resolver,
+                        self_share_workflow=self_share_workflow,
+                        cleanup_client=p115 if self_share_config.enabled else None,
+                        self_share_receive_cid=config.self_share_receive_cid,
+                        task_store=task_store,
+                        task_engine_enabled=config.task_engine_enabled,
+                    )
+            except Exception as exc:
+                if stop_event.is_set():
+                    break
+                log_polling_error(telegram, exc)
+                stop_event.wait(5)
+    finally:
+        if task_runner is not None:
+            stop = getattr(task_runner, "stop", None)
+            if callable(stop):
+                try:
+                    stop(join_timeout=5)
+                except TypeError:
+                    stop()
+        stop_web_server(web_server)
 
 
 def main() -> int:
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
-    run_forever(Config.from_env())
+    stop_event = threading.Event()
+
+    def request_stop(signum, _frame):
+        LOG.info("Received signal %s; shutting down", signum)
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
+    run_forever(Config.from_env(), stop_event=stop_event)
     return 0
 
 

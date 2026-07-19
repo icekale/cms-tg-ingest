@@ -245,6 +245,21 @@ class TaskStoreTests(unittest.TestCase):
             self.assertIn("STATUS", normalized_plan)
             self.assertNotIn("SCAN TASKS USING INDEX IDX_TASKS_UPDATED_AT", normalized_plan)
 
+    def test_find_pending_stage_excludes_requested_task_without_scanning_recent_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            current = store.upsert_task("current", "", "https://115cdn.com/s/current")
+            store.record_event(current.id, TaskStage.SHARE_SYNC_SUBMITTED, TaskStatus.RUNNING, "current", next_run_at=1.0)
+            waiting = store.upsert_task("waiting", "", "https://115cdn.com/s/waiting")
+            store.record_event(waiting.id, TaskStage.STRM_READY, TaskStatus.PENDING, "waiting", next_run_at=1.0)
+
+            with patch.object(store, "list_recent_tasks", side_effect=AssertionError("SQL stage lookup must not scan recent tasks")):
+                found = store.find_pending_stage(TaskStage.STRM_READY, exclude_task_id=current.id)
+                missing = store.find_pending_stage(TaskStage.SHARE_SYNC_SUBMITTED, exclude_task_id=current.id)
+
+            self.assertEqual(found.id, waiting.id)
+            self.assertIsNone(missing)
+
     def test_queue_summary_counts_statuses_and_lock_waits(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

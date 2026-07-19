@@ -144,6 +144,23 @@ class BridgeV02IntegrationTests(unittest.TestCase):
 
                 self.assertIsNone(server)
 
+    def test_stop_web_server_closes_server(self):
+        class FakeServer:
+            def __init__(self):
+                self.calls = []
+
+            def shutdown(self):
+                self.calls.append("shutdown")
+
+            def server_close(self):
+                self.calls.append("close")
+
+        server = FakeServer()
+
+        bridge.stop_web_server(server)
+
+        self.assertEqual(server.calls, ["shutdown", "close"])
+
     def test_run_forever_passes_task_store_to_handle_update(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):
             cfg = bridge.Config.from_env()

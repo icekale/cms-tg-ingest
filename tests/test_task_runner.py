@@ -1,4 +1,5 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -80,6 +81,17 @@ class TimeAdvancingCountingWorkflow:
 
 
 class TaskRunnerTests(unittest.TestCase):
+    def test_stop_wakes_and_joins_idle_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            runner = TaskRunner(store, FakeWorkflow([]), interval_seconds=60)
+
+            thread = runner.start()
+            time.sleep(0.01)
+            runner.stop(join_timeout=1)
+
+            self.assertFalse(thread.is_alive())
+
     def test_run_once_completes_stage_and_enqueues_next_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

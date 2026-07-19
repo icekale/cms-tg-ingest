@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import html
 import time
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from .models import RetryAction, TaskStage, TaskStatus
 from .quality import QualityIssue, format_task_quality_report, scan_task_quality
@@ -986,11 +987,28 @@ class WebApp:
         self.submission_store = submission_store
         self.task_engine_enabled = task_engine_enabled
 
-    def _authorized(self, path: str, headers: dict[str, str]) -> bool:
+    def _authorization_source(self, path: str, headers: dict[str, str]) -> str:
         if not self.web_token:
-            return True
+            return "anonymous"
         query = parse_qs(urlparse(path).query)
-        return query.get("token", [""])[0] == self.web_token or headers.get("X-Web-Token") == self.web_token
+        if query.get("token", [""])[0] == self.web_token:
+            return "query"
+        if (headers.get("X-Web-Token") or headers.get("x-web-token")) == self.web_token:
+            return "header"
+        cookie = SimpleCookie()
+        try:
+            cookie.load(headers.get("Cookie") or headers.get("cookie") or "")
+        except CookieError:
+            return ""
+        if cookie.get("cms_web_token") and cookie["cms_web_token"].value == self.web_token:
+            return "cookie"
+        return ""
+
+    def _authorized(self, path: str, headers: dict[str, str]) -> bool:
+        return bool(self._authorization_source(path, headers))
+
+    def _web_token_cookie(self) -> str:
+        return f"cms_web_token={quote(self.web_token, safe='')}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800"
 
     def handle_request(
         self,
@@ -1000,28 +1018,32 @@ class WebApp:
         body: bytes,
     ) -> tuple[int, dict[str, str], bytes]:
         del body
-        if not self._authorized(path, headers):
+        authorization_source = self._authorization_source(path, headers)
+        if not authorization_source:
             return 403, {"Content-Type": "text/plain; charset=utf-8"}, b"Forbidden"
         parsed = urlparse(path)
+        if method == "GET" and authorization_source == "query":
+            return 303, {"Location": parsed.path or "/", "Set-Cookie": self._web_token_cookie()}, b""
+        auth_headers = {"Set-Cookie": self._web_token_cookie()} if authorization_source in {"query", "header"} else {}
         if method == "GET" and parsed.path == "/":
             page = render_task_list(self.store, task_engine_enabled=self.task_engine_enabled)
-            return 200, {"Content-Type": "text/html; charset=utf-8"}, page.encode("utf-8")
+            return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, page.encode("utf-8")
         if method == "GET" and parsed.path == "/quality":
-            return 200, {"Content-Type": "text/html; charset=utf-8"}, render_quality_page(self.store).encode("utf-8")
+            return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, render_quality_page(self.store).encode("utf-8")
         if method == "POST" and parsed.path == "/quality/fix":
             fix_quality_issues(self.store)
-            return 303, {"Location": "/quality"}, b""
+            return 303, {"Location": "/quality", **auth_headers}, b""
         if method == "GET" and parsed.path == "/health":
             page = render_health_page(self.store, task_engine_enabled=self.task_engine_enabled)
-            return 200, {"Content-Type": "text/html; charset=utf-8"}, page.encode("utf-8")
+            return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, page.encode("utf-8")
         if method == "POST" and parsed.path == "/history/clear":
             self.store.clear_finished_tasks()
-            return 303, {"Location": "/"}, b""
+            return 303, {"Location": "/", **auth_headers}, b""
         if method == "GET" and parsed.path.startswith("/task/"):
             task_id = parse_task_id_from_path(parsed.path)
             if task_id is None:
                 return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
-            return 200, {"Content-Type": "text/html; charset=utf-8"}, render_task_detail(self.store, task_id, self.submission_store).encode("utf-8")
+            return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, render_task_detail(self.store, task_id, self.submission_store).encode("utf-8")
         task_action = parse_task_action_path(parsed.path) if method == "POST" else None
         if task_action is not None:
             task_id, action = task_action
@@ -1073,7 +1095,7 @@ class WebApp:
                         initial_event_message="手动触发重试",
                         increment_retry=True,
                     )
-            return 303, {"Location": f"/task/{task_id}"}, b""
+            return 303, {"Location": f"/task/{task_id}", **auth_headers}, b""
         if parsed.path.startswith("/task/"):
             return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
         return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"Not Found"
@@ -1115,5 +1137,6 @@ def start_web_server(
 
     server = ThreadingHTTPServer((host, port), Handler)
     thread = Thread(target=server.serve_forever, daemon=True)
+    server._cms_thread = thread
     thread.start()
     return server

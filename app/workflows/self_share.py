@@ -970,17 +970,7 @@ class BridgeSelfShareTaskWorkflow:
         )
 
     def _pending_cms_share_sync_task(self, task):
-        for candidate in self.task_store.list_recent_tasks(limit=100):
-            if candidate.id == task.id:
-                continue
-            if candidate.current_stage != TaskStage.STRM_READY:
-                continue
-            if candidate.status not in {TaskStatus.PENDING, TaskStatus.RUNNING}:
-                continue
-            if candidate.next_run_at < 0:
-                continue
-            return candidate
-        return None
+        return self.task_store.find_pending_stage(TaskStage.STRM_READY, exclude_task_id=task.id)
 
     def _stage_strm_ready(self, task):
         row = self._submission_row(task)
