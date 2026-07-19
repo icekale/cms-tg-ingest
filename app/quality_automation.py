@@ -116,8 +116,20 @@ class QualityAutomation:
 
     def run_once(self, run_id: str, now: datetime | None = None) -> QualityRunSummary:
         local_now = self._local_now(now)
+        run_id = str(run_id)
         started_at = local_now.isoformat()
-        running = QualityRunSummary(run_id=str(run_id), status="running", started_at=started_at)
+        if not self.store.claim_quality_run_execution(
+            run_id,
+            local_now.timestamp(),
+            stale_after_seconds=self.STALE_RUN_SECONDS,
+        ):
+            return QualityRunSummary(
+                run_id=run_id,
+                status="conflict",
+                started_at=started_at,
+                error="quality run lease is owned by another run",
+            )
+        running = QualityRunSummary(run_id=run_id, status="running", started_at=started_at)
         self._persist_summary(running, local_now.timestamp())
         try:
             limit = max(1, int(self.config.quality_auto_max_tasks))
@@ -126,7 +138,7 @@ class QualityAutomation:
             plans = self._plan(tasks, issues)
             finished_local = self._local_now(datetime.now(self._timezone))
             summary = QualityRunSummary(
-                run_id=str(run_id),
+                run_id=run_id,
                 status="succeeded",
                 started_at=started_at,
                 finished_at=finished_local.isoformat(),
@@ -138,7 +150,7 @@ class QualityAutomation:
             )
         except Exception as exc:
             summary = QualityRunSummary(
-                run_id=str(run_id),
+                run_id=run_id,
                 status="failed",
                 started_at=started_at,
                 finished_at=self._local_now(datetime.now(self._timezone)).isoformat(),
@@ -165,17 +177,13 @@ class QualityAutomation:
         self.run_once(run_id)
         return True
 
-    def _persist_summary(self, summary: QualityRunSummary, updated_at: float) -> None:
-        self.store.set_runtime_state(self._STATUS_KEY, summary.status, updated_at=updated_at)
-        self.store.set_runtime_state(
-            self._SUMMARY_KEY,
+    def _persist_summary(self, summary: QualityRunSummary, updated_at: float) -> bool:
+        return self.store.update_quality_run_state_if_owner(
+            summary.run_id,
+            summary.status,
             json.dumps(asdict(summary), ensure_ascii=False, sort_keys=True),
-            updated_at=updated_at,
+            updated_at,
         )
-        current_run_id = summary.run_id if summary.status == "running" else ""
-        self.store.set_runtime_state(self._CURRENT_RUN_KEY, current_run_id, updated_at=updated_at)
-        if summary.status != "running":
-            self.store.set_runtime_state("quality_auto_current_run_date", "", updated_at=updated_at)
 
     def _plan(self, tasks: list[TaskSnapshot], issues: list[QualityIssue]) -> list[QualityRepairPlan]:
         grouped: dict[int, list[QualityIssue]] = {}

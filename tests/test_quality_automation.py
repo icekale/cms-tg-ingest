@@ -245,6 +245,43 @@ class QualityScheduleTests(unittest.TestCase):
 
             self.assertEqual(sorted(results), [False, True])
 
+    def test_old_runner_cannot_overwrite_new_lease_when_it_finishes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, store = self.make_service(tmp)
+            timezone = ZoneInfo("Asia/Shanghai")
+            started_at = datetime(2026, 7, 20, 2, 50, tzinfo=timezone)
+            takeover_at = started_at.timestamp() + service.STALE_RUN_SECONDS + 1
+            scan_started = Event()
+            release_scan = Event()
+
+            def blocked_scan(*args, **kwargs):
+                scan_started.set()
+                release_scan.wait(timeout=5)
+                return []
+
+            with patch("app.quality_automation.scan_task_quality", side_effect=blocked_scan):
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    old_future = executor.submit(service.run_once, "old-run", started_at)
+                    self.assertTrue(scan_started.wait(timeout=5))
+                    self.assertTrue(
+                        store.claim_quality_run_execution(
+                            "new-run",
+                            takeover_at,
+                            stale_after_seconds=service.STALE_RUN_SECONDS,
+                        )
+                    )
+                    service._persist_summary(
+                        QualityRunSummary("new-run", "running", started_at=started_at.isoformat()),
+                        takeover_at,
+                    )
+                    release_scan.set()
+                    old_future.result(timeout=5)
+
+            self.assertEqual(store.get_runtime_state("quality_auto_status")["value"], "running")
+            self.assertEqual(store.get_runtime_state("quality_auto_current_run_id")["value"], "new-run")
+            persisted = json.loads(store.get_runtime_state("quality_auto_last_summary")["value"])
+            self.assertEqual(persisted["run_id"], "new-run")
+
 
 class QualityPlanningTests(unittest.TestCase):
     def make_service(self, tmp, max_tasks=50):

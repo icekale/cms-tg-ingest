@@ -209,7 +209,13 @@ class TaskStore:
                 and status == "running"
                 and float(status_row["updated_at"]) <= stale_before
             )
-            if status == "running" and not running_is_stale:
+            current_run_row = conn.execute(
+                "SELECT value FROM runtime_state WHERE key = ?",
+                (current_run_key,),
+            ).fetchone()
+            current_run_id = str(current_run_row["value"] or "").strip() if current_run_row else ""
+            same_owner = status == "running" and current_run_id == str(run_id)
+            if status == "running" and not running_is_stale and not same_owner:
                 return False
 
             current_date_row = conn.execute(
@@ -217,11 +223,6 @@ class TaskStore:
                 (current_date_key,),
             ).fetchone()
             current_date = str(current_date_row["value"] or "").strip() if current_date_row else ""
-            current_run_row = conn.execute(
-                "SELECT value FROM runtime_state WHERE key = ?",
-                (current_run_key,),
-            ).fetchone()
-            current_run_id = str(current_run_row["value"] or "").strip() if current_run_row else ""
             claimed_date = current_date
             if not claimed_date and current_run_id.startswith("quality-"):
                 run_id_parts = current_run_id.removeprefix("quality-").split("-")
@@ -234,7 +235,7 @@ class TaskStore:
                     (date_key,),
                 ).fetchone()
                 if date_row is not None and not (
-                    running_is_stale and claimed_date == str(run_date)
+                    same_owner or (running_is_stale and claimed_date == str(run_date))
                 ):
                     return False
                 conn.execute(
@@ -246,12 +247,52 @@ class TaskStore:
                     (date_key, str(run_date), timestamp),
                 )
 
+            target_date = str(run_date) if run_date is not None else (current_date if same_owner else "")
             runtime_values = [
                 ("quality_auto_status", "running"),
                 (current_run_key, str(run_id)),
-                (current_date_key, str(run_date or "")),
+                (current_date_key, target_date),
             ]
             for key, value in runtime_values:
+                conn.execute(
+                    """
+                    INSERT INTO runtime_state (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                    """,
+                    (key, value, timestamp),
+                )
+            return True
+
+    def update_quality_run_state_if_owner(
+        self,
+        run_id: str,
+        status: str,
+        summary_json: str,
+        updated_at: float,
+    ) -> bool:
+        """Persist a quality summary only while run_id owns the current runtime lease."""
+        timestamp = float(updated_at)
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            owner = conn.execute(
+                "SELECT value FROM runtime_state WHERE key = ?",
+                ("quality_auto_current_run_id",),
+            ).fetchone()
+            if owner is None or str(owner["value"] or "") != str(run_id):
+                return False
+            values = [
+                ("quality_auto_status", str(status)),
+                ("quality_auto_last_summary", str(summary_json)),
+            ]
+            if str(status) != "running":
+                values.extend(
+                    [
+                        ("quality_auto_current_run_id", ""),
+                        ("quality_auto_current_run_date", ""),
+                    ]
+                )
+            for key, value in values:
                 conn.execute(
                     """
                     INSERT INTO runtime_state (key, value, updated_at)
