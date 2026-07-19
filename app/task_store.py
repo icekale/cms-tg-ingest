@@ -1049,6 +1049,47 @@ class TaskStore:
             )
         return int(cursor.rowcount or 0) == 1
 
+    def record_quality_cleanup_event(
+        self,
+        task_id: int,
+        run_id: str,
+        status: TaskStatus,
+        message: str,
+        *,
+        metadata_patch: dict[str, Any] | None = None,
+        error_type: str = "",
+        error_summary: str = "",
+    ) -> bool:
+        """Record cleanup completion only while the same cleanup run owns the lease."""
+        now = time.time()
+        owner = f"quality-cleanup:{run_id}"
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT current_stage, metadata_json FROM tasks WHERE id = ? AND claimed_by = ?",
+                (int(task_id), owner),
+            ).fetchone()
+            if row is None:
+                return False
+            metadata = self._merge_metadata(row["metadata_json"], metadata_patch)
+            conn.execute(
+                """
+                INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at)
+                VALUES (?, ?, ?, ?, ?, '', ?)
+                """,
+                (int(task_id), row["current_stage"], status.value, message, error_type, now),
+            )
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = ?, error_type = ?, error_summary = ?, metadata_json = ?,
+                    claimed_by = '', claimed_at = 0, updated_at = ?
+                WHERE id = ? AND claimed_by = ?
+                """,
+                (status.value, error_type, error_summary, metadata, now, int(task_id), owner),
+            )
+        return True
+
     def enqueue_task(
         self,
         task_id: int,

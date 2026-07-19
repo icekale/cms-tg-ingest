@@ -48,6 +48,8 @@ class QualityRunSummary:
 
 class QualityAutomation:
     STALE_RUN_SECONDS = 21600
+    MAX_TASKS = 1000
+    MAX_115_CHECK_LIMIT = 100
     _STATUS_KEY = "quality_auto_status"
     _SUMMARY_KEY = "quality_auto_last_summary"
     _CURRENT_RUN_KEY = "quality_auto_current_run_id"
@@ -73,6 +75,10 @@ class QualityAutomation:
             "quality_auto_115_check_limit": int(config.quality_auto_115_check_limit),
         }
         self._load_runtime_overrides()
+        if not 1 <= int(config.quality_auto_max_tasks) <= self.MAX_TASKS:
+            raise ValueError(f"quality_auto_max_tasks must be between 1 and {self.MAX_TASKS}")
+        if not 1 <= int(config.quality_auto_115_check_limit) <= self.MAX_115_CHECK_LIMIT:
+            raise ValueError(f"quality_auto_115_check_limit must be between 1 and {self.MAX_115_CHECK_LIMIT}")
         self._timezone = ZoneInfo(config.quality_auto_timezone)
         self._run_time = self._parse_run_time(config.quality_auto_time)
 
@@ -117,8 +123,10 @@ class QualityAutomation:
             raise ValueError("quality automation timezone must be a valid IANA timezone") from exc
         max_tasks = int(max_tasks)
         check_limit = int(check_limit)
-        if max_tasks <= 0 or check_limit <= 0:
-            raise ValueError("quality automation limits must be greater than zero")
+        if not 1 <= max_tasks <= self.MAX_TASKS:
+            raise ValueError(f"quality_auto_max_tasks must be between 1 and {self.MAX_TASKS}")
+        if not 1 <= check_limit <= self.MAX_115_CHECK_LIMIT:
+            raise ValueError(f"quality_auto_115_check_limit must be between 1 and {self.MAX_115_CHECK_LIMIT}")
         values: dict[str, object] = {
             "quality_auto_enabled": bool(enabled),
             "quality_auto_time": parsed_time.strftime("%H:%M"),
@@ -570,38 +578,39 @@ class QualityAutomation:
                 return QualityCleanupResult("blocked_cleanup", "cleanup_busy")
         try:
             if handler(reserved, str(run_id)) is False:
-                if hasattr(self.store, "record_event"):
-                    self.store.record_event(
+                finish = getattr(self.store, "record_quality_cleanup_event", None)
+                if callable(finish):
+                    finish(
                         reserved.id,
-                        reserved.current_stage,
+                        str(run_id),
                         reserved.status,
                         "自动巡检清理被拒绝",
                         error_type="quality_cleanup_rejected",
                         error_summary="cleanup rejected",
-                        clear_claim=True,
                     )
                 return QualityCleanupResult("blocked_cleanup", "cleanup_rejected")
         except Exception:
-            if hasattr(self.store, "record_event"):
-                self.store.record_event(
+            finish = getattr(self.store, "record_quality_cleanup_event", None)
+            if callable(finish):
+                finish(
                     reserved.id,
-                    reserved.current_stage,
+                    str(run_id),
                     TaskStatus.NEEDS_ACTION,
                     "自动巡检清理失败",
                     error_type="quality_cleanup_failed",
                     error_summary="cleanup failed",
-                    clear_claim=True,
                 )
             return QualityCleanupResult("blocked_cleanup", "cleanup_failed")
         try:
-            self.store.record_event(
+            finish = getattr(self.store, "record_quality_cleanup_event", None)
+            if not callable(finish) or not finish(
                 reserved.id,
-                reserved.current_stage,
+                str(run_id),
                 reserved.status,
                 "自动巡检清理完成",
                 metadata_patch={"quality_cleanup_completed": True},
-                clear_claim=True,
-            )
+            ):
+                raise RuntimeError("cleanup owner changed before completion was persisted")
         except Exception:
             finalize = getattr(self.store, "finalize_quality_cleanup", None)
             if not callable(finalize) or not finalize(reserved.id, str(run_id)):

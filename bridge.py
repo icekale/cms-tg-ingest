@@ -2846,6 +2846,8 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
     quality_automation = None
     quality_thread = None
     probe_stop_events: list[threading.Event] = []
+    probe_threads: list[threading.Thread] = []
+    probe_holder: dict[str, Any] = {"stop_event": None, "thread": None}
     if config.task_engine_enabled and self_share_config.enabled and p115:
         task_workflow = BridgeSelfShareTaskWorkflow(
             cms=cms,
@@ -2872,8 +2874,6 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         )
         task_runner.start()
         LOG.info("Task engine worker started interval_seconds=%s", config.task_worker_interval_seconds)
-        probe_holder: dict[str, Any] = {"stop_event": None, "thread": None}
-
         def set_invalid_probe_enabled(quality_enabled: bool) -> None:
             if not config.self_share_invalid_cleanup_enabled:
                 return
@@ -2881,6 +2881,9 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
                 previous_stop = probe_holder.get("stop_event")
                 if isinstance(previous_stop, threading.Event):
                     previous_stop.set()
+                previous_thread = probe_holder.get("thread")
+                if isinstance(previous_thread, threading.Thread) and previous_thread.is_alive():
+                    previous_thread.join(timeout=2)
                 probe_holder["stop_event"] = None
                 probe_holder["thread"] = None
                 return
@@ -2901,6 +2904,8 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
                 limit=config.self_share_invalid_check_limit,
                 stop_event=probe_stop,
             )
+            if isinstance(probe_holder["thread"], threading.Thread):
+                probe_threads.append(probe_holder["thread"])
 
         quality_automation = QualityAutomation(
             task_store,
@@ -2979,6 +2984,9 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         stop_event.set()
         for probe_stop in probe_stop_events:
             probe_stop.set()
+        for probe_thread in probe_threads:
+            if isinstance(probe_thread, threading.Thread) and probe_thread.is_alive():
+                probe_thread.join(timeout=2)
         if task_runner is not None:
             stop = getattr(task_runner, "stop", None)
             if callable(stop):
