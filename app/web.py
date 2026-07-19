@@ -742,6 +742,35 @@ def _quality_repair_action(issue: QualityIssue, task: Any | None) -> str | None:
     return None
 
 
+def _apply_web_transition(
+    store: TaskStore,
+    task: Any,
+    *,
+    target_stage: TaskStage,
+    target_event_message: str,
+    initial_event_message: str | None = None,
+    increment_retry: bool = False,
+    metadata_patch: dict[str, Any] | None = None,
+) -> bool:
+    updated = store.compare_and_set_transition(
+        task.id,
+        task.current_stage,
+        {task.status},
+        require_unclaimed=True,
+        target_stage=target_stage,
+        target_status=TaskStatus.PENDING,
+        target_event_message=target_event_message,
+        initial_event_message=initial_event_message,
+        increment_retry=increment_retry,
+        metadata_patch=metadata_patch,
+        metadata_delete_keys=("_defer_stage", "_defer_message", "_defer_count"),
+        next_run_at=0,
+        clear_errors=True,
+        clear_claim=True,
+    )
+    return updated is not None
+
+
 def render_quality_page(store: TaskStore) -> str:
     issues = scan_task_quality(store)
     report = format_task_quality_report(issues)
@@ -833,19 +862,32 @@ def fix_quality_issues(store: TaskStore) -> int:
         task = store.find_task(issue.task_id)
         action = _quality_repair_action(issue, task)
         if action == "restore":
-            store.record_event(
-                task.id,
-                TaskStage.EMBY_CONFIRMED,
-                TaskStatus.PENDING,
-                "Web 巡检自动修复：恢复 STRM",
-                metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": TaskStage.EMBY_CONFIRMED.value},
-                clear_claim=True,
-            )
-            store.enqueue_task(task.id, TaskStage.EMBY_CONFIRMED, message="Web 巡检恢复 STRM 已入队", next_run_at=0)
-            fixed_task_ids.add(task.id)
+            if _apply_web_transition(
+                store,
+                task,
+                target_stage=TaskStage.EMBY_CONFIRMED,
+                target_event_message="Web 巡检恢复 STRM 已入队",
+                initial_event_message="Web 巡检自动修复：恢复 STRM",
+                metadata_patch={
+                    "retry_from_stage": task.current_stage.value,
+                    "retry_stage": TaskStage.EMBY_CONFIRMED.value,
+                },
+            ):
+                fixed_task_ids.add(task.id)
         elif action == "reprocess":
-            store.reprocess_task(task.id, message="Web 巡检自动修复：从头重跑", next_run_at=0)
-            fixed_task_ids.add(task.id)
+            if _apply_web_transition(
+                store,
+                task,
+                target_stage=TaskStage.RECEIVED,
+                target_event_message="Web 巡检自动修复：从头重跑",
+                increment_retry=True,
+                metadata_patch={
+                    "retry_from_stage": task.current_stage.value,
+                    "retry_stage": TaskStage.RECEIVED.value,
+                    "force_reprocess": True,
+                },
+            ):
+                fixed_task_ids.add(task.id)
     return len(fixed_task_ids)
 
 
@@ -980,34 +1022,51 @@ class WebApp:
             task_id, action = task_action
             task = self.store.find_task(task_id)
             if task and action == "emby" and _task_can_use_downstream_actions(task):
-                self.store.enqueue_task(task_id, TaskStage.EMBY_CONFIRMED, message="Web 触发 Emby 检查", next_run_at=0)
-            elif task and action == "restore" and _task_can_use_downstream_actions(task):
-                self.store.record_event(
-                    task_id,
-                    TaskStage.EMBY_CONFIRMED,
-                    TaskStatus.PENDING,
-                    "Web 触发 STRM 恢复",
-                    metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": TaskStage.EMBY_CONFIRMED.value},
-                    clear_claim=True,
+                _apply_web_transition(
+                    self.store,
+                    task,
+                    target_stage=TaskStage.EMBY_CONFIRMED,
+                    target_event_message="Web 触发 Emby 检查",
                 )
-                self.store.enqueue_task(task_id, TaskStage.EMBY_CONFIRMED, message="Web STRM 恢复已入队", next_run_at=0)
+            elif task and action == "restore" and _task_can_use_downstream_actions(task):
+                _apply_web_transition(
+                    self.store,
+                    task,
+                    target_stage=TaskStage.EMBY_CONFIRMED,
+                    target_event_message="Web STRM 恢复已入队",
+                    initial_event_message="Web 触发 STRM 恢复",
+                    metadata_patch={
+                        "retry_from_stage": task.current_stage.value,
+                        "retry_stage": TaskStage.EMBY_CONFIRMED.value,
+                    },
+                )
             elif task and action == "reprocess" and _task_can_reprocess(task):
-                self.store.reprocess_task(task_id, message="Web 触发从头重跑", next_run_at=0)
+                _apply_web_transition(
+                    self.store,
+                    task,
+                    target_stage=TaskStage.RECEIVED,
+                    target_event_message="Web 触发从头重跑",
+                    increment_retry=True,
+                    metadata_patch={
+                        "retry_from_stage": task.current_stage.value,
+                        "retry_stage": TaskStage.RECEIVED.value,
+                        "force_reprocess": True,
+                    },
+                )
             elif task and action == "retry":
                 decision = decide_retry(task)
                 if _task_can_retry(task, decision):
                     target_stage = decision.stage or task.current_stage
                     if target_stage in {TaskStage.NEEDS_ACTION, TaskStage.FAILED}:
                         target_stage = TaskStage.RECEIVED
-                    self.store.record_event(
-                        task_id,
-                        task.current_stage,
-                        TaskStatus.PENDING,
-                        "手动触发重试",
+                    _apply_web_transition(
+                        self.store,
+                        task,
+                        target_stage=target_stage,
+                        target_event_message="手动重试已入队",
+                        initial_event_message="手动触发重试",
                         increment_retry=True,
-                        clear_claim=True,
                     )
-                    self.store.enqueue_task(task_id, target_stage, message="手动重试已入队", next_run_at=0)
             return 303, {"Location": f"/task/{task_id}"}, b""
         if parsed.path.startswith("/task/"):
             return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"

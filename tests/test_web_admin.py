@@ -1,7 +1,10 @@
 import re
+import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 from unittest.mock import patch
 
 import bridge
@@ -22,6 +25,20 @@ from app.web import (
 
 
 class WebAdminTests(unittest.TestCase):
+    def _run_concurrent_posts(self, app: WebApp, path: str) -> list[tuple[int, dict[str, str], bytes]]:
+        barrier = Barrier(2)
+        original_find_task = app.store.find_task
+
+        def synchronized_find_task(task_id: int):
+            task = original_find_task(task_id)
+            barrier.wait(timeout=5)
+            return task
+
+        with patch.object(app.store, "find_task", side_effect=synchronized_find_task):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(app.handle_request, "POST", path, {}, b"") for _ in range(2)]
+                return [future.result(timeout=10) for future in futures]
+
     def test_pages_share_product_navigation(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
@@ -890,6 +907,142 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(claimed.id, task.id)
             self.assertEqual(claimed.current_stage, TaskStage.STRM_READY)
             self.assertEqual(body, b"")
+
+    def test_concurrent_retry_requests_apply_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("concurrent-retry", "", "https://115cdn.com/s/concurrent-retry")
+            store.record_event(
+                task.id,
+                TaskStage.STRM_READY,
+                TaskStatus.FAILED,
+                "STRM missing",
+                error_summary="未找到 STRM",
+            )
+            app = WebApp(store, web_token="")
+
+            responses = self._run_concurrent_posts(app, f"/task/{task.id}/retry")
+            updated = store.find_task(task.id)
+            events = store.list_events(task.id)
+
+            self.assertEqual([response[0] for response in responses], [303, 303])
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.current_stage, TaskStage.STRM_READY)
+            self.assertEqual(updated.retry_count, 1)
+            self.assertEqual(sum(event["message"] == "手动触发重试" for event in events), 1)
+            self.assertEqual(sum(event["message"] == "手动重试已入队" for event in events), 1)
+
+    def test_concurrent_reprocess_requests_apply_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("concurrent-reprocess", "", "https://115cdn.com/s/concurrent-reprocess")
+            store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            app = WebApp(store, web_token="")
+
+            responses = self._run_concurrent_posts(app, f"/task/{task.id}/reprocess")
+            updated = store.find_task(task.id)
+            events = store.list_events(task.id)
+
+            self.assertEqual([response[0] for response in responses], [303, 303])
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(updated.retry_count, 1)
+            self.assertEqual(sum(event["message"] == "Web 触发从头重跑" for event in events), 1)
+            self.assertTrue(updated.metadata["force_reprocess"])
+
+    def test_concurrent_downstream_and_quality_actions_apply_once(self):
+        cases = (
+            (
+                "emby",
+                "emby",
+                TaskStage.MOVED,
+                ("Web 触发 Emby 检查",),
+                TaskStage.EMBY_CONFIRMED,
+                0,
+                None,
+            ),
+            (
+                "restore",
+                "restore",
+                TaskStage.CLEANED,
+                ("Web 触发 STRM 恢复", "Web STRM 恢复已入队"),
+                TaskStage.EMBY_CONFIRMED,
+                0,
+                None,
+            ),
+            (
+                "quality-restore",
+                "quality",
+                TaskStage.CLEANED,
+                ("Web 巡检自动修复：恢复 STRM", "Web 巡检恢复 STRM 已入队"),
+                TaskStage.EMBY_CONFIRMED,
+                0,
+                "missing_dest",
+            ),
+            (
+                "quality-reprocess",
+                "quality",
+                TaskStage.CLEANED,
+                ("Web 巡检自动修复：从头重跑",),
+                TaskStage.RECEIVED,
+                1,
+                "direct_strm",
+            ),
+        )
+        for name, action, source_stage, messages, target_stage, retry_count, issue_code in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                store = TaskStore(Path(tmp) / "tasks.db")
+                task = store.upsert_task(name, "", f"https://115cdn.com/s/{name}")
+                store.record_event(task.id, source_stage, TaskStatus.SUCCEEDED, "done")
+                app = WebApp(store, web_token="")
+                path = "/quality/fix" if action == "quality" else f"/task/{task.id}/{action}"
+
+                if issue_code:
+                    issue = QualityIssue(issue_code, "problem", f"/{name}", task.id, name)
+                    with patch("app.web.scan_task_quality", return_value=[issue]):
+                        responses = self._run_concurrent_posts(app, path)
+                else:
+                    responses = self._run_concurrent_posts(app, path)
+                updated = store.find_task(task.id)
+                events = store.list_events(task.id)
+
+                self.assertEqual([response[0] for response in responses], [303, 303])
+                self.assertEqual(updated.status, TaskStatus.PENDING)
+                self.assertEqual(updated.current_stage, target_stage)
+                self.assertEqual(updated.retry_count, retry_count)
+                for message in messages:
+                    self.assertEqual(sum(event["message"] == message for event in events), 1)
+
+    def test_worker_claim_after_eligibility_snapshot_makes_web_action_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("claim-race", "", "https://115cdn.com/s/claim-race")
+            store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            events_before = store.list_events(task.id)
+            original_find_task = store.find_task
+
+            def find_then_claim(task_id: int):
+                snapshot = original_find_task(task_id)
+                with sqlite3.connect(store.db_path) as conn:
+                    conn.execute(
+                        "UPDATE tasks SET claimed_by = ?, claimed_at = ? WHERE id = ?",
+                        ("worker-race", 123.0, task_id),
+                    )
+                return snapshot
+
+            app = WebApp(store, web_token="")
+            with patch.object(store, "find_task", side_effect=find_then_claim):
+                status, headers, body = app.handle_request("POST", f"/task/{task.id}/reprocess", {}, b"")
+            updated = store.find_task(task.id)
+
+            self.assertEqual(status, 303)
+            self.assertEqual(headers["Location"], f"/task/{task.id}")
+            self.assertEqual(body, b"")
+            self.assertEqual(updated.status, TaskStatus.SUCCEEDED)
+            self.assertEqual(updated.current_stage, TaskStage.CLEANED)
+            self.assertEqual(updated.claimed_by, "worker-race")
+            self.assertEqual(updated.retry_count, 0)
+            self.assertEqual(store.list_events(task.id), events_before)
 
     def test_reprocess_endpoint_requeues_task_from_received_stage(self):
         with tempfile.TemporaryDirectory() as tmp:

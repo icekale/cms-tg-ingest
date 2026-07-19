@@ -101,6 +101,38 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(updated.metadata["first"], "yes")
             self.assertEqual(updated.metadata["second"], "yes")
 
+    def test_compare_and_set_transition_records_initial_and_target_events_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+
+            updated = store.compare_and_set_transition(
+                task.id,
+                TaskStage.RECEIVED,
+                {TaskStatus.PENDING},
+                require_unclaimed=True,
+                target_stage=TaskStage.EMBY_CONFIRMED,
+                target_status=TaskStatus.PENDING,
+                initial_event_message="initial transition",
+                target_event_message="queued transition",
+                next_run_at=0,
+                clear_errors=True,
+                clear_claim=True,
+            )
+            events = store.list_events(task.id)
+
+            self.assertIsNotNone(updated)
+            self.assertEqual(
+                [(event["stage"], event["status"], event["message"]) for event in events],
+                [
+                    (TaskStage.RECEIVED.value, TaskStatus.PENDING.value, "initial transition"),
+                    (TaskStage.EMBY_CONFIRMED.value, TaskStatus.PENDING.value, "queued transition"),
+                ],
+            )
+            self.assertEqual(updated.current_stage, TaskStage.EMBY_CONFIRMED)
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.next_run_at, 0)
+
     def test_record_failure_stores_error_and_retry_count(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

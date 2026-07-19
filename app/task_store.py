@@ -480,6 +480,83 @@ class TaskStore:
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return self._snapshot(row)
 
+    def compare_and_set_transition(
+        self,
+        task_id: int,
+        expected_stage: TaskStage,
+        allowed_statuses: set[TaskStatus] | tuple[TaskStatus, ...],
+        *,
+        require_unclaimed: bool,
+        target_stage: TaskStage,
+        target_status: TaskStatus,
+        target_event_message: str,
+        initial_event_message: str | None = None,
+        increment_retry: bool = False,
+        metadata_patch: dict[str, Any] | None = None,
+        metadata_delete_keys: tuple[str, ...] | None = None,
+        next_run_at: float | None = None,
+        clear_errors: bool = False,
+        clear_claim: bool = False,
+    ) -> TaskSnapshot | None:
+        allowed_status_values = {status.value for status in allowed_statuses}
+        if not allowed_status_values:
+            return None
+        now = time.time()
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if current is None:
+                return None
+            if current["current_stage"] != expected_stage.value:
+                return None
+            if current["status"] not in allowed_status_values:
+                return None
+            if require_unclaimed and str(current["claimed_by"] or "").strip():
+                return None
+
+            merged_metadata = self._merge_metadata(
+                current["metadata_json"],
+                metadata_patch,
+                metadata_delete_keys,
+            )
+            if initial_event_message is not None:
+                conn.execute(
+                    """
+                    INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at)
+                    VALUES (?, ?, ?, ?, '', '', ?)
+                    """,
+                    (task_id, expected_stage.value, TaskStatus.PENDING.value, initial_event_message, now),
+                )
+            conn.execute(
+                """
+                INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at)
+                VALUES (?, ?, ?, ?, '', '', ?)
+                """,
+                (task_id, target_stage.value, target_status.value, target_event_message, now),
+            )
+            updates = [
+                "current_stage = ?",
+                "status = ?",
+                "metadata_json = ?",
+                "updated_at = ?",
+            ]
+            values: list[Any] = [target_stage.value, target_status.value, merged_metadata, now]
+            if increment_retry:
+                updates.append("retry_count = retry_count + 1")
+            if next_run_at is not None:
+                updates.append("next_run_at = ?")
+                values.append(float(next_run_at))
+            if clear_errors:
+                updates.append("error_type = ''")
+                updates.append("error_summary = ''")
+            if clear_claim:
+                updates.append("claimed_by = ''")
+                updates.append("claimed_at = 0")
+            values.append(task_id)
+            conn.execute(f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?", values)
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return self._snapshot(row) if row else None
+
     def enqueue_task(
         self,
         task_id: int,
