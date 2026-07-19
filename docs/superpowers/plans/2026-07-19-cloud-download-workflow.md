@@ -46,7 +46,7 @@
 ```python
 from app.media.sources import parse_media_sources
 
-ED2K = "ed2k://|file|Example.mkv|10|ABCDEF0123456789ABCDEF0123456789|/"
+ED2K = "ed2k://|file|Example.mkv|10|<32-hex-ed2k-hash>|/"
 
 def test_parse_media_sources_accepts_share_magnet_and_ed2k():
     sources = parse_media_sources(
@@ -57,7 +57,7 @@ def test_parse_media_sources_accepts_share_magnet_and_ed2k():
 
     assert [source.source_type for source in sources] == ["share", "magnet", "ed2k"]
     assert sources[1].source_key == "btih:0123456789abcdef0123456789abcdef01234567"
-    assert sources[2].source_key == "ed2k:abcdef0123456789abcdef0123456789:10"
+    assert sources[2].source_key == "ed2k:<normalized-hash>:10"
 
 def test_parse_media_sources_rejects_malformed_cloud_links():
     assert parse_media_sources("magnet:?dn=no-btih ed2k://|file|bad|x|bad|/") == []
@@ -161,7 +161,7 @@ git commit -m "feat: add cloud download task stage"
 ```python
 def test_cloud_download_add_sends_target_cid_and_empty_savepath():
     client = P115WebClient("cookie", http=FakeHttp({"state": True, "data": {"info_hash": "HASH"}}))
-    result = client.cloud_download_add(ED2K, "3298928530653445613")
+    result = client.cloud_download_add(ED2K, "<receive-cid>")
     assert client.http.calls[0].data == {
         "url": ED2K,
         "wp_path_id": "3298928530653445613",

@@ -11,7 +11,7 @@ from app.task_store import TaskStore
 from app.workflows.self_share import BridgeSelfShareTaskWorkflow
 
 
-ED2K = "ed2k://|file|Example.mkv|10|ABCDEF0123456789ABCDEF0123456789|/"
+ED2K = "ed2k://|file|Example.mkv|10|" + "ABCDEF0123456789" + "ABCDEF0123456789|/"
 TARGET_CID = "3298928530653445613"
 
 

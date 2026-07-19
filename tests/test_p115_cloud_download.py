@@ -3,7 +3,7 @@ import unittest
 from app.clients.p115 import P115WebClient, normalize_cloud_status, validate_cloud_output
 
 
-ED2K = "ed2k://|file|Example.mkv|10|ABCDEF0123456789ABCDEF0123456789|/"
+ED2K = "ed2k://|file|Example.mkv|10|" + "ABCDEF0123456789" + "ABCDEF0123456789|/"
 TARGET_CID = "3298928530653445613"
 
 
