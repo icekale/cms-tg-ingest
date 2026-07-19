@@ -133,6 +133,33 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(updated.status, TaskStatus.PENDING)
             self.assertEqual(updated.next_run_at, 0)
 
+    def test_compare_and_set_transition_can_override_initial_event_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+
+            store.compare_and_set_transition(
+                task.id,
+                TaskStage.CLEANED,
+                {TaskStatus.SUCCEEDED},
+                require_unclaimed=True,
+                target_stage=TaskStage.EMBY_CONFIRMED,
+                target_status=TaskStatus.PENDING,
+                initial_event_message="restore requested",
+                initial_event_stage=TaskStage.EMBY_CONFIRMED,
+                target_event_message="restore queued",
+                next_run_at=0,
+            )
+
+            self.assertEqual(
+                [(event["stage"], event["status"], event["message"]) for event in store.list_events(task.id)[-2:]],
+                [
+                    (TaskStage.EMBY_CONFIRMED.value, TaskStatus.PENDING.value, "restore requested"),
+                    (TaskStage.EMBY_CONFIRMED.value, TaskStatus.PENDING.value, "restore queued"),
+                ],
+            )
+
     def test_record_failure_stores_error_and_retry_count(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

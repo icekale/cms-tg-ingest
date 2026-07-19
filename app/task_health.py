@@ -3,8 +3,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, replace
 
-from .models import TaskSnapshot, TaskStatus
-from .task_diagnostics import _duration, describe_task_wait, is_unscheduled_active_task
+from .models import TaskSnapshot
+from .task_diagnostics import _duration, describe_task_wait
 from .task_engine import stage_display_name
 from .task_store import TaskStore
 
@@ -58,26 +58,9 @@ def build_task_health(
         )
     current_time = time.time() if now is None else float(now)
     recent_tasks = store.list_recent_tasks(limit=limit)
-    open_tasks = store.list_open_tasks()
-    problems = [
-        task
-        for task in open_tasks
-        if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or is_unscheduled_active_task(task)
-    ]
-    lock_waits = [
-        task
-        for task in open_tasks
-        if task.status == TaskStatus.RUNNING and bool(task.metadata.get("_lock_waiting"))
-    ]
-    wait_tasks = [task for task in open_tasks if task.status in {TaskStatus.RUNNING, TaskStatus.PENDING}]
-    cooldown_until = 0.0
-    for task in open_tasks:
-        try:
-            value = float(task.metadata.get("p115_risk_cooldown_until") or 0)
-        except (TypeError, ValueError):
-            value = 0.0
-        if value > current_time:
-            cooldown_until = max(cooldown_until, value)
+    aggregate = store.aggregate_open_task_health(limit=5)
+    wait_tasks = aggregate.wait_tasks
+    cooldown_until = aggregate.p115_cooldown_until if aggregate.p115_cooldown_until > current_time else 0.0
     wait_details = tuple(
         _format_wait_detail(task, now=current_time)
         for task in wait_tasks[:5]
@@ -85,15 +68,15 @@ def build_task_health(
     return TaskHealthSummary(
         enabled=enabled,
         recent_count=len(recent_tasks),
-        pending_count=sum(1 for task in open_tasks if task.status == TaskStatus.PENDING),
-        running_count=sum(1 for task in open_tasks if task.status == TaskStatus.RUNNING),
-        needs_action_count=sum(1 for task in open_tasks if task.status == TaskStatus.NEEDS_ACTION),
-        problem_count=len(problems),
-        lock_wait_count=len(lock_waits),
-        latest_problem=problems[0] if problems else None,
-        latest_lock_wait=lock_waits[0] if lock_waits else None,
+        pending_count=aggregate.pending_count,
+        running_count=aggregate.running_count,
+        needs_action_count=aggregate.needs_action_count,
+        problem_count=aggregate.problem_count,
+        lock_wait_count=aggregate.lock_wait_count,
+        latest_problem=aggregate.latest_problem,
+        latest_lock_wait=aggregate.latest_lock_wait,
         wait_details=wait_details,
-        wait_overflow_count=max(0, len(wait_tasks) - len(wait_details)),
+        wait_overflow_count=max(0, aggregate.pending_count + aggregate.running_count - len(wait_details)),
         p115_cooldown_until=cooldown_until,
     )
 

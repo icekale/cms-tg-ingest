@@ -24,6 +24,21 @@ class TaskQueueSummary:
 
 
 @dataclass(frozen=True)
+class TaskHealthAggregate:
+    pending_count: int
+    running_count: int
+    needs_action_count: int
+    failed_count: int
+    unscheduled_count: int
+    problem_count: int
+    lock_wait_count: int
+    p115_cooldown_until: float
+    wait_tasks: tuple[TaskSnapshot, ...] = ()
+    latest_problem: TaskSnapshot | None = None
+    latest_lock_wait: TaskSnapshot | None = None
+
+
+@dataclass(frozen=True)
 class TaskLockClaimResult:
     task: TaskSnapshot | None = None
     holder: TaskSnapshot | None = None
@@ -188,6 +203,127 @@ class TaskStore:
                 open_statuses,
             ).fetchall()
         return [self._snapshot(row) for row in rows]
+
+    def aggregate_open_task_health(self, limit: int = 5) -> TaskHealthAggregate:
+        detail_limit = max(0, int(limit))
+        open_statuses = (
+            TaskStatus.PENDING.value,
+            TaskStatus.RUNNING.value,
+            TaskStatus.FAILED.value,
+            TaskStatus.NEEDS_ACTION.value,
+        )
+        lock_wait_value = """
+            CASE
+                WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$._lock_waiting')
+                ELSE NULL
+            END
+        """
+        lock_wait_condition = f"COALESCE({lock_wait_value}, '') NOT IN ('', 0)"
+        p115_cooldown_value = """
+            CASE
+                WHEN json_valid(metadata_json)
+                THEN CAST(COALESCE(json_extract(metadata_json, '$.p115_risk_cooldown_until'), 0) AS REAL)
+                ELSE 0
+            END
+        """
+        with self._lock, self._connection() as conn:
+            aggregate = conn.execute(
+                f"""
+                SELECT
+                    COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0) AS pending_count,
+                    COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0) AS running_count,
+                    COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0) AS needs_action_count,
+                    COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0) AS failed_count,
+                    COALESCE(SUM(CASE
+                        WHEN status IN (?, ?) AND next_run_at < 0 AND TRIM(claimed_by) = ''
+                        THEN 1 ELSE 0 END), 0) AS unscheduled_count,
+                    COALESCE(SUM(CASE
+                        WHEN status IN (?, ?)
+                          OR (status IN (?, ?) AND next_run_at < 0 AND TRIM(claimed_by) = '')
+                        THEN 1 ELSE 0 END), 0) AS problem_count,
+                    COALESCE(SUM(CASE
+                        WHEN status = ? AND {lock_wait_condition}
+                        THEN 1 ELSE 0 END), 0) AS lock_wait_count,
+                    COALESCE(MAX({p115_cooldown_value}), 0) AS p115_cooldown_until
+                FROM tasks INDEXED BY idx_tasks_next_run
+                WHERE status IN (?, ?, ?, ?)
+                """,
+                (
+                    TaskStatus.PENDING.value,
+                    TaskStatus.RUNNING.value,
+                    TaskStatus.NEEDS_ACTION.value,
+                    TaskStatus.FAILED.value,
+                    TaskStatus.PENDING.value,
+                    TaskStatus.RUNNING.value,
+                    TaskStatus.FAILED.value,
+                    TaskStatus.NEEDS_ACTION.value,
+                    TaskStatus.PENDING.value,
+                    TaskStatus.RUNNING.value,
+                    TaskStatus.RUNNING.value,
+                    *open_statuses,
+                ),
+            ).fetchone()
+            wait_rows = conn.execute(
+                """
+                SELECT * FROM tasks INDEXED BY idx_tasks_next_run
+                WHERE status IN (?, ?)
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                (TaskStatus.PENDING.value, TaskStatus.RUNNING.value, detail_limit),
+            ).fetchall()
+            latest_problem_row = conn.execute(
+                """
+                SELECT * FROM tasks INDEXED BY idx_tasks_next_run
+                WHERE status IN (?, ?)
+                   OR (status IN (?, ?) AND next_run_at < 0 AND TRIM(claimed_by) = '')
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (
+                    TaskStatus.FAILED.value,
+                    TaskStatus.NEEDS_ACTION.value,
+                    TaskStatus.PENDING.value,
+                    TaskStatus.RUNNING.value,
+                ),
+            ).fetchone()
+            latest_lock_wait_row = conn.execute(
+                f"""
+                SELECT * FROM tasks INDEXED BY idx_tasks_next_run
+                WHERE status = ? AND {lock_wait_condition}
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (TaskStatus.RUNNING.value,),
+            ).fetchone()
+
+        snapshots: dict[int, TaskSnapshot] = {}
+
+        def snapshot(row: sqlite3.Row | None) -> TaskSnapshot | None:
+            if row is None:
+                return None
+            task_id = int(row["id"])
+            existing = snapshots.get(task_id)
+            if existing is not None:
+                return existing
+            task = self._snapshot(row)
+            snapshots[task_id] = task
+            return task
+
+        wait_tasks = tuple(snapshot(row) for row in wait_rows)
+        return TaskHealthAggregate(
+            pending_count=int(aggregate["pending_count"]),
+            running_count=int(aggregate["running_count"]),
+            needs_action_count=int(aggregate["needs_action_count"]),
+            failed_count=int(aggregate["failed_count"]),
+            unscheduled_count=int(aggregate["unscheduled_count"]),
+            problem_count=int(aggregate["problem_count"]),
+            lock_wait_count=int(aggregate["lock_wait_count"]),
+            p115_cooldown_until=float(aggregate["p115_cooldown_until"] or 0),
+            wait_tasks=tuple(task for task in wait_tasks if task is not None),
+            latest_problem=snapshot(latest_problem_row),
+            latest_lock_wait=snapshot(latest_lock_wait_row),
+        )
 
     def queue_summary(self, limit: int = 100) -> TaskQueueSummary:
         tasks = self.list_recent_tasks(limit=limit)
@@ -491,6 +627,7 @@ class TaskStore:
         target_status: TaskStatus,
         target_event_message: str,
         initial_event_message: str | None = None,
+        initial_event_stage: TaskStage | None = None,
         increment_retry: bool = False,
         metadata_patch: dict[str, Any] | None = None,
         metadata_delete_keys: tuple[str, ...] | None = None,
@@ -525,7 +662,13 @@ class TaskStore:
                     INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at)
                     VALUES (?, ?, ?, ?, '', '', ?)
                     """,
-                    (task_id, expected_stage.value, TaskStatus.PENDING.value, initial_event_message, now),
+                    (
+                        task_id,
+                        (initial_event_stage or expected_stage).value,
+                        TaskStatus.PENDING.value,
+                        initial_event_message,
+                        now,
+                    ),
                 )
             conn.execute(
                 """

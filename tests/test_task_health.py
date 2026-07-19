@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.models import TaskStage, TaskStatus
 from app.task_health import build_task_health, format_task_health, format_taskstore_health
@@ -34,7 +35,8 @@ class TaskHealthTests(unittest.TestCase):
                 task = store.upsert_task(f"done-{index}", "", f"https://115cdn.com/s/done-{index}")
                 store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
 
-            summary = build_task_health(store, enabled=True, limit=100, now=100.0)
+            with patch.object(store, "list_open_tasks", side_effect=AssertionError("health must use aggregation")):
+                summary = build_task_health(store, enabled=True, limit=100, now=100.0)
 
             self.assertEqual(summary.recent_count, 100)
             self.assertEqual(summary.pending_count, 1)
@@ -46,6 +48,74 @@ class TaskHealthTests(unittest.TestCase):
             self.assertEqual(summary.latest_lock_wait.id, waiting.id)
             self.assertEqual(summary.p115_cooldown_until, 500.0)
             self.assertEqual(len(summary.wait_details), 2)
+
+    def test_open_health_aggregate_counts_all_open_rows_and_json_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            pending = store.upsert_task("pending", "", "https://115cdn.com/s/pending")
+            store.record_event(pending.id, TaskStage.ORGANIZING, TaskStatus.PENDING, "pending", next_run_at=10.0)
+            running = store.upsert_task("running", "", "https://115cdn.com/s/running")
+            store.record_event(
+                running.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "running",
+                metadata_patch={"_lock_waiting": True, "p115_risk_cooldown_until": 500.0},
+                next_run_at=20.0,
+            )
+            legacy = store.upsert_task("legacy", "", "https://115cdn.com/s/legacy")
+            store.record_event(legacy.id, TaskStage.MOVED, TaskStatus.PENDING, "legacy", next_run_at=-1.0)
+            failed = store.upsert_task("failed", "", "https://115cdn.com/s/failed")
+            store.record_event(failed.id, TaskStage.FAILED, TaskStatus.FAILED, "failed")
+            manual = store.upsert_task("manual", "", "https://115cdn.com/s/manual")
+            store.record_event(manual.id, TaskStage.NEEDS_ACTION, TaskStatus.NEEDS_ACTION, "manual")
+
+            aggregate = store.aggregate_open_task_health(limit=1)
+
+            self.assertEqual(aggregate.pending_count, 2)
+            self.assertEqual(aggregate.running_count, 1)
+            self.assertEqual(aggregate.needs_action_count, 1)
+            self.assertEqual(aggregate.failed_count, 1)
+            self.assertEqual(aggregate.unscheduled_count, 1)
+            self.assertEqual(aggregate.problem_count, 3)
+            self.assertEqual(aggregate.lock_wait_count, 1)
+            self.assertEqual(aggregate.p115_cooldown_until, 500.0)
+            self.assertEqual(aggregate.wait_tasks[0].id, legacy.id)
+            self.assertEqual(aggregate.latest_problem.id, manual.id)
+            self.assertEqual(aggregate.latest_lock_wait.id, running.id)
+
+    def test_health_materializes_only_bounded_detail_rows(self):
+        class TrackingTaskStore(TaskStore):
+            def __init__(self, db_path):
+                self.snapshot_ids = []
+                super().__init__(db_path)
+
+            def _snapshot(self, row):
+                self.snapshot_ids.append(int(row["id"]))
+                return super()._snapshot(row)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TrackingTaskStore(Path(tmp) / "tasks.db")
+            for index in range(20):
+                task = store.upsert_task(f"waiting-{index}", "", f"https://115cdn.com/s/waiting-{index}")
+                store.record_event(task.id, TaskStage.ORGANIZING, TaskStatus.PENDING, "waiting", next_run_at=200.0)
+            failed = store.upsert_task("failed", "", "https://115cdn.com/s/failed")
+            store.record_event(failed.id, TaskStage.FAILED, TaskStatus.FAILED, "failed")
+            lock_wait = store.upsert_task("lock-wait", "", "https://115cdn.com/s/lock-wait")
+            store.record_event(
+                lock_wait.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "lock wait",
+                metadata_patch={"_lock_waiting": True},
+                next_run_at=200.0,
+            )
+            store.snapshot_ids.clear()
+
+            build_task_health(store, enabled=True, limit=1, now=100.0)
+
+            self.assertLessEqual(len(store.snapshot_ids), 8)
+            self.assertLess(len(store.snapshot_ids), 22)
 
     def test_health_limits_all_open_wait_details_in_newest_order(self):
         with tempfile.TemporaryDirectory() as tmp:

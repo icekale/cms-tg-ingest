@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from threading import Barrier
 from unittest.mock import patch
@@ -1023,11 +1024,12 @@ class WebAdminTests(unittest.TestCase):
 
             def find_then_claim(task_id: int):
                 snapshot = original_find_task(task_id)
-                with sqlite3.connect(store.db_path) as conn:
-                    conn.execute(
-                        "UPDATE tasks SET claimed_by = ?, claimed_at = ? WHERE id = ?",
-                        ("worker-race", 123.0, task_id),
-                    )
+                with closing(sqlite3.connect(store.db_path)) as conn:
+                    with conn:
+                        conn.execute(
+                            "UPDATE tasks SET claimed_by = ?, claimed_at = ? WHERE id = ?",
+                            ("worker-race", 123.0, task_id),
+                        )
                 return snapshot
 
             app = WebApp(store, web_token="")
@@ -1127,7 +1129,13 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(updated.metadata["retry_stage"], TaskStage.EMBY_CONFIRMED.value)
             self.assertIsNotNone(claimed)
             self.assertEqual(claimed.current_stage, TaskStage.EMBY_CONFIRMED)
-            self.assertTrue(any(event["message"] == "Web 触发 STRM 恢复" for event in events))
+            self.assertEqual(
+                [(event["stage"], event["status"], event["message"]) for event in events[-2:]],
+                [
+                    (TaskStage.EMBY_CONFIRMED.value, TaskStatus.PENDING.value, "Web 触发 STRM 恢复"),
+                    (TaskStage.EMBY_CONFIRMED.value, TaskStatus.PENDING.value, "Web STRM 恢复已入队"),
+                ],
+            )
             self.assertEqual(body, b"")
 
     def test_quality_page_runs_local_taskstore_scan(self):
@@ -1256,6 +1264,51 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(store.list_events(task.id), [])
             self.assertEqual(body, b"")
 
+    def test_quality_page_repairs_unclaimed_unscheduled_legacy_active_tasks_once(self):
+        cases = (("pending", TaskStatus.PENDING, "direct_strm"), ("running", TaskStatus.RUNNING, "unexpected_strm"))
+        for name, status, issue_code in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                store = TaskStore(Path(tmp) / "tasks.db")
+                task = store.upsert_task(name, "", f"https://115cdn.com/s/{name}")
+                store.record_event(task.id, TaskStage.MOVED, status, "legacy active", next_run_at=-1.0)
+                issue = QualityIssue(issue_code, "legacy issue", f"/{name}.strm", task.id, name)
+                app = WebApp(store, web_token="")
+
+                with patch("app.web.scan_task_quality", return_value=[issue]):
+                    markup = render_quality_page(store)
+                    first_status, _headers, _body = app.handle_request("POST", "/quality/fix", {}, b"")
+                    second_status, _headers, _body = app.handle_request("POST", "/quality/fix", {}, b"")
+
+                updated = store.find_task(task.id)
+                events = store.list_events(task.id)
+                self.assertIn('action="/quality/fix"', markup)
+                self.assertEqual(first_status, 303)
+                self.assertEqual(second_status, 303)
+                self.assertEqual(updated.current_stage, TaskStage.RECEIVED)
+                self.assertEqual(updated.status, TaskStatus.PENDING)
+                self.assertEqual(updated.retry_count, 1)
+                self.assertEqual(sum(event["message"] == "Web 巡检自动修复：从头重跑" for event in events), 1)
+
+    def test_quality_page_scheduled_active_tasks_remain_noop(self):
+        for status in (TaskStatus.PENDING, TaskStatus.RUNNING):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp:
+                store = TaskStore(Path(tmp) / "tasks.db")
+                task = store.upsert_task(f"scheduled-{status.value}", "", "https://115cdn.com/s/scheduled")
+                store.record_event(task.id, TaskStage.MOVED, status, "scheduled active", next_run_at=100.0)
+                issue = QualityIssue("direct_strm", "scheduled issue", "/scheduled.strm", task.id, "scheduled")
+                before = store.find_task(task.id)
+                events_before = store.list_events(task.id)
+                app = WebApp(store, web_token="")
+
+                with patch("app.web.scan_task_quality", return_value=[issue]):
+                    markup = render_quality_page(store)
+                    status_code, _headers, _body = app.handle_request("POST", "/quality/fix", {}, b"")
+
+                self.assertNotIn('action="/quality/fix"', markup)
+                self.assertEqual(status_code, 303)
+                self.assertEqual(store.find_task(task.id), before)
+                self.assertEqual(store.list_events(task.id), events_before)
+
     def test_quality_page_counts_distinct_actionable_tasks_and_repairs_only_them(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
@@ -1349,8 +1402,8 @@ class WebAdminTests(unittest.TestCase):
             missing_task = store.find_task(missing.id)
             direct_task = store.find_task(direct.id)
             pending_task = store.find_task(pending.id)
-            missing_events = [event["message"] for event in store.list_events(missing.id)]
-            direct_events = [event["message"] for event in store.list_events(direct.id)]
+            missing_events = store.list_events(missing.id)
+            direct_events = store.list_events(direct.id)
 
             self.assertEqual(status, 303)
             self.assertEqual(headers["Location"], "/quality")
@@ -1364,8 +1417,20 @@ class WebAdminTests(unittest.TestCase):
             self.assertTrue(direct_task.metadata["force_reprocess"])
             self.assertEqual(pending_task.status, TaskStatus.PENDING)
             self.assertEqual(pending_task.current_stage, TaskStage.MOVED)
-            self.assertIn("Web 巡检自动修复：恢复 STRM", missing_events)
-            self.assertIn("Web 巡检自动修复：从头重跑", direct_events)
+            self.assertEqual(
+                [(event["stage"], event["status"], event["message"]) for event in missing_events[-2:]],
+                [
+                    (TaskStage.EMBY_CONFIRMED.value, TaskStatus.PENDING.value, "Web 巡检自动修复：恢复 STRM"),
+                    (TaskStage.EMBY_CONFIRMED.value, TaskStatus.PENDING.value, "Web 巡检恢复 STRM 已入队"),
+                ],
+            )
+            self.assertEqual(
+                [(event["stage"], event["status"], event["message"]) for event in direct_events],
+                [
+                    (TaskStage.CLEANED.value, TaskStatus.SUCCEEDED.value, "done"),
+                    (TaskStage.RECEIVED.value, TaskStatus.PENDING.value, "Web 巡检自动修复：从头重跑"),
+                ],
+            )
             self.assertEqual(body, b"")
 
     def test_health_page_shows_local_taskstore_summary(self):

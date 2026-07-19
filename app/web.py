@@ -733,7 +733,7 @@ def _group_quality_issues(issues: list[QualityIssue]) -> list[dict[str, Any]]:
 
 
 def _quality_repair_action(issue: QualityIssue, task: Any | None) -> str | None:
-    if task is None or task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+    if task is None:
         return None
     if issue.code in {"missing_dest", "missing_strm"} and _task_can_use_downstream_actions(task):
         return "restore"
@@ -749,6 +749,7 @@ def _apply_web_transition(
     target_stage: TaskStage,
     target_event_message: str,
     initial_event_message: str | None = None,
+    initial_event_stage: TaskStage | None = None,
     increment_retry: bool = False,
     metadata_patch: dict[str, Any] | None = None,
 ) -> bool:
@@ -761,6 +762,7 @@ def _apply_web_transition(
         target_status=TaskStatus.PENDING,
         target_event_message=target_event_message,
         initial_event_message=initial_event_message,
+        initial_event_stage=initial_event_stage,
         increment_retry=increment_retry,
         metadata_patch=metadata_patch,
         metadata_delete_keys=("_defer_stage", "_defer_message", "_defer_count"),
@@ -868,6 +870,7 @@ def fix_quality_issues(store: TaskStore) -> int:
                 target_stage=TaskStage.EMBY_CONFIRMED,
                 target_event_message="Web 巡检恢复 STRM 已入队",
                 initial_event_message="Web 巡检自动修复：恢复 STRM",
+                initial_event_stage=TaskStage.EMBY_CONFIRMED,
                 metadata_patch={
                     "retry_from_stage": task.current_stage.value,
                     "retry_stage": TaskStage.EMBY_CONFIRMED.value,
@@ -1035,6 +1038,7 @@ class WebApp:
                     target_stage=TaskStage.EMBY_CONFIRMED,
                     target_event_message="Web STRM 恢复已入队",
                     initial_event_message="Web 触发 STRM 恢复",
+                    initial_event_stage=TaskStage.EMBY_CONFIRMED,
                     metadata_patch={
                         "retry_from_stage": task.current_stage.value,
                         "retry_stage": TaskStage.EMBY_CONFIRMED.value,
