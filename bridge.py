@@ -305,7 +305,13 @@ def create_task_store(config: Config) -> TaskStore:
     return TaskStore(config.task_db_path)
 
 
-def maybe_start_web_server(config: Config, task_store: TaskStore, submission_store: Any | None = None, starter=start_web_server):
+def maybe_start_web_server(
+    config: Config,
+    task_store: TaskStore,
+    submission_store: Any | None = None,
+    quality_automation: QualityAutomation | None = None,
+    starter=start_web_server,
+):
     if not config.web_enabled:
         return None
     kwargs = {
@@ -314,12 +320,19 @@ def maybe_start_web_server(config: Config, task_store: TaskStore, submission_sto
     }
     if submission_store is not None:
         kwargs["submission_store"] = submission_store
+    if quality_automation is not None:
+        kwargs["quality_automation"] = quality_automation
     server = starter(task_store, config.web_host, config.web_port, **kwargs)
     LOG.info("v0.2 web admin started host=%s port=%s", config.web_host, config.web_port)
     return server
 
 
-def call_maybe_start_web_server(config: Config, task_store: TaskStore, submission_store: Any | None = None):
+def call_maybe_start_web_server(
+    config: Config,
+    task_store: TaskStore,
+    submission_store: Any | None = None,
+    quality_automation: QualityAutomation | None = None,
+):
     try:
         parameters = inspect.signature(maybe_start_web_server).parameters
     except (TypeError, ValueError):
@@ -327,8 +340,16 @@ def call_maybe_start_web_server(config: Config, task_store: TaskStore, submissio
     supports_submission_store = "submission_store" in parameters or any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     )
-    if supports_submission_store:
-        return maybe_start_web_server(config, task_store, submission_store=submission_store)
+    supports_quality_automation = "quality_automation" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    if supports_submission_store or supports_quality_automation:
+        return maybe_start_web_server(
+            config,
+            task_store,
+            submission_store=submission_store if supports_submission_store else None,
+            quality_automation=quality_automation if supports_quality_automation else None,
+        )
     return maybe_start_web_server(config, task_store)
 
 
@@ -2800,7 +2821,6 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
     )
     store = SubmissionStore(config.db_path)
     task_store = create_task_store(config)
-    web_server = call_maybe_start_web_server(config, task_store, submission_store=store)
     self_share_config = SelfShareConfig.from_config(config, cms)
     p115 = (
         P115WebClient(
@@ -2822,6 +2842,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
             stable_seconds=move_config.stable_seconds,
         )
     task_runner = None
+    quality_automation = None
     quality_thread = None
     if config.task_engine_enabled and self_share_config.enabled and p115:
         task_workflow = BridgeSelfShareTaskWorkflow(
@@ -2874,6 +2895,12 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
                 interval_seconds=config.self_share_invalid_check_interval_seconds,
                 limit=config.self_share_invalid_check_limit,
             )
+    web_server = call_maybe_start_web_server(
+        config,
+        task_store,
+        submission_store=store,
+        quality_automation=quality_automation,
+    )
     offset = None
     LOG.info("cms-tg-ingest started db_path=%s", config.db_path)
     try:

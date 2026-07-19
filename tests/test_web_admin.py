@@ -11,6 +11,8 @@ from unittest.mock import patch
 import bridge
 from app.models import TaskStage, TaskStatus
 from app.quality import QualityIssue
+from app.quality_automation import QualityAutomation
+from app.config import Config
 from app.task_health import format_taskstore_health
 from app.task_store import TaskStore
 from app.web import (
@@ -1821,6 +1823,68 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertIn("任务引擎已停用", page_html)
             self.assertNotIn("任务引擎正常", page_html)
+
+    def test_quality_page_renders_automation_status_and_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            config = Config(
+                tg_bot_token="token",
+                tg_allowed_chat_id="chat",
+                cms_base_url="http://cms",
+                cms_username="user",
+                cms_password="pass",
+                task_db_path=str(Path(tmp) / "tasks.db"),
+                quality_auto_enabled=True,
+            )
+            automation = QualityAutomation(store, config, allowed_roots=[Path(tmp) / "library"])
+            app = WebApp(store, quality_automation=automation)
+
+            status, _headers, body = app.handle_request("GET", "/quality", {}, b"")
+            page_html = body.decode("utf-8")
+
+            self.assertEqual(status, 200)
+            self.assertIn("自动巡检", page_html)
+            self.assertIn("02:50", page_html)
+            self.assertIn("Asia/Shanghai", page_html)
+            self.assertIn('action="/quality/settings"', page_html)
+            self.assertIn('action="/quality/run"', page_html)
+            self.assertIn('action="/quality/settings/reset"', page_html)
+
+    def test_quality_settings_validate_persist_and_reset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            config = Config(
+                tg_bot_token="token",
+                tg_allowed_chat_id="chat",
+                cms_base_url="http://cms",
+                cms_username="user",
+                cms_password="pass",
+                task_db_path=str(Path(tmp) / "tasks.db"),
+            )
+            automation = QualityAutomation(store, config, allowed_roots=[Path(tmp) / "library"])
+            app = WebApp(store, quality_automation=automation)
+
+            status, _headers, _body = app.handle_request(
+                "POST",
+                "/quality/settings",
+                {},
+                b"enabled=true&time=03%3A15&timezone=UTC&max_tasks=12&check_limit=4",
+            )
+            self.assertEqual(status, 303)
+            self.assertTrue(config.quality_auto_enabled)
+            self.assertEqual(config.quality_auto_time, "03:15")
+            self.assertEqual(config.quality_auto_timezone, "UTC")
+            self.assertEqual(config.quality_auto_max_tasks, 12)
+            self.assertEqual(store.get_runtime_state("quality_auto_overrides")["value"].find("03:15") >= 0, True)
+
+            status, _headers, _body = app.handle_request("POST", "/quality/settings", {}, b"enabled=true&time=bad")
+            self.assertEqual(status, 400)
+            self.assertEqual(config.quality_auto_time, "03:15")
+
+            status, _headers, _body = app.handle_request("POST", "/quality/settings/reset", {}, b"")
+            self.assertEqual(status, 303)
+            self.assertEqual(config.quality_auto_time, "02:50")
+            self.assertIsNone(store.get_runtime_state("quality_auto_overrides"))
 
 
 if __name__ == "__main__":

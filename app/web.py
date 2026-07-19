@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from .models import RetryAction, TaskStage, TaskStatus
 from .quality import QualityIssue, format_task_quality_report, scan_task_quality
+from .quality_automation import QualityAutomation
 from .task_bridge import sync_task_from_submission
 from .task_diagnostics import (
     _duration,
@@ -775,7 +776,7 @@ def _apply_web_transition(
     return updated is not None
 
 
-def render_quality_page(store: TaskStore) -> str:
+def render_quality_page(store: TaskStore, quality_automation: QualityAutomation | None = None) -> str:
     issues = scan_task_quality(store)
     report = format_task_quality_report(issues)
     grouped = _group_quality_issues(issues)
@@ -836,6 +837,34 @@ def render_quality_page(store: TaskStore) -> str:
         fix_action = f"""<form method="post" action="/quality/fix" onsubmit="return confirm('将按巡检结果入队修复：缺失目录恢复 STRM，直链 STRM 从头重跑。确定继续？')">
         <button class="button-primary" type="submit">修复 {len(actionable_task_ids)} 个可处理任务</button>
       </form>"""
+    automation_markup = ""
+    if quality_automation is not None:
+        snapshot = quality_automation.status_snapshot()
+        summary = snapshot.get("last_summary") if isinstance(snapshot.get("last_summary"), dict) else {}
+        status_label = str(snapshot.get("status") or "idle")
+        current_run = str(snapshot.get("current_run_id") or "")
+        run_button = "" if status_label == "running" else '<form method="post" action="/quality/run"><button class="button-primary" type="submit">立即巡检</button></form>'
+        automation_markup = f"""
+<section class="panel" data-section="quality-automation">
+  <div class="panel-header"><div><h2>自动巡检</h2><p class="subtle">每天按本地时间运行一次；正常修复不发送 Telegram。</p></div><span class="badge status-{html.escape(status_label)}">{html.escape(status_label)}</span></div>
+  <div class="summary-grid">
+    <div class="summary-item"><div class="summary-label">自动运行</div><div class="summary-value">{'已启用' if snapshot.get('enabled') else '已停用'}</div></div>
+    <div class="summary-item"><div class="summary-label">执行时间</div><div class="summary-value">{html.escape(str(snapshot.get('time') or '-'))} · {html.escape(str(snapshot.get('timezone') or '-'))}</div></div>
+    <div class="summary-item"><div class="summary-label">下次运行</div><div class="summary-value">{html.escape(str(snapshot.get('next_run_at') or '-'))}</div></div>
+    <div class="summary-item"><div class="summary-label">最近结果</div><div class="summary-value">扫描 {html.escape(str(summary.get('scanned_count', 0)))}，问题 {html.escape(str(summary.get('issue_count', 0)))}，失败 {html.escape(str(summary.get('failed_count', 0)))}</div></div>
+  </div>
+  <form method="post" action="/quality/settings" class="actions">
+    <label>启用 <input type="checkbox" name="enabled" value="true" {'checked' if snapshot.get('enabled') else ''}></label>
+    <label>时间 <input name="time" value="{html.escape(str(snapshot.get('time') or '02:50'))}" size="5"></label>
+    <label>时区 <input name="timezone" value="{html.escape(str(snapshot.get('timezone') or 'Asia/Shanghai'))}" size="18"></label>
+    <label>任务上限 <input name="max_tasks" value="{html.escape(str(snapshot.get('max_tasks') or 50))}" type="number" min="1" max="1000"></label>
+    <label>115检查上限 <input name="check_limit" value="{html.escape(str(snapshot.get('check_limit') or 3))}" type="number" min="1" max="100"></label>
+    <button class="button-primary" type="submit">保存设置</button>
+  </form>
+  <div class="actions">{run_button}<form method="post" action="/quality/settings/reset"><button class="button-secondary" type="submit">恢复环境默认</button></form></div>
+  {f'<p class="subtle">当前运行：{html.escape(current_run)}</p>' if current_run else ''}
+</section>
+"""
     body = f"""
 <div class="topbar">
   <div>
@@ -846,6 +875,7 @@ def render_quality_page(store: TaskStore) -> str:
   <div class="actions"><a class="button" href="/quality">重新巡检</a><a class="button" href="/">返回运行概览</a></div>
 </div>
 <div class="quality-summary" role="group" aria-label="巡检摘要">{summary_markup}</div>
+{automation_markup}
 <section class="panel">
   <div class="panel-header">
     <div><h2>巡检结果</h2><p class="subtle">发现缺失目录或直链 STRM 时，可以入队执行安全修复。</p></div>
@@ -987,11 +1017,13 @@ class WebApp:
         web_token: str = "",
         submission_store: Any | None = None,
         task_engine_enabled: bool = True,
+        quality_automation: QualityAutomation | None = None,
     ):
         self.store = store
         self.web_token = web_token
         self.submission_store = submission_store
         self.task_engine_enabled = task_engine_enabled
+        self.quality_automation = quality_automation
 
     def _authorization_source(self, path: str, headers: dict[str, str]) -> str:
         if not self.web_token:
@@ -1023,7 +1055,6 @@ class WebApp:
         headers: dict[str, str],
         body: bytes,
     ) -> tuple[int, dict[str, str], bytes]:
-        del body
         authorization_source = self._authorization_source(path, headers)
         if not authorization_source:
             return 403, {"Content-Type": "text/plain; charset=utf-8"}, b"Forbidden"
@@ -1035,9 +1066,36 @@ class WebApp:
             page = render_task_list(self.store, task_engine_enabled=self.task_engine_enabled)
             return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, page.encode("utf-8")
         if method == "GET" and parsed.path == "/quality":
-            return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, render_quality_page(self.store).encode("utf-8")
+            return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, render_quality_page(self.store, self.quality_automation).encode("utf-8")
         if method == "POST" and parsed.path == "/quality/fix":
             fix_quality_issues(self.store)
+            return 303, {"Location": "/quality", **auth_headers}, b""
+        if method == "POST" and parsed.path == "/quality/run":
+            if self.quality_automation is None:
+                return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"quality automation unavailable"
+            if self.quality_automation.status_snapshot().get("status") == "running":
+                return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"quality run already active"
+            Thread(target=self.quality_automation.run_now, name="quality-manual-run", daemon=True).start()
+            return 303, {"Location": "/quality", **auth_headers}, b""
+        if method == "POST" and parsed.path == "/quality/settings/reset":
+            if self.quality_automation is None:
+                return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"quality automation unavailable"
+            self.quality_automation.reset_settings()
+            return 303, {"Location": "/quality", **auth_headers}, b""
+        if method == "POST" and parsed.path == "/quality/settings":
+            if self.quality_automation is None:
+                return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"quality automation unavailable"
+            try:
+                values = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+                self.quality_automation.update_settings(
+                    enabled=values.get("enabled", [""])[0].lower() in {"1", "true", "on", "yes"},
+                    run_time=values.get("time", [""])[0],
+                    timezone_name=values.get("timezone", [""])[0],
+                    max_tasks=int(values.get("max_tasks", [""])[0]),
+                    check_limit=int(values.get("check_limit", [""])[0]),
+                )
+            except (UnicodeDecodeError, ValueError, TypeError) as exc:
+                return 400, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, str(exc).encode("utf-8")
             return 303, {"Location": "/quality", **auth_headers}, b""
         if method == "GET" and parsed.path == "/health":
             page = render_health_page(self.store, task_engine_enabled=self.task_engine_enabled)
@@ -1114,12 +1172,14 @@ def start_web_server(
     web_token: str = "",
     submission_store: Any | None = None,
     task_engine_enabled: bool = True,
+    quality_automation: QualityAutomation | None = None,
 ) -> ThreadingHTTPServer:
     app = WebApp(
         store,
         web_token=web_token,
         submission_store=submission_store,
         task_engine_enabled=task_engine_enabled,
+        quality_automation=quality_automation,
     )
 
     class Handler(BaseHTTPRequestHandler):

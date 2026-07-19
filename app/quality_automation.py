@@ -51,6 +51,7 @@ class QualityAutomation:
     _STATUS_KEY = "quality_auto_status"
     _SUMMARY_KEY = "quality_auto_last_summary"
     _CURRENT_RUN_KEY = "quality_auto_current_run_id"
+    _OVERRIDES_KEY = "quality_auto_overrides"
 
     def __init__(
         self,
@@ -63,6 +64,14 @@ class QualityAutomation:
     ) -> None:
         self.store = store
         self.config = config
+        self._env_defaults = {
+            "quality_auto_enabled": bool(config.quality_auto_enabled),
+            "quality_auto_time": str(config.quality_auto_time),
+            "quality_auto_timezone": str(config.quality_auto_timezone),
+            "quality_auto_max_tasks": int(config.quality_auto_max_tasks),
+            "quality_auto_115_check_limit": int(config.quality_auto_115_check_limit),
+        }
+        self._load_runtime_overrides()
         self._timezone = ZoneInfo(config.quality_auto_timezone)
         self._run_time = self._parse_run_time(config.quality_auto_time)
 
@@ -73,6 +82,84 @@ class QualityAutomation:
             roots = list(allowed_roots)
         self.allowed_roots = tuple(safe_resolve(Path(root)) for root in roots)
         self.repair_adapter = repair_adapter
+
+    def _load_runtime_overrides(self) -> None:
+        state = self.store.get_runtime_state(self._OVERRIDES_KEY)
+        if not state:
+            return
+        try:
+            values = json.loads(state["value"])
+        except (TypeError, ValueError, KeyError):
+            return
+        if not isinstance(values, dict):
+            return
+        for name in self._env_defaults:
+            if name in values:
+                setattr(self.config, name, values[name])
+        self.config.quality_auto_time = self._parse_run_time(str(self.config.quality_auto_time)).strftime("%H:%M")
+        self.config.quality_auto_timezone = str(ZoneInfo(str(self.config.quality_auto_timezone)))
+
+    def update_settings(
+        self,
+        *,
+        enabled: bool,
+        run_time: str,
+        timezone_name: str,
+        max_tasks: int,
+        check_limit: int,
+    ) -> dict[str, object]:
+        parsed_time = self._parse_run_time(run_time)
+        timezone = ZoneInfo(str(timezone_name))
+        max_tasks = int(max_tasks)
+        check_limit = int(check_limit)
+        if max_tasks <= 0 or check_limit <= 0:
+            raise ValueError("quality automation limits must be greater than zero")
+        values: dict[str, object] = {
+            "quality_auto_enabled": bool(enabled),
+            "quality_auto_time": parsed_time.strftime("%H:%M"),
+            "quality_auto_timezone": str(timezone_name),
+            "quality_auto_max_tasks": max_tasks,
+            "quality_auto_115_check_limit": check_limit,
+        }
+        for name, value in values.items():
+            setattr(self.config, name, value)
+        self._timezone = timezone
+        self._run_time = parsed_time
+        self.store.set_runtime_state(self._OVERRIDES_KEY, json.dumps(values, ensure_ascii=False, sort_keys=True))
+        return values
+
+    def reset_settings(self) -> dict[str, object]:
+        self.store.delete_runtime_state(self._OVERRIDES_KEY)
+        for name, value in self._env_defaults.items():
+            setattr(self.config, name, value)
+        self._timezone = ZoneInfo(str(self.config.quality_auto_timezone))
+        self._run_time = self._parse_run_time(str(self.config.quality_auto_time))
+        return dict(self._env_defaults)
+
+    def status_snapshot(self, now: datetime | None = None) -> dict[str, object]:
+        summary: dict[str, object] = {}
+        state = self.store.get_runtime_state(self._SUMMARY_KEY)
+        if state:
+            try:
+                parsed = json.loads(state["value"])
+                if isinstance(parsed, dict):
+                    summary = parsed
+            except (TypeError, ValueError, KeyError):
+                summary = {}
+        current = self.store.get_runtime_state(self._CURRENT_RUN_KEY)
+        status = self.store.get_runtime_state(self._STATUS_KEY)
+        local_now = self._local_now(now)
+        return {
+            "enabled": bool(self.config.quality_auto_enabled),
+            "time": str(self.config.quality_auto_time),
+            "timezone": str(self.config.quality_auto_timezone),
+            "max_tasks": int(self.config.quality_auto_max_tasks),
+            "check_limit": int(self.config.quality_auto_115_check_limit),
+            "status": str(status["value"] if status else "idle"),
+            "current_run_id": str(current["value"] if current else ""),
+            "last_summary": summary,
+            "next_run_at": self.next_run_at(local_now).isoformat(),
+        }
 
     @staticmethod
     def _parse_run_time(value: str) -> datetime_time:
@@ -182,15 +269,16 @@ class QualityAutomation:
                     for plan in plans
                 ]
             finished_local = local_now if injected_now else self._local_now(datetime.now(self._timezone))
+            failed_count = sum(plan.execution_status == "failed" for plan in plans)
             summary = QualityRunSummary(
                 run_id=run_id,
-                status="succeeded",
+                status="failed" if failed_count else "succeeded",
                 started_at=started_at,
                 finished_at=finished_local.isoformat(),
                 issue_count=len(issues),
                 planned_count=sum(plan.action != "skip" for plan in plans),
-                skipped_count=sum(plan.action == "skip" for plan in plans),
-                failed_count=sum(plan.execution_status == "failed" for plan in plans),
+                skipped_count=sum(plan.action == "skip" or plan.execution_status == "skipped" for plan in plans),
+                failed_count=failed_count,
                 scanned_count=len(tasks),
                 plans=tuple(plans),
             )
@@ -306,10 +394,16 @@ class QualityAutomation:
         """Atomically reserve a task before handing repair work to an adapter."""
         if plan.action == "skip":
             return plan
+        if plan.action not in {"restore", "reprocess", "invalid_share"}:
+            return replace(plan, execution_status="skipped", reason="unsupported_action")
         task = self.store.find_task(plan.task_id)
         if task is None:
             return replace(plan, execution_status="skipped", reason="task_missing")
-        if task.metadata.get("quality_repair_queued"):
+        if (
+            task.metadata.get("quality_repair_queued")
+            and task.current_stage in {TaskStage.RECEIVED, TaskStage.EMBY_CONFIRMED}
+            and task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}
+        ):
             return replace(plan, execution_status="skipped", reason="task_busy")
         if task.status == TaskStatus.RUNNING or task.claimed_by.strip():
             return replace(plan, execution_status="skipped", reason="task_busy")
@@ -407,10 +501,18 @@ class QualityAutomation:
 
     def cleanup_if_safe(self, task: TaskSnapshot, run_id: str) -> QualityCleanupResult:
         """Run cleanup only after the local, share, Emby, and event gates pass."""
+        task = self.store.find_task(task.id) or task
         metadata = task.metadata
+        if metadata.get("quality_cleanup_completed"):
+            return QualityCleanupResult("already_cleaned")
         if not metadata.get("own_share_available"):
             return QualityCleanupResult("blocked_cleanup", "own_share_not_available")
-        if str(metadata.get("emby_status") or "").lower() != "confirmed" or metadata.get("emby_match_count") != 1:
+        if (
+            task.status != TaskStatus.SUCCEEDED
+            or task.current_stage not in {TaskStage.EMBY_CONFIRMED, TaskStage.CLEANED}
+            or str(metadata.get("emby_status") or "").lower() != "confirmed"
+            or metadata.get("emby_match_count") != 1
+        ):
             return QualityCleanupResult("blocked_cleanup", "emby_not_confirmed_unique")
         has_success_event = False
         if hasattr(self.store, "has_quality_success_event"):
@@ -448,7 +550,11 @@ class QualityAutomation:
             return QualityCleanupResult("blocked_cleanup", "cleanup_adapter_missing")
         reserved = task
         if hasattr(self.store, "claim_quality_cleanup"):
-            reserved = self.store.claim_quality_cleanup(task.id, str(run_id))
+            reserved = self.store.claim_quality_cleanup(
+                task.id,
+                str(run_id),
+                expected_updated_at=task.updated_at,
+            )
             if reserved is None:
                 return QualityCleanupResult("blocked_cleanup", "cleanup_busy")
         try:

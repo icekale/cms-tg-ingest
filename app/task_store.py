@@ -170,6 +170,10 @@ class TaskStore:
             return None
         return {"value": str(row["value"]), "updated_at": float(row["updated_at"])}
 
+    def delete_runtime_state(self, key: str) -> None:
+        with self._lock, self._connection() as conn:
+            conn.execute("DELETE FROM runtime_state WHERE key = ?", (str(key),))
+
     def claim_quality_run(self, run_date: str, now: float) -> bool:
         state_key = f"quality_auto_run:{run_date}"
         timestamp = float(now)
@@ -970,22 +974,36 @@ class TaskStore:
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return self._snapshot(row) if row else None
 
-    def claim_quality_cleanup(self, task_id: int, run_id: str, now: float | None = None) -> TaskSnapshot | None:
+    def claim_quality_cleanup(
+        self,
+        task_id: int,
+        run_id: str,
+        now: float | None = None,
+        *,
+        expected_updated_at: float | None = None,
+        stale_after_seconds: int = 21600,
+    ) -> TaskSnapshot | None:
         """Atomically reserve one cleanup attempt for a quality run."""
         current_time = time.time() if now is None else float(now)
+        stale_before = current_time - max(1, int(stale_after_seconds))
         with self._lock, self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
-            if row is None or str(row["claimed_by"] or "").strip():
+            if row is None:
+                return None
+            claimed_by = str(row["claimed_by"] or "").strip()
+            if claimed_by and float(row["claimed_at"] or 0) > stale_before:
+                return None
+            if expected_updated_at is not None and float(row["updated_at"] or 0) != float(expected_updated_at):
                 return None
             metadata = self._merge_metadata(row["metadata_json"], {"quality_cleanup_run_id": str(run_id)})
             conn.execute(
                 """
                 UPDATE tasks
                 SET metadata_json = ?, claimed_by = ?, claimed_at = ?, updated_at = ?
-                WHERE id = ? AND claimed_by = ''
+                WHERE id = ? AND (claimed_by = '' OR claimed_at <= ?)
                 """,
-                (metadata, f"quality-cleanup:{run_id}", current_time, current_time, int(task_id)),
+                (metadata, f"quality-cleanup:{run_id}", current_time, current_time, int(task_id), stale_before),
             )
             if conn.total_changes < 1:
                 return None
@@ -996,20 +1014,19 @@ class TaskStore:
         with self._lock, self._connection() as conn:
             row = conn.execute(
                 """
-                SELECT 1 FROM task_events
+                SELECT stage, status FROM task_events
                 WHERE task_id = ?
-                  AND status = ?
-                  AND stage IN (?, ?)
+                ORDER BY id DESC
                 LIMIT 1
                 """,
-                (
-                    int(task_id),
-                    TaskStatus.SUCCEEDED.value,
-                    TaskStage.EMBY_CONFIRMED.value,
-                    TaskStage.CLEANED.value,
-                ),
+                (int(task_id),),
             ).fetchone()
-        return row is not None
+            if row is None:
+                return False
+            return (
+                row["status"] == TaskStatus.SUCCEEDED.value
+                and row["stage"] in {TaskStage.EMBY_CONFIRMED.value, TaskStage.CLEANED.value}
+            )
 
     def enqueue_task(
         self,
