@@ -88,6 +88,47 @@ def p115_residue_parent_id(item: dict[str, Any]) -> str:
     return str(item.get("cid") or item.get("pid") or item.get("parent_id") or "").strip()
 
 
+def normalize_cloud_status(item: dict[str, Any]) -> str:
+    raw = item.get("status", item.get("stat", item.get("state", "")))
+    value = str(raw).strip().lower()
+    if value in {"11", "completed", "complete", "success", "succeeded", "done"}:
+        return "completed"
+    if value in {"12", "running", "downloading", "queued", "pending", "wait"}:
+        return "running"
+    if value in {"9", "failed", "failure", "error", "cancelled", "canceled"}:
+        return "failed"
+    return "unknown"
+
+
+def _cloud_task_item(resp: dict[str, Any]) -> dict[str, Any]:
+    data = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+    for key in ("task", "item", "record"):
+        if isinstance(data.get(key), dict):
+            return dict(data[key])
+    return dict(data)
+
+
+def _cloud_identity(item: dict[str, Any]) -> dict[str, str]:
+    info_hash = str(item.get("info_hash") or item.get("hash") or item.get("infohash") or "").strip().lower()
+    task_id = str(item.get("task_id") or item.get("id") or item.get("taskid") or "").strip()
+    return {"info_hash": info_hash, "task_id": task_id}
+
+
+def validate_cloud_output(output: dict[str, Any], target_cid: str) -> dict[str, str]:
+    file_id = p115_file_id(output)
+    parent_id = p115_parent_id(output)
+    target = str(target_cid or "").strip()
+    if not file_id:
+        raise RuntimeError("115 cloud download completed without an output file id")
+    if not target or parent_id != target:
+        raise RuntimeError("115 cloud download output is outside the configured receive CID")
+    return {
+        "file_id": file_id,
+        "parent_id": parent_id,
+        "file_name": p115_file_name(output),
+    }
+
+
 def category_for_115_parent_id(parent_id: str, mapping: dict[str, str] | None = None) -> str:
     category_map = mapping if mapping is not None else CMS_PARENT_CID_CATEGORY_MAP
     return category_map.get(str(parent_id or "").strip(), "")
@@ -381,6 +422,56 @@ class P115WebClient:
         receive_data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
         title = str(receive_data.get("receive_title") or info.get("share_title") or (items[0].get("n") if items else "") or "").strip()
         return {"title": title, "file_ids": file_ids, "response": resp}
+
+    def cloud_download_add(self, url: str, target_cid: str) -> dict[str, str]:
+        resp = self._request(
+            "https://clouddownload.115.com/lixianssp/?ac=add_task_url",
+            method="POST",
+            data={"url": str(url), "wp_path_id": str(target_cid), "savepath": ""},
+        )
+        self._ensure_state(resp, "115 cloud download submit failed")
+        item = _cloud_task_item(resp)
+        identity = _cloud_identity(item)
+        if not identity["info_hash"] and not identity["task_id"]:
+            raise RuntimeError("115 cloud download did not return task identity")
+        return {
+            **identity,
+            "file_id": p115_file_id(item),
+            "parent_id": p115_parent_id(item),
+            "file_name": p115_file_name(item),
+            "status": normalize_cloud_status(item),
+        }
+
+    def cloud_download_status(self, identity: dict[str, Any]) -> dict[str, Any]:
+        info_hash = str(identity.get("info_hash") or "").strip()
+        if info_hash:
+            resp = self._request(
+                "https://clouddownload.115.com/?ac=get_user_task",
+                params={"info_hash": info_hash},
+            )
+        else:
+            resp = self._request(
+                "https://clouddownload.115.com/?ac=task_lists",
+                params={"page": 1, "page_size": 30},
+            )
+        self._ensure_state(resp, "115 cloud download status failed")
+        item = _cloud_task_item(resp)
+        normalized_identity = _cloud_identity(item)
+        return {
+            **normalized_identity,
+            "status": normalize_cloud_status(item),
+            "raw_status": str(item.get("status", item.get("stat", item.get("state", "")))),
+            "file_id": p115_file_id(item),
+            "parent_id": p115_parent_id(item),
+            "file_name": p115_file_name(item),
+            "raw": item,
+        }
+
+    def cloud_download_output(self, identity: dict[str, Any], target_cid: str) -> dict[str, str]:
+        status = self.cloud_download_status(identity)
+        if status["status"] != "completed":
+            raise RuntimeError(f"115 cloud download is not completed: {status['status']}")
+        return validate_cloud_output(status, target_cid)
 
     def list_files(self, parent_id: str, limit: int = 100) -> list[dict[str, Any]]:
         resp = self._request(
