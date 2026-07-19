@@ -170,6 +170,20 @@ class TaskStore:
             return None
         return {"value": str(row["value"]), "updated_at": float(row["updated_at"])}
 
+    def claim_quality_run(self, run_date: str, now: float) -> bool:
+        state_key = f"quality_auto_run:{run_date}"
+        timestamp = float(now)
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute("SELECT 1 FROM runtime_state WHERE key = ?", (state_key,)).fetchone()
+            if existing is not None:
+                return False
+            conn.execute(
+                "INSERT INTO runtime_state (key, value, updated_at) VALUES (?, ?, ?)",
+                (state_key, str(run_date), timestamp),
+            )
+            return True
+
     @staticmethod
     def _merge_metadata(
         existing_json: str | None,

@@ -4,8 +4,10 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from datetime import time as datetime_time
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 LOG = logging.getLogger("cms-tg-ingest")
 
@@ -21,6 +23,32 @@ def env_float(name: str, default: float) -> float:
         return float(os.environ.get(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def parse_quality_auto_time(value: str) -> str:
+    if re.fullmatch(r"\d{2}:\d{2}", value or "") is None:
+        raise ValueError("QUALITY_AUTO_TIME must use HH:MM format")
+    try:
+        hour, minute = (int(part) for part in value.split(":", 1))
+        datetime_time(hour, minute)
+    except ValueError as exc:
+        raise ValueError("QUALITY_AUTO_TIME must be a valid time") from exc
+    return value
+
+
+def parse_quality_auto_timezone(value: str) -> str:
+    try:
+        ZoneInfo(value)
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        raise ValueError("QUALITY_AUTO_TIMEZONE must be a valid IANA timezone") from exc
+    return value
+
+
+def positive_int_env(name: str, default: int) -> int:
+    value = int(os.environ.get(name, str(default)))
+    if value <= 0:
+        raise ValueError(f"{name} must be greater than zero")
+    return value
 
 
 @dataclass
@@ -80,6 +108,11 @@ class Config:
     web_token: str = ""
     task_worker_interval_seconds: int = 5
     task_max_retries: int = 3
+    quality_auto_enabled: bool = False
+    quality_auto_time: str = "02:50"
+    quality_auto_timezone: str = "Asia/Shanghai"
+    quality_auto_max_tasks: int = 50
+    quality_auto_115_check_limit: int = 3
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -149,6 +182,13 @@ class Config:
             web_token=os.environ.get("WEB_TOKEN", ""),
             task_worker_interval_seconds=int(os.environ.get("TASK_WORKER_INTERVAL_SECONDS", "5")),
             task_max_retries=int(os.environ.get("TASK_MAX_RETRIES", "3")),
+            quality_auto_enabled=parse_bool_env(os.environ.get("QUALITY_AUTO_ENABLED"), False),
+            quality_auto_time=parse_quality_auto_time(os.environ.get("QUALITY_AUTO_TIME", "02:50")),
+            quality_auto_timezone=parse_quality_auto_timezone(
+                os.environ.get("QUALITY_AUTO_TIMEZONE", "Asia/Shanghai")
+            ),
+            quality_auto_max_tasks=positive_int_env("QUALITY_AUTO_MAX_TASKS", 50),
+            quality_auto_115_check_limit=positive_int_env("QUALITY_AUTO_115_CHECK_LIMIT", 3),
         )
 
 

@@ -290,6 +290,23 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(store.get_runtime_state("task_runner"), {"value": "running", "updated_at": 123.0})
             self.assertIsNone(store.get_runtime_state("missing"))
 
+    def test_claim_quality_run_only_claims_a_date_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            self.assertTrue(store.claim_quality_run("2026-07-19", now=100.0))
+            self.assertFalse(store.claim_quality_run("2026-07-19", now=200.0))
+            self.assertTrue(store.claim_quality_run("2026-07-20", now=300.0))
+
+    def test_claim_quality_run_is_atomic_across_store_instances(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "tasks.db"
+            first_store = TaskStore(db_path)
+            second_store = TaskStore(db_path)
+
+            self.assertTrue(first_store.claim_quality_run("2026-07-19", now=100.0))
+            self.assertFalse(second_store.claim_quality_run("2026-07-19", now=200.0))
+
     def test_queue_summary_counts_statuses_and_lock_waits(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
