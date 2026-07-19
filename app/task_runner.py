@@ -38,6 +38,7 @@ _STAGE_MAX_DEFER_COUNT = {
     TaskStage.EMBY_CONFIRMED: 20,
 }
 _DEFER_METADATA_KEYS = ("_defer_stage", "_defer_message", "_defer_count")
+_HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 
 def _without_defer_metadata(metadata: dict[str, object]) -> dict[str, object]:
@@ -198,8 +199,25 @@ class TaskRunner:
         self.now = now or time.time
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._heartbeat_thread: threading.Thread | None = None
         self._startup_claims_cleared = False
         self._p115_risk_cooldown_until = 0.0
+        self._last_heartbeat_at = 0.0
+
+    def _record_heartbeat(self) -> None:
+        now = self.now()
+        if now - self._last_heartbeat_at < _HEARTBEAT_INTERVAL_SECONDS:
+            return
+        try:
+            self.store.set_runtime_state("task_runner", "running", updated_at=now)
+            self._last_heartbeat_at = now
+        except Exception:
+            LOG.debug("Failed to record TaskRunner heartbeat", exc_info=True)
+
+    def _run_heartbeat(self) -> None:
+        while not self._stop.is_set():
+            self._record_heartbeat()
+            self._stop.wait(_HEARTBEAT_INTERVAL_SECONDS)
 
     def run_once(self) -> bool:
         self._clear_startup_claims_once()
@@ -482,18 +500,23 @@ class TaskRunner:
         if self._thread and self._thread.is_alive():
             return self._thread
         self._stop.clear()
+        self._last_heartbeat_at = 0.0
+        self._heartbeat_thread = threading.Thread(target=self._run_heartbeat, daemon=True)
+        self._heartbeat_thread.start()
         self._thread = threading.Thread(target=self.run_forever, daemon=True)
         self._thread.start()
         return self._thread
 
     def stop(self, join_timeout: float = 5) -> None:
         self._stop.set()
-        thread = self._thread
-        if thread and thread is not threading.current_thread():
-            thread.join(max(0.0, float(join_timeout)))
+        deadline = time.monotonic() + max(0.0, float(join_timeout))
+        for thread in (self._thread, self._heartbeat_thread):
+            if thread and thread is not threading.current_thread():
+                thread.join(max(0.0, deadline - time.monotonic()))
 
     def run_forever(self) -> None:
         while not self._stop.is_set():
+            self._record_heartbeat()
             did_work = self.run_once()
             if not did_work:
                 self._stop.wait(self.interval_seconds)

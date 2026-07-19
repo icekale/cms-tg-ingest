@@ -1,10 +1,43 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+
+_RETRYABLE_HTTP_STATUS = {408, 425, 429}
+_MAX_SAFE_GET_ATTEMPTS = 2
+
+
+def _safe_get_retryable(req: urllib.request.Request, error: BaseException) -> bool:
+    if str(req.get_method()).upper() not in {"GET", "HEAD"}:
+        return False
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in _RETRYABLE_HTTP_STATUS or error.code >= 500
+    return isinstance(error, (urllib.error.URLError, TimeoutError))
+
+
+def _read_response(req: urllib.request.Request, timeout: int) -> str:
+    attempts = _MAX_SAFE_GET_ATTEMPTS if str(req.get_method()).upper() in {"GET", "HEAD"} else 1
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            if attempt + 1 < attempts and _safe_get_retryable(req, exc):
+                exc.close()
+                time.sleep(0.2)
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt + 1 < attempts and _safe_get_retryable(req, exc):
+                time.sleep(0.2)
+                continue
+            raise
+    raise RuntimeError("HTTP request attempts exhausted")
 
 
 class HttpJson:
@@ -20,8 +53,7 @@ class HttpJson:
             req_headers.update(headers)
         req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                raw = resp.read().decode("utf-8", "replace")
+            raw = _read_response(req, self.timeout)
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", "replace")
             raise RuntimeError(f"HTTP {exc.code} from {url}: {body[:300]}") from exc
@@ -59,13 +91,14 @@ class FormHttp:
             req_headers.update(headers)
         req = urllib.request.Request(url, data=body, headers=req_headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                raw = resp.read().decode("utf-8", "replace")
+            raw = _read_response(req, self.timeout)
         except urllib.error.HTTPError as exc:
             body_text = exc.read().decode("utf-8", "replace")
             raise RuntimeError(f"HTTP {exc.code} from {url}: {body_text[:300]}") from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Cannot reach {url}: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise RuntimeError(f"Cannot reach {url}: {exc}") from exc
         try:
             return json.loads(raw)
         except json.JSONDecodeError as exc:

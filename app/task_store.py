@@ -34,6 +34,7 @@ class TaskHealthAggregate:
     problem_count: int
     lock_wait_count: int
     p115_cooldown_until: float
+    runner_heartbeat_at: float = 0.0
     wait_tasks: tuple[TaskSnapshot, ...] = ()
     latest_problem: TaskSnapshot | None = None
     latest_lock_wait: TaskSnapshot | None = None
@@ -110,6 +111,15 @@ class TaskStore:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id, id)")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS runtime_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
 
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
@@ -131,6 +141,25 @@ class TaskStore:
     @staticmethod
     def _snapshot(row: sqlite3.Row) -> TaskSnapshot:
         return TaskSnapshot.from_row(dict(row))
+
+    def set_runtime_state(self, key: str, value: str, updated_at: float | None = None) -> None:
+        timestamp = time.time() if updated_at is None else float(updated_at)
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO runtime_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (str(key), str(value), timestamp),
+            )
+
+    def get_runtime_state(self, key: str) -> dict[str, Any] | None:
+        with self._lock, self._connection() as conn:
+            row = conn.execute("SELECT value, updated_at FROM runtime_state WHERE key = ?", (str(key),)).fetchone()
+        if row is None:
+            return None
+        return {"value": str(row["value"]), "updated_at": float(row["updated_at"])}
 
     @staticmethod
     def _merge_metadata(
@@ -333,6 +362,10 @@ class TaskStore:
                 """,
                 (TaskStatus.RUNNING.value,),
             ).fetchone()
+            runner_heartbeat_row = conn.execute(
+                "SELECT updated_at FROM runtime_state WHERE key = ?",
+                ("task_runner",),
+            ).fetchone()
 
         snapshots: dict[int, TaskSnapshot] = {}
 
@@ -358,6 +391,7 @@ class TaskStore:
             problem_count=int(aggregate["problem_count"]),
             lock_wait_count=int(aggregate["lock_wait_count"]),
             p115_cooldown_until=float(aggregate["p115_cooldown_until"] or 0),
+            runner_heartbeat_at=float(runner_heartbeat_row["updated_at"] or 0) if runner_heartbeat_row else 0.0,
             wait_tasks=tuple(task for task in wait_tasks if task is not None),
             latest_problem=snapshot(latest_problem_row),
             latest_lock_wait=snapshot(latest_lock_wait_row),

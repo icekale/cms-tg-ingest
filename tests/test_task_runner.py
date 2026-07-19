@@ -2,6 +2,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.clients.p115 import P115RiskControlError
 from app.models import TaskStage, TaskStatus
@@ -81,6 +82,47 @@ class TimeAdvancingCountingWorkflow:
 
 
 class TaskRunnerTests(unittest.TestCase):
+    def test_heartbeat_refreshes_while_worker_waits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            runner = TaskRunner(store, FakeWorkflow([]), interval_seconds=60)
+
+            with patch("app.task_runner._HEARTBEAT_INTERVAL_SECONDS", 0.01):
+                runner.start()
+                try:
+                    deadline = time.time() + 1
+                    first = None
+                    while time.time() < deadline:
+                        first = store.get_runtime_state("task_runner")
+                        if first is not None:
+                            break
+                        time.sleep(0.005)
+                    self.assertIsNotNone(first)
+
+                    first_updated_at = first["updated_at"]
+                    refreshed = None
+                    while time.time() < deadline:
+                        refreshed = store.get_runtime_state("task_runner")
+                        if refreshed["updated_at"] > first_updated_at:
+                            break
+                        time.sleep(0.005)
+                    self.assertGreater(refreshed["updated_at"], first_updated_at)
+                finally:
+                    runner.stop(join_timeout=1)
+
+    def test_start_records_task_runner_heartbeat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            runner = TaskRunner(store, FakeWorkflow([]), interval_seconds=60)
+
+            runner.start()
+            time.sleep(0.01)
+            runner.stop(join_timeout=1)
+
+            heartbeat = store.get_runtime_state("task_runner")
+            self.assertEqual(heartbeat["value"], "running")
+            self.assertGreater(heartbeat["updated_at"], 0)
+
     def test_stop_wakes_and_joins_idle_worker(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

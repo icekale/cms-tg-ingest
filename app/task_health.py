@@ -9,6 +9,9 @@ from .task_engine import stage_display_name
 from .task_store import TaskStore
 
 
+RUNNER_HEARTBEAT_STALE_SECONDS = 90.0
+
+
 @dataclass(frozen=True)
 class TaskHealthSummary:
     enabled: bool
@@ -23,6 +26,8 @@ class TaskHealthSummary:
     wait_details: tuple[str, ...] = ()
     wait_overflow_count: int = 0
     p115_cooldown_until: float = 0.0
+    runner_heartbeat_at: float = 0.0
+    runner_heartbeat_stale: bool = False
 
 
 def _truncate(value: object, limit: int) -> str:
@@ -60,6 +65,12 @@ def build_task_health(
     aggregate = store.aggregate_open_task_health(limit=limit)
     wait_tasks = aggregate.wait_tasks
     cooldown_until = aggregate.p115_cooldown_until if aggregate.p115_cooldown_until > current_time else 0.0
+    runner_heartbeat_at = aggregate.runner_heartbeat_at
+    runner_heartbeat_stale = bool(
+        enabled
+        and runner_heartbeat_at > 0
+        and current_time - runner_heartbeat_at > RUNNER_HEARTBEAT_STALE_SECONDS
+    )
     wait_details = tuple(
         _format_wait_detail(task, now=current_time)
         for task in wait_tasks[:5]
@@ -77,6 +88,8 @@ def build_task_health(
         wait_details=wait_details,
         wait_overflow_count=max(0, aggregate.pending_count + aggregate.running_count - len(wait_details)),
         p115_cooldown_until=cooldown_until,
+        runner_heartbeat_at=runner_heartbeat_at,
+        runner_heartbeat_stale=runner_heartbeat_stale,
     )
 
 
@@ -91,6 +104,14 @@ def format_task_health(summary: TaskHealthSummary, *, now: float | None = None) 
         f"锁等待: {summary.lock_wait_count}",
         f"失败/需处理: {summary.problem_count}",
     ]
+    if not summary.enabled:
+        lines.append("TaskRunner心跳: disabled")
+    elif summary.runner_heartbeat_stale:
+        lines.append("TaskRunner心跳: stale")
+    elif summary.runner_heartbeat_at > 0:
+        lines.append("TaskRunner心跳: active")
+    else:
+        lines.append("TaskRunner心跳: unknown")
     if summary.p115_cooldown_until > current_time:
         remaining = _duration(summary.p115_cooldown_until - current_time)
         lines.append(f"115风控冷却: ACTIVE，剩余 {remaining}")

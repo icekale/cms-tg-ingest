@@ -90,6 +90,30 @@ class DoctorConfigTests(unittest.TestCase):
         self.assertIn("WEB_PORT", text)
         self.assertIn("TASK_DB directory does not exist", text)
 
+    def test_web_exposure_and_unsupported_concurrency_are_nonblocking_warnings(self):
+        env = {
+            "TG_BOT_TOKEN": "123456:secret-token",
+            "TG_ALLOWED_CHAT_ID": "464100862",
+            "CMS_BASE_URL": "http://cms:9527",
+            "CMS_USERNAME": "user",
+            "CMS_PASSWORD": "secret-password",
+            "DB_PATH": "/data/submissions.db",
+            "TASK_DB_PATH": "/data/tasks.db",
+            "STRM_SOURCE_ROOTS": "/data",
+            "WEB_ENABLED": "true",
+            "WEB_HOST": "0.0.0.0",
+            "WEB_TOKEN": "",
+            "TASK_MAX_CONCURRENT": "2",
+        }
+
+        report = doctor.run_checks(env=env, filesystem=doctor.MemoryFilesystem(existing_paths={"/data"}))
+
+        self.assertTrue(report.ok)
+        text = report.to_text()
+        self.assertIn("WARNING", text)
+        self.assertIn("WEB_TOKEN", text)
+        self.assertIn("TASK_MAX_CONCURRENT", text)
+
     def test_task_engine_requires_self_share_workflow_without_leaking_secrets(self):
         env = {
             "TG_BOT_TOKEN": "123456:secret-token",
