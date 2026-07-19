@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+下一版本将包含本页以下稳定性改进。
+
+## 0.2.2 - 2026-07-19
+
+- 外部 HTTP 的 GET/HEAD 请求在网络错误、超时、408、425、429 和 5xx 时最多保守重试一次；POST 不自动重试，避免重复接收、建分享或提交任务。
+- TaskRunner 增加独立本地心跳，长时间等待或外部阶段执行时不会误报心跳停止；Web `/health` 会标记真正 stale 的任务引擎。
+- `doctor.py` 增加 Web 未配置 `WEB_TOKEN` 和遗留 `TASK_MAX_CONCURRENT` 的非阻断安全提示。
+- `.env.example` 移除当前不生效的 `TASK_MAX_CONCURRENT` 配置，继续保持单 worker 和 115 低频调用策略。
+
 - 增加共享别名层：CMS 标准名称与 115 分享名称解耦，媒体库仍恢复标准目录和剧集文件名。
 - 增加分享别名准备、分享验证、CMS 删除落库三个 TaskStore 阶段，并在 Web/TG 中显示等待原因。
 - `have_vio_file` 改为风险提示；分享仍可访问时不会误删 STRM，第二级中性文件名后停止自动改名。

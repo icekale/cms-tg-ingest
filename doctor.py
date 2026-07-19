@@ -160,6 +160,19 @@ def _check_optional_env(env: Mapping[str, str]) -> CheckItem:
     return CheckItem("optional_env", True, "optional feature variables are consistent")
 
 
+def _check_runtime_safety(env: Mapping[str, str]) -> CheckItem:
+    warnings: list[str] = []
+    if _env_bool(env, "WEB_ENABLED"):
+        host = _env_value(env, "WEB_HOST") or "0.0.0.0"
+        if host in {"0.0.0.0", "::", "*"} and not _env_value(env, "WEB_TOKEN"):
+            warnings.append("WEB is exposed on all interfaces without WEB_TOKEN")
+    if _env_value(env, "TASK_MAX_CONCURRENT"):
+        warnings.append("TASK_MAX_CONCURRENT is unsupported; TaskRunner intentionally uses one worker")
+    if warnings:
+        return CheckItem("runtime_safety", True, "WARNING " + "; ".join(warnings))
+    return CheckItem("runtime_safety", True, "runtime safety settings are explicit")
+
+
 def _check_filesystem(env: Mapping[str, str], filesystem: Filesystem) -> CheckItem:
     problems: list[str] = []
     db_path = Path(_env_value(env, "DB_PATH") or "/data/submissions.db")
@@ -195,6 +208,7 @@ def run_checks(env: Mapping[str, str] | None = None, filesystem: Filesystem | No
     return DoctorReport([
         _check_required_env(env),
         _check_optional_env(env),
+        _check_runtime_safety(env),
         _check_filesystem(env, filesystem),
     ])
 

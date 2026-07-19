@@ -260,6 +260,15 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(found.id, waiting.id)
             self.assertIsNone(missing)
 
+    def test_runtime_state_persists_value_and_timestamp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            store.set_runtime_state("task_runner", "running", updated_at=123.0)
+
+            self.assertEqual(store.get_runtime_state("task_runner"), {"value": "running", "updated_at": 123.0})
+            self.assertIsNone(store.get_runtime_state("missing"))
+
     def test_queue_summary_counts_statuses_and_lock_waits(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
