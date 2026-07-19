@@ -64,7 +64,7 @@ class WebAdminTests(unittest.TestCase):
             for active_label in ("运行概览", "质量巡检", "本地健康"):
                 self.assertIn(f'aria-current="page">{active_label}</a>', pages[active_label])
 
-    def test_task_detail_renders_eight_user_facing_phases(self):
+    def test_task_detail_renders_user_facing_phases(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
             task = store.upsert_task("recognizing", "", "https://115cdn.com/s/recognizing")
@@ -74,15 +74,15 @@ class WebAdminTests(unittest.TestCase):
 
             page_html = render_task_detail(store, task.id)
             phase_html = _render_phase_track(store.find_task(task.id), store.list_events(task.id))
-            labels = ("接收", "CMS 整理", "分类识别", "建分享", "分享 STRM", "移动入库", "Emby 确认", "清理完成")
+            labels = ("115 云下载", "接收", "CMS 整理", "分类识别", "建分享", "分享 STRM", "移动入库", "Emby 确认", "清理完成")
 
             positions = [phase_html.index(f"<span>{label}</span>") for label in labels]
             self.assertEqual(positions, sorted(positions))
             self.assertIn(phase_html, page_html)
-            self.assertEqual(page_html.count('class="phase-step'), 8)
+            self.assertEqual(page_html.count('class="phase-step'), 9)
             self.assertIn('class="phase-step is-current"', page_html)
             self.assertIn('role="list"', phase_html)
-            self.assertEqual(phase_html.count('role="listitem"'), 8)
+            self.assertEqual(phase_html.count('role="listitem"'), 9)
             self.assertIn('aria-current="step"', phase_html)
             self.assertIn('aria-label="接收，已完成"', phase_html)
             self.assertIn('aria-label="CMS 整理，已完成"', phase_html)
@@ -105,7 +105,7 @@ class WebAdminTests(unittest.TestCase):
 
                     phase_index = _task_phase_index(task, [{"stage": TaskStage.STRM_READY}])
 
-                    self.assertEqual(phase_index, 4)
+                self.assertEqual(phase_index, 5)
 
     def test_shared_focus_ring_uses_contrast_token(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -91,6 +91,7 @@ from app.media.classify import (
     tmdb_match_score,
     user_movie_category_bucket,
 )
+from app.media.sources import parse_media_sources
 
 from app.media.strm import (
     category_for_self_share_row,
@@ -175,7 +176,7 @@ LINK_RE = re.compile(r"https?://(?:www\.)?(?:115cdn|115|anxia)\.com/s/[^\s<>'\"]
 TRAILING_PUNCT = ".,;)。），]】》>"
 LOG = logging.getLogger("cms-tg-ingest")
 LAST_TELEGRAM_TRANSIENT_ERROR_AT: str | None = None
-HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 链接\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- /status 查看最近任务\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd"""
+HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 分享、磁力或 ED2K 链接\n- 磁力/ED2K 会进入 115 云下载，再复用 CMS 整理和分享 STRM 流程\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- /status 查看最近任务\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd\ned2k://|file|Example.mkv|10|0123456789ABCDEF0123456789ABCDEF|/"""
 MENU_BUTTONS = {
     "📊 统计": "/metrics",
     "📋 最近任务": "/status",
@@ -2531,13 +2532,29 @@ def handle_update(
     explicit_series_update = text.startswith("追更")
     if explicit_series_update:
         text = text.removeprefix("追更").lstrip(" ：:")
-    links = extract_share_links(text)
-    if not links:
+    sources = parse_media_sources(text)
+    if not sources:
         return
 
-    result_lines = [f"收到 {len(links)} 个链接："]
-    for index, link in enumerate(links, 1):
+    result_lines = [f"收到 {len(sources)} 个链接："]
+    for index, source in enumerate(sources, 1):
+        link = source.raw_url
         try:
+            if source.source_type in {"magnet", "ed2k"}:
+                if not (self_share_workflow and task_engine_enabled and task_store is not None):
+                    result_lines.append(f"{index}. 云下载链接需要启用 TaskStore 自分享工作流")
+                    continue
+                task = task_store.upsert_cloud_task(
+                    source.source_key,
+                    source.raw_url,
+                    chat_id=str(chat_id or ""),
+                    title=source.display_name,
+                )
+                if not task_store.list_events(task.id):
+                    task = task_store.enqueue_task(task.id, TaskStage.CLOUD_DOWNLOADING, message="等待 115 云下载", next_run_at=0)
+                result_lines.append(f"{index}. {format_task_intake_reply(task)}")
+                LOG.info("Enqueued cloud source in TaskStore: type=%s key=%s task_id=%s", source.source_type, source.source_key, task.id)
+                continue
             key = normalize_share_link(link)
             if self_share_workflow and task_engine_enabled and task_store is None:
                 raise RuntimeError("TaskStore is required when TASK_ENGINE_ENABLED=true for self_share_sync")

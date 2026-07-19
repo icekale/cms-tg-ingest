@@ -61,6 +61,8 @@ class Config:
     self_share_cleanup_after_emby: bool = False
     self_share_source_cleanup_parent_ids: str = ""
     self_share_auto_organize_retry_seconds: int = 15
+    self_share_cloud_poll_seconds: int = 30
+    self_share_cloud_timeout_seconds: int = 86400
     self_share_invalid_cleanup_enabled: bool = False
     self_share_invalid_check_interval_seconds: int = 21600
     self_share_invalid_check_limit: int = 3
@@ -128,6 +130,8 @@ class Config:
             self_share_cleanup_after_emby=parse_bool_env(os.environ.get("SELF_SHARE_CLEANUP_AFTER_EMBY"), False),
             self_share_source_cleanup_parent_ids=os.environ.get("SELF_SHARE_SOURCE_CLEANUP_PARENT_IDS", ""),
             self_share_auto_organize_retry_seconds=int(os.environ.get("SELF_SHARE_AUTO_ORGANIZE_RETRY_SECONDS", "15")),
+            self_share_cloud_poll_seconds=max(30, int(os.environ.get("SELF_SHARE_CLOUD_POLL_SECONDS", "30"))),
+            self_share_cloud_timeout_seconds=max(300, int(os.environ.get("SELF_SHARE_CLOUD_TIMEOUT_SECONDS", "86400"))),
             self_share_invalid_cleanup_enabled=parse_bool_env(os.environ.get("SELF_SHARE_INVALID_CLEANUP_ENABLED"), False),
             self_share_invalid_check_interval_seconds=max(60, int(os.environ.get("SELF_SHARE_INVALID_CHECK_INTERVAL_SECONDS", "21600"))),
             self_share_invalid_check_limit=max(1, int(os.environ.get("SELF_SHARE_INVALID_CHECK_LIMIT", "3"))),
@@ -189,6 +193,8 @@ class SelfShareConfig:
     cleanup_after_emby: bool = False
     source_cleanup_parent_ids: set[str] | None = None
     auto_organize_retry_seconds: int = 90
+    cloud_poll_seconds: int = 30
+    cloud_timeout_seconds: int = 86400
     parent_cid_category_map: dict[str, str] | None = None
     organized_scan_parent_ids: set[str] | None = None
     cms_state_db_path: Path = Path("/cms/cms-online.db")
@@ -216,6 +222,8 @@ class SelfShareConfig:
             cleanup_after_emby=config.self_share_cleanup_after_emby,
             source_cleanup_parent_ids=set(split_env_list(config.self_share_source_cleanup_parent_ids)),
             auto_organize_retry_seconds=max(0, int(config.self_share_auto_organize_retry_seconds)),
+            cloud_poll_seconds=max(30, int(config.self_share_cloud_poll_seconds)),
+            cloud_timeout_seconds=max(300, int(config.self_share_cloud_timeout_seconds)),
             parent_cid_category_map=parse_parent_cid_category_map(config.cms_parent_cid_category_map),
             organized_scan_parent_ids=organized_scan_parent_ids,
             cms_state_db_path=Path(config.cms_state_db_path).expanduser(),

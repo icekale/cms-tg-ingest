@@ -1,8 +1,8 @@
 # cms-tg-ingest
 
-`cms-tg-ingest` 是 Cloud Media Sync（CMS）的 115 分享自动入库外挂。把一个或多个 115 分享链接发给 Telegram 机器人，程序会让 CMS 完成整理和分类，再创建你自己的永久分享、生成分享 STRM、移动到媒体库、刷新并确认 Emby 入库，最后清理 115 转存源。
+`cms-tg-ingest` 是 Cloud Media Sync（CMS）的 115 自动入库外挂。把一个或多个 115 分享、磁力或 ED2K 链接发给 Telegram 机器人，程序会让 115/CMS 完成云下载、整理和分类，再创建你自己的永久分享、生成分享 STRM、移动到媒体库、刷新并确认 Emby 入库，最后清理 115 转存源。
 
-`115 分享链接 -> CMS 整理分类 -> 自有永久分享 -> 分享 STRM -> Emby 入库 -> 清理转存源`
+`115 分享/磁力/ED2K -> 115 接收或云下载 -> CMS 整理分类 -> 自有永久分享 -> 分享 STRM -> Emby 入库 -> 清理转存源`
 
 它把手动转存、整理、再分享、生成 STRM、移动目录和刷新 Emby 的重复操作收敛成一次发送链接。整个流程以 CMS 的整理结果为准，外挂只负责任务编排、安全校验、状态追踪和失败恢复。
 
@@ -24,7 +24,7 @@
 
 ## 功能特性
 
-- **裸链接入库**：Telegram 机器人接收一条或多条 115 分享链接，自动去重并创建任务。
+- **多源链接入库**：Telegram 机器人接收一条或多条 115 分享、磁力或 ED2K 链接，自动去重并创建任务。
 - **白名单访问**：只允许指定 Telegram 用户或聊天 ID 使用。
 - **自分享 STRM 工作流**：转存到待整理目录、等待 CMS 自动整理、创建自己的 115 永久分享、调用 CMS 分享同步、移动生成的 STRM。
 - **CMS 优先分类**：优先使用 CMS 整理后的目录和分类结果；只有 CMS 识别不确定时才通过按钮请求人工确认分类。
@@ -35,6 +35,7 @@
 - **共享别名保护**：CMS 完成整理和分类后，外挂用中性名称创建 115 分享，并用 canonical manifest 在本地恢复 CMS 标准目录名；115 风险标记只作为预警，最终以分享状态和 STRM 实际播放验证为准。
 - **安全清理 115 空间**：在 `TASK_ENGINE_ENABLED=true` 的 TaskRunner 路径中，自己的永久分享状态验证通过后即可删除 115 转存源，不会取消自己的 115 永久分享；后续 STRM 只使用自己的分享链接生成。
 - **115 压力保护**：整理文件夹查找使用分层搜索早停和整理目录扫描预算；遇到 115 风控冷却会暂停新的 115/CMS 全局阶段，避免连续重试。
+- **115 云下载**：磁力和 ED2K 先落入 `SELF_SHARE_RECEIVE_CID`，按至少 30 秒间隔查询完成状态；云下载失败或超时不会触发后续清理。
 - **离线诊断**：`doctor.py` 可检查配置、挂载路径、数据库质量和常见部署问题。
 - **可选兜底识别**：可接入 OpenAI 兼容接口，但默认思路仍是尽量依赖 CMS 分类。
 
@@ -120,13 +121,15 @@ SELF_SHARE_STRM_ROOT=/mnt/user/Unraid/strm/share
 SELF_SHARE_CMS_LOCAL_PATH=/media/share
 SELF_SHARE_CLEANUP_AFTER_EMBY=true
 SELF_SHARE_SOURCE_CLEANUP_PARENT_IDS=
+SELF_SHARE_CLOUD_POLL_SECONDS=30
+SELF_SHARE_CLOUD_TIMEOUT_SECONDS=86400
 MOVE_CONFLICT_POLICY=merge
 ```
 
 完整流程：
 
-1. 你把 115 分享链接发给 Telegram bot。
-2. 外挂用 115 接口把外部分享接收到 `SELF_SHARE_RECEIVE_CID` 指定的待整理目录，不提交 CMS 普通同步。
+1. 你把 115 分享、磁力或 ED2K 链接发给 Telegram bot。
+2. 115 分享用接收接口，磁力/ED2K 用云下载接口，统一落到 `SELF_SHARE_RECEIVE_CID` 指定的待整理目录；两者都不提交 CMS 普通同步。
 3. 外挂触发 CMS 自动整理，并找到整理后的 115 文件夹。
 4. 外挂保存 CMS 标准目录、分类和 TMDB 信息，用中性 `asset-*` 别名创建你自己的 115 永久分享，提取码默认 `1212`。
 5. 外挂检查分享状态；若 115 标记名称风险，只在当前任务目录内尝试一次中性视频文件名，不扫描整个网盘。`have_vio_file` 只记录为风险提示，不会单独判定分享失效。

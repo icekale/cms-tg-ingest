@@ -64,6 +64,10 @@ class TaskDiagnosticsTests(unittest.TestCase):
     def test_explain_task_slowness_names_cms_strm_emby_and_115_cooldown(self):
         cases = [
             (
+                make_task(current_stage=TaskStage.CLOUD_DOWNLOADING, metadata={"_defer_message": "等待 115 云下载完成"}),
+                "等 115 云下载",
+            ),
+            (
                 make_task(current_stage=TaskStage.ORGANIZING, metadata={"_defer_message": "等待 CMS 整理完成"}),
                 "等 CMS 整理",
             ),

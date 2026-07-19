@@ -5,6 +5,7 @@ import hashlib
 import logging
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,9 +18,11 @@ from app.clients.p115 import (
     P115WebClient,
     category_for_115_parent_id,
     is_p115_risk_control_message,
+    normalize_cloud_status,
     p115_file_id,
     p115_file_name,
     p115_is_folder,
+    validate_cloud_output,
 )
 from app.config import MovePlan, SelfShareConfig, default_library_roots, is_relative_to, safe_resolve
 from app.media.classify import (
@@ -353,10 +356,13 @@ class BridgeSelfShareTaskWorkflow:
         self.fallback_category = str(fallback_category or "").strip()
         self.task_db_path = task_db_path
         self.cms_cloud_index = cms_cloud_index
+        self._now = time.time
 
     def run_stage(self, task):
         if task.current_stage == TaskStage.RECEIVED:
             return self._stage_received(task)
+        if task.current_stage == TaskStage.CLOUD_DOWNLOADING:
+            return self._stage_cloud_downloading(task)
         if task.current_stage == TaskStage.ORGANIZING:
             return self._stage_organizing(task)
         if task.current_stage == TaskStage.RECOGNIZING:
@@ -380,6 +386,90 @@ class BridgeSelfShareTaskWorkflow:
         if task.current_stage == TaskStage.CLEANED:
             return self._stage_cleaned(task)
         return StageResult.failed("阶段尚未实现", error_type="unsupported_stage")
+
+    def _stage_cloud_downloading(self, task):
+        if not self.self_share_config.enabled:
+            return StageResult.failed("自分享工作流未启用", error_type="self_share_disabled")
+        if not self.receive_cid:
+            return StageResult.failed("缺少 115 接收目录 ID", error_type="missing_receive_cid")
+
+        metadata = dict(task.metadata)
+        info_hash = str(metadata.get("cloud_info_hash") or "").strip()
+        task_id = str(metadata.get("cloud_task_id") or "").strip()
+        started_at = float(metadata.get("cloud_started_at") or 0)
+        if not info_hash and not task_id:
+            submitted = self.p115.cloud_download_add(task.url, self.receive_cid)
+            info_hash = str(submitted.get("info_hash") or "").strip()
+            task_id = str(submitted.get("task_id") or "").strip()
+            started_at = self._now()
+            metadata.update(
+                {
+                    "cloud_info_hash": info_hash,
+                    "cloud_task_id": task_id,
+                    "cloud_started_at": started_at,
+                    "cloud_target_cid": self.receive_cid,
+                    "cloud_status": normalize_cloud_status(submitted),
+                }
+            )
+            return StageResult.defer(
+                "已提交 115 云下载，等待完成",
+                self.self_share_config.cloud_poll_seconds,
+                metadata,
+            )
+
+        if started_at and self._now() - started_at >= self.self_share_config.cloud_timeout_seconds:
+            return StageResult.failed(
+                "115 云下载超时，未进入后续整理和清理阶段",
+                error_type="cloud_download_timeout",
+                metadata=metadata,
+            )
+
+        identity = {"info_hash": info_hash, "task_id": task_id}
+        status = self.p115.cloud_download_status(identity)
+        normalized = normalize_cloud_status(status)
+        metadata["cloud_status"] = normalized
+        if normalized == "running":
+            return StageResult.defer(
+                "等待 115 云下载完成",
+                self.self_share_config.cloud_poll_seconds,
+                metadata,
+            )
+        if normalized == "failed":
+            return StageResult.failed(
+                "115 云下载失败，未删除任何源文件",
+                error_type="cloud_download_failed",
+                metadata=metadata,
+            )
+        if normalized != "completed":
+            return StageResult.defer(
+                "等待 115 云下载状态确认",
+                self.self_share_config.cloud_poll_seconds,
+                metadata,
+            )
+
+        output = validate_cloud_output(status, self.receive_cid)
+        row = self.store.upsert_submission(
+            _ShareKey(task.share_code, task.receive_code),
+            task.url,
+            "received",
+            title=output.get("file_name") or task.title or task.share_code,
+        )
+        row = self.store.update_self_share(
+            int(row["id"]),
+            workflow_mode="self_share_sync",
+            workflow_phase="cloud_downloaded_to_pending",
+        ) or row
+        metadata.update(
+            {
+                "submission_id": int(row["id"]),
+                "received_title": output.get("file_name") or task.title or task.share_code,
+                "received_file_ids": [output["file_id"]],
+                "cloud_output_file_id": output["file_id"],
+                "cloud_output_parent_id": output["parent_id"],
+                "cloud_output_name": output.get("file_name") or "",
+            }
+        )
+        return StageResult.complete("115 云下载完成，已进入 CMS 整理", metadata)
 
     def _submission_row(self, task) -> dict[str, Any] | None:
         submission_id = task.metadata.get("submission_id") or task.submission_id

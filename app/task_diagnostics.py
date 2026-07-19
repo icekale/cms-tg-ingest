@@ -143,6 +143,8 @@ def explain_task_slowness(task: TaskSnapshot, *, now: float) -> str:
 
     reason = str(metadata.get("_defer_message") or task.error_summary or "").strip()
     stage = task.current_stage
+    if stage == TaskStage.CLOUD_DOWNLOADING or "云下载" in reason:
+        return "等 115 云下载"
     if stage == TaskStage.ORGANIZING or "CMS 整理" in reason:
         return "等 CMS 整理"
     if stage == TaskStage.SHARE_ALIAS_PREPARED:

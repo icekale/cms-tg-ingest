@@ -74,6 +74,8 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             cfg = bridge.Config.from_env()
 
             self.assertEqual(cfg.self_share_auto_organize_retry_seconds, 15)
+            self.assertEqual(cfg.self_share_cloud_poll_seconds, 30)
+            self.assertEqual(cfg.self_share_cloud_timeout_seconds, 86400)
 
     def test_create_task_store_uses_task_db_path(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):

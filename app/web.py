@@ -31,6 +31,7 @@ _NAV_ITEMS = (
 )
 
 _TASK_PHASES = (
+    ("115 云下载", {TaskStage.CLOUD_DOWNLOADING}),
     ("接收", {TaskStage.RECEIVED, TaskStage.CMS_SUBMITTED}),
     ("CMS 整理", {TaskStage.ORGANIZING, TaskStage.ORGANIZED}),
     ("分类识别", {TaskStage.RECOGNIZING}),

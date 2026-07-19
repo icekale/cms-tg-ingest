@@ -16,6 +16,7 @@ LOG = logging.getLogger(__name__)
 
 _GLOBAL_115_LOCK_STAGES = {
     TaskStage.RECEIVED,
+    TaskStage.CLOUD_DOWNLOADING,
     TaskStage.ORGANIZING,
     TaskStage.SHARE_ALIAS_PREPARED,
     TaskStage.OWN_SHARE_CREATED,
