@@ -124,6 +124,7 @@ from app.media.strm import (
 
 from app.models import TaskStage, TaskStatus
 from app.quality import format_task_quality_report, scan_task_quality
+from app.quality_automation import QualityAutomation, QualityRunSummary
 from app.task_bridge import ensure_task_for_link, record_failure, record_submission_event, sync_task_from_submission
 from app.task_engine import decide_retry, stage_display_name
 from app.task_health import format_taskstore_health
@@ -187,6 +188,77 @@ MENU_BUTTONS = {
     "🩺 健康检查": "/health",
     "❓ 帮助": "/help",
 }
+
+
+class _QualityRepairAdapter:
+    """Queue quality repairs into the authoritative TaskRunner workflow."""
+
+    def __init__(self, submission_store: Any, task_store: TaskStore):
+        self.submission_store = submission_store
+        self.task_store = task_store
+
+    def restore(self, task: Any, run_id: str) -> bool:
+        return True
+
+    def reprocess(self, task: Any, run_id: str) -> bool:
+        return True
+
+    def rebuild_invalid_share(self, task: Any, run_id: str) -> bool:
+        submission_id = task.metadata.get("submission_id") or task.submission_id
+        if submission_id in (None, "") or not hasattr(self.submission_store, "reset_self_share_for_update"):
+            return False
+        row = self.submission_store.reset_self_share_for_update(int(submission_id))
+        return bool(row)
+
+    def cleanup(self, task: Any, run_id: str) -> bool:
+        submission_id = task.metadata.get("submission_id") or task.submission_id
+        if submission_id in (None, ""):
+            return False
+        row = self.submission_store.find_by_id(int(submission_id))
+        if not row:
+            return False
+        updated, _message = cleanup_own_share_source(self.submission_store, row, getattr(self, "cleanup_client", None))
+        return str(updated.get("cleanup_status") or "").lower() == "deleted"
+
+
+def _quality_attention_message(summary: QualityRunSummary) -> str:
+    plans = [
+        plan
+        for plan in summary.plans
+        if plan.execution_status in {"failed", "skipped"}
+    ]
+    lines = [
+        f"质量巡检需要关注：{summary.run_id}",
+        f"扫描 {summary.scanned_count} 个任务，发现 {summary.issue_count} 个问题，失败 {summary.failed_count} 个，跳过 {len(plans)} 个。",
+    ]
+    for plan in plans[:10]:
+        title = plan.title or f"任务 #{plan.task_id}"
+        lines.append(f"#{plan.task_id} {title}：{plan.reason}")
+    return "\n".join(lines)
+
+
+def start_quality_automation_loop(
+    automation: QualityAutomation,
+    telegram: Any,
+    chat_id: str,
+    stop_event: threading.Event,
+    interval_seconds: int = 30,
+) -> threading.Thread:
+    interval = max(5, int(interval_seconds))
+
+    def loop() -> None:
+        while not stop_event.wait(interval):
+            try:
+                summary = automation.run_if_due()
+                if summary and (summary.failed_count or any(plan.execution_status in {"failed", "skipped"} for plan in summary.plans)):
+                    telegram.send_message(chat_id, _quality_attention_message(summary))
+            except Exception:
+                LOG.exception("Quality automation loop failed")
+
+    thread = threading.Thread(target=loop, name="quality-automation", daemon=True)
+    thread.start()
+    LOG.info("Quality automation loop enabled interval_seconds=%s", interval)
+    return thread
 TERMINAL_STATUS_KEYWORDS = ("done", "finish", "success", "complete", "完成", "成功", "failed", "error", "失败", "timeout", "超时")
 TERMINAL_EMBY_STATUSES = {"confirmed", "timeout", "disabled", "failed", "error", "invalid_share_cleaned"}
 TERMINAL_MOVE_STATUSES = {"moved", "skipped", "failed", "error", "conflict", "invalid_share_cleaned"}
@@ -2750,6 +2822,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
             stable_seconds=move_config.stable_seconds,
         )
     task_runner = None
+    quality_thread = None
     if config.task_engine_enabled and self_share_config.enabled and p115:
         task_workflow = BridgeSelfShareTaskWorkflow(
             cms=cms,
@@ -2776,7 +2849,20 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         )
         task_runner.start()
         LOG.info("Task engine worker started interval_seconds=%s", config.task_worker_interval_seconds)
-        if config.self_share_invalid_cleanup_enabled:
+        if config.quality_auto_enabled:
+            quality_automation = QualityAutomation(
+                task_store,
+                config,
+                move_config=move_config,
+                repair_adapter=_QualityRepairAdapter(store, task_store),
+            )
+            quality_thread = start_quality_automation_loop(
+                quality_automation,
+                telegram,
+                config.tg_allowed_chat_id,
+                stop_event,
+            )
+        if config.self_share_invalid_cleanup_enabled and not config.quality_auto_enabled:
             start_invalid_self_share_probe_loop(
                 store,
                 task_store,
@@ -2838,6 +2924,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
                 log_polling_error(telegram, exc)
                 stop_event.wait(5)
     finally:
+        stop_event.set()
         if task_runner is not None:
             stop = getattr(task_runner, "stop", None)
             if callable(stop):

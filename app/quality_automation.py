@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
-from .config import Config, MoveConfig, is_under_any_root, safe_resolve
+from .config import Config, MoveConfig, is_relative_to, is_under_any_root, safe_resolve
 from .models import TaskSnapshot, TaskStage, TaskStatus
 from .quality import QualityIssue, scan_task_quality
 from .task_store import TaskStore
@@ -165,6 +165,16 @@ class QualityAutomation:
                 allowed_roots=self.allowed_roots,
                 tasks=tasks,
             )
+            issues.extend(
+                QualityIssue("invalid_share", "115 已明确确认自有分享失效", task_id=task.id)
+                for task in tasks
+                if str(
+                    task.metadata.get("invalid_share_status")
+                    or task.metadata.get("share_validation_status")
+                    or ""
+                ).strip().lower()
+                == "invalid"
+            )
             plans = self._plan(tasks, issues)
             if self.repair_adapter is not None:
                 plans = [
@@ -253,7 +263,11 @@ class QualityAutomation:
                 plans.append(self._skip_plan(task, "risk_control", task_issues))
                 continue
             if "invalid_share" in issue_codes:
-                invalid_status = str(task.metadata.get("invalid_share_status") or "").strip().lower()
+                invalid_status = str(
+                    task.metadata.get("invalid_share_status")
+                    or task.metadata.get("share_validation_status")
+                    or ""
+                ).strip().lower()
                 if invalid_status != "invalid":
                     plans.append(self._skip_plan(task, "unknown_share_status", task_issues))
                     continue
@@ -295,10 +309,26 @@ class QualityAutomation:
         task = self.store.find_task(plan.task_id)
         if task is None:
             return replace(plan, execution_status="skipped", reason="task_missing")
+        if task.metadata.get("quality_repair_queued"):
+            return replace(plan, execution_status="skipped", reason="task_busy")
         if task.status == TaskStatus.RUNNING or task.claimed_by.strip():
             return replace(plan, execution_status="skipped", reason="task_busy")
-        if str(task.metadata.get("p115_risk_controlled") or "").lower() in {"1", "true", "yes"}:
+        risk_until = 0.0
+        try:
+            risk_until = float(task.metadata.get("p115_risk_cooldown_until") or 0)
+        except (TypeError, ValueError):
+            pass
+        if (
+            str(task.metadata.get("p115_risk_controlled") or "").lower() in {"1", "true", "yes"}
+            or risk_until > time.time()
+        ):
             return replace(plan, execution_status="skipped", reason="risk_control")
+        if plan.action == "invalid_share" and str(
+            task.metadata.get("invalid_share_status")
+            or task.metadata.get("share_validation_status")
+            or ""
+        ).strip().lower() != "invalid":
+            return replace(plan, execution_status="skipped", reason="unknown_share_status")
 
         target_stage = TaskStage.EMBY_CONFIRMED if plan.action == "restore" else TaskStage.RECEIVED
         metadata = {
@@ -319,6 +349,7 @@ class QualityAutomation:
             metadata_patch=metadata,
             next_run_at=time.time(),
             clear_errors=True,
+            claim_by=f"quality:{run_id}",
         )
         if reserved is None:
             return replace(plan, execution_status="skipped", reason="task_busy")
@@ -326,10 +357,37 @@ class QualityAutomation:
         handler_name = "rebuild_invalid_share" if plan.action == "invalid_share" else plan.action
         handler = getattr(self.repair_adapter, handler_name, None) if self.repair_adapter is not None else None
         if not callable(handler):
-            return replace(plan, execution_status="queued")
+            self.store.record_event(
+                reserved.id,
+                target_stage,
+                TaskStatus.FAILED,
+                "自动巡检没有可用的修复适配器",
+                error_type="quality_repair_adapter_missing",
+                error_summary="repair adapter missing",
+                clear_claim=True,
+            )
+            return replace(plan, execution_status="failed", reason="repair_adapter_missing")
         try:
             if handler(reserved, str(run_id)) is False:
+                self.store.record_event(
+                    reserved.id,
+                    target_stage,
+                    TaskStatus.FAILED,
+                    "自动巡检修复适配器拒绝执行",
+                    error_type="quality_repair_rejected",
+                    error_summary="repair rejected",
+                    clear_claim=True,
+                )
                 return replace(plan, execution_status="failed", reason="repair_rejected")
+            self.store.record_event(
+                reserved.id,
+                target_stage,
+                TaskStatus.PENDING,
+                f"自动巡检修复已入队：{plan.action}",
+                metadata_patch={"quality_repair_queued": True},
+                next_run_at=time.time(),
+                clear_claim=True,
+            )
         except Exception as exc:
             try:
                 self.store.record_event(
@@ -354,7 +412,10 @@ class QualityAutomation:
             return QualityCleanupResult("blocked_cleanup", "own_share_not_available")
         if str(metadata.get("emby_status") or "").lower() != "confirmed" or metadata.get("emby_match_count") != 1:
             return QualityCleanupResult("blocked_cleanup", "emby_not_confirmed_unique")
-        if not metadata.get("quality_success_event"):
+        has_success_event = False
+        if hasattr(self.store, "has_quality_success_event"):
+            has_success_event = bool(self.store.has_quality_success_event(task.id))
+        if not has_success_event:
             return QualityCleanupResult("blocked_cleanup", "success_event_missing")
         destination_text = str(metadata.get("dest_path") or "").strip()
         if not destination_text or not self._path_allowed(destination_text):
@@ -365,12 +426,19 @@ class QualityAutomation:
         own_share_code = str(metadata.get("own_share_code") or "").strip()
         receive_code = str(metadata.get("own_share_receive_code") or "1212").strip() or "1212"
         marker = f"/s/{own_share_code}_{receive_code}_"
-        strm_files = list(destination.rglob("*.strm")) + list(destination.rglob("*.STRM"))
+        strm_files = [
+            path
+            for path in destination.rglob("*")
+            if path.is_file() and path.suffix.lower() == ".strm"
+        ]
         if not own_share_code or not strm_files:
             return QualityCleanupResult("blocked_cleanup", "share_strm_missing")
         for path in strm_files:
+            canonical = safe_resolve(path)
+            if not is_relative_to(canonical, destination) or not self._path_allowed(str(canonical)):
+                return QualityCleanupResult("blocked_cleanup", "share_strm_outside_allowed_root")
             try:
-                content = path.read_text(encoding="utf-8", errors="replace")
+                content = canonical.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 return QualityCleanupResult("blocked_cleanup", "share_strm_unreadable")
             if "/d/" in content or marker not in content:
@@ -378,11 +446,45 @@ class QualityAutomation:
         handler = getattr(self.repair_adapter, "cleanup", None) if self.repair_adapter is not None else None
         if not callable(handler):
             return QualityCleanupResult("blocked_cleanup", "cleanup_adapter_missing")
+        reserved = task
+        if hasattr(self.store, "claim_quality_cleanup"):
+            reserved = self.store.claim_quality_cleanup(task.id, str(run_id))
+            if reserved is None:
+                return QualityCleanupResult("blocked_cleanup", "cleanup_busy")
         try:
-            if handler(task, str(run_id)) is False:
+            if handler(reserved, str(run_id)) is False:
+                if hasattr(self.store, "record_event"):
+                    self.store.record_event(
+                        reserved.id,
+                        reserved.current_stage,
+                        reserved.status,
+                        "自动巡检清理被拒绝",
+                        error_type="quality_cleanup_rejected",
+                        error_summary="cleanup rejected",
+                        clear_claim=True,
+                    )
                 return QualityCleanupResult("blocked_cleanup", "cleanup_rejected")
         except Exception:
+            if hasattr(self.store, "record_event"):
+                self.store.record_event(
+                    reserved.id,
+                    reserved.current_stage,
+                    TaskStatus.NEEDS_ACTION,
+                    "自动巡检清理失败",
+                    error_type="quality_cleanup_failed",
+                    error_summary="cleanup failed",
+                    clear_claim=True,
+                )
             return QualityCleanupResult("blocked_cleanup", "cleanup_failed")
+        if hasattr(self.store, "record_event"):
+            self.store.record_event(
+                reserved.id,
+                reserved.current_stage,
+                reserved.status,
+                "自动巡检清理完成",
+                metadata_patch={"quality_cleanup_completed": True},
+                clear_claim=True,
+            )
         return QualityCleanupResult("cleaned")
 
     def _safe_metadata(self, task: TaskSnapshot) -> bool:

@@ -606,6 +606,12 @@ class QualityRepairExecutionTests(unittest.TestCase):
             self.assertTrue(strm.exists())
 
             service.store.patch_metadata(task.id, {"quality_success_event": True})
+            service.store.record_event(
+                task.id,
+                TaskStage.EMBY_CONFIRMED,
+                TaskStatus.SUCCEEDED,
+                "Emby confirmed",
+            )
             current = service.store.find_task(task.id)
             self.assertEqual(service.cleanup_if_safe(current, "cleanup-ok").status, "cleaned")
             self.assertEqual([call[0] for call in adapter.calls], ["cleanup"])

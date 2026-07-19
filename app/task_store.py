@@ -899,6 +899,7 @@ class TaskStore:
         next_run_at: float | None = None,
         clear_errors: bool = False,
         clear_claim: bool = False,
+        claim_by: str | None = None,
     ) -> TaskSnapshot | None:
         allowed_status_values = {status.value for status in allowed_statuses}
         if not allowed_status_values:
@@ -960,10 +961,55 @@ class TaskStore:
             if clear_claim:
                 updates.append("claimed_by = ''")
                 updates.append("claimed_at = 0")
+            if claim_by is not None:
+                updates.append("claimed_by = ?")
+                values.extend([str(claim_by), now])
+                updates.append("claimed_at = ?")
             values.append(task_id)
             conn.execute(f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?", values)
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return self._snapshot(row) if row else None
+
+    def claim_quality_cleanup(self, task_id: int, run_id: str, now: float | None = None) -> TaskSnapshot | None:
+        """Atomically reserve one cleanup attempt for a quality run."""
+        current_time = time.time() if now is None else float(now)
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+            if row is None or str(row["claimed_by"] or "").strip():
+                return None
+            metadata = self._merge_metadata(row["metadata_json"], {"quality_cleanup_run_id": str(run_id)})
+            conn.execute(
+                """
+                UPDATE tasks
+                SET metadata_json = ?, claimed_by = ?, claimed_at = ?, updated_at = ?
+                WHERE id = ? AND claimed_by = ''
+                """,
+                (metadata, f"quality-cleanup:{run_id}", current_time, current_time, int(task_id)),
+            )
+            if conn.total_changes < 1:
+                return None
+            claimed = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+        return self._snapshot(claimed) if claimed else None
+
+    def has_quality_success_event(self, task_id: int) -> bool:
+        with self._lock, self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM task_events
+                WHERE task_id = ?
+                  AND status = ?
+                  AND stage IN (?, ?)
+                LIMIT 1
+                """,
+                (
+                    int(task_id),
+                    TaskStatus.SUCCEEDED.value,
+                    TaskStage.EMBY_CONFIRMED.value,
+                    TaskStage.CLEANED.value,
+                ),
+            ).fetchone()
+        return row is not None
 
     def enqueue_task(
         self,
