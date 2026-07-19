@@ -4,7 +4,7 @@ import json
 import shutil
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from app.config import MoveConfig, MovePlan, SelfShareConfig, is_relative_to, is_under_any_root, safe_resolve
 from app.media.classify import (
@@ -20,6 +20,10 @@ from app.media.classify import (
 MISSING_SELF_SHARE_SOURCE_REASONS = {"STRM 源目录不存在", "源目录不包含 STRM 文件", "未找到 STRM 源目录"}
 
 
+class UnsafeMediaPathError(ValueError):
+    pass
+
+
 def category_for_self_share_row(row: dict[str, Any]) -> str:
     for key in ("category_final", "category_choice"):
         category = str(row.get(key) or "").strip()
@@ -28,9 +32,14 @@ def category_for_self_share_row(row: dict[str, Any]) -> str:
     return final_category_for_move(row, parse_recognition_json(row))
 
 
-def iter_strm_files(path: Path):
+def iter_strm_files(path: Path, allowed_roots: Iterable[str | Path] | None = None):
+    roots = tuple(safe_resolve(Path(root)) for root in allowed_roots) if allowed_roots is not None else None
+    if roots is not None and not is_under_any_root(path, list(roots)):
+        raise UnsafeMediaPathError(f"path outside allowed roots: {path}")
     try:
         for child in path.rglob("*"):
+            if roots is not None and not is_under_any_root(child, list(roots)):
+                raise UnsafeMediaPathError(f"path outside allowed roots: {child}")
             if child.is_file() and child.suffix.lower() == ".strm":
                 yield child
     except OSError:

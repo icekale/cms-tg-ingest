@@ -134,6 +134,11 @@ class QualityScheduleTests(unittest.TestCase):
 
             self.assertEqual(next_run.replace(tzinfo=None), datetime(2026, 3, 8, 3, 50))
             self.assertEqual(next_run.astimezone(timezone.utc), datetime(2026, 3, 8, 7, 50, tzinfo=timezone.utc))
+            self.assertIsNone(service.run_if_due(datetime(2026, 3, 8, 3, 49, tzinfo=local_timezone)))
+            self.assertEqual(
+                service.run_if_due(datetime(2026, 3, 8, 3, 50, tzinfo=local_timezone)).status,
+                "succeeded",
+            )
 
     def test_run_if_due_claims_one_local_date_across_calls_and_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -212,10 +217,11 @@ class QualityScheduleTests(unittest.TestCase):
             with patch("app.quality_automation.scan_task_quality", side_effect=RuntimeError("scan failed")):
                 summary = service.run_once(
                     "manual-run",
-                    datetime(2026, 7, 20, 2, 50, tzinfo=ZoneInfo("Asia/Shanghai")),
+                    datetime(2099, 7, 20, 2, 50, tzinfo=ZoneInfo("Asia/Shanghai")),
                 )
 
             self.assertEqual(summary.status, "failed")
+            self.assertEqual(summary.finished_at, summary.started_at)
             self.assertEqual(store.get_runtime_state("quality_auto_status")["value"], "failed")
             persisted = json.loads(store.get_runtime_state("quality_auto_last_summary")["value"])
             self.assertEqual(persisted["run_id"], "manual-run")
@@ -457,6 +463,18 @@ class QualityPlanningTests(unittest.TestCase):
             enqueue_task.assert_not_called()
             reprocess_task.assert_not_called()
             self.assertEqual(summary.planned_count, 1)
+
+    def test_run_once_uses_one_task_snapshot_for_scan_and_planning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _ = self.make_service(tmp)
+            with patch.object(
+                service.store,
+                "list_recent_tasks",
+                wraps=service.store.list_recent_tasks,
+            ) as list_recent_tasks:
+                service.run_once("one-snapshot", datetime(2099, 7, 20, 2, 50, tzinfo=ZoneInfo("Asia/Shanghai")))
+
+            self.assertEqual(list_recent_tasks.call_count, 1)
 
 
 if __name__ == "__main__":

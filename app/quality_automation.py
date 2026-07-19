@@ -105,9 +105,7 @@ class QualityAutomation:
         if not self.config.quality_auto_enabled:
             return None
         local_now = self._local_now(now)
-        current_time = (local_now.hour, local_now.minute)
-        configured_time = (self._run_time.hour, self._run_time.minute)
-        if current_time < configured_time:
+        if local_now < self._scheduled_on(local_now, local_now.date()):
             return None
 
         run_date = local_now.date().isoformat()
@@ -152,7 +150,12 @@ class QualityAutomation:
         try:
             limit = max(1, int(self.config.quality_auto_max_tasks))
             tasks = self.store.list_recent_tasks(limit=limit)
-            issues = scan_task_quality(self.store, limit=limit, allowed_roots=self.allowed_roots)
+            issues = scan_task_quality(
+                self.store,
+                limit=limit,
+                allowed_roots=self.allowed_roots,
+                tasks=tasks,
+            )
             plans = self._plan(tasks, issues)
             finished_local = local_now if injected_now else self._local_now(datetime.now(self._timezone))
             summary = QualityRunSummary(
@@ -167,11 +170,12 @@ class QualityAutomation:
                 plans=tuple(plans),
             )
         except Exception as exc:
+            finished_local = local_now if injected_now else self._local_now(datetime.now(self._timezone))
             summary = QualityRunSummary(
                 run_id=run_id,
                 status="failed",
                 started_at=started_at,
-                finished_at=self._local_now(datetime.now(self._timezone)).isoformat(),
+                finished_at=finished_local.isoformat(),
                 failed_count=1,
                 error=f"{type(exc).__name__}: {exc}",
             )

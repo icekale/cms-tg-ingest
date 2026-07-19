@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.models import TaskStage, TaskStatus
 from app.quality import QualityIssue, inspect_task_files, format_task_quality_report, scan_task_quality
@@ -74,6 +75,31 @@ class TaskQualityTests(unittest.TestCase):
 
             self.assertEqual(missing[0].code, "missing_dest")
             self.assertEqual(empty[0].code, "missing_strm")
+
+    def test_scan_rejects_strm_symlink_target_outside_allowed_root_before_reading(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            allowed_root = root / "library"
+            dest = allowed_root / "Movie"
+            outside = root / "outside" / "movie.strm"
+            dest.mkdir(parents=True)
+            outside.parent.mkdir()
+            outside.write_text("http://cms/d/outside.mkv", encoding="utf-8")
+            (dest / "movie.strm").symlink_to(outside)
+            store = TaskStore(root / "tasks.db")
+            task = store.upsert_task("symlink", "", "https://115cdn.com/s/symlink")
+            store.record_event(
+                task.id,
+                TaskStage.MOVED,
+                TaskStatus.SUCCEEDED,
+                "moved",
+                metadata_patch={"dest_path": str(dest), "own_share_code": "own"},
+            )
+
+            with patch.object(Path, "read_text", side_effect=AssertionError("unsafe STRM was read")):
+                issues = scan_task_quality(store, allowed_roots=[allowed_root])
+
+            self.assertEqual([issue.code for issue in issues], ["unsafe_metadata"])
 
 
 

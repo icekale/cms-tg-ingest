@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .config import is_under_any_root
-from .media.strm import iter_strm_files
+from .media.strm import UnsafeMediaPathError, iter_strm_files
 from .models import TaskSnapshot
 from .task_store import TaskStore
 
@@ -34,7 +34,10 @@ def inspect_task_files(
         return [QualityIssue("unsafe_metadata", "目标路径不在允许根目录", str(dest))]
     if not dest.exists():
         return [QualityIssue("missing_dest", "目标目录不存在", str(dest))]
-    files = sorted(iter_strm_files(dest))
+    try:
+        files = sorted(iter_strm_files(dest, allowed_roots=allowed_roots))
+    except UnsafeMediaPathError:
+        return [QualityIssue("unsafe_metadata", "目标路径不在允许根目录", str(dest))]
     if not files:
         return [QualityIssue("missing_strm", "目标目录没有 STRM 文件", str(dest))]
     issues: list[QualityIssue] = []
@@ -53,10 +56,12 @@ def scan_task_quality(
     store: TaskStore,
     limit: int = 100,
     allowed_roots: Iterable[str | Path] | None = None,
+    tasks: Iterable[TaskSnapshot] | None = None,
 ) -> list[QualityIssue]:
     allowed_roots = tuple(allowed_roots) if allowed_roots is not None else None
     issues: list[QualityIssue] = []
-    for task in store.list_recent_tasks(limit=limit):
+    task_rows = list(tasks) if tasks is not None else store.list_recent_tasks(limit=limit)
+    for task in task_rows:
         dest_path = str(task.metadata.get("dest_path") or "").strip()
         if not dest_path:
             continue
