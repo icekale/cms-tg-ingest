@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from app.config import Config
 from app.models import TaskStage, TaskStatus
-from app.quality import scan_task_quality
+from app.quality import QualityIssue, scan_task_quality
 from app.quality_automation import QualityAutomation, QualityRepairPlan, QualityRunSummary
 from app.task_store import TaskStore
 
@@ -475,6 +475,191 @@ class QualityPlanningTests(unittest.TestCase):
                 service.run_once("one-snapshot", datetime(2099, 7, 20, 2, 50, tzinfo=ZoneInfo("Asia/Shanghai")))
 
             self.assertEqual(list_recent_tasks.call_count, 1)
+
+
+class FakeQualityRepairAdapter:
+    def __init__(self):
+        self.calls = []
+        self.release_restore = None
+
+    def restore(self, task, run_id):
+        self.calls.append(("restore", task.id, run_id))
+        if self.release_restore is not None:
+            self.release_restore.wait(timeout=5)
+        return True
+
+    def reprocess(self, task, run_id):
+        self.calls.append(("reprocess", task.id, run_id))
+        return True
+
+    def rebuild_invalid_share(self, task, run_id):
+        self.calls.append(("invalid_share", task.id, run_id))
+        return True
+
+    def cleanup(self, task, run_id):
+        self.calls.append(("cleanup", task.id, run_id))
+        return True
+
+
+class QualityRepairExecutionTests(unittest.TestCase):
+    def make_service(self, tmp, adapter=None):
+        library = Path(tmp) / "library"
+        config = Config(
+            tg_bot_token="token",
+            tg_allowed_chat_id="chat",
+            cms_base_url="http://cms",
+            cms_username="user",
+            cms_password="pass",
+            task_db_path=str(Path(tmp) / "tasks.db"),
+            quality_auto_enabled=True,
+        )
+        return QualityAutomation(
+            TaskStore(Path(tmp) / "tasks.db"),
+            config,
+            allowed_roots=[library],
+            repair_adapter=adapter,
+        ), library
+
+    @staticmethod
+    def add_task(store, share_code, dest, **metadata):
+        task = store.upsert_task(share_code, "", f"https://115cdn.com/s/{share_code}")
+        return store.record_event(
+            task.id,
+            TaskStage.MOVED,
+            TaskStatus.SUCCEEDED,
+            "moved",
+            metadata_patch={"dest_path": str(dest), "own_share_code": "own", **metadata},
+        )
+
+    def test_restore_and_reprocess_use_atomic_existing_task_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = FakeQualityRepairAdapter()
+            service, library = self.make_service(tmp, adapter)
+            missing = self.add_task(service.store, "missing", library / "missing")
+            direct_dest = library / "direct"
+            direct_dest.mkdir(parents=True)
+            (direct_dest / "movie.strm").write_text("https://cms/d/direct.mkv", encoding="utf-8")
+            direct = self.add_task(service.store, "direct", direct_dest)
+
+            summary = service.run_once("repair-run", datetime(2099, 7, 20, 2, 50, tzinfo=ZoneInfo("Asia/Shanghai")))
+
+            self.assertEqual(summary.status, "succeeded")
+            self.assertEqual(service.store.find_task(missing.id).current_stage, TaskStage.EMBY_CONFIRMED)
+            self.assertEqual(service.store.find_task(direct.id).current_stage, TaskStage.RECEIVED)
+            self.assertEqual(service.store.find_task(direct.id).metadata["force_reprocess"], True)
+            self.assertEqual(
+                sorted(call[0] for call in adapter.calls),
+                ["reprocess", "restore"],
+            )
+
+    def test_invalid_share_requires_explicit_invalid_status_and_risk_is_not_rebuilt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = FakeQualityRepairAdapter()
+            service, library = self.make_service(tmp, adapter)
+            invalid = self.add_task(service.store, "invalid", library / "invalid", invalid_share_status="invalid")
+            unknown = self.add_task(service.store, "unknown", library / "unknown", invalid_share_status="unknown")
+            risk = self.add_task(
+                service.store,
+                "risk",
+                library / "risk",
+                p115_risk_controlled=True,
+            )
+            with patch(
+                "app.quality_automation.scan_task_quality",
+                return_value=[
+                    QualityIssue("invalid_share", "share unavailable", task_id=invalid.id),
+                    QualityIssue("invalid_share", "share unavailable", task_id=unknown.id),
+                    QualityIssue("direct_strm", "direct", task_id=risk.id),
+                ],
+            ):
+                summary = service.run_once("invalid-run")
+
+            plans = {plan.task_id: plan for plan in summary.plans}
+            self.assertEqual(plans[invalid.id].execution_status, "queued")
+            self.assertEqual(plans[unknown.id].execution_status, "skipped")
+            self.assertEqual(plans[unknown.id].reason, "unknown_share_status")
+            self.assertEqual(plans[risk.id].execution_status, "skipped")
+            self.assertEqual(plans[risk.id].reason, "risk_control")
+            self.assertEqual([call[0] for call in adapter.calls], ["invalid_share"])
+
+    def test_cleanup_requires_all_positive_gates_and_preserves_files_on_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = FakeQualityRepairAdapter()
+            service, library = self.make_service(tmp, adapter)
+            destination = library / "movie"
+            destination.mkdir(parents=True)
+            strm = destination / "movie.strm"
+            strm.write_text("https://cms/s/own_1212_movie.mkv", encoding="utf-8")
+            task = self.add_task(
+                service.store,
+                "cleanup",
+                destination,
+                own_share_available=True,
+                own_share_receive_code="1212",
+                emby_status="confirmed",
+                emby_match_count=1,
+            )
+
+            blocked = service.cleanup_if_safe(task, "cleanup-blocked")
+            self.assertEqual(blocked.status, "blocked_cleanup")
+            self.assertEqual(adapter.calls, [])
+            self.assertTrue(strm.exists())
+
+            service.store.patch_metadata(task.id, {"quality_success_event": True})
+            current = service.store.find_task(task.id)
+            self.assertEqual(service.cleanup_if_safe(current, "cleanup-ok").status, "cleaned")
+            self.assertEqual([call[0] for call in adapter.calls], ["cleanup"])
+
+    def test_cleanup_does_not_run_when_emby_confirmation_is_not_unique(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = FakeQualityRepairAdapter()
+            service, library = self.make_service(tmp, adapter)
+            destination = library / "movie"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/s/own_1212_movie.mkv", encoding="utf-8")
+            task = self.add_task(
+                service.store,
+                "emby-failure",
+                destination,
+                own_share_available=True,
+                emby_status="failed",
+                emby_match_count=0,
+            )
+
+            result = service.cleanup_if_safe(task, "emby-failure")
+
+            self.assertEqual(result.status, "blocked_cleanup")
+            self.assertEqual(result.reason, "emby_not_confirmed_unique")
+            self.assertEqual(adapter.calls, [])
+
+    def test_two_quality_owners_cannot_execute_same_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first_adapter = FakeQualityRepairAdapter()
+            second_adapter = FakeQualityRepairAdapter()
+            first, library = self.make_service(tmp, first_adapter)
+            second, _ = self.make_service(tmp, second_adapter)
+            destination = library / "movie"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/s/own_1212_movie.mkv", encoding="utf-8")
+            task = self.add_task(first.store, "duplicate-owner", destination)
+            plan = QualityRepairPlan(task.id, "reprocess", "direct_strm", ("direct_strm",))
+            first_adapter.release_restore = Event()
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first_future = executor.submit(first.execute_plan, plan, "owner-one")
+                for _ in range(50):
+                    current = first.store.find_task(task.id)
+                    if current and current.status == TaskStatus.RUNNING:
+                        break
+                    Event().wait(0.01)
+                second_result = second.execute_plan(plan, "owner-two")
+                first_adapter.release_restore.set()
+                first_result = first_future.result(timeout=5)
+
+            self.assertEqual(first_result.execution_status, "queued")
+            self.assertEqual(second_result.execution_status, "skipped")
+            self.assertEqual(second_result.reason, "task_busy")
+
 
 
 if __name__ == "__main__":

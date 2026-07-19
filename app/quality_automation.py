@@ -10,7 +10,7 @@ from typing import Iterable
 from zoneinfo import ZoneInfo
 
 from .config import Config, MoveConfig, is_under_any_root, safe_resolve
-from .models import TaskSnapshot, TaskStatus
+from .models import TaskSnapshot, TaskStage, TaskStatus
 from .quality import QualityIssue, scan_task_quality
 from .task_store import TaskStore
 
@@ -22,6 +22,13 @@ class QualityRepairPlan:
     reason: str
     issue_codes: tuple[str, ...] = ()
     title: str = ""
+    execution_status: str = "planned"
+
+
+@dataclass(frozen=True)
+class QualityCleanupResult:
+    status: str
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -52,6 +59,7 @@ class QualityAutomation:
         *,
         move_config: MoveConfig | None = None,
         allowed_roots: Iterable[str | Path] | None = None,
+        repair_adapter: object | None = None,
     ) -> None:
         self.store = store
         self.config = config
@@ -64,6 +72,7 @@ class QualityAutomation:
         else:
             roots = list(allowed_roots)
         self.allowed_roots = tuple(safe_resolve(Path(root)) for root in roots)
+        self.repair_adapter = repair_adapter
 
     @staticmethod
     def _parse_run_time(value: str) -> datetime_time:
@@ -157,6 +166,11 @@ class QualityAutomation:
                 tasks=tasks,
             )
             plans = self._plan(tasks, issues)
+            if self.repair_adapter is not None:
+                plans = [
+                    self.execute_plan(plan, run_id) if plan.action != "skip" else plan
+                    for plan in plans
+                ]
             finished_local = local_now if injected_now else self._local_now(datetime.now(self._timezone))
             summary = QualityRunSummary(
                 run_id=run_id,
@@ -166,6 +180,7 @@ class QualityAutomation:
                 issue_count=len(issues),
                 planned_count=sum(plan.action != "skip" for plan in plans),
                 skipped_count=sum(plan.action == "skip" for plan in plans),
+                failed_count=sum(plan.execution_status == "failed" for plan in plans),
                 scanned_count=len(tasks),
                 plans=tuple(plans),
             )
@@ -234,7 +249,16 @@ class QualityAutomation:
                 continue
 
             issue_codes = tuple(sorted({issue.code for issue in task_issues}))
-            if any(code in {"direct_strm", "unexpected_strm"} for code in issue_codes):
+            if str(task.metadata.get("p115_risk_controlled") or "").lower() in {"1", "true", "yes"}:
+                plans.append(self._skip_plan(task, "risk_control", task_issues))
+                continue
+            if "invalid_share" in issue_codes:
+                invalid_status = str(task.metadata.get("invalid_share_status") or "").strip().lower()
+                if invalid_status != "invalid":
+                    plans.append(self._skip_plan(task, "unknown_share_status", task_issues))
+                    continue
+                action = "invalid_share"
+            elif any(code in {"direct_strm", "unexpected_strm"} for code in issue_codes):
                 action = "reprocess"
             elif any(code in {"missing_dest", "missing_strm"} for code in issue_codes):
                 action = "restore"
@@ -264,6 +288,103 @@ class QualityAutomation:
                 )
         return plans
 
+    def execute_plan(self, plan: QualityRepairPlan, run_id: str) -> QualityRepairPlan:
+        """Atomically reserve a task before handing repair work to an adapter."""
+        if plan.action == "skip":
+            return plan
+        task = self.store.find_task(plan.task_id)
+        if task is None:
+            return replace(plan, execution_status="skipped", reason="task_missing")
+        if task.status == TaskStatus.RUNNING or task.claimed_by.strip():
+            return replace(plan, execution_status="skipped", reason="task_busy")
+        if str(task.metadata.get("p115_risk_controlled") or "").lower() in {"1", "true", "yes"}:
+            return replace(plan, execution_status="skipped", reason="risk_control")
+
+        target_stage = TaskStage.EMBY_CONFIRMED if plan.action == "restore" else TaskStage.RECEIVED
+        metadata = {
+            "quality_run_id": str(run_id),
+            "quality_repair_action": plan.action,
+            "quality_repair_reason": plan.reason,
+        }
+        if plan.action in {"reprocess", "invalid_share"}:
+            metadata["force_reprocess"] = True
+        reserved = self.store.compare_and_set_transition(
+            task.id,
+            task.current_stage,
+            {TaskStatus.PENDING, TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.NEEDS_ACTION},
+            require_unclaimed=True,
+            target_stage=target_stage,
+            target_status=TaskStatus.RUNNING,
+            target_event_message=f"自动巡检已排队：{plan.action}",
+            metadata_patch=metadata,
+            next_run_at=time.time(),
+            clear_errors=True,
+        )
+        if reserved is None:
+            return replace(plan, execution_status="skipped", reason="task_busy")
+
+        handler_name = "rebuild_invalid_share" if plan.action == "invalid_share" else plan.action
+        handler = getattr(self.repair_adapter, handler_name, None) if self.repair_adapter is not None else None
+        if not callable(handler):
+            return replace(plan, execution_status="queued")
+        try:
+            if handler(reserved, str(run_id)) is False:
+                return replace(plan, execution_status="failed", reason="repair_rejected")
+        except Exception as exc:
+            try:
+                self.store.record_event(
+                    reserved.id,
+                    target_stage,
+                    TaskStatus.FAILED,
+                    f"自动巡检修复失败：{exc}",
+                    error_type="quality_repair_failed",
+                    error_summary=str(exc),
+                    error_detail=repr(exc),
+                    clear_claim=True,
+                )
+            except Exception:
+                pass
+            return replace(plan, execution_status="failed", reason="repair_failed")
+        return replace(plan, execution_status="queued")
+
+    def cleanup_if_safe(self, task: TaskSnapshot, run_id: str) -> QualityCleanupResult:
+        """Run cleanup only after the local, share, Emby, and event gates pass."""
+        metadata = task.metadata
+        if not metadata.get("own_share_available"):
+            return QualityCleanupResult("blocked_cleanup", "own_share_not_available")
+        if str(metadata.get("emby_status") or "").lower() != "confirmed" or metadata.get("emby_match_count") != 1:
+            return QualityCleanupResult("blocked_cleanup", "emby_not_confirmed_unique")
+        if not metadata.get("quality_success_event"):
+            return QualityCleanupResult("blocked_cleanup", "success_event_missing")
+        destination_text = str(metadata.get("dest_path") or "").strip()
+        if not destination_text or not self._path_allowed(destination_text):
+            return QualityCleanupResult("blocked_cleanup", "destination_not_allowed")
+        destination = safe_resolve(Path(destination_text))
+        if not destination.is_dir():
+            return QualityCleanupResult("blocked_cleanup", "destination_missing")
+        own_share_code = str(metadata.get("own_share_code") or "").strip()
+        receive_code = str(metadata.get("own_share_receive_code") or "1212").strip() or "1212"
+        marker = f"/s/{own_share_code}_{receive_code}_"
+        strm_files = list(destination.rglob("*.strm")) + list(destination.rglob("*.STRM"))
+        if not own_share_code or not strm_files:
+            return QualityCleanupResult("blocked_cleanup", "share_strm_missing")
+        for path in strm_files:
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return QualityCleanupResult("blocked_cleanup", "share_strm_unreadable")
+            if "/d/" in content or marker not in content:
+                return QualityCleanupResult("blocked_cleanup", "share_strm_not_current")
+        handler = getattr(self.repair_adapter, "cleanup", None) if self.repair_adapter is not None else None
+        if not callable(handler):
+            return QualityCleanupResult("blocked_cleanup", "cleanup_adapter_missing")
+        try:
+            if handler(task, str(run_id)) is False:
+                return QualityCleanupResult("blocked_cleanup", "cleanup_rejected")
+        except Exception:
+            return QualityCleanupResult("blocked_cleanup", "cleanup_failed")
+        return QualityCleanupResult("cleaned")
+
     def _safe_metadata(self, task: TaskSnapshot) -> bool:
         dest_path = str(task.metadata.get("dest_path") or "").strip()
         if not dest_path or not self._path_allowed(dest_path):
@@ -292,4 +413,5 @@ class QualityAutomation:
             reason=reason,
             issue_codes=tuple(sorted({issue.code for issue in issues or []})),
             title=task.title,
+            execution_status="skipped",
         )
