@@ -45,7 +45,11 @@ def parse_quality_auto_timezone(value: str) -> str:
 
 
 def positive_int_env(name: str, default: int) -> int:
-    value = int(os.environ.get(name, str(default)))
+    raw_value = os.environ.get(name, str(default))
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive integer, got {raw_value!r}") from exc
     if value <= 0:
         raise ValueError(f"{name} must be greater than zero")
     return value

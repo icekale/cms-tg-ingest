@@ -76,3 +76,12 @@ class QualityAutomationConfigTests(unittest.TestCase):
                     with self.subTest(name=name, value=value), patch.dict(os.environ, env, clear=True):
                         with self.assertRaises(ValueError):
                             Config.from_env()
+
+    def test_quality_automation_rejects_non_integer_limits_with_clear_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("QUALITY_AUTO_MAX_TASKS", "QUALITY_AUTO_115_CHECK_LIMIT"):
+                env = self.required_env(tmp)
+                env[name] = "not-a-number"
+                with self.subTest(name=name), patch.dict(os.environ, env, clear=True):
+                    with self.assertRaisesRegex(ValueError, rf"{name} must be a positive integer"):
+                        Config.from_env()
