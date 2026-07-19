@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import http.client
 import time
 import urllib.error
 import urllib.parse
@@ -10,6 +11,7 @@ from pathlib import Path
 
 _RETRYABLE_HTTP_STATUS = {408, 425, 429}
 _MAX_SAFE_GET_ATTEMPTS = 2
+_TRANSIENT_NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, http.client.RemoteDisconnected)
 
 
 def _safe_get_retryable(req: urllib.request.Request, error: BaseException) -> bool:
@@ -17,7 +19,7 @@ def _safe_get_retryable(req: urllib.request.Request, error: BaseException) -> bo
         return False
     if isinstance(error, urllib.error.HTTPError):
         return error.code in _RETRYABLE_HTTP_STATUS or error.code >= 500
-    return isinstance(error, (urllib.error.URLError, TimeoutError))
+    return isinstance(error, _TRANSIENT_NETWORK_ERRORS)
 
 
 def _read_response(req: urllib.request.Request, timeout: int) -> str:
@@ -32,7 +34,7 @@ def _read_response(req: urllib.request.Request, timeout: int) -> str:
                 time.sleep(0.2)
                 continue
             raise
-        except (urllib.error.URLError, TimeoutError) as exc:
+        except _TRANSIENT_NETWORK_ERRORS as exc:
             if attempt + 1 < attempts and _safe_get_retryable(req, exc):
                 time.sleep(0.2)
                 continue
@@ -60,6 +62,8 @@ class HttpJson:
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Cannot reach {url}: {exc.reason}") from exc
         except TimeoutError as exc:
+            raise RuntimeError(f"Cannot reach {url}: {exc}") from exc
+        except http.client.RemoteDisconnected as exc:
             raise RuntimeError(f"Cannot reach {url}: {exc}") from exc
         if not raw.strip():
             return {}
@@ -98,6 +102,8 @@ class FormHttp:
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Cannot reach {url}: {exc.reason}") from exc
         except TimeoutError as exc:
+            raise RuntimeError(f"Cannot reach {url}: {exc}") from exc
+        except http.client.RemoteDisconnected as exc:
             raise RuntimeError(f"Cannot reach {url}: {exc}") from exc
         try:
             return json.loads(raw)

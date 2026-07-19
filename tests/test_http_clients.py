@@ -1,3 +1,4 @@
+import http.client
 import unittest
 from unittest.mock import patch
 from urllib.error import URLError
@@ -20,6 +21,20 @@ class FakeResponse:
 
 
 class HttpClientTests(unittest.TestCase):
+    def test_json_get_retries_remote_disconnect(self):
+        with (
+            patch(
+                "app.clients.http.urllib.request.urlopen",
+                side_effect=[http.client.RemoteDisconnected("remote closed"), FakeResponse('{"ok": true}')],
+            ) as urlopen,
+            patch("app.clients.http.time.sleep") as sleep,
+        ):
+            result = HttpJson(timeout=1).request("https://example.test/getUpdates")
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once()
+
     def test_json_get_retries_one_transient_network_error(self):
         with (
             patch("app.clients.http.urllib.request.urlopen", side_effect=[URLError("temporary"), FakeResponse('{"ok": true}')]) as urlopen,

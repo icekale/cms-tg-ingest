@@ -1127,6 +1127,7 @@ class TelegramClient:
                 "handshake operation timed out",
                 "read operation timed out",
                 "connection reset by peer",
+                "remote end closed",
                 "network unreachable",
             )
         )
