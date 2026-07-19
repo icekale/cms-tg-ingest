@@ -180,6 +180,33 @@ class DoctorConfigTests(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertIn("TASK_WORKER_INTERVAL_SECONDS must be a positive number", report.to_text())
 
+    def test_self_share_cloud_download_requires_safe_poll_and_timeout(self):
+        env = {
+            "TG_BOT_TOKEN": "123456:secret-token",
+            "TG_ALLOWED_CHAT_ID": "464100862",
+            "CMS_BASE_URL": "http://cms:9527",
+            "CMS_USERNAME": "user",
+            "CMS_PASSWORD": "secret-password",
+            "DB_PATH": "/data/submissions.db",
+            "TASK_DB_PATH": "/data/tasks.db",
+            "WORKFLOW_MODE": "self_share_sync",
+            "TASK_ENGINE_ENABLED": "true",
+            "P115_COOKIE_PATH": "/config/115-cookies.txt",
+            "SELF_SHARE_RECEIVE_CID": "pending-cid",
+            "SELF_SHARE_STRM_ROOT": "/mnt/share",
+            "STRM_SOURCE_ROOTS": "/mnt/share",
+            "SELF_SHARE_CLOUD_POLL_SECONDS": "5",
+            "SELF_SHARE_CLOUD_TIMEOUT_SECONDS": "0",
+        }
+        filesystem = doctor.MemoryFilesystem(existing_paths={"/data", "/config/115-cookies.txt", "/mnt/share"})
+
+        report = doctor.run_checks(env=env, filesystem=filesystem)
+
+        self.assertFalse(report.ok)
+        text = report.to_text()
+        self.assertIn("SELF_SHARE_CLOUD_POLL_SECONDS must be at least 30 seconds", text)
+        self.assertIn("SELF_SHARE_CLOUD_TIMEOUT_SECONDS must be a positive number", text)
+
     def test_audit_db_reports_tmdb_mismatch_direct_and_unexpected_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

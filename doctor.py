@@ -137,6 +137,19 @@ def _check_optional_env(env: Mapping[str, str]) -> CheckItem:
         warnings.append("P115_COOKIE_PATH is required for self_share_sync")
     if workflow == "self_share_sync" and not _env_value(env, "SELF_SHARE_RECEIVE_CID"):
         warnings.append("SELF_SHARE_RECEIVE_CID is required for self_share_sync")
+    if workflow == "self_share_sync":
+        try:
+            cloud_poll_seconds = int(_env_value(env, "SELF_SHARE_CLOUD_POLL_SECONDS") or "30")
+            if cloud_poll_seconds < 30:
+                warnings.append("SELF_SHARE_CLOUD_POLL_SECONDS must be at least 30 seconds")
+        except ValueError:
+            warnings.append("SELF_SHARE_CLOUD_POLL_SECONDS must be an integer")
+        try:
+            cloud_timeout_seconds = int(_env_value(env, "SELF_SHARE_CLOUD_TIMEOUT_SECONDS") or "86400")
+            if cloud_timeout_seconds <= 0:
+                warnings.append("SELF_SHARE_CLOUD_TIMEOUT_SECONDS must be a positive number")
+        except ValueError:
+            warnings.append("SELF_SHARE_CLOUD_TIMEOUT_SECONDS must be a positive number")
     if _env_bool(env, "OPENAI_CLASSIFY_ENABLED") and not _env_value(env, "OPENAI_API_KEY"):
         warnings.append("OPENAI_API_KEY is required when OpenAI fallback is enabled")
     if _env_value(env, "EMBY_BASE_URL") and not _env_value(env, "EMBY_API_KEY"):

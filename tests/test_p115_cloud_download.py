@@ -50,6 +50,26 @@ class P115CloudDownloadTests(unittest.TestCase):
         self.assertEqual(normalize_cloud_status({"status": 12}), "running")
         self.assertEqual(normalize_cloud_status({"status": 9}), "failed")
 
+    def test_cloud_download_status_matches_task_id_in_task_list(self):
+        http = FakeHttp([
+            {
+                "state": True,
+                "data": {
+                    "list": [
+                        {"task_id": "other", "status": 11, "cid": "wrong", "pid": TARGET_CID},
+                        {"task_id": "task-1", "status": 12, "cid": "folder", "pid": TARGET_CID},
+                    ]
+                },
+            }
+        ])
+        client = P115WebClient("UID=1", http=http, timeout=3)
+
+        result = client.cloud_download_status({"task_id": "task-1"})
+
+        self.assertEqual(result["task_id"], "task-1")
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(result["file_id"], "folder")
+
     def test_cloud_download_output_rejects_wrong_parent_cid(self):
         with self.assertRaises(RuntimeError):
             validate_cloud_output({"file_id": "folder", "parent_id": "999"}, TARGET_CID)

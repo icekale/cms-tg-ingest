@@ -100,8 +100,21 @@ def normalize_cloud_status(item: dict[str, Any]) -> str:
     return "unknown"
 
 
-def _cloud_task_item(resp: dict[str, Any]) -> dict[str, Any]:
+def _cloud_task_item(resp: dict[str, Any], identity: dict[str, Any] | None = None) -> dict[str, Any]:
     data = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+    items = iter_items(data)
+    if items:
+        if identity:
+            expected_info_hash = str(identity.get("info_hash") or "").strip().lower()
+            expected_task_id = str(identity.get("task_id") or "").strip()
+            for item in items:
+                candidate = _cloud_identity(item)
+                if expected_info_hash and candidate["info_hash"] == expected_info_hash:
+                    return dict(item)
+                if expected_task_id and candidate["task_id"] == expected_task_id:
+                    return dict(item)
+            raise RuntimeError("115 cloud download task identity was not found")
+        return dict(items[0])
     for key in ("task", "item", "record"):
         if isinstance(data.get(key), dict):
             return dict(data[key])
@@ -455,7 +468,7 @@ class P115WebClient:
                 params={"page": 1, "page_size": 30},
             )
         self._ensure_state(resp, "115 cloud download status failed")
-        item = _cloud_task_item(resp)
+        item = _cloud_task_item(resp, identity=identity)
         normalized_identity = _cloud_identity(item)
         return {
             **normalized_identity,

@@ -1,10 +1,12 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 import bridge
 from app.config import MoveConfig, SelfShareConfig
 from app.models import TaskStage, TaskStatus
+from app.task_runner import TaskRunner
 from app.task_store import TaskStore
 from app.workflows.self_share import BridgeSelfShareTaskWorkflow
 
@@ -81,6 +83,90 @@ class FakeSubmissionStore:
     def find_by_key(self, key):
         row = self.rows.get((key.share_code, key.receive_code))
         return dict(row) if row else None
+
+
+class PipelineP115(FakeCloudP115):
+    def __init__(self):
+        super().__init__([])
+        self.folder = {
+            "file_id": "organized-folder",
+            "file_name": "Example Movie (2020) [tmdb=123]",
+            "parent_id": "movie-parent",
+            "category": "华语电影",
+        }
+        self.created_shares = []
+        self.deleted = []
+        self.renamed = []
+
+    def cloud_download_status(self, identity):
+        self.status_calls.append(dict(identity))
+        return {
+            "status": 11,
+            "file_id": "cloud-folder",
+            "parent_id": TARGET_CID,
+            "file_name": "Example.mkv",
+        }
+
+    def find_organized_folder(self, recognition, title, **kwargs):
+        return dict(self.folder)
+
+    def rename_file(self, file_id, file_name):
+        self.renamed.append((str(file_id), str(file_name)))
+        return {"state": True}
+
+    def create_long_share(self, file_id):
+        self.created_shares.append(str(file_id))
+        return {
+            "share_code": "owncode",
+            "receive_code": "ownpwd",
+            "share_url": "https://115.com/s/owncode?password=ownpwd",
+        }
+
+    def inspect_share(self, share_code, receive_code):
+        return {"available": True, "share_state": "0", "have_vio_file": False}
+
+    def delete_file(self, file_id):
+        self.deleted.append(str(file_id))
+        return {"state": True}
+
+
+class PipelineCms(FakeCms):
+    def __init__(self, source_root):
+        super().__init__()
+        self.source_root = Path(source_root)
+        self.alias_name = ""
+        self.share_sync_calls = []
+        self.plain_share_down_calls = []
+
+    def add_share115_sync_task(self, own_code, own_pwd, cid, local_path):
+        self.share_sync_calls.append((own_code, own_pwd, cid, local_path))
+        self.assert_source_folder = self.source_root / self.alias_name
+        self.assert_source_folder.mkdir(parents=True, exist_ok=True)
+        (self.assert_source_folder / "Example Movie.strm").write_text(
+            f"https://115.com/s/{own_code}_{own_pwd}_Example.mkv",
+            encoding="utf-8",
+        )
+
+
+class PipelineEmby:
+    enabled = True
+
+    def __init__(self):
+        self.item = None
+        self.refreshed = []
+
+    def refresh_library_for_path(self, path):
+        self.refreshed.append(str(path))
+        return "电影库"
+
+    def find_item_by_tmdb(self, tmdb_id):
+        return self.item
+
+    def recent_items(self, limit=30):
+        return [self.item] if self.item else []
+
+    def library_name_for_item(self, item):
+        return item.get("LibraryName")
 
 
 def make_workflow(p115, store):
@@ -171,6 +257,96 @@ class CloudWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome.value, "failed")
             self.assertEqual(result.error_type, "cloud_download_timeout")
             self.assertEqual(submissions.rows, {})
+
+    def test_cloud_source_completes_authoritative_self_share_pipeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            library_root = root / "library"
+            share_root.mkdir()
+            task_store = TaskStore(root / "tasks.db")
+            submissions = bridge.SubmissionStore(root / "submissions.db")
+            p115 = PipelineP115()
+            cms = PipelineCms(share_root)
+            emby = PipelineEmby()
+            cleanup = p115
+            config = SelfShareConfig(
+                enabled=True,
+                strm_root=share_root,
+                cms_local_path="/media/share",
+                cms_cid="0",
+                excluded_parent_ids=set(),
+                cleanup_after_emby=True,
+                parent_cid_category_map={"movie-parent": "华语电影"},
+                cloud_poll_seconds=30,
+                cloud_timeout_seconds=3600,
+                auto_organize_retry_seconds=30,
+            )
+            move_config = MoveConfig(
+                source_roots=[share_root],
+                library_roots={"华语电影": library_root},
+                conflict_policy="merge",
+                stable_seconds=0,
+            )
+            workflow = BridgeSelfShareTaskWorkflow(
+                cms=cms,
+                telegram=FakeTelegram(),
+                chat_id="464100862",
+                store=submissions,
+                task_store=task_store,
+                p115=p115,
+                self_share_config=config,
+                move_config=move_config,
+                emby=emby,
+                openai_classifier=None,
+                tmdb_resolver=None,
+                cleanup_client=cleanup,
+                receive_cid=TARGET_CID,
+            )
+            task = task_store.upsert_cloud_task("ed2k:hash:10", ED2K, title="Example.mkv")
+            task_store.enqueue_task(task.id, TaskStage.CLOUD_DOWNLOADING, next_run_at=0)
+            clock = [time.time()]
+            runner = TaskRunner(
+                task_store,
+                workflow,
+                worker_id="cloud-pipeline-test",
+                interval_seconds=1,
+                now=lambda: clock[0],
+            )
+
+            for _ in range(30):
+                current = task_store.find_task(task.id)
+                if current.current_stage == TaskStage.SHARE_SYNC_SUBMITTED and not cms.alias_name:
+                    cms.alias_name = p115.renamed[-1][1]
+                runner.run_once()
+                current = task_store.find_task(task.id)
+                self.assertIsNotNone(current)
+                if current.current_stage == TaskStage.EMBY_CONFIRMED and current.status == TaskStatus.PENDING:
+                    row = submissions.find_by_id(current.metadata["submission_id"])
+                    emby.item = {
+                        "Id": "emby-123",
+                        "Name": "Example Movie",
+                        "Path": row["dest_path"],
+                        "ProviderIds": {"Tmdb": "123"},
+                        "LibraryName": "电影库",
+                    }
+                if current.status == TaskStatus.SUCCEEDED and current.current_stage == TaskStage.CLEANED:
+                    break
+                clock[0] = max(clock[0] + 0.1, float(current.next_run_at or clock[0]) + 0.1)
+
+            final = task_store.find_task(task.id)
+            row = submissions.find_by_id(final.metadata["submission_id"])
+            self.assertEqual(final.current_stage, TaskStage.CLEANED)
+            self.assertEqual(final.status, TaskStatus.SUCCEEDED)
+            self.assertEqual(cms.plain_share_down_calls, [])
+            self.assertEqual(len(cms.share_sync_calls), 1)
+            self.assertEqual(p115.created_shares, ["organized-folder"])
+            self.assertEqual(p115.deleted, ["organized-folder"])
+            self.assertEqual(row["cleanup_status"], "deleted")
+            self.assertEqual(row["emby_parent"], "电影库")
+            self.assertTrue(Path(row["dest_path"]).is_dir())
+            self.assertIn("/s/owncode_ownpwd_", next(Path(row["dest_path"]).glob("*.strm")).read_text(encoding="utf-8"))
+            self.assertEqual(len(emby.refreshed), 1)
 
 
 class CloudIntakeTests(unittest.TestCase):
