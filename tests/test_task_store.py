@@ -1,6 +1,8 @@
 import sqlite3
+import threading
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -306,6 +308,29 @@ class TaskStoreTests(unittest.TestCase):
 
             self.assertTrue(first_store.claim_quality_run("2026-07-19", now=100.0))
             self.assertFalse(second_store.claim_quality_run("2026-07-19", now=200.0))
+
+    def test_claim_quality_run_allows_only_one_concurrent_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "tasks.db"
+            first_store = TaskStore(db_path)
+            second_store = TaskStore(db_path)
+            start = threading.Barrier(2)
+
+            def claim(store):
+                start.wait()
+                return store.claim_quality_run("2026-07-19", now=100.0)
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = [
+                    future.result()
+                    for future in (
+                        executor.submit(claim, first_store),
+                        executor.submit(claim, second_store),
+                    )
+                ]
+
+            self.assertEqual(results.count(True), 1)
+            self.assertEqual(results.count(False), 1)
 
     def test_queue_summary_counts_statuses_and_lock_waits(self):
         with tempfile.TemporaryDirectory() as tmp:
