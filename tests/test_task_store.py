@@ -2,6 +2,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.models import TaskStage, TaskStatus
 from app.task_store import TaskStore
@@ -100,6 +101,65 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(updated.metadata["first"], "yes")
             self.assertEqual(updated.metadata["second"], "yes")
 
+    def test_compare_and_set_transition_records_initial_and_target_events_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+
+            updated = store.compare_and_set_transition(
+                task.id,
+                TaskStage.RECEIVED,
+                {TaskStatus.PENDING},
+                require_unclaimed=True,
+                target_stage=TaskStage.EMBY_CONFIRMED,
+                target_status=TaskStatus.PENDING,
+                initial_event_message="initial transition",
+                target_event_message="queued transition",
+                next_run_at=0,
+                clear_errors=True,
+                clear_claim=True,
+            )
+            events = store.list_events(task.id)
+
+            self.assertIsNotNone(updated)
+            self.assertEqual(
+                [(event["stage"], event["status"], event["message"]) for event in events],
+                [
+                    (TaskStage.RECEIVED.value, TaskStatus.PENDING.value, "initial transition"),
+                    (TaskStage.EMBY_CONFIRMED.value, TaskStatus.PENDING.value, "queued transition"),
+                ],
+            )
+            self.assertEqual(updated.current_stage, TaskStage.EMBY_CONFIRMED)
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.next_run_at, 0)
+
+    def test_compare_and_set_transition_can_override_initial_event_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+
+            store.compare_and_set_transition(
+                task.id,
+                TaskStage.CLEANED,
+                {TaskStatus.SUCCEEDED},
+                require_unclaimed=True,
+                target_stage=TaskStage.EMBY_CONFIRMED,
+                target_status=TaskStatus.PENDING,
+                initial_event_message="restore requested",
+                initial_event_stage=TaskStage.EMBY_CONFIRMED,
+                target_event_message="restore queued",
+                next_run_at=0,
+            )
+
+            self.assertEqual(
+                [(event["stage"], event["status"], event["message"]) for event in store.list_events(task.id)[-2:]],
+                [
+                    (TaskStage.EMBY_CONFIRMED.value, TaskStatus.PENDING.value, "restore requested"),
+                    (TaskStage.EMBY_CONFIRMED.value, TaskStatus.PENDING.value, "restore queued"),
+                ],
+            )
+
     def test_record_failure_stores_error_and_retry_count(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
@@ -131,6 +191,59 @@ class TaskStoreTests(unittest.TestCase):
             recent = store.list_recent_tasks(limit=2)
 
             self.assertEqual([task.id for task in recent], [two.id, one.id])
+
+    def test_list_open_tasks_excludes_succeeded_and_returns_newest_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            pending = store.upsert_task("pending", "", "https://115cdn.com/s/pending")
+            running = store.upsert_task("running", "", "https://115cdn.com/s/running")
+            store.record_event(running.id, TaskStage.ORGANIZING, TaskStatus.RUNNING, "running")
+            failed = store.upsert_task("failed", "", "https://115cdn.com/s/failed")
+            store.record_event(failed.id, TaskStage.FAILED, TaskStatus.FAILED, "failed")
+            succeeded = store.upsert_task("succeeded", "", "https://115cdn.com/s/succeeded")
+            store.record_event(succeeded.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            manual = store.upsert_task("manual", "", "https://115cdn.com/s/manual")
+            store.record_event(manual.id, TaskStage.NEEDS_ACTION, TaskStatus.NEEDS_ACTION, "choose")
+
+            open_tasks = store.list_open_tasks()
+
+            self.assertEqual([task.id for task in open_tasks], [manual.id, failed.id, running.id, pending.id])
+            self.assertEqual(
+                [task.status for task in open_tasks],
+                [TaskStatus.NEEDS_ACTION, TaskStatus.FAILED, TaskStatus.RUNNING, TaskStatus.PENDING],
+            )
+
+    def test_list_open_tasks_searches_status_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            statements = []
+            original_connect = store._connect
+
+            def traced_connect():
+                conn = original_connect()
+                conn.set_trace_callback(statements.append)
+                return conn
+
+            with patch.object(store, "_connect", side_effect=traced_connect):
+                store.list_open_tasks()
+
+            select_sql = next(
+                statement.strip()
+                for statement in statements
+                if statement.lstrip().startswith("SELECT * FROM tasks")
+            )
+            conn = sqlite3.connect(store.db_path)
+            try:
+                plan = [str(row[3]) for row in conn.execute(f"EXPLAIN QUERY PLAN {select_sql}")]
+            finally:
+                conn.close()
+            normalized_plan = "\n".join(plan).upper()
+
+            self.assertIn("STATUS IN", select_sql.upper())
+            self.assertIn("SEARCH TASKS", normalized_plan)
+            self.assertIn("IDX_TASKS_NEXT_RUN", normalized_plan)
+            self.assertIn("STATUS", normalized_plan)
+            self.assertNotIn("SCAN TASKS USING INDEX IDX_TASKS_UPDATED_AT", normalized_plan)
 
     def test_queue_summary_counts_statuses_and_lock_waits(self):
         with tempfile.TemporaryDirectory() as tmp:

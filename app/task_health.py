@@ -3,8 +3,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, replace
 
-from .models import TaskSnapshot, TaskStatus
-from .task_diagnostics import _duration, describe_task_wait, is_dispatchable_active_task, is_unscheduled_active_task
+from .models import TaskSnapshot
+from .task_diagnostics import _duration, describe_task_wait
 from .task_engine import stage_display_name
 from .task_store import TaskStore
 
@@ -39,7 +39,13 @@ def _format_wait_detail(task: TaskSnapshot, *, now: float) -> str:
     return _truncate(f"#{task.id} {title}: {describe_task_wait(safe_task, now=now)}", 200)
 
 
-def build_task_health(store: TaskStore | None, *, enabled: bool, limit: int = 100) -> TaskHealthSummary:
+def build_task_health(
+    store: TaskStore | None,
+    *,
+    enabled: bool,
+    limit: int = 100,
+    now: float | None = None,
+) -> TaskHealthSummary:
     if store is None:
         return TaskHealthSummary(
             enabled=enabled,
@@ -50,40 +56,32 @@ def build_task_health(store: TaskStore | None, *, enabled: bool, limit: int = 10
             problem_count=0,
             lock_wait_count=0,
         )
-    queue = store.queue_summary(limit=limit)
-    tasks = store.list_recent_tasks(limit=limit)
-    problems = [task for task in tasks if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or is_unscheduled_active_task(task)]
-    now = time.time()
-    wait_tasks = [task for task in tasks if task.status in {TaskStatus.RUNNING, TaskStatus.PENDING}]
-    cooldown_until = 0.0
-    for task in tasks:
-        try:
-            value = float(task.metadata.get("p115_risk_cooldown_until") or 0)
-        except (TypeError, ValueError):
-            value = 0.0
-        if value > now:
-            cooldown_until = max(cooldown_until, value)
+    current_time = time.time() if now is None else float(now)
+    aggregate = store.aggregate_open_task_health(limit=limit)
+    wait_tasks = aggregate.wait_tasks
+    cooldown_until = aggregate.p115_cooldown_until if aggregate.p115_cooldown_until > current_time else 0.0
     wait_details = tuple(
-        _format_wait_detail(task, now=now)
+        _format_wait_detail(task, now=current_time)
         for task in wait_tasks[:5]
     )
     return TaskHealthSummary(
         enabled=enabled,
-        recent_count=queue.recent_count,
-        pending_count=sum(1 for task in tasks if task.status == TaskStatus.PENDING and is_dispatchable_active_task(task)),
-        running_count=sum(1 for task in tasks if task.status == TaskStatus.RUNNING and is_dispatchable_active_task(task)),
-        needs_action_count=queue.needs_action_count,
-        problem_count=len(problems),
-        lock_wait_count=queue.lock_wait_count,
-        latest_problem=problems[0] if problems else None,
-        latest_lock_wait=queue.latest_lock_wait,
+        recent_count=aggregate.recent_count,
+        pending_count=aggregate.pending_count,
+        running_count=aggregate.running_count,
+        needs_action_count=aggregate.needs_action_count,
+        problem_count=aggregate.problem_count,
+        lock_wait_count=aggregate.lock_wait_count,
+        latest_problem=aggregate.latest_problem,
+        latest_lock_wait=aggregate.latest_lock_wait,
         wait_details=wait_details,
-        wait_overflow_count=max(0, len(wait_tasks) - len(wait_details)),
+        wait_overflow_count=max(0, aggregate.pending_count + aggregate.running_count - len(wait_details)),
         p115_cooldown_until=cooldown_until,
     )
 
 
-def format_task_health(summary: TaskHealthSummary) -> str:
+def format_task_health(summary: TaskHealthSummary, *, now: float | None = None) -> str:
+    current_time = time.time() if now is None else float(now)
     lines = [
         f"TaskEngine: {'ENABLED' if summary.enabled else 'DISABLED'}",
         f"TaskStore最近任务: {summary.recent_count}",
@@ -93,8 +91,8 @@ def format_task_health(summary: TaskHealthSummary) -> str:
         f"锁等待: {summary.lock_wait_count}",
         f"失败/需处理: {summary.problem_count}",
     ]
-    if summary.p115_cooldown_until:
-        remaining = _duration(summary.p115_cooldown_until - time.time())
+    if summary.p115_cooldown_until > current_time:
+        remaining = _duration(summary.p115_cooldown_until - current_time)
         lines.append(f"115风控冷却: ACTIVE，剩余 {remaining}")
     else:
         lines.append("115风控冷却: inactive")
@@ -116,5 +114,13 @@ def format_task_health(summary: TaskHealthSummary) -> str:
     return "\n".join(lines)
 
 
-def format_taskstore_health(store: TaskStore | None, *, enabled: bool, limit: int = 100) -> str:
-    return format_task_health(build_task_health(store, enabled=enabled, limit=limit))
+def format_taskstore_health(
+    store: TaskStore | None,
+    *,
+    enabled: bool,
+    limit: int = 100,
+    now: float | None = None,
+) -> str:
+    current_time = time.time() if now is None else float(now)
+    summary = build_task_health(store, enabled=enabled, limit=limit, now=current_time)
+    return format_task_health(summary, now=current_time)

@@ -115,19 +115,22 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             self.assertEqual(stage, TaskStage.EMBY_CONFIRMED)
 
     def test_maybe_start_web_server_only_when_enabled(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):
-            cfg = bridge.Config.from_env()
-            task_store = bridge.create_task_store(cfg)
-            calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            env["TASK_ENGINE_ENABLED"] = "false"
+            with patch.dict(os.environ, env, clear=True):
+                cfg = bridge.Config.from_env()
+                task_store = bridge.create_task_store(cfg)
+                calls = []
 
-            def fake_start(store, host, port, web_token=""):
-                calls.append((store, host, port, web_token))
-                return "server"
+                def fake_start(store, host, port, web_token="", task_engine_enabled=None):
+                    calls.append((store, host, port, web_token, task_engine_enabled))
+                    return "server"
 
-            server = bridge.maybe_start_web_server(cfg, task_store, starter=fake_start)
+                server = bridge.maybe_start_web_server(cfg, task_store, starter=fake_start)
 
-            self.assertEqual(server, "server")
-            self.assertEqual(calls, [(task_store, "127.0.0.1", 8787, "secret")])
+                self.assertEqual(server, "server")
+                self.assertEqual(calls, [(task_store, "127.0.0.1", 8787, "secret", False)])
 
     def test_maybe_start_web_server_returns_none_when_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
