@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import json
 import logging
+import re
 import threading
 import time
 from typing import Any
 
 from app.clients.http import FormHttp, load_cookie_value
+from app.clients.p115_cipher import lixian_rsa_encrypt
 from app.config import default_library_roots
 from app.media.classify import candidate_tokens, extract_tmdb_id_from_name, extract_year_from_name, normalize_text
 
 LOG = logging.getLogger("cms-tg-ingest")
 CMS_PARENT_CID_CATEGORY_MAP: dict[str, str] = {}
 DEFAULT_ORGANIZED_SCAN_MAX_LIST_CALLS = 80
+PAN115_LIXIAN_SSP_URL = "https://lixian.115.com/lixianssp/"
+PAN115_LIXIAN_WEB_URL = "https://lixian.115.com/lixian/"
+PAN115_ANDROID_USER_AGENT = "Mozilla/5.0 115disk/99.99.99.99 115Browser/99.99.99.99 115wangpan_android/99.99.99.99"
 
 
 class P115RiskControlError(RuntimeError):
@@ -65,7 +71,7 @@ def iter_items(data: Any) -> list[dict]:
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]
     if isinstance(data, dict):
-        for key in ("list", "items", "records", "data", "rows"):
+        for key in ("list", "items", "records", "data", "rows", "tasks", "result"):
             value = data.get(key)
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)]
@@ -125,6 +131,15 @@ def _cloud_identity(item: dict[str, Any]) -> dict[str, str]:
     info_hash = str(item.get("info_hash") or item.get("hash") or item.get("infohash") or "").strip().lower()
     task_id = str(item.get("task_id") or item.get("id") or item.get("taskid") or "").strip()
     return {"info_hash": info_hash, "task_id": task_id}
+
+
+def _cloud_source_hash(source_url: str) -> str:
+    value = str(source_url or "").strip()
+    match = re.search(r"urn:btih:([0-9a-z]+)", value, re.IGNORECASE)
+    if match:
+        return match.group(1).lower()
+    match = re.search(r"ed2k://\|file\|[^|]*\|[0-9]+\|([0-9a-f]{32})\|/", value, re.IGNORECASE)
+    return match.group(1).lower() if match else ""
 
 
 def validate_cloud_output(output: dict[str, Any], target_cid: str) -> dict[str, str]:
@@ -350,11 +365,21 @@ class P115WebClient:
                 self.sleeper(wait_seconds)
         self._last_request_at = float(self.clock())
 
-    def _request(self, url: str, method: str = "GET", data: dict | None = None, params: dict | None = None) -> dict:
+    def _request(
+        self,
+        url: str,
+        method: str = "GET",
+        data: dict | None = None,
+        params: dict | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> dict:
         with self._request_lock:
             self._rate_limit()
             self.request_count += 1
-            return self.http.request(url, method=method, data=data, params=params, headers=self._headers())
+            request_headers = self._headers()
+            if headers:
+                request_headers.update(headers)
+            return self.http.request(url, method=method, data=data, params=params, headers=request_headers)
 
     @staticmethod
     def _ensure_state(resp: dict, fallback: str) -> dict:
@@ -437,14 +462,28 @@ class P115WebClient:
         return {"title": title, "file_ids": file_ids, "response": resp}
 
     def cloud_download_add(self, url: str, target_cid: str) -> dict[str, str]:
+        payload = json.dumps(
+            {
+                "url": str(url),
+                "wp_path_id": str(target_cid),
+                "ac": "add_task_url",
+                "app_ver": "99.99.99.99",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
         resp = self._request(
-            "https://clouddownload.115.com/lixianssp/?ac=add_task_url",
+            PAN115_LIXIAN_SSP_URL,
             method="POST",
-            data={"url": str(url), "wp_path_id": str(target_cid), "savepath": ""},
+            data={"data": lixian_rsa_encrypt(payload)},
+            headers={"User-Agent": PAN115_ANDROID_USER_AGENT},
         )
         self._ensure_state(resp, "115 cloud download submit failed")
         item = _cloud_task_item(resp)
         identity = _cloud_identity(item)
+        if not identity["info_hash"] and not identity["task_id"]:
+            item = self._find_cloud_task_by_source(url)
+            identity = _cloud_identity(item)
         if not identity["info_hash"] and not identity["task_id"]:
             raise RuntimeError("115 cloud download did not return task identity")
         return {
@@ -456,17 +495,10 @@ class P115WebClient:
         }
 
     def cloud_download_status(self, identity: dict[str, Any]) -> dict[str, Any]:
-        info_hash = str(identity.get("info_hash") or "").strip()
-        if info_hash:
-            resp = self._request(
-                "https://clouddownload.115.com/?ac=get_user_task",
-                params={"info_hash": info_hash},
-            )
-        else:
-            resp = self._request(
-                "https://clouddownload.115.com/?ac=task_lists",
-                params={"page": 1, "page_size": 30},
-            )
+        resp = self._request(
+            PAN115_LIXIAN_WEB_URL,
+            params={"ct": "lixian", "ac": "task_lists", "page": 1, "page_size": 30},
+        )
         self._ensure_state(resp, "115 cloud download status failed")
         item = _cloud_task_item(resp, identity=identity)
         normalized_identity = _cloud_identity(item)
@@ -479,6 +511,25 @@ class P115WebClient:
             "file_name": p115_file_name(item),
             "raw": item,
         }
+
+    def _find_cloud_task_by_source(self, source_url: str) -> dict[str, Any]:
+        resp = self._request(
+            PAN115_LIXIAN_WEB_URL,
+            params={"ct": "lixian", "ac": "task_lists", "page": 1, "page_size": 30},
+        )
+        self._ensure_state(resp, "115 cloud download task list failed")
+        data = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+        candidates = iter_items(data)
+        source_hash = _cloud_source_hash(source_url)
+        source_text = str(source_url or "").strip().lower()
+        for candidate in candidates:
+            candidate_hash = _cloud_identity(candidate)["info_hash"]
+            candidate_url = str(candidate.get("url") or "").strip().lower()
+            if source_hash and candidate_hash == source_hash:
+                return dict(candidate)
+            if candidate_url and candidate_url == source_text:
+                return dict(candidate)
+        return {}
 
     def cloud_download_output(self, identity: dict[str, Any], target_cid: str) -> dict[str, str]:
         status = self.cloud_download_status(identity)
