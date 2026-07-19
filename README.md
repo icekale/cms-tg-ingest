@@ -32,6 +32,7 @@
 - **TaskStore 任务引擎**：SQLite 记录任务阶段、时间线、错误、重试次数和运行状态，支持 `/status`、`/history`、`/metrics`、`/health`、`/quality`、`/clear_history`。
 - **TG/Web 运维按钮**：查看详情、重试当前阶段、查 Emby、恢复 STRM、从头重跑。
 - **本地质量巡检**：检查缺失 STRM、直链 STRM、目标目录异常等问题；巡检只读本地 TaskStore 和 STRM 文件，不扫描 115。
+- **每日自动巡检**：启用后默认每天 `02:50`（`Asia/Shanghai`）运行一次，自动恢复缺失 STRM、重排直链 STRM；Web `/quality` 可查看最近结果、立即运行、修改时间/时区/上限或恢复环境默认。
 - **共享别名保护**：CMS 完成整理和分类后，外挂用中性名称创建 115 分享，并用 canonical manifest 在本地恢复 CMS 标准目录名；115 风险标记只作为预警，最终以分享状态和 STRM 实际播放验证为准。
 - **安全清理 115 空间**：在 `TASK_ENGINE_ENABLED=true` 的 TaskRunner 路径中，自己的永久分享状态验证通过后即可删除 115 转存源，不会取消自己的 115 永久分享；后续 STRM 只使用自己的分享链接生成。
 - **115 压力保护**：整理文件夹查找使用分层搜索早停和整理目录扫描预算；遇到 115 风控冷却会暂停新的 115/CMS 全局阶段，避免连续重试。
@@ -54,6 +55,13 @@ WEB_PORT=8787
 WEB_TOKEN=
 TASK_WORKER_INTERVAL_SECONDS=5
 TASK_MAX_RETRIES=3
+
+# 可选：每日质量巡检。首次上线建议保持 false，手动测试通过后再改为 true。
+QUALITY_AUTO_ENABLED=false
+QUALITY_AUTO_TIME=02:50
+QUALITY_AUTO_TIMEZONE=Asia/Shanghai
+QUALITY_AUTO_MAX_TASKS=50
+QUALITY_AUTO_115_CHECK_LIMIT=3
 ```
 
 访问地址示例：`http://<unraid-ip>:8787/`。如需回滚到旧的 SubmissionStore + 轮询路径，设置 `TASK_ENGINE_ENABLED=false`；该旧路径是兼容回滚路径，不提供 TaskRunner 的同等清理顺序保证。
@@ -201,6 +209,16 @@ docker pull icekale/cms-tg-ingest:0.1.0
 git tag v0.1.0
 git push origin v0.1.0
 ```
+
+## 每日质量巡检
+
+开启 `QUALITY_AUTO_ENABLED=true` 后，程序每天按 `QUALITY_AUTO_TIME` 和 `QUALITY_AUTO_TIMEZONE` 只认领一次本地日期运行权。默认时间为北京时间 `02:50`，单次最多处理 `QUALITY_AUTO_MAX_TASKS` 个任务；`QUALITY_AUTO_115_CHECK_LIMIT` 用于限制失效分享确认预算。
+
+Web `/quality` 的设置优先于环境变量，并写入 TaskStore 的 `runtime_state`；点击“恢复环境默认”后重新使用 `.env` 值。修改设置不会中断当前运行。Telegram 只在失败、风控、任务占用或需要人工处理时通知，正常修复不发送摘要。
+
+自动修复只把任务排入现有 TaskRunner，不会启动 CMS 普通同步。失效分享必须先由当前任务确认 `share_validation_status=invalid`，风控、未知状态和多候选目录不会自动重建。删除 115 转存源前必须同时满足当前自有分享、分享 STRM marker、媒体库路径、唯一 Emby 入库和 TaskStore 最新成功事件；任何一项失败都保留源文件和 STRM。
+
+回滚时将 `QUALITY_AUTO_ENABLED=false` 并重启容器；已写入的运行摘要和任务事件仍保留，不会自动删除媒体文件。
 
 ## 诊断
 
