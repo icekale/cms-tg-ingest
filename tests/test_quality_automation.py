@@ -2,9 +2,11 @@ import json
 import os
 import tempfile
 import unittest
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import FrozenInstanceError
 from datetime import datetime
 from pathlib import Path
+from threading import Barrier, Event, Lock
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -173,6 +175,75 @@ class QualityScheduleTests(unittest.TestCase):
             persisted = json.loads(store.get_runtime_state("quality_auto_last_summary")["value"])
             self.assertEqual(persisted["run_id"], "manual-run")
             self.assertEqual(persisted["status"], "failed")
+
+    def test_stale_running_state_can_recover_but_fresh_running_state_refuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, store = self.make_service(tmp)
+            timezone = ZoneInfo("Asia/Shanghai")
+            due = datetime(2026, 7, 20, 2, 50, tzinfo=timezone)
+            stale_at = due.timestamp() - service.STALE_RUN_SECONDS - 1
+
+            store.set_runtime_state("quality_auto_status", "running", updated_at=stale_at)
+            store.set_runtime_state("quality_auto_current_run_id", "quality-2026-07-20-crashed", updated_at=stale_at)
+            self.assertTrue(store.claim_quality_run("2026-07-20", stale_at))
+
+            recovered = service.run_if_due(due)
+
+            self.assertIsNotNone(recovered)
+            self.assertEqual(recovered.status, "succeeded")
+
+            fresh_due = datetime(2026, 7, 21, 2, 50, tzinfo=timezone)
+            fresh_at = fresh_due.timestamp()
+            store.set_runtime_state("quality_auto_status", "running", updated_at=fresh_at)
+            store.set_runtime_state("quality_auto_current_run_id", "active-run", updated_at=fresh_at)
+            store.set_runtime_state("quality_auto_current_run_date", "2026-07-21", updated_at=fresh_at)
+            self.assertTrue(store.claim_quality_run("2026-07-21", fresh_at))
+
+            self.assertIsNone(service.run_if_due(fresh_due))
+
+    def test_concurrent_run_now_allows_exactly_one_runner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _ = self.make_service(tmp)
+            second_service = QualityAutomation(
+                TaskStore(Path(tmp) / "tasks.db"),
+                service.config,
+                allowed_roots=[Path(tmp) / "library"],
+            )
+            status_reads = Barrier(2)
+            scan_started = Event()
+            release_scan = Event()
+            scan_calls = 0
+            scan_calls_lock = Lock()
+            original_get_runtime_state = TaskStore.get_runtime_state
+
+            def synchronized_status_read(store, key):
+                state = original_get_runtime_state(store, key)
+                if key == "quality_auto_status":
+                    status_reads.wait(timeout=5)
+                return state
+
+            def blocked_scan(*args, **kwargs):
+                nonlocal scan_calls
+                with scan_calls_lock:
+                    scan_calls += 1
+                    call_number = scan_calls
+                if call_number == 1:
+                    scan_started.set()
+                    release_scan.wait(timeout=5)
+                return []
+
+            with patch.object(TaskStore, "get_runtime_state", synchronized_status_read), patch(
+                "app.quality_automation.scan_task_quality", side_effect=blocked_scan
+            ):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = [executor.submit(item.run_now) for item in (service, second_service)]
+                    self.assertTrue(scan_started.wait(timeout=5))
+                    done, _ = wait(futures, timeout=5, return_when=FIRST_COMPLETED)
+                    self.assertEqual(len(done), 1)
+                    release_scan.set()
+                    results = [future.result() for future in futures]
+
+            self.assertEqual(sorted(results), [False, True])
 
 
 class QualityPlanningTests(unittest.TestCase):

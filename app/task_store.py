@@ -184,6 +184,84 @@ class TaskStore:
             )
             return True
 
+    def claim_quality_run_execution(
+        self,
+        run_id: str,
+        now: float,
+        *,
+        run_date: str | None = None,
+        stale_after_seconds: int = 21600,
+    ) -> bool:
+        """Atomically acquire the quality runtime lease and optional local-date claim."""
+        timestamp = float(now)
+        stale_before = timestamp - max(1, int(stale_after_seconds))
+        current_run_key = "quality_auto_current_run_id"
+        current_date_key = "quality_auto_current_run_date"
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            status_row = conn.execute(
+                "SELECT value, updated_at FROM runtime_state WHERE key = ?",
+                ("quality_auto_status",),
+            ).fetchone()
+            status = str(status_row["value"] or "").strip().lower() if status_row else ""
+            running_is_stale = bool(
+                status_row
+                and status == "running"
+                and float(status_row["updated_at"]) <= stale_before
+            )
+            if status == "running" and not running_is_stale:
+                return False
+
+            current_date_row = conn.execute(
+                "SELECT value FROM runtime_state WHERE key = ?",
+                (current_date_key,),
+            ).fetchone()
+            current_date = str(current_date_row["value"] or "").strip() if current_date_row else ""
+            current_run_row = conn.execute(
+                "SELECT value FROM runtime_state WHERE key = ?",
+                (current_run_key,),
+            ).fetchone()
+            current_run_id = str(current_run_row["value"] or "").strip() if current_run_row else ""
+            claimed_date = current_date
+            if not claimed_date and current_run_id.startswith("quality-"):
+                run_id_parts = current_run_id.removeprefix("quality-").split("-")
+                if len(run_id_parts) >= 3:
+                    claimed_date = "-".join(run_id_parts[:3])
+            if run_date:
+                date_key = f"quality_auto_run:{run_date}"
+                date_row = conn.execute(
+                    "SELECT updated_at FROM runtime_state WHERE key = ?",
+                    (date_key,),
+                ).fetchone()
+                if date_row is not None and not (
+                    running_is_stale and claimed_date == str(run_date)
+                ):
+                    return False
+                conn.execute(
+                    """
+                    INSERT INTO runtime_state (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                    """,
+                    (date_key, str(run_date), timestamp),
+                )
+
+            runtime_values = [
+                ("quality_auto_status", "running"),
+                (current_run_key, str(run_id)),
+                (current_date_key, str(run_date or "")),
+            ]
+            for key, value in runtime_values:
+                conn.execute(
+                    """
+                    INSERT INTO runtime_state (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                    """,
+                    (key, value, timestamp),
+                )
+            return True
+
     @staticmethod
     def _merge_metadata(
         existing_json: str | None,

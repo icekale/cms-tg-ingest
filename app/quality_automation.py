@@ -40,6 +40,7 @@ class QualityRunSummary:
 
 
 class QualityAutomation:
+    STALE_RUN_SECONDS = 21600
     _STATUS_KEY = "quality_auto_status"
     _SUMMARY_KEY = "quality_auto_last_summary"
     _CURRENT_RUN_KEY = "quality_auto_current_run_id"
@@ -101,13 +102,16 @@ class QualityAutomation:
         configured_time = (self._run_time.hour, self._run_time.minute)
         if current_time < configured_time:
             return None
-        if self._runtime_status() == "running":
-            return None
 
         run_date = local_now.date().isoformat()
-        if not self.store.claim_quality_run(run_date, local_now.timestamp()):
-            return None
         run_id = f"quality-{run_date}-{time.monotonic_ns():x}"
+        if not self.store.claim_quality_run_execution(
+            run_id,
+            local_now.timestamp(),
+            run_date=run_date,
+            stale_after_seconds=self.STALE_RUN_SECONDS,
+        ):
+            return None
         return self.run_once(run_id, local_now)
 
     def run_once(self, run_id: str, now: datetime | None = None) -> QualityRunSummary:
@@ -151,15 +155,15 @@ class QualityAutomation:
 
     def run_now(self) -> bool:
         """Run synchronously; return False only when another run is marked running."""
-        if self._runtime_status() == "running":
-            return False
         run_id = f"quality-manual-{time.monotonic_ns():x}"
+        if not self.store.claim_quality_run_execution(
+            run_id,
+            time.time(),
+            stale_after_seconds=self.STALE_RUN_SECONDS,
+        ):
+            return False
         self.run_once(run_id)
         return True
-
-    def _runtime_status(self) -> str:
-        state = self.store.get_runtime_state(self._STATUS_KEY)
-        return str(state.get("value") or "").strip().lower() if state else ""
 
     def _persist_summary(self, summary: QualityRunSummary, updated_at: float) -> None:
         self.store.set_runtime_state(self._STATUS_KEY, summary.status, updated_at=updated_at)
@@ -170,6 +174,8 @@ class QualityAutomation:
         )
         current_run_id = summary.run_id if summary.status == "running" else ""
         self.store.set_runtime_state(self._CURRENT_RUN_KEY, current_run_id, updated_at=updated_at)
+        if summary.status != "running":
+            self.store.set_runtime_state("quality_auto_current_run_date", "", updated_at=updated_at)
 
     def _plan(self, tasks: list[TaskSnapshot], issues: list[QualityIssue]) -> list[QualityRepairPlan]:
         grouped: dict[int, list[QualityIssue]] = {}
