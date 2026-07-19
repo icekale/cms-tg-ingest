@@ -25,6 +25,7 @@ class TaskQueueSummary:
 
 @dataclass(frozen=True)
 class TaskHealthAggregate:
+    recent_count: int
     pending_count: int
     running_count: int
     needs_action_count: int
@@ -205,7 +206,8 @@ class TaskStore:
         return [self._snapshot(row) for row in rows]
 
     def aggregate_open_task_health(self, limit: int = 5) -> TaskHealthAggregate:
-        detail_limit = max(0, int(limit))
+        recent_limit = max(0, int(limit))
+        detail_limit = min(5, recent_limit)
         open_statuses = (
             TaskStatus.PENDING.value,
             TaskStatus.RUNNING.value,
@@ -227,6 +229,18 @@ class TaskStore:
             END
         """
         with self._lock, self._connection() as conn:
+            conn.execute("BEGIN")
+            recent_count = conn.execute(
+                """
+                SELECT COUNT(*) AS recent_count
+                FROM (
+                    SELECT id FROM tasks
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT ?
+                )
+                """,
+                (recent_limit,),
+            ).fetchone()
             aggregate = conn.execute(
                 f"""
                 SELECT
@@ -312,6 +326,7 @@ class TaskStore:
 
         wait_tasks = tuple(snapshot(row) for row in wait_rows)
         return TaskHealthAggregate(
+            recent_count=int(recent_count["recent_count"]),
             pending_count=int(aggregate["pending_count"]),
             running_count=int(aggregate["running_count"]),
             needs_action_count=int(aggregate["needs_action_count"]),

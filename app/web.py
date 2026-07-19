@@ -785,7 +785,8 @@ def render_quality_page(store: TaskStore) -> str:
         if _quality_repair_action(issue, tasks[issue.task_id]):
             actionable_task_ids.add(issue.task_id)
     category_counts = {
-        "目录/STRM 缺失": sum(issue.code in {"missing_dest", "missing_strm"} for issue in issues),
+        "目标目录缺失": sum(issue.code == "missing_dest" for issue in issues),
+        "STRM 缺失": sum(issue.code == "missing_strm" for issue in issues),
         "直链 STRM": sum(issue.code == "direct_strm" for issue in issues),
         "异常分享": sum(issue.code == "unexpected_strm" for issue in issues),
     }
@@ -802,7 +803,8 @@ def render_quality_page(store: TaskStore) -> str:
     for row in grouped:
         codes = row["codes"]
         type_counts = (
-            ("目录/STRM 缺失", codes.get("missing_dest", 0) + codes.get("missing_strm", 0)),
+            ("目标目录缺失", codes.get("missing_dest", 0)),
+            ("STRM 缺失", codes.get("missing_strm", 0)),
             ("直链 STRM", codes.get("direct_strm", 0)),
             ("异常分享", codes.get("unexpected_strm", 0)),
         )

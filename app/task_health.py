@@ -57,8 +57,7 @@ def build_task_health(
             lock_wait_count=0,
         )
     current_time = time.time() if now is None else float(now)
-    recent_tasks = store.list_recent_tasks(limit=limit)
-    aggregate = store.aggregate_open_task_health(limit=5)
+    aggregate = store.aggregate_open_task_health(limit=limit)
     wait_tasks = aggregate.wait_tasks
     cooldown_until = aggregate.p115_cooldown_until if aggregate.p115_cooldown_until > current_time else 0.0
     wait_details = tuple(
@@ -67,7 +66,7 @@ def build_task_health(
     )
     return TaskHealthSummary(
         enabled=enabled,
-        recent_count=len(recent_tasks),
+        recent_count=aggregate.recent_count,
         pending_count=aggregate.pending_count,
         running_count=aggregate.running_count,
         needs_action_count=aggregate.needs_action_count,

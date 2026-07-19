@@ -144,6 +144,18 @@ class TaskHealthTests(unittest.TestCase):
             self.assertIn(f"#{waiting_ids[-1]} Waiting 5", summary.wait_details[0])
             self.assertNotIn(f"#{waiting_ids[0]} Waiting 0", "\n".join(summary.wait_details))
 
+    def test_health_reads_recent_count_from_the_same_aggregate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            for index in range(3):
+                task = store.upsert_task(f"recent-{index}", "", f"https://115cdn.com/s/recent-{index}")
+                store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+
+            with patch.object(store, "list_recent_tasks", side_effect=AssertionError("health must use one aggregate read")):
+                summary = build_task_health(store, enabled=True, limit=2, now=100.0)
+
+            self.assertEqual(summary.recent_count, 2)
+
     def test_health_formatters_share_explicit_clock_at_cooldown_expiry(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

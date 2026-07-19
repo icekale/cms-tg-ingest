@@ -1190,7 +1190,7 @@ class WebAdminTests(unittest.TestCase):
 
             markup = render_quality_page(store)
 
-            for label in ("问题总数", "受影响任务", "目录/STRM 缺失", "直链 STRM", "异常分享"):
+            for label in ("问题总数", "受影响任务", "目标目录缺失", "STRM 缺失", "直链 STRM", "异常分享"):
                 self.assertIn(label, markup)
             self.assertEqual(markup.count('class="quality-row"'), 1)
             self.assertIn("直链电影", markup)
@@ -1221,7 +1221,8 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(len(rows), 2)
             self.assertIn("#2", rows[0])
             self.assertIn("缺失任务", rows[0])
-            self.assertIn('<span class="quality-count"><span>目录/STRM 缺失</span><strong>2</strong></span>', rows[0])
+            self.assertIn('<span class="quality-count"><span>目标目录缺失</span><strong>1</strong></span>', rows[0])
+            self.assertIn('<span class="quality-count"><span>STRM 缺失</span><strong>1</strong></span>', rows[0])
             self.assertIn("共 2 条", rows[0])
             self.assertIn("#1", rows[1])
             self.assertIn("混合任务", rows[1])
