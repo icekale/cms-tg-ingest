@@ -4,6 +4,7 @@ import os
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import bridge
 from app.clients import cms as cms_client
@@ -1080,7 +1081,12 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 row["id"],
             )
 
-            result = workflow.run_stage(task)
+            with patch.object(
+                workflow.task_store,
+                "list_recent_tasks",
+                side_effect=AssertionError("share sync wait must use a SQL existence query"),
+            ):
+                result = workflow.run_stage(task)
 
             self.assertEqual(result.outcome, StageOutcome.DEFER)
             self.assertIn("等待上一条 CMS 分享同步完成", result.message)

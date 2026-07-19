@@ -486,8 +486,11 @@ class TaskRunner:
         self._thread.start()
         return self._thread
 
-    def stop(self) -> None:
+    def stop(self, join_timeout: float = 5) -> None:
         self._stop.set()
+        thread = self._thread
+        if thread and thread is not threading.current_thread():
+            thread.join(max(0.0, float(join_timeout)))
 
     def run_forever(self) -> None:
         while not self._stop.is_set():

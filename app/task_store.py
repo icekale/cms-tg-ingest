@@ -126,6 +126,7 @@ class TaskStore:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(status, next_run_at, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_claim ON tasks(claimed_by, claimed_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_stage_status_next ON tasks(current_stage, status, next_run_at, id)")
 
     @staticmethod
     def _snapshot(row: sqlite3.Row) -> TaskSnapshot:
@@ -204,6 +205,28 @@ class TaskStore:
                 open_statuses,
             ).fetchall()
         return [self._snapshot(row) for row in rows]
+
+    def find_pending_stage(self, stage: TaskStage, *, exclude_task_id: int | None = None) -> TaskSnapshot | None:
+        params: list[Any] = [stage.value, TaskStatus.PENDING.value, TaskStatus.RUNNING.value]
+        exclude_clause = ""
+        if exclude_task_id is not None:
+            exclude_clause = " AND id <> ?"
+            params.append(int(exclude_task_id))
+        with self._lock, self._connection() as conn:
+            row = conn.execute(
+                f"""
+                SELECT *
+                FROM tasks INDEXED BY idx_tasks_stage_status_next
+                WHERE current_stage = ?
+                  AND status IN (?, ?)
+                  AND next_run_at >= 0
+                  {exclude_clause}
+                ORDER BY updated_at ASC, id ASC
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+        return self._snapshot(row) if row else None
 
     def aggregate_open_task_health(self, limit: int = 5) -> TaskHealthAggregate:
         recent_limit = max(0, int(limit))
