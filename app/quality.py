@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import replace
 from pathlib import Path
+from typing import Iterable
 
+from .config import is_under_any_root
 from .media.strm import iter_strm_files
 from .models import TaskSnapshot
 from .task_store import TaskStore
@@ -24,9 +26,12 @@ def inspect_task_files(
     dest_path: str | Path,
     own_share_code: str = "",
     own_share_receive_code: str = "1212",
+    allowed_roots: Iterable[str | Path] | None = None,
 ) -> list[QualityIssue]:
     del task
     dest = Path(dest_path)
+    if allowed_roots is not None and not is_under_any_root(dest, list(allowed_roots)):
+        return [QualityIssue("unsafe_metadata", "目标路径不在允许根目录", str(dest))]
     if not dest.exists():
         return [QualityIssue("missing_dest", "目标目录不存在", str(dest))]
     files = sorted(iter_strm_files(dest))
@@ -44,7 +49,12 @@ def inspect_task_files(
     return issues
 
 
-def scan_task_quality(store: TaskStore, limit: int = 100) -> list[QualityIssue]:
+def scan_task_quality(
+    store: TaskStore,
+    limit: int = 100,
+    allowed_roots: Iterable[str | Path] | None = None,
+) -> list[QualityIssue]:
+    allowed_roots = tuple(allowed_roots) if allowed_roots is not None else None
     issues: list[QualityIssue] = []
     for task in store.list_recent_tasks(limit=limit):
         dest_path = str(task.metadata.get("dest_path") or "").strip()
@@ -58,6 +68,7 @@ def scan_task_quality(store: TaskStore, limit: int = 100) -> list[QualityIssue]:
             dest_path=dest_path,
             own_share_code=own_share_code,
             own_share_receive_code=own_share_receive_code,
+            allowed_roots=allowed_roots,
         ):
             issues.append(replace(issue, task_id=task.id, title=title))
     return issues

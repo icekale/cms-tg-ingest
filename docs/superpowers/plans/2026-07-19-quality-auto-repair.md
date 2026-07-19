@@ -306,7 +306,7 @@ After Task 6 passes, bump app/__init__.py and CHANGELOG.md to the next patch ver
 
 - [ ] Step 2: Back up and deploy Unraid.
 
-On 192.168.5.28, back up /mnt/user/appdata/cms-tg-ingest and its Compose file, update only the image tag, run docker compose pull and docker compose up -d --no-build, and preserve .env, /data, the 115 cookie, CMS database, and STRM mounts.
+On the Unraid host, back up the appdata directory and its Compose file, update only the image tag, run docker compose pull and docker compose up -d --no-build, and preserve .env, /data, the 115 cookie, CMS database, and STRM mounts.
 
 - [ ] Step 3: Verify production behavior.
 
@@ -315,4 +315,3 @@ Check container version/health, /, /health, and /quality status codes, then insp
 - [ ] Step 4: Commit and report evidence.
 
 Report image tag/digest, test count, scheduler configuration, and skipped/failed quality items. Do not claim a full production repair until TaskStore events and filesystem/Emby checks confirm it.
-

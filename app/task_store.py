@@ -214,8 +214,9 @@ class TaskStore:
                 (current_run_key,),
             ).fetchone()
             current_run_id = str(current_run_row["value"] or "").strip() if current_run_row else ""
-            same_owner = status == "running" and current_run_id == str(run_id)
-            if status == "running" and not running_is_stale and not same_owner:
+            if status == "running" and current_run_id == str(run_id):
+                return False
+            if status == "running" and not running_is_stale:
                 return False
 
             current_date_row = conn.execute(
@@ -234,9 +235,7 @@ class TaskStore:
                     "SELECT updated_at FROM runtime_state WHERE key = ?",
                     (date_key,),
                 ).fetchone()
-                if date_row is not None and not (
-                    same_owner or (running_is_stale and claimed_date == str(run_date))
-                ):
+                if date_row is not None and not (running_is_stale and claimed_date == str(run_date)):
                     return False
                 conn.execute(
                     """
@@ -247,7 +246,7 @@ class TaskStore:
                     (date_key, str(run_date), timestamp),
                 )
 
-            target_date = str(run_date) if run_date is not None else (current_date if same_owner else "")
+            target_date = str(run_date) if run_date is not None else ""
             runtime_values = [
                 ("quality_auto_status", "running"),
                 (current_run_key, str(run_id)),

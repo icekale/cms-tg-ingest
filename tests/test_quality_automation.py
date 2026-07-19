@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import FrozenInstanceError
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Barrier, Event, Lock
 from unittest.mock import patch
@@ -120,6 +120,21 @@ class QualityScheduleTests(unittest.TestCase):
 
             self.assertEqual(service.next_run_at(now), datetime(2026, 7, 20, 2, 50, tzinfo=timezone))
 
+    def test_next_run_at_round_trips_spring_dst_gap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _ = self.make_service(
+                tmp,
+                quality_auto_timezone="America/New_York",
+                quality_auto_time="02:50",
+            )
+            local_timezone = ZoneInfo("America/New_York")
+            now = datetime(2026, 3, 8, 1, 49, tzinfo=local_timezone)
+
+            next_run = service.next_run_at(now)
+
+            self.assertEqual(next_run.replace(tzinfo=None), datetime(2026, 3, 8, 3, 50))
+            self.assertEqual(next_run.astimezone(timezone.utc), datetime(2026, 3, 8, 7, 50, tzinfo=timezone.utc))
+
     def test_run_if_due_claims_one_local_date_across_calls_and_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             service, store = self.make_service(tmp)
@@ -151,6 +166,36 @@ class QualityScheduleTests(unittest.TestCase):
             store.set_runtime_state("quality_auto_status", "running")
 
             self.assertFalse(service.run_now())
+
+    def test_same_run_id_allows_only_one_run_once_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _ = self.make_service(tmp)
+            scan_started = Event()
+            release_scan = Event()
+            scan_calls = 0
+            scan_calls_lock = Lock()
+
+            def blocked_scan(*args, **kwargs):
+                nonlocal scan_calls
+                with scan_calls_lock:
+                    scan_calls += 1
+                    call_number = scan_calls
+                if call_number == 1:
+                    scan_started.set()
+                    release_scan.wait(timeout=5)
+                return []
+
+            fixed_now = datetime(2099, 7, 20, 2, 50, tzinfo=ZoneInfo("Asia/Shanghai"))
+            with patch("app.quality_automation.scan_task_quality", side_effect=blocked_scan):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    first = executor.submit(service.run_once, "same-run", fixed_now)
+                    self.assertTrue(scan_started.wait(timeout=5))
+                    second = executor.submit(service.run_once, "same-run", fixed_now)
+                    second_summary = second.result(timeout=5)
+                    release_scan.set()
+                    first_summary = first.result(timeout=5)
+
+            self.assertEqual(sorted((first_summary.status, second_summary.status)), ["conflict", "succeeded"])
 
     def test_run_summary_and_repair_plan_are_immutable(self):
         summary = QualityRunSummary("run", "succeeded")
@@ -275,12 +320,26 @@ class QualityScheduleTests(unittest.TestCase):
                         takeover_at,
                     )
                     release_scan.set()
-                    old_future.result(timeout=5)
+                    old_summary = old_future.result(timeout=5)
 
+            self.assertEqual(old_summary.status, "superseded")
             self.assertEqual(store.get_runtime_state("quality_auto_status")["value"], "running")
             self.assertEqual(store.get_runtime_state("quality_auto_current_run_id")["value"], "new-run")
             persisted = json.loads(store.get_runtime_state("quality_auto_last_summary")["value"])
             self.assertEqual(persisted["run_id"], "new-run")
+
+    def test_injected_now_controls_finished_at(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _ = self.make_service(tmp)
+            fixed_now = datetime(2099, 7, 20, 2, 50, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+            summary = service.run_once("injected-time", fixed_now)
+
+            self.assertEqual(summary.finished_at, fixed_now.isoformat())
+            self.assertGreaterEqual(
+                datetime.fromisoformat(summary.finished_at),
+                datetime.fromisoformat(summary.started_at),
+            )
 
 
 class QualityPlanningTests(unittest.TestCase):
@@ -370,7 +429,8 @@ class QualityPlanningTests(unittest.TestCase):
             (outside_dest / "movie.strm").write_text("https://cms/d/direct.mkv", encoding="utf-8")
             outside = self.add_task(service.store, "outside", outside_dest)
 
-            summary = service.run_once("unsafe-run")
+            with patch.object(Path, "read_text", side_effect=AssertionError("unsafe STRM was read")):
+                summary = service.run_once("unsafe-run")
             plans = {plan.task_id: plan for plan in summary.plans}
 
             self.assertEqual(plans[missing.id].reason, "unsafe_metadata")

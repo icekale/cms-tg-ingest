@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import asdict, dataclass
-from datetime import datetime, time as datetime_time, timedelta
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 from zoneinfo import ZoneInfo
@@ -84,15 +84,22 @@ class QualityAutomation:
 
     def next_run_at(self, now: datetime | None = None) -> datetime:
         local_now = self._local_now(now)
-        scheduled = local_now.replace(
+        scheduled = self._scheduled_on(local_now, local_now.date())
+        if local_now >= scheduled:
+            scheduled = self._scheduled_on(local_now, local_now.date() + timedelta(days=1))
+        return scheduled
+
+    def _scheduled_on(self, reference: datetime, run_date) -> datetime:
+        candidate = reference.replace(
+            year=run_date.year,
+            month=run_date.month,
+            day=run_date.day,
             hour=self._run_time.hour,
             minute=self._run_time.minute,
             second=0,
             microsecond=0,
         )
-        if local_now >= scheduled:
-            scheduled += timedelta(days=1)
-        return scheduled
+        return candidate.astimezone(timezone.utc).astimezone(self._timezone)
 
     def run_if_due(self, now: datetime | None = None) -> QualityRunSummary | None:
         if not self.config.quality_auto_enabled:
@@ -112,7 +119,7 @@ class QualityAutomation:
             stale_after_seconds=self.STALE_RUN_SECONDS,
         ):
             return None
-        return self.run_once(run_id, local_now)
+        return self._run_once_owned(run_id, local_now, injected_now=now is not None)
 
     def run_once(self, run_id: str, now: datetime | None = None) -> QualityRunSummary:
         local_now = self._local_now(now)
@@ -129,14 +136,25 @@ class QualityAutomation:
                 started_at=started_at,
                 error="quality run lease is owned by another run",
             )
+        return self._run_once_owned(run_id, local_now, injected_now=now is not None)
+
+    def _run_once_owned(
+        self,
+        run_id: str,
+        local_now: datetime,
+        *,
+        injected_now: bool,
+    ) -> QualityRunSummary:
+        started_at = local_now.isoformat()
         running = QualityRunSummary(run_id=run_id, status="running", started_at=started_at)
-        self._persist_summary(running, local_now.timestamp())
+        if not self._persist_summary(running, local_now.timestamp()):
+            return replace(running, status="superseded", error="quality run lease was superseded")
         try:
             limit = max(1, int(self.config.quality_auto_max_tasks))
             tasks = self.store.list_recent_tasks(limit=limit)
-            issues = scan_task_quality(self.store, limit=limit)
+            issues = scan_task_quality(self.store, limit=limit, allowed_roots=self.allowed_roots)
             plans = self._plan(tasks, issues)
-            finished_local = self._local_now(datetime.now(self._timezone))
+            finished_local = local_now if injected_now else self._local_now(datetime.now(self._timezone))
             summary = QualityRunSummary(
                 run_id=run_id,
                 status="succeeded",
@@ -162,7 +180,8 @@ class QualityAutomation:
             if summary.finished_at
             else local_now.timestamp()
         )
-        self._persist_summary(summary, finished_timestamp)
+        if not self._persist_summary(summary, finished_timestamp):
+            return replace(summary, status="superseded", error="quality run lease was superseded")
         return summary
 
     def run_now(self) -> bool:
@@ -174,7 +193,7 @@ class QualityAutomation:
             stale_after_seconds=self.STALE_RUN_SECONDS,
         ):
             return False
-        self.run_once(run_id)
+        self._run_once_owned(run_id, self._local_now(None), injected_now=False)
         return True
 
     def _persist_summary(self, summary: QualityRunSummary, updated_at: float) -> bool:
