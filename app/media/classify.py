@@ -253,14 +253,15 @@ class TmdbApiResolver:
             "source": "tmdb_api",
         }
         if media_type == "tv":
-            result.update(
-                {
-                    "status": str(data.get("status") or ""),
-                    "number_of_seasons": _normalized_int(data.get("number_of_seasons")),
-                    "number_of_episodes": _normalized_int(data.get("number_of_episodes")),
-                    "seasons": _normalize_tv_seasons(data.get("seasons")),
-                }
-            )
+            tv_metadata = {
+                "status": str(data.get("status") or ""),
+                "seasons": _normalize_tv_seasons(data.get("seasons")),
+            }
+            for field in ("number_of_seasons", "number_of_episodes"):
+                value = _normalized_int(data.get(field))
+                if value is not None:
+                    tv_metadata[field] = value
+            result.update(tv_metadata)
         return result
 
 
