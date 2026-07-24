@@ -52,6 +52,7 @@ class HdhiveAccount:
     weekly_free_quota_unlimited: bool
     level: str
     is_blocked: bool
+    is_forever_vip: bool = False
 
 
 @dataclass(frozen=True)
@@ -168,6 +169,7 @@ class HdhiveProxyClient:
             weekly_free_quota_unlimited=bool(data.get("weekly_free_quota_unlimited")),
             level=_as_text(data.get("level")) or "user",
             is_blocked=bool(data.get("is_blocked")),
+            is_forever_vip=bool(data.get("is_forever_vip")),
         )
 
     def resources(self, media_type: str, tmdb_id: str) -> list[HdhiveResource]:
