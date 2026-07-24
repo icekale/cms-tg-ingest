@@ -23,6 +23,7 @@ from app.clients.cms import CmsClient
 from app.cms_cloud_index import CmsCloudDataIndex
 from app.clients.emby import EmbyClient
 from app.clients.http import FormHttp, HttpJson, load_cookie_value
+from app.clients.hdhive import HdhiveProxyClient, HdhiveProxyError
 from app.clients.p115 import (
     CMS_PARENT_CID_CATEGORY_MAP,
     P115RiskControlError,
@@ -92,6 +93,7 @@ from app.media.classify import (
     user_movie_category_bucket,
 )
 from app.media.sources import parse_media_sources
+from app.hdhive import HdhiveSelectionError, HdhiveSessionStore, HdhiveWorkflow
 
 from app.media.strm import (
     category_for_self_share_row,
@@ -140,6 +142,9 @@ from app.telegram_ui import (
     format_status,
     format_taskstore_history,
     format_taskstore_status,
+    hdhive_candidate_keyboard,
+    hdhive_confirmation_keyboard,
+    hdhive_resource_keyboard,
     menu_keyboard,
     quality_issue_for_row,
     quality_issue_rows,
@@ -178,13 +183,14 @@ TRAILING_PUNCT = ".,;)。），]】》>"
 LOG = logging.getLogger("cms-tg-ingest")
 LAST_TELEGRAM_TRANSIENT_ERROR_AT: str | None = None
 ED2K_HELP_EXAMPLE = "ed2k://|file|Example.mkv|10|" + "0123456789ABCDEF" * 2 + "|/"
-HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 分享、磁力或 ED2K 链接\n- 磁力/ED2K 会进入 115 云下载，再复用 CMS 整理和分享 STRM 流程\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- /status 查看最近任务\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd\n""" + ED2K_HELP_EXAMPLE
+HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 分享、磁力或 ED2K 链接\n- 磁力/ED2K 会进入 115 云下载，再复用 CMS 整理和分享 STRM 流程\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- HDHive 搜索可通过 TMDB 匹配影片/剧集，筛选网盘并解锁资源\n- /status 查看最近任务\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd\n""" + ED2K_HELP_EXAMPLE
 MENU_BUTTONS = {
     "📊 统计": "/metrics",
     "📋 最近任务": "/status",
     "🕘 历史": "/history",
     "🧯 巡检": "/quality",
     "🧹 清理历史": "/clear_history",
+    "HDHive 搜索": "/hdhive_search",
     "🩺 健康检查": "/health",
     "❓ 帮助": "/help",
 }
@@ -304,6 +310,25 @@ def normalize_share_link(url: str) -> ShareKey:
 
 def create_task_store(config: Config) -> TaskStore:
     return TaskStore(config.task_db_path)
+
+
+def create_hdhive_workflow(config: Config, cms: CmsClient) -> HdhiveWorkflow | None:
+    if not bool(getattr(config, "hdhive_enabled", False)):
+        return None
+    refresh_via_cms = getattr(cms, "get_hdhive_info", None)
+    return HdhiveWorkflow(
+        cms=cms,
+        proxy=HdhiveProxyClient(
+            getattr(config, "hdhive_proxy_base_url", ""),
+            getattr(config, "hdhive_token_config_path", ""),
+            http=HttpJson(int(getattr(config, "http_timeout", 60))),
+            refresh_via_cms=refresh_via_cms if callable(refresh_via_cms) else None,
+        ),
+        sessions=HdhiveSessionStore(
+            int(getattr(config, "hdhive_search_session_ttl_seconds", 900))
+        ),
+        auto_unlock_max_points=int(getattr(config, "hdhive_auto_unlock_max_points", 20)),
+    )
 
 
 def maybe_start_web_server(
@@ -1086,6 +1111,8 @@ def format_health(
     openai_enabled: bool | None = None,
     openai_ok: bool | None = None,
     task_health: str | None = None,
+    hdhive_enabled: bool | None = None,
+    hdhive_ok: bool | None = None,
 ) -> str:
     source_ok = all(safe_resolve(root).exists() for root in move_config.source_roots)
     lib_ok = all(safe_resolve(root).exists() for root in move_config.library_roots.values())
@@ -1099,6 +1126,8 @@ def format_health(
             lines.append(f"OpenAI分类兜底: {'OK' if openai_ok else 'FAIL'}")
         else:
             lines.append("OpenAI分类兜底: DISABLED")
+    if hdhive_enabled is not None:
+        lines.append(f"HDHive: {'OK' if hdhive_ok else 'FAIL'}" if hdhive_enabled else "HDHive: DISABLED")
     lines.extend(
         [
             f"Emby: {'OK' if emby_ok else 'FAIL'}",
@@ -1567,6 +1596,210 @@ def parse_category_callback(data: str) -> tuple[int, str] | None:
         return None
 
 
+def parse_hdhive_callback(data: str) -> tuple[str, str, str] | None:
+    parts = str(data or "").split(":")
+    if len(parts) == 3 and parts[0] == "hive" and parts[1] in {"cancel", "unlock", "confirm"}:
+        return parts[1], parts[2], ""
+    if len(parts) != 4 or parts[0] != "hive":
+        return None
+    if parts[1] not in {"candidate", "filter", "toggle", "single"}:
+        return None
+    return parts[1], parts[2], parts[3]
+
+
+def format_hdhive_account(account: Any) -> str:
+    quota = "无限制" if account.weekly_free_quota_unlimited else str(account.weekly_free_quota_remaining)
+    return f"账号：{account.nickname}\n等级：{account.level}\n积分：{account.points}\n本周免费次数：{quota}"
+
+
+def format_hdhive_resources(workflow: HdhiveWorkflow, session_id: str) -> tuple[str, dict[str, Any]]:
+    session = workflow.sessions.get(session_id)
+    if session is None:
+        raise HdhiveSelectionError("HDHive 操作会话已过期，请重新搜索")
+    visible_indexes = workflow.visible_resource_indexes(session_id)
+    selectable = set(workflow.selectable_resource_indexes(session_id))
+    lines = [f"HDHive 资源：{session.media_type} / TMDB {session.tmdb_id}", ""]
+    if not visible_indexes:
+        lines.append("当前网盘筛选没有资源。")
+    for index in visible_indexes:
+        item = session.resources[index]
+        status = "不可用" if item.validate_status.lower() == "invalid" else "可选"
+        cost = "已解锁" if item.is_unlocked else f"积分 {item.unlock_points if item.unlock_points is not None else '未知'}"
+        selected = "已选" if index in session.selected_indexes else "未选"
+        if index not in selectable:
+            selected = "不可选"
+        lines.append(
+            f"{index + 1}. {item.title or '未命名'} | {item.pan_type} | {item.share_size or '大小未知'} | "
+            f"{'/'.join(item.video_resolution) or '分辨率未知'} | {cost} | {status}/{selected}"
+        )
+        if item.validate_message and item.validate_status.lower() == "invalid":
+            lines.append(f"   原因：{item.validate_message}")
+    lines.append(f"已选择：{len(session.selected_indexes)} 个。点击资源行选择，再点击解锁。")
+    return "\n".join(lines), hdhive_resource_keyboard(
+        session_id,
+        session.resources,
+        visible_indexes,
+        session.selected_indexes,
+        workflow.available_pan_types(session_id),
+        session.pan_type,
+    )
+
+
+def execute_hdhive_unlock(
+    workflow: HdhiveWorkflow,
+    session_id: str,
+    chat_id: int | str,
+    callback_id: str,
+    telegram: TelegramClient,
+    enqueue_unlocked_links: Any | None,
+    confirmed: bool,
+) -> None:
+    try:
+        session = workflow.sessions.get(session_id)
+        if session is None:
+            raise HdhiveSelectionError("HDHive 操作会话已过期，请重新搜索")
+        selected_pan_types = {
+            session.resources[index].slug: session.resources[index].pan_type.strip().lower()
+            for index in session.selected_indexes
+            if 0 <= index < len(session.resources)
+        }
+        results = workflow.unlock(session_id, confirmed=confirmed)
+    except HdhiveSelectionError as exc:
+        telegram.answer_callback_query(callback_id, str(exc), show_alert=True)
+        return
+    except HdhiveProxyError as exc:
+        telegram.answer_callback_query(callback_id, "HDHive 请求失败", show_alert=True)
+        telegram.send_message(chat_id, f"HDHive 请求失败：{exc.message}")
+        return
+    success_urls: list[str] = []
+    non_115_urls: list[str] = []
+    lines = ["HDHive 解锁结果："]
+    for item in results:
+        if item.success:
+            lines.append(f"成功：{item.slug}" + ("（已拥有）" if item.already_owned else ""))
+            if item.full_url:
+                if selected_pan_types.get(item.slug) == "115":
+                    success_urls.append(item.full_url)
+                else:
+                    non_115_urls.append(item.full_url)
+        else:
+            lines.append(f"失败：{item.slug}，{item.message or item.error_code or '未知原因'}")
+    if success_urls and enqueue_unlocked_links is not None:
+        try:
+            enqueue_unlocked_links(success_urls, str(chat_id))
+            lines.append(f"已将 {len(success_urls)} 个 115 链接交给现有入库流程。")
+        except Exception as exc:
+            LOG.exception("Failed to enqueue unlocked HDHive links")
+            lines.append(f"115 入库提交失败：{classify_error(exc)}。解锁链接未丢失，请稍后重试。")
+    if non_115_urls:
+        lines.append("非 115 链接（已解锁但未自动进入 115 入库流程）：")
+        lines.extend(non_115_urls)
+    telegram.answer_callback_query(callback_id, "解锁处理完成", show_alert=False)
+    telegram.send_message(chat_id, "\n".join(lines))
+
+
+def handle_hdhive_callback(
+    data: str,
+    callback_id: str,
+    chat_id: int | str,
+    telegram: TelegramClient,
+    workflow: HdhiveWorkflow | None,
+    enqueue_unlocked_links: Any | None,
+) -> bool:
+    parsed = parse_hdhive_callback(data)
+    if not parsed:
+        return False
+    action, session_id, argument = parsed
+    if workflow is None:
+        telegram.answer_callback_query(callback_id, "HDHive 功能未启用", show_alert=True)
+        return True
+    try:
+        session = workflow.sessions.get(session_id)
+        if session is None:
+            raise HdhiveSelectionError("HDHive 操作会话已过期，请重新搜索")
+        if action == "cancel":
+            workflow.sessions.remove(session_id)
+            telegram.answer_callback_query(callback_id, "已取消", show_alert=False)
+            telegram.send_message(chat_id, "已取消 HDHive 操作。")
+            return True
+        if action == "candidate":
+            index = int(argument)
+            if index < 0 or index >= len(session.candidates):
+                raise HdhiveSelectionError("候选媒体不存在，请重新搜索")
+            candidate = session.candidates[index]
+            workflow.load_resources(session_id, candidate["media_type"], candidate["tmdb_id"])
+            text, keyboard = format_hdhive_resources(workflow, session_id)
+            telegram.answer_callback_query(callback_id, "已查询 HDHive 资源", show_alert=False)
+            telegram.send_message(chat_id, text, reply_markup=keyboard)
+            return True
+        if action == "filter":
+            if argument == "all":
+                pan_type = "all"
+            else:
+                pan_types = workflow.available_pan_types(session_id)
+                pan_index = int(argument)
+                if pan_index < 0 or pan_index >= len(pan_types):
+                    raise HdhiveSelectionError("网盘筛选不存在，请重新查询")
+                pan_type = pan_types[pan_index]
+            workflow.set_filter(session_id, pan_type)
+            text, keyboard = format_hdhive_resources(workflow, session_id)
+            telegram.answer_callback_query(callback_id, f"已筛选：{pan_type}", show_alert=False)
+            telegram.send_message(chat_id, text, reply_markup=keyboard)
+            return True
+        if action in {"toggle", "single"}:
+            resource_index = int(argument)
+            if action == "single" and resource_index not in workflow.selectable_resource_indexes(session_id):
+                raise HdhiveSelectionError("该资源不可选择")
+            if action == "single":
+                session.selected_indexes = []
+            workflow.toggle_selection(session_id, resource_index)
+            if action == "single":
+                preview = workflow.unlock_preview(session_id)
+                if preview.requires_confirmation:
+                    telegram.answer_callback_query(callback_id, "需要确认扣费", show_alert=False)
+                    telegram.send_message(
+                        chat_id,
+                        f"{format_hdhive_account(preview.account)}\n预计最多消耗积分：{preview.maximum_points}\n请确认解锁。",
+                        reply_markup=hdhive_confirmation_keyboard(session_id),
+                    )
+                else:
+                    execute_hdhive_unlock(
+                        workflow,
+                        session_id,
+                        chat_id,
+                        callback_id,
+                        telegram,
+                        enqueue_unlocked_links,
+                        False,
+                    )
+                return True
+            text, keyboard = format_hdhive_resources(workflow, session_id)
+            telegram.answer_callback_query(callback_id, "已更新选择", show_alert=False)
+            telegram.send_message(chat_id, text, reply_markup=keyboard)
+            return True
+        if action == "unlock":
+            preview = workflow.unlock_preview(session_id)
+            if preview.requires_confirmation:
+                telegram.answer_callback_query(callback_id, "需要确认扣费", show_alert=False)
+                telegram.send_message(
+                    chat_id,
+                    f"{format_hdhive_account(preview.account)}\n预计最多消耗积分：{preview.maximum_points}\n请确认解锁。",
+                    reply_markup=hdhive_confirmation_keyboard(session_id),
+                )
+            else:
+                execute_hdhive_unlock(workflow, session_id, chat_id, callback_id, telegram, enqueue_unlocked_links, False)
+            return True
+        if action == "confirm":
+            execute_hdhive_unlock(workflow, session_id, chat_id, callback_id, telegram, enqueue_unlocked_links, True)
+            return True
+    except (ValueError, IndexError, HdhiveSelectionError) as exc:
+        telegram.answer_callback_query(callback_id, str(exc), show_alert=True)
+        return True
+    except HdhiveProxyError as exc:
+        telegram.answer_callback_query(callback_id, "HDHive 请求失败", show_alert=True)
+        telegram.send_message(chat_id, f"HDHive 请求失败：{exc.message}")
+        return True
+    return True
 def remember_manual_parent_category(store: SubmissionStore, row: dict[str, Any], category: str) -> None:
     if not hasattr(store, "remember_parent_category"):
         return
@@ -1588,6 +1821,8 @@ def handle_callback_query(
     store: SubmissionStore,
     emby: EmbyClient | None = None,
     task_store: TaskStore | None = None,
+    hdhive_workflow: HdhiveWorkflow | None = None,
+    enqueue_unlocked_links: Any | None = None,
 ) -> None:
     sender_id = ((callback_query.get("from") or {}).get("id"))
     message = callback_query.get("message") or {}
@@ -1605,6 +1840,15 @@ def handle_callback_query(
         write_metrics_snapshot(store, metrics_path_for_store(store))
         telegram.answer_callback_query(callback_id, f"已清理 {removed} 条", show_alert=False)
         telegram.send_message(chat_id, f"已清理 {removed} 条已结束历史记录。正在处理中的任务已保留。")
+        return
+    if handle_hdhive_callback(
+        data,
+        callback_id,
+        chat_id,
+        telegram,
+        hdhive_workflow,
+        enqueue_unlocked_links,
+    ):
         return
     task_action = parse_task_action_callback(data)
     if task_action:
@@ -2545,9 +2789,20 @@ def handle_update(
     self_share_receive_cid: str = "",
     task_store: TaskStore | None = None,
     task_engine_enabled: bool = False,
+    hdhive_workflow: HdhiveWorkflow | None = None,
+    enqueue_unlocked_links: Any | None = None,
 ) -> None:
     if update.get("callback_query"):
-        handle_callback_query(update.get("callback_query") or {}, telegram, allowed_chat_id, store, emby=emby, task_store=task_store)
+        handle_callback_query(
+            update.get("callback_query") or {},
+            telegram,
+            allowed_chat_id,
+            store,
+            emby=emby,
+            task_store=task_store,
+            hdhive_workflow=hdhive_workflow,
+            enqueue_unlocked_links=enqueue_unlocked_links,
+        )
         return
 
     message = update.get("message") or {}
@@ -2564,6 +2819,13 @@ def handle_update(
     command = text.split()[0].split("@", 1)[0].lower() if text.startswith("/") else ""
     if command == "/help":
         send_menu_message(telegram, chat_id, HELP_TEXT)
+        return
+    if command == "/hdhive_search":
+        if hdhive_workflow is None:
+            telegram.send_message(chat_id, "HDHive 搜索未启用，或 CMS 尚未完成影巢账号授权。")
+            return
+        session_id = hdhive_workflow.sessions.begin(str(chat_id), "")
+        telegram.send_message(chat_id, f"请输入片名或 TMDB ID。\n本次搜索编号：{session_id}")
         return
     if command == "/status":
         if task_engine_enabled and task_store is not None:
@@ -2616,6 +2878,8 @@ def handle_update(
                 telegram_last_error_at=LAST_TELEGRAM_TRANSIENT_ERROR_AT,
                 openai_enabled=bool(openai_classifier and openai_classifier.enabled),
                 openai_ok=openai_classifier.healthcheck() if openai_classifier else False,
+                hdhive_enabled=hdhive_workflow is not None,
+                hdhive_ok=hdhive_workflow.proxy.healthcheck() if hdhive_workflow is not None else False,
                 task_health=format_taskstore_health(
                     task_store,
                     enabled=bool(task_engine_enabled),
@@ -2623,6 +2887,27 @@ def handle_update(
             ),
         )
         return
+
+    if hdhive_workflow is not None:
+        pending = hdhive_workflow.sessions.active_for_chat(str(chat_id))
+        if pending is not None and not pending.candidates and not pending.media_type and text:
+            pending.query = text
+            try:
+                candidates = hdhive_workflow.search_candidates(text)
+                hdhive_workflow.set_candidates(pending.session_id, candidates)
+                lines = ["请选择要查询的 TMDB 媒体："]
+                for index, candidate in enumerate(candidates, 1):
+                    media_type = "电影" if candidate["media_type"] == "movie" else "剧集"
+                    year = candidate.get("year") or "年份未知"
+                    lines.append(f"{index}. {candidate['title']} ({year}) [{media_type}] TMDB:{candidate['tmdb_id']}")
+                telegram.send_message(
+                    chat_id,
+                    "\n".join(lines),
+                    reply_markup=hdhive_candidate_keyboard(pending.session_id, candidates),
+                )
+            except (HdhiveSelectionError, HdhiveProxyError) as exc:
+                telegram.send_message(chat_id, f"HDHive 搜索失败：{getattr(exc, 'message', str(exc))}")
+            return
 
     explicit_series_update = text.startswith("追更")
     if explicit_series_update:
@@ -2822,6 +3107,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
     )
     store = SubmissionStore(config.db_path)
     task_store = create_task_store(config)
+    hdhive_workflow = create_hdhive_workflow(config, cms)
     self_share_config = SelfShareConfig.from_config(config, cms)
     p115 = (
         P115WebClient(
@@ -2951,6 +3237,39 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
             interval_seconds=max(1, int(config.status_repair_interval_seconds)),
             limit=max(1, int(config.status_repair_limit)),
         )
+
+    def enqueue_hdhive_links(urls: list[str], chat_id: str) -> None:
+        links = [str(url).strip() for url in urls if str(url).strip()]
+        if not links:
+            return
+        handle_update(
+            {
+                "message": {
+                    "chat": {"id": chat_id},
+                    "from": {"id": chat_id},
+                    "text": "\n".join(links),
+                }
+            },
+            cms,
+            telegram,
+            config.tg_allowed_chat_id,
+            store,
+            poll_status=False,
+            status_poll_seconds=config.status_poll_seconds,
+            status_poll_interval=config.status_poll_interval,
+            emby=emby,
+            move_config=move_config,
+            openai_classifier=openai_classifier,
+            tmdb_resolver=tmdb_resolver,
+            self_share_workflow=self_share_workflow,
+            cleanup_client=p115 if self_share_config.enabled else None,
+            self_share_receive_cid=config.self_share_receive_cid,
+            task_store=task_store,
+            task_engine_enabled=config.task_engine_enabled,
+            hdhive_workflow=hdhive_workflow,
+            enqueue_unlocked_links=enqueue_hdhive_links,
+        )
+
     try:
         while not stop_event.is_set():
             try:
@@ -2974,6 +3293,8 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
                         self_share_receive_cid=config.self_share_receive_cid,
                         task_store=task_store,
                         task_engine_enabled=config.task_engine_enabled,
+                        hdhive_workflow=hdhive_workflow,
+                        enqueue_unlocked_links=enqueue_hdhive_links if hdhive_workflow is not None else None,
                     )
             except Exception as exc:
                 if stop_event.is_set():

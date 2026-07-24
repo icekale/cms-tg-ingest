@@ -211,6 +211,79 @@ def task_action_keyboard(tasks: list[Any], limit: int = 5) -> dict[str, Any] | N
     return {"inline_keyboard": buttons} if buttons else None
 
 
+def hdhive_candidate_keyboard(session_id: str, candidates: list[dict[str, str]]) -> dict[str, Any]:
+    buttons = []
+    for index, candidate in enumerate(candidates[:12]):
+        title = truncate_text(candidate.get("title") or "未命名", 34)
+        year = candidate.get("year") or "年未知"
+        media_type = "电影" if candidate.get("media_type") == "movie" else "剧集"
+        buttons.append([{"text": f"{index + 1}. {title} ({year}) [{media_type}]", "callback_data": f"hive:candidate:{session_id}:{index}"}])
+    buttons.append([{"text": "取消搜索", "callback_data": f"hive:cancel:{session_id}"}])
+    return {"inline_keyboard": buttons}
+
+
+def hdhive_resource_keyboard(
+    session_id: str,
+    resources: list[Any],
+    visible_indexes: list[int],
+    selected_indexes: list[int],
+    pan_types: list[str],
+    current_pan_type: str,
+) -> dict[str, Any]:
+    buttons = []
+    filter_buttons = [{"text": "全部" if current_pan_type == "all" else "全部资源", "callback_data": f"hive:filter:{session_id}:all"}]
+    for index, pan_type in enumerate(pan_types):
+        filter_buttons.append(
+            {
+                "text": f"[{pan_type}]" if pan_type == current_pan_type else pan_type,
+                "callback_data": f"hive:filter:{session_id}:{index}",
+            }
+        )
+    for start in range(0, len(filter_buttons), 4):
+        buttons.append(filter_buttons[start : start + 4])
+    for resource_index in visible_indexes:
+        resource = resources[resource_index]
+        title = truncate_text(resource.title or f"资源 {resource_index + 1}", 28)
+        details = "/".join(resource.video_resolution) or "分辨率未知"
+        cost = "已解锁" if resource.is_unlocked else f"{resource.unlock_points if resource.unlock_points is not None else '?'}分"
+        if resource.validate_status.lower() == "invalid":
+            text = f"不可用 {resource_index + 1}. {title} | {resource.pan_type} | {cost}"
+        else:
+            mark = "已选 " if resource_index in selected_indexes else ""
+            text = f"{mark}{resource_index + 1}. {title} | {resource.pan_type} | {details} | {cost}"
+        buttons.append(
+            [
+                {
+                    "text": text,
+                    "callback_data": f"hive:toggle:{session_id}:{resource_index}",
+                },
+                {
+                    "text": "单独解锁",
+                    "callback_data": f"hive:single:{session_id}:{resource_index}",
+                },
+            ]
+        )
+    selected_count = len(selected_indexes)
+    buttons.append(
+        [
+            {"text": f"解锁选中 ({selected_count})", "callback_data": f"hive:unlock:{session_id}"},
+            {"text": "取消", "callback_data": f"hive:cancel:{session_id}"},
+        ]
+    )
+    return {"inline_keyboard": buttons}
+
+
+def hdhive_confirmation_keyboard(session_id: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "确认解锁", "callback_data": f"hive:confirm:{session_id}"},
+                {"text": "取消", "callback_data": f"hive:cancel:{session_id}"},
+            ]
+        ]
+    }
+
+
 def clear_history_keyboard() -> dict[str, Any]:
     return {
         "inline_keyboard": [
@@ -227,6 +300,7 @@ def menu_keyboard() -> dict[str, Any]:
         "keyboard": [
             [{"text": "📊 统计"}, {"text": "📋 最近任务"}],
             [{"text": "🕘 历史"}, {"text": "🧹 清理历史"}],
+            [{"text": "HDHive 搜索"}],
             [{"text": "🩺 健康检查"}, {"text": "❓ 帮助"}],
         ],
         "resize_keyboard": True,

@@ -73,6 +73,12 @@ class HdhiveSessionStore:
             self._purge()
             return self._sessions.get(str(session_id))
 
+    def active_for_chat(self, chat_id: str) -> HdhiveSession | None:
+        with self._lock:
+            self._purge()
+            session_id = self._chat_sessions.get(str(chat_id))
+            return self._sessions.get(session_id) if session_id else None
+
     def remove(self, session_id: str) -> None:
         with self._lock:
             session = self._sessions.pop(str(session_id), None)
