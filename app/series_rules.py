@@ -40,9 +40,18 @@ class EpisodeFilter:
     ranges: tuple[tuple[EpisodeKey, EpisodeKey], ...] = ()
 
     def __post_init__(self) -> None:
+        normalized_ranges = tuple(tuple(item) for item in self.ranges)
+        for item in normalized_ranges:
+            if len(item) != 2 or not all(isinstance(key, EpisodeKey) for key in item):
+                raise ValueError("ranges must contain episode-key pairs")
+            start, end = item
+            if start.season != end.season:
+                raise ValueError("episode ranges cannot cross seasons")
+            if start > end:
+                raise ValueError("episode range start must not exceed its end")
         object.__setattr__(self, "exact_keys", frozenset(self.exact_keys))
         object.__setattr__(self, "seasons", frozenset(self.seasons))
-        object.__setattr__(self, "ranges", tuple(tuple(item) for item in self.ranges))
+        object.__setattr__(self, "ranges", normalized_ranges)
 
     def matches(self, key: EpisodeKey) -> bool:
         return (
@@ -67,7 +76,10 @@ def parse_episode_key(value: str | None) -> EpisodeKey | None:
     match = _EPISODE_TOKEN_RE.search(str(value or ""))
     if not match:
         return None
-    return _episode_key(int(match.group("season")), int(match.group("episode")))
+    try:
+        return _episode_key(int(match.group("season")), int(match.group("episode")))
+    except ValueError:
+        return None
 
 
 def normalize_episode_key(value: str | None) -> str:

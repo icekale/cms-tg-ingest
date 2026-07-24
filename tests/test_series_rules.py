@@ -20,6 +20,11 @@ class SeriesRuleTests(unittest.TestCase):
         self.assertEqual(parse_episode_key("S01"), None)
         self.assertEqual(normalize_episode_key("show_s1e2"), "S01E02")
 
+    def test_invalid_embedded_episode_numbers_are_unparsed(self):
+        for value in ("S01E00", "S00E00", "S01E000", "S-1E02", "S01EXX"):
+            with self.subTest(value=value):
+                self.assertIsNone(parse_episode_key(value))
+
     def test_episode_key_is_immutable_and_ordered(self):
         self.assertLess(EpisodeKey(1, 2), EpisodeKey(1, 10))
         with self.assertRaises(FrozenInstanceError):
@@ -55,6 +60,12 @@ class SeriesRuleTests(unittest.TestCase):
         self.assertTrue(episode_filter.matches(EpisodeKey(1, 1)))
         self.assertTrue(episode_filter.matches(EpisodeKey(2, 1)))
         self.assertTrue(episode_filter.matches(EpisodeKey(3, 2)))
+
+    def test_direct_filter_rejects_invalid_ranges(self):
+        with self.assertRaises(ValueError):
+            EpisodeFilter(ranges=[(EpisodeKey(1, 3), EpisodeKey(1, 2))])
+        with self.assertRaises(ValueError):
+            EpisodeFilter(ranges=[(EpisodeKey(1, 1), EpisodeKey(2, 1))])
 
     def test_rejects_cross_season_ranges_and_bad_tokens(self):
         with self.assertRaises(ValueError):
