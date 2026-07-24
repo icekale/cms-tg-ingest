@@ -26,6 +26,8 @@ class HdhiveSubscription:
     last_error: str
     created_at: float
     updated_at: float
+    episode_filter: str = ""
+    last_summary_json: str = "{}"
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "HdhiveSubscription":
@@ -44,6 +46,8 @@ class HdhiveSubscription:
             last_error=str(row["last_error"] or ""),
             created_at=float(row["created_at"] or 0),
             updated_at=float(row["updated_at"] or 0),
+            episode_filter=str(row["episode_filter"] or ""),
+            last_summary_json=str(row["last_summary_json"] or "{}"),
         )
 
 
@@ -65,6 +69,8 @@ class HdhiveSubscriptionItem:
     unlocked_at: float | None
     created_at: float
     updated_at: float
+    normalized_episode_key: str = ""
+    skip_reason: str = ""
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "HdhiveSubscriptionItem":
@@ -85,6 +91,8 @@ class HdhiveSubscriptionItem:
             unlocked_at=float(row["unlocked_at"]) if row["unlocked_at"] is not None else None,
             created_at=float(row["created_at"] or 0),
             updated_at=float(row["updated_at"] or 0),
+            normalized_episode_key=str(row["normalized_episode_key"] or ""),
+            skip_reason=str(row["skip_reason"] or ""),
         )
 
 
@@ -156,6 +164,8 @@ class HdhiveSubscriptionStore:
                     last_error TEXT NOT NULL DEFAULT '',
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
+                    episode_filter TEXT NOT NULL DEFAULT '',
+                    last_summary_json TEXT NOT NULL DEFAULT '{}',
                     UNIQUE(chat_id, source_type, source_value)
                 );
                 CREATE INDEX IF NOT EXISTS idx_hdhive_subscriptions_status
@@ -177,6 +187,8 @@ class HdhiveSubscriptionStore:
                     unlocked_at REAL,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
+                    normalized_episode_key TEXT NOT NULL DEFAULT '',
+                    skip_reason TEXT NOT NULL DEFAULT '',
                     UNIQUE(subscription_id, episode_key, resource_slug),
                     FOREIGN KEY(subscription_id) REFERENCES hdhive_subscriptions(id)
                 );
@@ -198,14 +210,32 @@ class HdhiveSubscriptionStore:
                 );
                 """
             )
-            existing = {row[1] for row in connection.execute("PRAGMA table_info(hdhive_subscription_items)")}
-            for name, definition in {
-                "unlock_points_spent": "INTEGER",
-                "unlock_points_source": "TEXT NOT NULL DEFAULT ''",
-                "unlocked_at": "REAL",
-            }.items():
-                if name not in existing:
-                    connection.execute(f"ALTER TABLE hdhive_subscription_items ADD COLUMN {name} {definition}")
+            self._ensure_columns(
+                connection,
+                "hdhive_subscriptions",
+                {
+                    "episode_filter": "TEXT NOT NULL DEFAULT ''",
+                    "last_summary_json": "TEXT NOT NULL DEFAULT '{}'",
+                },
+            )
+            self._ensure_columns(
+                connection,
+                "hdhive_subscription_items",
+                {
+                    "unlock_points_spent": "INTEGER",
+                    "unlock_points_source": "TEXT NOT NULL DEFAULT ''",
+                    "unlocked_at": "REAL",
+                    "normalized_episode_key": "TEXT NOT NULL DEFAULT ''",
+                    "skip_reason": "TEXT NOT NULL DEFAULT ''",
+                },
+            )
+
+    @staticmethod
+    def _ensure_columns(connection: sqlite3.Connection, table: str, definitions: dict[str, str]) -> None:
+        existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for name, definition in definitions.items():
+            if name not in existing:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
     @staticmethod
     def _row_or_none(row: sqlite3.Row | None, factory):
@@ -279,7 +309,7 @@ class HdhiveSubscriptionStore:
 
     def set_status(self, subscription_id: int, status: str) -> HdhiveSubscription:
         status = str(status).strip().lower()
-        if status not in {"active", "paused", "error", "deleted"}:
+        if status not in {"active", "paused", "error", "completed", "deleted"}:
             raise ValueError("invalid HDHive subscription status")
         with self._lock, self._connection() as connection:
             connection.execute(
@@ -294,16 +324,67 @@ class HdhiveSubscriptionStore:
             raise KeyError(f"HDHive subscription {subscription_id} does not exist")
         return HdhiveSubscription.from_row(row)
 
-    def record_check(self, subscription_id: int, error: str = "", checked_at: float | None = None) -> None:
+    def update_episode_filter(self, subscription_id: int, value: str) -> HdhiveSubscription:
         with self._lock, self._connection() as connection:
             connection.execute(
                 """
                 UPDATE hdhive_subscriptions
-                SET last_checked_at = ?, last_error = ?, updated_at = ?
+                SET episode_filter = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (float(checked_at if checked_at is not None else time.time()), str(error or ""), time.time(), int(subscription_id)),
+                (str(value or "").strip(), time.time(), int(subscription_id)),
             )
+            row = connection.execute(
+                "SELECT * FROM hdhive_subscriptions WHERE id = ?",
+                (int(subscription_id),),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"HDHive subscription {subscription_id} does not exist")
+        return HdhiveSubscription.from_row(row)
+
+    def record_check(
+        self,
+        subscription_id: int,
+        error: str = "",
+        checked_at: float | None = None,
+        summary: dict[str, Any] | None = None,
+    ) -> None:
+        summary_json = None
+        if summary is not None:
+            if not isinstance(summary, dict):
+                raise TypeError("HDHive subscription summary must be a dictionary")
+            summary_json = json.dumps(
+                summary,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        with self._lock, self._connection() as connection:
+            if summary_json is None:
+                connection.execute(
+                    """
+                    UPDATE hdhive_subscriptions
+                    SET last_checked_at = ?, last_error = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (float(checked_at if checked_at is not None else time.time()), str(error or ""), time.time(), int(subscription_id)),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE hdhive_subscriptions
+                    SET last_checked_at = ?, last_error = ?, last_summary_json = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        float(checked_at if checked_at is not None else time.time()),
+                        str(error or ""),
+                        summary_json,
+                        time.time(),
+                        int(subscription_id),
+                    ),
+                )
 
     def upsert_item(
         self,
@@ -314,6 +395,8 @@ class HdhiveSubscriptionStore:
         resolution_score: int,
         unlock_points: int | None,
         title: str = "",
+        *,
+        normalized_episode_key: str | None = None,
     ) -> HdhiveSubscriptionItem:
         now = time.time()
         with self._lock, self._connection() as connection:
@@ -321,13 +404,18 @@ class HdhiveSubscriptionStore:
                 """
                 INSERT INTO hdhive_subscription_items
                     (subscription_id, episode_key, resource_slug, title, validate_status,
-                     resolution_score, unlock_points, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    resolution_score, unlock_points, created_at, updated_at,
+                    normalized_episode_key, skip_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(subscription_id, episode_key, resource_slug) DO UPDATE SET
                     title = CASE WHEN excluded.title <> '' THEN excluded.title ELSE title END,
                     validate_status = excluded.validate_status,
                     resolution_score = excluded.resolution_score,
                     unlock_points = COALESCE(excluded.unlock_points, unlock_points),
+                    normalized_episode_key = CASE
+                        WHEN excluded.normalized_episode_key <> '' THEN excluded.normalized_episode_key
+                        ELSE normalized_episode_key
+                    END,
                     updated_at = CASE WHEN status = 'unlocking' THEN updated_at ELSE excluded.updated_at END
                 """,
                 (
@@ -340,6 +428,8 @@ class HdhiveSubscriptionStore:
                     unlock_points,
                     now,
                     now,
+                    str(normalized_episode_key or ""),
+                    "",
                 ),
             )
             row = connection.execute(
@@ -373,6 +463,33 @@ class HdhiveSubscriptionStore:
 
     def mark_item_pending(self, item_id: int, error: str = "") -> HdhiveSubscriptionItem:
         return self._update_item(item_id, status="pending_confirmation", last_error=error)
+
+    def mark_item_skipped(self, item_id: int, status: str, reason: str) -> HdhiveSubscriptionItem:
+        status = str(status).strip().lower()
+        if status not in {"filtered", "emby_exists", "unparsed"}:
+            raise ValueError("invalid HDHive subscription item skip status")
+        return self._update_item(item_id, status=status, last_error="", skip_reason=str(reason or ""))
+
+    def reset_item_for_check(self, item_id: int, expected_status: str) -> HdhiveSubscriptionItem:
+        expected_status = str(expected_status).strip().lower()
+        if expected_status not in {"filtered", "emby_exists", "unparsed"}:
+            raise ValueError("invalid HDHive subscription item skip status")
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE hdhive_subscription_items
+                SET status = 'discovered', skip_reason = '', updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (time.time(), int(item_id), expected_status),
+            )
+            row = connection.execute(
+                "SELECT * FROM hdhive_subscription_items WHERE id = ?",
+                (int(item_id),),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"HDHive subscription item {item_id} does not exist")
+        return HdhiveSubscriptionItem.from_row(row)
 
     def mark_item_enqueued(
         self,
@@ -437,6 +554,7 @@ class HdhiveSubscriptionStore:
         status: str,
         task_id: int | None = None,
         last_error: str = "",
+        skip_reason: str | None = None,
         unlock_points_spent: int | None = None,
         unlock_points_source: str = "",
         unlocked_at: float | None = None,
@@ -447,24 +565,26 @@ class HdhiveSubscriptionStore:
                     """
                     UPDATE hdhive_subscription_items
                     SET status = ?, last_error = ?,
+                        skip_reason = COALESCE(?, skip_reason),
                         unlock_points_spent = COALESCE(?, unlock_points_spent),
                         unlock_points_source = CASE WHEN ? <> '' THEN ? ELSE unlock_points_source END,
                         unlocked_at = COALESCE(?, unlocked_at), updated_at = ?
                     WHERE id = ?
                     """,
-                    (status, str(last_error or ""), unlock_points_spent, unlock_points_source, unlock_points_source, unlocked_at, time.time(), int(item_id)),
+                    (status, str(last_error or ""), skip_reason, unlock_points_spent, unlock_points_source, unlock_points_source, unlocked_at, time.time(), int(item_id)),
                 )
             else:
                 connection.execute(
                     """
                     UPDATE hdhive_subscription_items
                     SET status = ?, task_id = ?, last_error = ?,
+                        skip_reason = COALESCE(?, skip_reason),
                         unlock_points_spent = COALESCE(?, unlock_points_spent),
                         unlock_points_source = CASE WHEN ? <> '' THEN ? ELSE unlock_points_source END,
                         unlocked_at = COALESCE(?, unlocked_at), updated_at = ?
                     WHERE id = ?
                     """,
-                    (status, int(task_id), str(last_error or ""), unlock_points_spent, unlock_points_source, unlock_points_source, unlocked_at, time.time(), int(item_id)),
+                    (status, int(task_id), str(last_error or ""), skip_reason, unlock_points_spent, unlock_points_source, unlock_points_source, unlocked_at, time.time(), int(item_id)),
                 )
             row = connection.execute(
                 "SELECT * FROM hdhive_subscription_items WHERE id = ?",
