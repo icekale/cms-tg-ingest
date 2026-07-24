@@ -47,7 +47,7 @@ docker pull icekale/cms-tg-ingest:latest
 ```env
 HDHIVE_ENABLED=true
 HDHIVE_PROXY_BASE_URL=https://authx.771885.xyz
-HDHIVE_TOKEN_CONFIG_PATH=/config/hdhive-openapi.json
+HDHIVE_TOKEN_CONFIG_PATH=/config/cms-config/hdhive-openapi.json
 HDHIVE_AUTO_UNLOCK_MAX_POINTS=20
 HDHIVE_SUBSCRIPTION_AUTO_ENABLED=true
 HDHIVE_SUBSCRIPTION_TIME=01:30
@@ -55,7 +55,7 @@ HDHIVE_SUBSCRIPTION_TIMEZONE=Asia/Shanghai
 ```
 
 ```yaml
-- /mnt/user/appdata/cloud-media-sync/config/hdhive-openapi.json:/config/hdhive-openapi.json:ro
+- /mnt/user/appdata/cloud-media-sync/config:/config/cms-config:ro
 ```
 
 Telegram 菜单中的 `HDHive 搜索` 会先让用户选择 TMDB 媒体，再显示资源和网盘筛选按钮。高费用或未知费用会二次确认；只有 115 结果会自动进入 CMS 整理、自有分享 STRM 和 Emby 入库流程。

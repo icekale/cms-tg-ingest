@@ -16,8 +16,8 @@ services:
       - /mnt/user/appdata/cloud-media-sync/config/115-cookies.txt:/config/115-cookies.txt:ro
       # Read-only CMS metadata used to map a direct STRM back to its 115 media folder.
       - /mnt/user/appdata/cloud-media-sync/config/cms-online.db:/cms/cms-online.db:ro
-      # Read-only CMS HDHive OAuth access token; CMS remains responsible for refresh-token rotation.
-      - /mnt/user/appdata/cloud-media-sync/config/hdhive-openapi.json:/config/hdhive-openapi.json:ro
+      # Read-only CMS config directory so OAuth token replacement remains visible after refresh.
+      - /mnt/user/appdata/cloud-media-sync/config:/config/cms-config:ro
     healthcheck:
       test: ["CMD", "python", "/app/doctor.py", "--quiet"]
       interval: 5m

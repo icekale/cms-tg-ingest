@@ -200,7 +200,7 @@ def _check_filesystem(env: Mapping[str, str], filesystem: Filesystem) -> CheckIt
         problems.append(f"TASK_DB directory is not writable: {task_db_path.parent}")
     workflow = _env_value(env, "WORKFLOW_MODE") or "direct"
     if _env_bool(env, "HDHIVE_ENABLED"):
-        token_path = Path(_env_value(env, "HDHIVE_TOKEN_CONFIG_PATH") or "/config/hdhive-openapi.json")
+        token_path = Path(_env_value(env, "HDHIVE_TOKEN_CONFIG_PATH") or "/config/cms-config/hdhive-openapi.json")
         if not filesystem.is_file(token_path):
             problems.append(f"HDHive token file does not exist: {token_path}")
     if workflow == "self_share_sync":
@@ -267,7 +267,7 @@ def _check_hdhive_subscriptions(env: Mapping[str, str], filesystem: Filesystem) 
         return CheckItem("hdhive_subscriptions", True, "HDHive disabled")
 
     problems: list[str] = []
-    token_path = Path(_env_value(env, "HDHIVE_TOKEN_CONFIG_PATH") or "/config/hdhive-openapi.json")
+    token_path = Path(_env_value(env, "HDHIVE_TOKEN_CONFIG_PATH") or "/config/cms-config/hdhive-openapi.json")
     if not filesystem.is_file(token_path):
         problems.append(f"HDHive OAuth token file does not exist: {token_path}")
 

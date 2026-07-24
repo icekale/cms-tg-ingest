@@ -128,7 +128,7 @@ python3 -W error::ResourceWarning -m unittest discover -s tests -v
 ```env
 HDHIVE_ENABLED=true
 HDHIVE_PROXY_BASE_URL=https://authx.771885.xyz
-HDHIVE_TOKEN_CONFIG_PATH=/config/hdhive-openapi.json
+HDHIVE_TOKEN_CONFIG_PATH=/config/cms-config/hdhive-openapi.json
 HDHIVE_SEARCH_SESSION_TTL_SECONDS=900
 HDHIVE_AUTO_UNLOCK_MAX_POINTS=20
 ```
@@ -140,7 +140,7 @@ HDHIVE_AUTO_UNLOCK_MAX_POINTS=20
 Compose 挂载示例：
 
 ```yaml
-- /mnt/user/appdata/cloud-media-sync/config/hdhive-openapi.json:/config/hdhive-openapi.json:ro
+- /mnt/user/appdata/cloud-media-sync/config:/config/cms-config:ro
 ```
 
 ### HDHive 剧集订阅

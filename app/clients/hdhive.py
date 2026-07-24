@@ -12,6 +12,10 @@ from urllib.request import Request, urlopen
 from app.clients.http import HttpJson
 
 LOG = logging.getLogger("cms-tg-ingest")
+_HDHIVE_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 
 def _as_text(value: Any) -> str:
@@ -160,6 +164,7 @@ class HdhiveProxyClient:
                     f"{self.base_url}{path}",
                     method="POST",
                     payload=payload,
+                    headers={"User-Agent": _HDHIVE_USER_AGENT},
                 )
             except RuntimeError as exc:
                 response = _json_from_error(exc)

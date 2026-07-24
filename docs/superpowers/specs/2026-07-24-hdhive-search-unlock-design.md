@@ -176,7 +176,7 @@ New environment variables:
 ```text
 HDHIVE_ENABLED=false
 HDHIVE_PROXY_BASE_URL=https://authx.771885.xyz
-HDHIVE_TOKEN_CONFIG_PATH=/config/hdhive-openapi.json
+HDHIVE_TOKEN_CONFIG_PATH=/config/cms-config/hdhive-openapi.json
 HDHIVE_SEARCH_SESSION_TTL_SECONDS=900
 HDHIVE_AUTO_UNLOCK_MAX_POINTS=20
 ```
@@ -184,7 +184,7 @@ HDHIVE_AUTO_UNLOCK_MAX_POINTS=20
 Deployment adds this read-only mount:
 
 ```text
-/mnt/user/appdata/cloud-media-sync/config/hdhive-openapi.json:/config/hdhive-openapi.json:ro
+/mnt/user/appdata/cloud-media-sync/config:/config/cms-config:ro
 ```
 
 The feature remains disabled when the variable is false or the token file is unavailable. Existing ingest behavior is unchanged.

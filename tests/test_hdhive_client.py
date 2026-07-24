@@ -73,6 +73,7 @@ class HdhiveProxyClientTests(unittest.TestCase):
                     {"resource_type": "movie", "tmdb_id": "550", "access_token": "access-1"},
                 ),
             )
+            self.assertIn("Mozilla/5.0", http.calls[0][3]["User-Agent"])
             self.assertNotIn("refresh-should-not-be-used", repr(http.calls[0]))
 
     def test_resolve_tv_page_extracts_server_rendered_metadata(self):
