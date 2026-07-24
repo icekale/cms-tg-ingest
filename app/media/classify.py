@@ -274,6 +274,8 @@ def _normalized_int(value: Any) -> int | None:
         return None
     if isinstance(value, float) and not value.is_integer():
         return None
+    if number < 0:
+        return None
     return number
 
 

@@ -21,6 +21,22 @@ class TmdbTvDetailsTests(unittest.TestCase):
         self.assertNotIn("number_of_seasons", result)
         self.assertNotIn("number_of_episodes", result)
 
+    def test_omits_negative_top_level_tv_counts(self):
+        result = TmdbApiResolver._normalize_details(
+            {
+                "id": 1416,
+                "name": "Grey's Anatomy",
+                "original_language": "en",
+                "origin_country": ["US"],
+                "number_of_seasons": -1,
+                "number_of_episodes": "-2",
+            },
+            "tv",
+        )
+
+        self.assertNotIn("number_of_seasons", result)
+        self.assertNotIn("number_of_episodes", result)
+
     def test_normalizes_tv_completion_metadata_and_sanitizes_seasons(self):
         result = TmdbApiResolver._normalize_details(
             {
