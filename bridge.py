@@ -94,6 +94,8 @@ from app.media.classify import (
 )
 from app.media.sources import parse_media_sources
 from app.hdhive import HdhiveSelectionError, HdhiveSessionStore, HdhiveWorkflow
+from app.hdhive_subscription_store import HdhiveSubscriptionStore
+from app.hdhive_subscriptions import HdhiveSubscriptionScheduler, HdhiveSubscriptionService
 
 from app.media.strm import (
     category_for_self_share_row,
@@ -327,6 +329,21 @@ def create_hdhive_workflow(config: Config, cms: CmsClient) -> HdhiveWorkflow | N
         sessions=HdhiveSessionStore(
             int(getattr(config, "hdhive_search_session_ttl_seconds", 900))
         ),
+        auto_unlock_max_points=int(getattr(config, "hdhive_auto_unlock_max_points", 20)),
+    )
+
+
+def create_hdhive_subscription_service(
+    config: Config,
+    hdhive_workflow: HdhiveWorkflow | None,
+    enqueue_links: Any,
+) -> HdhiveSubscriptionService | None:
+    if not bool(getattr(config, "hdhive_enabled", False)) or hdhive_workflow is None:
+        return None
+    return HdhiveSubscriptionService(
+        proxy=hdhive_workflow.proxy,
+        store=HdhiveSubscriptionStore(getattr(config, "task_db_path", "/data/tasks.db")),
+        enqueue_links=enqueue_links,
         auto_unlock_max_points=int(getattr(config, "hdhive_auto_unlock_max_points", 20)),
     )
 
@@ -3131,6 +3148,8 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
     task_runner = None
     quality_automation = None
     quality_thread = None
+    hdhive_subscription_service = None
+    hdhive_subscription_scheduler = None
     probe_stop_events: list[threading.Event] = []
     probe_threads: list[threading.Thread] = []
     probe_holder: dict[str, Any] = {"stop_event": None, "thread": None}
@@ -3270,6 +3289,28 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
             enqueue_unlocked_links=enqueue_hdhive_links,
         )
 
+    hdhive_subscription_service = create_hdhive_subscription_service(
+        config,
+        hdhive_workflow,
+        enqueue_hdhive_links,
+    )
+    if hdhive_subscription_service is not None and Path(
+        getattr(config, "hdhive_token_config_path", "")
+    ).is_file():
+        hdhive_subscription_scheduler = HdhiveSubscriptionScheduler(
+            hdhive_subscription_service,
+            hdhive_subscription_service.store,
+            enabled=bool(getattr(config, "hdhive_subscription_auto_enabled", True)),
+            run_time=str(getattr(config, "hdhive_subscription_time", "01:30")),
+            timezone_name=str(getattr(config, "hdhive_subscription_timezone", "Asia/Shanghai")),
+        )
+        hdhive_subscription_scheduler.start()
+        LOG.info(
+            "HDHive subscription scheduler started time=%s timezone=%s",
+            getattr(config, "hdhive_subscription_time", "01:30"),
+            getattr(config, "hdhive_subscription_timezone", "Asia/Shanghai"),
+        )
+
     try:
         while not stop_event.is_set():
             try:
@@ -3317,6 +3358,8 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
                     stop()
         if quality_thread is not None:
             quality_thread.join(timeout=5)
+        if hdhive_subscription_scheduler is not None:
+            hdhive_subscription_scheduler.stop(join_timeout=5)
         stop_web_server(web_server)
 
 

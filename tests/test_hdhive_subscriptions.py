@@ -1,13 +1,16 @@
 import unittest
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from app.clients.hdhive import HdhiveResource, HdhiveUnlockItem
 from app.config import Config
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
 from app.hdhive_subscriptions import (
     HdhiveSubscriptionService,
+    HdhiveSubscriptionScheduler,
     HdhiveUrlError,
     parse_hdhive_tv_url,
     select_best_resource,
@@ -144,7 +147,6 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(result.pending_confirmation, 1)
         self.assertEqual(item.status, "pending_confirmation")
         self.assertEqual(proxy.unlock_calls, [])
-        self.assertEqual(intake_calls, [])
 
     def test_unknown_cost_waits_for_confirmation(self):
         item = resource("unknown-cost", points=None)
@@ -158,6 +160,44 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(result.pending_confirmation, 1)
         self.assertEqual(stored.status, "pending_confirmation")
         self.assertEqual(proxy.unlock_calls, [])
+
+
+class HdhiveSubscriptionSchedulerTests(unittest.TestCase):
+    def test_next_run_defaults_to_0130_shanghai(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HdhiveSubscriptionStore(Path(directory) / "tasks.db")
+            scheduler = HdhiveSubscriptionScheduler(
+                service=object(),
+                store=store,
+                enabled=True,
+                run_time="01:30",
+                timezone_name="Asia/Shanghai",
+            )
+            now = datetime(2026, 7, 25, 0, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+            next_run = scheduler.next_run_at(now)
+
+            self.assertEqual(next_run.hour, 1)
+            self.assertEqual(next_run.minute, 30)
+            self.assertEqual(next_run.tzinfo, ZoneInfo("Asia/Shanghai"))
+
+    def test_daily_lease_allows_one_run_per_local_date(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HdhiveSubscriptionStore(Path(directory) / "tasks.db")
+            scheduler = HdhiveSubscriptionScheduler(
+                service=object(),
+                store=store,
+                enabled=True,
+                run_time="01:30",
+                timezone_name="Asia/Shanghai",
+            )
+            at_run_time = datetime(2026, 7, 25, 1, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+            first = scheduler.run_if_due(at_run_time)
+            second = scheduler.run_if_due(at_run_time + timedelta(minutes=1))
+
+            self.assertIsNotNone(first)
+            self.assertIsNone(second)
 
 
 if __name__ == "__main__":

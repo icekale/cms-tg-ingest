@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import bridge
 from app.clients.hdhive import HdhiveAccount, HdhiveResource, HdhiveUnlockItem
 from app.hdhive import HdhiveSessionStore, HdhiveWorkflow
+from app.hdhive_subscriptions import HdhiveSubscriptionService
 from app.telegram_ui import hdhive_resource_keyboard
 
 
@@ -85,6 +86,28 @@ class HdhiveBridgeTests(unittest.TestCase):
             self.assertIsInstance(workflow, HdhiveWorkflow)
             self.assertEqual(workflow.sessions.ttl_seconds, 321)
             self.assertIs(workflow.proxy.refresh_via_cms.__self__, cms)
+
+    def test_subscription_service_factory_is_disabled_with_hdhive(self):
+        config = SimpleNamespace(hdhive_enabled=False)
+
+        self.assertIsNone(bridge.create_hdhive_subscription_service(config, object(), lambda _urls, _chat: None))
+
+    def test_subscription_service_factory_reuses_proxy_and_intake_callback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            callback = lambda _urls, _chat: None
+            config = SimpleNamespace(
+                hdhive_enabled=True,
+                task_db_path=str(Path(directory) / "tasks.db"),
+                hdhive_auto_unlock_max_points=20,
+            )
+            proxy = object()
+            workflow = SimpleNamespace(proxy=proxy)
+
+            service = bridge.create_hdhive_subscription_service(config, workflow, callback)
+
+            self.assertIsInstance(service, HdhiveSubscriptionService)
+            self.assertIs(service.proxy, proxy)
+            self.assertIs(service.enqueue_links, callback)
 
     def test_unlock_callback_enqueues_only_successful_115_links(self):
         proxy = FakeProxy()

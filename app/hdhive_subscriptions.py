@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import json
+import logging
 import re
+import threading
+import time
 from dataclasses import dataclass
+from datetime import datetime, time as datetime_time, timedelta, timezone
 from typing import Any, Callable
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.clients.hdhive import HdhiveResource, HdhiveUnlockItem
 from app.hdhive_subscription_store import HdhiveSubscription, HdhiveSubscriptionItem, HdhiveSubscriptionStore
+
+
+LOG = logging.getLogger("cms-tg-ingest")
 
 
 class HdhiveUrlError(ValueError):
@@ -49,6 +58,15 @@ class SubscriptionCheckResult:
     failed: int = 0
     skipped: int = 0
     error: str = ""
+
+
+@dataclass(frozen=True)
+class HdhiveScheduledRun:
+    run_id: str
+    status: str
+    started_at: str
+    finished_at: str
+    summary: dict[str, Any]
 
 
 def episode_key(resource: HdhiveResource) -> str:
@@ -240,3 +258,204 @@ class HdhiveSubscriptionService:
             if item.slug == resource.slug:
                 return item
         return results[0] if results else HdhiveUnlockItem(resource.slug, False, "", "没有返回解锁结果", "EMPTY_RESULT", False)
+
+
+class HdhiveSubscriptionScheduler:
+    def __init__(
+        self,
+        service: HdhiveSubscriptionService,
+        store: HdhiveSubscriptionStore,
+        *,
+        enabled: bool = True,
+        run_time: str = "01:30",
+        timezone_name: str = "Asia/Shanghai",
+        interval_seconds: int = 30,
+        clock: Callable[[], datetime] | None = None,
+        on_run: Callable[[HdhiveScheduledRun], None] | None = None,
+    ):
+        self.service = service
+        self.store = store
+        self.enabled = bool(enabled)
+        self._run_time = self._parse_time(run_time)
+        self._timezone = self._parse_timezone(timezone_name)
+        self.interval_seconds = max(5, int(interval_seconds))
+        self.clock = clock or (lambda: datetime.now(self._timezone))
+        self.on_run = on_run
+        self._status = "idle"
+        self._last_run: HdhiveScheduledRun | None = None
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.RLock()
+
+        stored_time = self.store.get_setting("time")
+        stored_timezone = self.store.get_setting("timezone")
+        stored_enabled = self.store.get_setting("enabled")
+        if stored_time:
+            self._run_time = self._parse_time(stored_time)
+        if stored_timezone:
+            self._timezone = self._parse_timezone(stored_timezone)
+        if stored_enabled is not None:
+            self.enabled = stored_enabled == "1"
+
+    @staticmethod
+    def _parse_time(value: str) -> datetime_time:
+        if re.fullmatch(r"\d{2}:\d{2}", str(value or "")) is None:
+            raise ValueError("HDHIVE_SUBSCRIPTION_TIME must use HH:MM format")
+        hour, minute = (int(part) for part in str(value).split(":", 1))
+        try:
+            return datetime_time(hour, minute)
+        except ValueError as exc:
+            raise ValueError("HDHIVE_SUBSCRIPTION_TIME must be a valid time") from exc
+
+    @staticmethod
+    def _parse_timezone(value: str) -> ZoneInfo:
+        try:
+            return ZoneInfo(str(value))
+        except (ValueError, ZoneInfoNotFoundError) as exc:
+            raise ValueError("HDHIVE_SUBSCRIPTION_TIMEZONE must be a valid IANA timezone") from exc
+
+    def _local_now(self, now: datetime | None = None) -> datetime:
+        value = now if now is not None else self.clock()
+        if value.tzinfo is None:
+            return value.replace(tzinfo=self._timezone)
+        return value.astimezone(self._timezone)
+
+    def _scheduled_on(self, reference: datetime, run_date) -> datetime:
+        candidate = reference.replace(
+            year=run_date.year,
+            month=run_date.month,
+            day=run_date.day,
+            hour=self._run_time.hour,
+            minute=self._run_time.minute,
+            second=0,
+            microsecond=0,
+        )
+        return candidate.astimezone(timezone.utc).astimezone(self._timezone)
+
+    def next_run_at(self, now: datetime | None = None) -> datetime:
+        local_now = self._local_now(now)
+        scheduled = self._scheduled_on(local_now, local_now.date())
+        if local_now >= scheduled:
+            scheduled = self._scheduled_on(local_now, local_now.date() + timedelta(days=1))
+        return scheduled
+
+    def run_if_due(self, now: datetime | None = None) -> HdhiveScheduledRun | None:
+        if not self.enabled:
+            return None
+        local_now = self._local_now(now)
+        if local_now < self._scheduled_on(local_now, local_now.date()):
+            return None
+        run_date = local_now.date().isoformat()
+        run_id = f"hdhive-{run_date}-{time.monotonic_ns():x}"
+        if not self.store.claim_daily_run(run_date, run_id, local_now.timestamp()):
+            return None
+        return self._run_owned(run_id, local_now)
+
+    def run_now(self) -> HdhiveScheduledRun | None:
+        local_now = self._local_now()
+        run_id = f"hdhive-manual-{time.monotonic_ns():x}"
+        run_date = f"manual-{local_now.date().isoformat()}-{time.monotonic_ns():x}"
+        if not self.store.claim_daily_run(run_date, run_id, local_now.timestamp()):
+            return None
+        return self._run_owned(run_id, local_now)
+
+    def _run_owned(self, run_id: str, local_now: datetime) -> HdhiveScheduledRun:
+        started_at = local_now.isoformat()
+        summary: dict[str, Any] = {
+            "subscriptions": 0,
+            "discovered": 0,
+            "enqueued": 0,
+            "pending_confirmation": 0,
+            "failed": 0,
+            "errors": [],
+        }
+        with self._lock:
+            self._status = "running"
+        try:
+            subscriptions = self.store.list_subscriptions()
+            summary["subscriptions"] = len(subscriptions)
+            for subscription in subscriptions:
+                if subscription.status != "active":
+                    continue
+                try:
+                    result = self.service.check(subscription.id)
+                    for field in ("discovered", "enqueued", "pending_confirmation", "failed"):
+                        summary[field] += int(getattr(result, field, 0))
+                except Exception as exc:
+                    summary["failed"] += 1
+                    summary["errors"].append(f"#{subscription.id}: {type(exc).__name__}: {exc}")
+                    LOG.exception("HDHive subscription check failed subscription_id=%s", subscription.id)
+            status = "failed" if summary["failed"] else "succeeded"
+        except Exception as exc:
+            status = "failed"
+            summary["failed"] += 1
+            summary["errors"].append(f"scheduler: {type(exc).__name__}: {exc}")
+            LOG.exception("HDHive subscription run failed")
+        finished_at = self._local_now().isoformat()
+        self.store.finish_run(run_id, status, summary, self._local_now().timestamp())
+        result = HdhiveScheduledRun(run_id, status, started_at, finished_at, summary)
+        with self._lock:
+            self._status = status
+            self._last_run = result
+        if callable(self.on_run):
+            self.on_run(result)
+        return result
+
+    def update_settings(self, *, enabled: bool, run_time: str, timezone_name: str) -> dict[str, Any]:
+        parsed_time = self._parse_time(run_time)
+        timezone = self._parse_timezone(timezone_name)
+        self.enabled = bool(enabled)
+        self._run_time = parsed_time
+        self._timezone = timezone
+        self.store.set_setting("enabled", "1" if self.enabled else "0")
+        self.store.set_setting("time", parsed_time.strftime("%H:%M"))
+        self.store.set_setting("timezone", str(timezone_name))
+        return self.settings()
+
+    def settings(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "time": self._run_time.strftime("%H:%M"),
+            "timezone": str(self._timezone),
+        }
+
+    def status_snapshot(self, now: datetime | None = None) -> dict[str, Any]:
+        latest = self._last_run or self.store.latest_run()
+        summary: dict[str, Any] = {}
+        if latest is not None:
+            try:
+                parsed = json.loads(latest.summary_json)
+                summary = parsed if isinstance(parsed, dict) else {}
+            except (TypeError, ValueError):
+                summary = {}
+        return {
+            **self.settings(),
+            "status": self._status,
+            "last_run_id": latest.run_id if latest is not None else "",
+            "last_summary": summary,
+            "next_run_at": self.next_run_at(now).isoformat(),
+        }
+
+    def start(self) -> threading.Thread:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return self._thread
+            self._stop_event.clear()
+
+            def loop() -> None:
+                while not self._stop_event.wait(self.interval_seconds):
+                    try:
+                        self.run_if_due()
+                    except Exception:
+                        LOG.exception("HDHive subscription scheduler loop failed")
+
+            self._thread = threading.Thread(target=loop, name="hdhive-subscriptions", daemon=True)
+            self._thread.start()
+            return self._thread
+
+    def stop(self, join_timeout: float = 5) -> None:
+        self._stop_event.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=join_timeout)
+        self._thread = None
