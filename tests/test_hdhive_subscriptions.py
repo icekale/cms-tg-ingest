@@ -1,8 +1,49 @@
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
+from app.clients.hdhive import HdhiveResource, HdhiveUnlockItem
 from app.config import Config
-from app.hdhive_subscriptions import HdhiveUrlError, parse_hdhive_tv_url
+from app.hdhive_subscription_store import HdhiveSubscriptionStore
+from app.hdhive_subscriptions import (
+    HdhiveSubscriptionService,
+    HdhiveUrlError,
+    parse_hdhive_tv_url,
+    select_best_resource,
+)
+
+
+def resource(slug, *, status="valid", resolution="1080P", points=8, episode_key="s01e01", owned=False):
+    return HdhiveResource(
+        slug=slug,
+        title=f"Title {slug}",
+        pan_type="115",
+        share_size="10GB",
+        video_resolution=(resolution,),
+        source=("WEB-DL",),
+        subtitle_language=("简中",),
+        subtitle_type=("内封",),
+        unlock_points=points,
+        validate_status=status,
+        validate_message="",
+        is_unlocked=owned,
+        episode_key=episode_key,
+    )
+
+
+class FakeSubscriptionProxy:
+    def __init__(self, resources, unlock_items=None):
+        self.resource_items = list(resources)
+        self.unlock_items = unlock_items or []
+        self.unlock_calls = []
+
+    def resources(self, media_type, tmdb_id):
+        return list(self.resource_items)
+
+    def unlock(self, slugs):
+        self.unlock_calls.append(list(slugs))
+        return list(self.unlock_items)
 
 
 class HdhiveSubscriptionUrlTests(unittest.TestCase):
@@ -47,6 +88,76 @@ class HdhiveSubscriptionUrlTests(unittest.TestCase):
             overridden = Config.from_env()
         self.assertEqual(overridden.hdhive_subscription_time, "03:15")
         self.assertEqual(overridden.hdhive_subscription_timezone, "UTC")
+
+
+class HdhiveSubscriptionServiceTests(unittest.TestCase):
+    def make_service(self, resources, unlock_items=None):
+        directory = tempfile.TemporaryDirectory()
+        store = HdhiveSubscriptionStore(Path(directory.name) / "tasks.db")
+        subscription = store.create_subscription("464100862", "tmdb_tv", "255358", "剧集", "255358")
+        proxy = FakeSubscriptionProxy(resources, unlock_items=unlock_items)
+        intake_calls = []
+        service = HdhiveSubscriptionService(
+            proxy=proxy,
+            store=store,
+            enqueue_links=lambda urls, chat_id: intake_calls.append((list(urls), str(chat_id))),
+            auto_unlock_max_points=20,
+        )
+        return directory, store, subscription, proxy, service, intake_calls
+
+    def test_select_best_resource_uses_validity_then_resolution_then_cost(self):
+        selected = select_best_resource(
+            [
+                resource("invalid-2160", status="invalid", resolution="2160P", points=0),
+                resource("unknown-2160", status="", resolution="2160P", points=1),
+                resource("valid-1080-expensive", resolution="1080P", points=20),
+                resource("valid-720-cheap", resolution="720P", points=1),
+            ]
+        )
+
+        self.assertEqual(selected.slug, "valid-1080-expensive")
+
+    def test_low_cost_resource_enters_existing_intake_once(self):
+        unlock_items = [HdhiveUnlockItem("best", True, "https://115cdn.com/s/new?password=abcd", "", "", False)]
+        directory, _store, subscription, proxy, service, intake_calls = self.make_service(
+            [resource("best", resolution="2160P", points=20)], unlock_items
+        )
+        try:
+            result = service.check(subscription.id)
+            repeated = service.check(subscription.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.enqueued, 1)
+        self.assertEqual(repeated.enqueued, 0)
+        self.assertEqual(proxy.unlock_calls, [["best"]])
+        self.assertEqual(intake_calls, [(["https://115cdn.com/s/new?password=abcd"], "464100862")])
+
+    def test_high_cost_resource_waits_for_confirmation(self):
+        directory, store, subscription, proxy, service, intake_calls = self.make_service([resource("high", points=21)])
+        try:
+            result = service.check(subscription.id)
+            item = store.list_items(subscription.id)[0]
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.pending_confirmation, 1)
+        self.assertEqual(item.status, "pending_confirmation")
+        self.assertEqual(proxy.unlock_calls, [])
+        self.assertEqual(intake_calls, [])
+
+    def test_unknown_cost_waits_for_confirmation(self):
+        item = resource("unknown-cost", points=None)
+        directory, store, subscription, proxy, service, _intake_calls = self.make_service([item])
+        try:
+            result = service.check(subscription.id)
+            stored = store.list_items(subscription.id)[0]
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.pending_confirmation, 1)
+        self.assertEqual(stored.status, "pending_confirmation")
+        self.assertEqual(proxy.unlock_calls, [])
 
 
 if __name__ == "__main__":
