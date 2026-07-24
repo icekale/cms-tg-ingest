@@ -91,10 +91,18 @@ class HdhiveScheduledRun:
 
 
 def episode_key(resource: HdhiveResource) -> str:
-    if resource.episode_key:
-        return resource.episode_key.strip().lower()
     if resource.season_number is not None and resource.episode_number is not None:
-        return f"s{resource.season_number:02d}e{resource.episode_number:02d}"
+        try:
+            season_number = int(resource.season_number)
+            episode_number = int(resource.episode_number)
+        except (TypeError, ValueError):
+            pass
+        else:
+            if season_number >= 0 and episode_number > 0:
+                return f"s{season_number:02d}e{episode_number:02d}"
+    for value in (getattr(resource, "episode_key", ""), getattr(resource, "episode_code", "")):
+        if value:
+            return str(value).strip().lower()
     match = _EPISODE_RE.search(resource.title or "")
     if match:
         return f"s{int(match.group(1)):02d}e{int(match.group(2)):02d}"
