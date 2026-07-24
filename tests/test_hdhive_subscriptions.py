@@ -19,7 +19,17 @@ from app.hdhive_subscriptions import (
 )
 
 
-def resource(slug, *, status="valid", resolution="1080P", points=8, episode_key="s01e01", owned=False):
+def resource(
+    slug,
+    *,
+    status="valid",
+    resolution="1080P",
+    points=8,
+    episode_key="s01e01",
+    owned=False,
+    season_number=None,
+    episode_number=None,
+):
     return HdhiveResource(
         slug=slug,
         title=f"Title {slug}",
@@ -33,6 +43,8 @@ def resource(slug, *, status="valid", resolution="1080P", points=8, episode_key=
         validate_status=status,
         validate_message="",
         is_unlocked=owned,
+        season_number=season_number,
+        episode_number=episode_number,
         episode_key=episode_key,
     )
 
@@ -224,6 +236,32 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(current.status, "enqueued")
         self.assertEqual(proxy.unlock_calls, [["stale"]])
         self.assertEqual(intake_calls, [(["https://115cdn.com/s/stale?password=abcd"], "464100862")])
+
+    def test_structured_season_episode_wins_over_invalid_episode_key(self):
+        unlock_items = [
+            HdhiveUnlockItem("numeric", True, "https://115cdn.com/s/numeric?password=abcd", "", "", False)
+        ]
+        directory, store, subscription, proxy, service, _intake_calls = self.make_service(
+            [
+                resource(
+                    "numeric",
+                    episode_key="not-an-episode",
+                    season_number=2,
+                    episode_number=3,
+                )
+            ],
+            unlock_items,
+        )
+        try:
+            result = service.check(subscription.id)
+            item = store.list_items(subscription.id)[0]
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.enqueued, 1)
+        self.assertEqual(item.normalized_episode_key, "S02E03")
+        self.assertEqual(item.status, "enqueued")
+        self.assertEqual(proxy.unlock_calls, [["numeric"]])
 
     def test_smart_check_skips_emby_existing_episode_across_multiple_seasons(self):
         tmdb = FakeTmdbResolver({"ok": True, "status": "Returning Series", "seasons": []})
