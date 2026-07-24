@@ -91,6 +91,26 @@ class EmbyClientTests(unittest.TestCase):
 
         self.assertEqual(client.find_series_by_tmdb("1416"), {"Id": "right", "ProviderIds": {"Tmdb": "1416"}})
 
+    def test_user_id_is_quoted_in_series_and_episode_requests(self):
+        http = QueueHttp([
+            {"Items": [{"Id": "series-1", "ProviderIds": {"Tmdb": "1416"}}]},
+            {"Items": []},
+        ])
+        client = EmbyClient("http://emby.test", "secret-key", user_id="user/id?name", http=http)
+
+        client.find_series_by_tmdb("1416")
+        client.episode_keys_for_series("series-1")
+
+        self.assertIn("/Users/user%2Fid%3Fname/Items?", http.calls[0][0])
+        self.assertIn("UserId=user%2Fid%3Fname", http.calls[1][0])
+
+    def test_malformed_items_payloads_are_treated_as_empty(self):
+        http = QueueHttp([{"Items": 123}, {"Items": {"unexpected": "object"}}])
+        client = EmbyClient("http://emby.test", "secret-key", user_id="user-1", http=http)
+
+        self.assertIsNone(client.find_series_by_tmdb("1416"))
+        self.assertEqual(client.episode_keys_for_series("series-1"), set())
+
     def test_episode_keys_ignore_missing_non_positive_or_invalid_indexes(self):
         http = QueueHttp([{
             "Items": [

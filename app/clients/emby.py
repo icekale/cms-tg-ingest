@@ -29,6 +29,11 @@ def _positive_episode_index(value: Any) -> int | None:
     return index if index > 0 else None
 
 
+def _response_items(response: dict | list) -> list[dict]:
+    items = response.get("Items") if isinstance(response, dict) else None
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
 class EmbyClient:
     def __init__(self, base_url: str, api_key: str, user_id: str = "", http: HttpJson | None = None, timeout: int = 60):
         self.base_url = (base_url or "").rstrip("/")
@@ -79,8 +84,9 @@ class EmbyClient:
 
     def recent_items(self, limit: int = 20) -> list[dict]:
         user_id = self.get_user_id()
+        quoted_user_id = urllib.parse.quote(user_id, safe="")
         resp = self._get(
-            f"/Users/{user_id}/Items",
+            f"/Users/{quoted_user_id}/Items",
             {
                 "Recursive": "true",
                 "Limit": str(limit),
@@ -89,17 +95,16 @@ class EmbyClient:
                 "SortOrder": "Descending",
             },
         )
-        if isinstance(resp, dict):
-            return [item for item in resp.get("Items") or [] if isinstance(item, dict)]
-        return []
+        return _response_items(resp)
 
     def find_item_by_tmdb(self, tmdb_id: str) -> dict | None:
         tmdb_id = str(tmdb_id or "").strip()
         if not tmdb_id:
             return None
         user_id = self.get_user_id()
+        quoted_user_id = urllib.parse.quote(user_id, safe="")
         resp = self._get(
-            f"/Users/{user_id}/Items",
+            f"/Users/{quoted_user_id}/Items",
             {
                 "Recursive": "true",
                 "AnyProviderIdEquals": f"tmdb.{tmdb_id}",
@@ -108,7 +113,7 @@ class EmbyClient:
                 "Limit": "10",
             },
         )
-        items = [item for item in (resp.get("Items") if isinstance(resp, dict) else []) or [] if isinstance(item, dict)]
+        items = _response_items(resp)
         for item in items:
             if item_tmdb_id(item) == tmdb_id:
                 return item
@@ -119,8 +124,9 @@ class EmbyClient:
         if not tmdb_id:
             return None
         user_id = self.get_user_id()
+        quoted_user_id = urllib.parse.quote(user_id, safe="")
         resp = self._get(
-            f"/Users/{user_id}/Items",
+            f"/Users/{quoted_user_id}/Items",
             {
                 "Recursive": "true",
                 "AnyProviderIdEquals": f"tmdb.{tmdb_id}",
@@ -128,7 +134,7 @@ class EmbyClient:
                 "Limit": "10",
             },
         )
-        items = [item for item in (resp.get("Items") if isinstance(resp, dict) else []) or [] if isinstance(item, dict)]
+        items = _response_items(resp)
         for item in items:
             if item_tmdb_id(item) == tmdb_id:
                 return item
@@ -147,7 +153,7 @@ class EmbyClient:
                 "Fields": "ParentIndexNumber,IndexNumber",
             },
         )
-        episodes = resp.get("Items") if isinstance(resp, dict) else []
+        episodes = _response_items(resp)
         keys: set[str] = set()
         for episode in episodes or []:
             if not isinstance(episode, dict):
