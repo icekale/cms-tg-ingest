@@ -35,6 +35,8 @@ def is_p115_risk_control_message(value: str) -> bool:
         for token in (
             "限制接收",
             "被限制接收",
+            "限制分享",
+            "被限制分享",
             "操作过于频繁",
             "访问过于频繁",
             "请求过于频繁",

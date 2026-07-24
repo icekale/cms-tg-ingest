@@ -19,17 +19,18 @@ class CmsCloudDataIndexTests(unittest.TestCase):
                     pid TEXT,
                     name TEXT,
                     pick_code TEXT,
-                    is_dir INTEGER NOT NULL
+                    is_dir INTEGER NOT NULL,
+                    f_modify_time INTEGER
                 )
                 """
             )
             conn.executemany(
-                "INSERT INTO cloud_data (fid, pid, name, pick_code, is_dir) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO cloud_data (fid, pid, name, pick_code, is_dir, f_modify_time) VALUES (?, ?, ?, ?, ?, ?)",
                 [
-                    ("episode", "season", "权力的游戏前传：龙族 (2022) - S03E03.mkv", "episodepick", 0),
-                    ("season", "series", "Season 03", "", 1),
-                    ("series", "tv-root", "Q-权力的游戏前传：龙族-2022-[tmdb=94997]", "", 1),
-                    ("tv-root", "0", "TV", "", 1),
+                    ("episode", "season", "权力的游戏前传：龙族 (2022) - S03E03.mkv", "episodepick", 0, 0),
+                    ("season", "series", "Season 03", "", 1, 0),
+                    ("series", "tv-root", "Q-权力的游戏前传：龙族-2022-[tmdb=94997]", "", 1, 0),
+                    ("tv-root", "0", "TV", "", 1, 0),
                 ],
             )
         return path
@@ -54,6 +55,22 @@ class CmsCloudDataIndexTests(unittest.TestCase):
                 },
             )
 
+    def test_resolves_renamed_cloud_output_from_recent_cms_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._db(tmp)
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "UPDATE cloud_data SET name = ?, f_modify_time = ? WHERE fid = ?",
+                    ("权力的游戏前传：龙族 (2022) - S03E05 - 第 5 集 - 2160p.mkv", 1045, "episode"),
+                )
+            folder = CmsCloudDataIndex(db_path).folder_for_cloud_output_name(
+                "House.of.the.Dragon.S03E05.2022.2160p.mkv",
+                started_at=1000,
+            )
+
+            self.assertEqual(folder["file_id"], "series")
+            self.assertEqual(folder["direct_file_id"], "episode")
+
     def test_rejects_media_root_with_wrong_tmdb(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._db(tmp)
@@ -72,6 +89,28 @@ class CmsCloudDataIndexTests(unittest.TestCase):
 
             self.assertTrue(index.has_file_id("series"))
             self.assertFalse(index.has_file_id("missing"))
+
+    def test_resolves_media_root_from_cloud_output_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._db(tmp)
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "UPDATE cloud_data SET name = ?, pick_code = ? WHERE fid = ?",
+                    ("House.of.the.Dragon.S03E05.mkv", "dragon-pick", "episode"),
+                )
+            folder = CmsCloudDataIndex(db_path).folder_for_cloud_output_name(
+                "House.of.the.Dragon.S03E05.mkv"
+            )
+
+            self.assertEqual(
+                folder,
+                {
+                    "file_id": "series",
+                    "file_name": "Q-权力的游戏前传：龙族-2022-[tmdb=94997]",
+                    "parent_id": "tv-root",
+                    "direct_file_id": "episode",
+                },
+            )
 
     def test_prefers_the_most_recent_direct_strm_in_an_existing_series_folder(self):
         with tempfile.TemporaryDirectory() as tmp:

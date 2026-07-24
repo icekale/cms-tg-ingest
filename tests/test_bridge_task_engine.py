@@ -189,14 +189,19 @@ class FakeTmdbHintResolver(FakeTmdbResolver):
 
 
 class FakeCmsCloudIndex:
-    def __init__(self, folder=None, indexed_file_ids=None):
+    def __init__(self, folder=None, indexed_file_ids=None, cloud_output_folder=None):
         self.folder = folder
         self.calls = []
         self.indexed_file_ids = set(indexed_file_ids or [])
+        self.cloud_output_folder = cloud_output_folder
 
     def folder_for_direct_strm(self, source, tmdb_id):
         self.calls.append((Path(source), tmdb_id))
         return self.folder
+
+    def folder_for_cloud_output_name(self, file_name, started_at=0):
+        self.calls.append(("cloud_output", file_name))
+        return self.cloud_output_folder
 
     def has_file_id(self, file_id):
         return str(file_id) in self.indexed_file_ids
@@ -1585,12 +1590,65 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.p115.find_organized_calls, [])
             self.assertTrue((direct_dir / "movie.strm").exists())
 
+    def test_organizing_stage_uses_cms_cloud_index_for_cloud_output_without_tmdb(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder_name = "Q-权力的游戏前传：龙族-2022-[tmdb=94997]"
+            cms_index = FakeCmsCloudIndex(
+                folder={
+                    "file_id": "series-id",
+                    "file_name": folder_name,
+                    "parent_id": "tv-parent",
+                    "direct_file_id": "episode-id",
+                    "direct_relative_path": "Season 03/S03E05.strm",
+                },
+                cloud_output_folder={
+                    "file_id": "series-id",
+                    "file_name": folder_name,
+                    "parent_id": "tv-parent",
+                    "direct_file_id": "episode-id",
+                }
+            )
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"外国电视": Path(tmp) / "tv"}),
+                cms_cloud_index=cms_index,
+            )
+            direct_folder = Path(tmp) / "tv" / folder_name / "Season 03"
+            direct_folder.mkdir(parents=True)
+            (direct_folder / "S03E05.strm").write_text("http://cms/d/episodepick.mkv?/episode.mkv", encoding="utf-8")
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="auto_organize_submitted",
+                own_share_file_id="series-id",
+                own_share_file_name=folder_name,
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "cloud_output_name": "House.of.the.Dragon.S03E05.mkv",
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["organized_folder"]["file_id"], "series-id")
+            self.assertEqual(result.metadata["organized_folder"]["direct_relative_path"], "Season 03/S03E05.strm")
+            self.assertIn(("cloud_output", "House.of.the.Dragon.S03E05.mkv"), cms_index.calls)
+            self.assertEqual(self.p115.find_organized_calls, [])
+
     def test_own_share_stage_falls_back_to_direct_file_when_folder_is_gone(self):
         class FolderGoneP115(FakeP115):
             def create_long_share(self, file_id):
                 self.created_shares.append(file_id)
                 if file_id == "series-id":
-                    raise RuntimeError("分享的文件(夹)已被移动或删除")
+                    raise RuntimeError("目录不存在或已转移")
                 return {
                     "share_code": "file-share",
                     "receive_code": "1212",

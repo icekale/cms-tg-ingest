@@ -562,6 +562,31 @@ class BridgeSelfShareTaskWorkflow:
             )
         direct_strm_removed = 0
         direct_signal = None
+        cloud_output_name = str(task.metadata.get("cloud_output_name") or "").strip()
+        if self.cms_cloud_index and cloud_output_name:
+            indexed_folder = self.cms_cloud_index.folder_for_cloud_output_name(
+                cloud_output_name,
+                started_at=as_float(task.metadata.get("cloud_started_at"), 0),
+            )
+            if indexed_folder:
+                folder = indexed_folder
+        if folder and self.cms_cloud_index and folder.get("direct_file_id") and not folder.get("direct_relative_path"):
+            folder_tmdb = extract_tmdb_id_from_name(str(folder.get("file_name") or ""))
+            if folder_tmdb:
+                direct_signal = find_recent_direct_library_strm_source_dir(
+                    self.move_config,
+                    row,
+                    {**recognition, "tmdb_id": folder_tmdb},
+                    title,
+                )
+                if direct_signal:
+                    direct_source, _direct_category = direct_signal
+                    direct_folder = self.cms_cloud_index.folder_for_direct_strm(direct_source, folder_tmdb)
+                    if direct_folder and str(direct_folder.get("direct_file_id") or "") == str(folder.get("direct_file_id") or ""):
+                        relative_path = str(direct_folder.get("direct_relative_path") or "").strip()
+                        if relative_path:
+                            folder = dict(folder)
+                            folder["direct_relative_path"] = relative_path
         if folder is None:
             direct_signal = find_recent_direct_library_strm_source_dir(self.move_config, row, recognition, title)
             if direct_signal:
@@ -1293,7 +1318,11 @@ class BridgeSelfShareTaskWorkflow:
     @staticmethod
     def _is_gone_share_source_error(exc: Exception) -> bool:
         message = str(exc or "").lower()
-        return "已被移动或删除" in str(exc or "") or "moved or deleted" in message
+        return (
+            "已被移动或删除" in str(exc or "")
+            or "不存在或已转移" in str(exc or "")
+            or "moved or deleted" in message
+        )
 
     @staticmethod
     def _direct_file_share_details(task) -> tuple[str, str]:

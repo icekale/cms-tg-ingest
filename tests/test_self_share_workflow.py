@@ -239,6 +239,16 @@ class CmsPlaybackProbeTests(unittest.TestCase):
         with self.assertRaises(bridge.P115RiskControlError):
             client.search_files("蜘蛛侠")
 
+    def test_115_share_restriction_raises_specific_error(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                return {"state": False, "error": "你已被限制分享，如有疑问请联系客服"}
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        with self.assertRaises(bridge.P115RiskControlError):
+            client.create_long_share("folder-id")
+
 
 class OrganizedFolderSelectionTests(unittest.TestCase):
     def test_selects_tmdb_folder_outside_pending_redundant_and_exists_bins(self):
