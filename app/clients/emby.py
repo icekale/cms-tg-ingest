@@ -7,6 +7,7 @@ from typing import Any
 from app.clients.http import HttpJson
 from app.config import is_relative_to, safe_resolve
 from app.media.classify import item_tmdb_id
+from app.series_rules import parse_episode_key
 
 
 class EmbyClient:
@@ -93,6 +94,69 @@ class EmbyClient:
             if item_tmdb_id(item) == tmdb_id:
                 return item
         return None
+
+    def find_series_by_tmdb(self, tmdb_id: str) -> dict | None:
+        tmdb_id = str(tmdb_id or "").strip()
+        if not tmdb_id:
+            return None
+        user_id = self.get_user_id()
+        resp = self._get(
+            f"/Users/{user_id}/Items",
+            {
+                "Recursive": "true",
+                "AnyProviderIdEquals": f"tmdb.{tmdb_id}",
+                "IncludeItemTypes": "Series",
+                "Limit": "10",
+            },
+        )
+        items = [item for item in (resp.get("Items") if isinstance(resp, dict) else []) or [] if isinstance(item, dict)]
+        for item in items:
+            if item_tmdb_id(item) == tmdb_id:
+                return item
+        return None
+
+    def episode_keys_for_series(self, series_id: str) -> set[str]:
+        series_id = str(series_id or "").strip()
+        if not series_id:
+            return set()
+        user_id = self.get_user_id()
+        quoted_series_id = urllib.parse.quote(series_id, safe="")
+        resp = self._get(
+            f"/Shows/{quoted_series_id}/Episodes",
+            {
+                "UserId": user_id,
+                "Fields": "ParentIndexNumber,IndexNumber",
+            },
+        )
+        episodes = resp.get("Items") if isinstance(resp, dict) else []
+        keys: set[str] = set()
+        for episode in episodes or []:
+            if not isinstance(episode, dict):
+                continue
+            season = episode.get("ParentIndexNumber")
+            number = episode.get("IndexNumber")
+            if isinstance(season, bool) or isinstance(number, bool):
+                continue
+            try:
+                season = int(season)
+                number = int(number)
+            except (TypeError, ValueError):
+                continue
+            if season <= 0 or number <= 0:
+                continue
+            key = parse_episode_key(f"S{season}E{number}")
+            if key is not None:
+                keys.add(key.normalized)
+        return keys
+
+    def existing_episode_keys_by_tmdb(self, tmdb_id: str) -> set[str]:
+        series = self.find_series_by_tmdb(tmdb_id)
+        if not series:
+            return set()
+        series_id = str(series.get("Id") or series.get("ItemId") or "").strip()
+        if not series_id:
+            return set()
+        return self.episode_keys_for_series(series_id)
 
     def library_roots(self) -> list[tuple[Path, str]]:
         if self._library_roots is not None:
