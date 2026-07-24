@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import doctor
+from app.hdhive_subscription_store import HdhiveSubscriptionStore
 
 
 class DoctorConfigTests(unittest.TestCase):
@@ -111,6 +112,46 @@ class DoctorConfigTests(unittest.TestCase):
 
         self.assertFalse(report.ok)
         self.assertIn("HDHive token file does not exist", report.to_text())
+        self.assertIn("hdhive_subscriptions", report.to_text())
+
+    def test_hdhive_subscription_health_reports_schedule_and_pending_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = root / "data"
+            token = root / "hdhive-openapi.json"
+            data.mkdir()
+            token.write_text("{}", encoding="utf-8")
+            task_db = data / "tasks.db"
+            store = HdhiveSubscriptionStore(task_db)
+            subscription = store.create_subscription("chat", "hdhive_tv", "slug", "剧集", "255358")
+            item = store.upsert_item(subscription.id, "s01e01", "resource", "valid", 1080, 21)
+            store.mark_item_pending(item.id, "需要确认")
+            env = {
+                "TG_BOT_TOKEN": "123456:secret-token",
+                "TG_ALLOWED_CHAT_ID": "464100862",
+                "CMS_BASE_URL": "http://cms:9527",
+                "CMS_USERNAME": "user",
+                "CMS_PASSWORD": "secret-password",
+                "DB_PATH": str(data / "submissions.db"),
+                "TASK_DB_PATH": str(task_db),
+                "STRM_SOURCE_ROOTS": str(data),
+                "HDHIVE_ENABLED": "true",
+                "HDHIVE_TOKEN_CONFIG_PATH": str(token),
+                "HDHIVE_SUBSCRIPTION_TIME": "01:30",
+                "HDHIVE_SUBSCRIPTION_TIMEZONE": "Asia/Shanghai",
+            }
+
+            report = doctor.run_checks(
+                env=env,
+                filesystem=doctor.MemoryFilesystem(existing_paths={data, token}),
+            )
+
+        self.assertTrue(report.ok, report.to_text())
+        text = report.to_text()
+        self.assertIn("hdhive_subscriptions", text)
+        self.assertIn("schedule=01:30 Asia/Shanghai", text)
+        self.assertIn("active=1", text)
+        self.assertIn("pending_confirmation=1", text)
 
     def test_web_exposure_and_unsupported_concurrency_are_nonblocking_warnings(self):
         env = {

@@ -14,6 +14,10 @@ cms-tg-ingest 的 Web UI 是 Telegram 入库外挂的轻量运维控制台。它
 
 Telegram 侧还可以复用 CMS 已授权的 HDHive 账号完成 TMDB 搜索、网盘筛选和资源解锁。该功能只把成功的 115 链接交给现有入库流程，不改变 CMS 的整理分类，也不替其他网盘执行入库。
 
+## HDHive 剧集订阅
+
+用户直接发送 `https://hdhive.com/tv/<slug>` 创建订阅，而不是立即解锁。系统每天按 `HDHIVE_SUBSCRIPTION_TIME`（默认 `01:30`，时区由 `HDHIVE_SUBSCRIPTION_TIMEZONE` 控制）检查新集；费用未知或超过阈值时进入待确认，用户点击“确认解锁”后才会继续。订阅由 `HDHIVE_SUBSCRIPTION_AUTO_ENABLED` 控制，可在 Web `/hdhive` 或 Telegram 菜单中暂停、恢复、删除和立即检查。
+
 ## Brand Personality
 
 清爽、可信、少打扰。界面应该像一个安静可靠的家庭媒体库助手：默认克制，只在需要关注时明确提醒，不用花哨效果制造存在感。

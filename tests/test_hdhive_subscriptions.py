@@ -163,6 +163,41 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
 
 
 class HdhiveSubscriptionSchedulerTests(unittest.TestCase):
+    def test_scheduler_enqueues_one_best_episode_and_keeps_high_cost_episode_pending(self):
+        directory = tempfile.TemporaryDirectory()
+        try:
+            store = HdhiveSubscriptionStore(Path(directory.name) / "tasks.db")
+            subscription = store.create_subscription("464100862", "tmdb_tv", "255358", "剧集", "255358")
+            proxy = FakeSubscriptionProxy(
+                [
+                    resource("ep1-4k", resolution="2160P", points=8, episode_key="s01e01"),
+                    resource("ep1-1080", resolution="1080P", points=1, episode_key="s01e01"),
+                    resource("ep2-high", resolution="1080P", points=21, episode_key="s01e02"),
+                ],
+                [HdhiveUnlockItem("ep1-4k", True, "https://115cdn.com/s/episode1?password=1111", "", "", False)],
+            )
+            intake_calls = []
+            service = HdhiveSubscriptionService(
+                proxy=proxy,
+                store=store,
+                enqueue_links=lambda urls, chat_id: intake_calls.append((urls, chat_id)),
+                auto_unlock_max_points=20,
+            )
+            scheduler = HdhiveSubscriptionScheduler(service, store, enabled=True)
+
+            run = scheduler.run_now()
+            items = {item.resource_slug: item for item in store.list_items(subscription.id)}
+
+            self.assertEqual(run.summary["enqueued"], 1)
+            self.assertEqual(run.summary["pending_confirmation"], 1)
+            self.assertEqual(proxy.unlock_calls, [["ep1-4k"]])
+            self.assertEqual(intake_calls, [(["https://115cdn.com/s/episode1?password=1111"], "464100862")])
+            self.assertEqual(items["ep1-4k"].status, "enqueued")
+            self.assertEqual(items["ep1-1080"].status, "discovered")
+            self.assertEqual(items["ep2-high"].status, "pending_confirmation")
+        finally:
+            directory.cleanup()
+
     def test_next_run_defaults_to_0130_shanghai(self):
         with tempfile.TemporaryDirectory() as directory:
             store = HdhiveSubscriptionStore(Path(directory) / "tasks.db")

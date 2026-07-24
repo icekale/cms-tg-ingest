@@ -38,6 +38,7 @@
 - **115 压力保护**：整理文件夹查找使用分层搜索早停和整理目录扫描预算；遇到 115 风控冷却会暂停新的 115/CMS 全局阶段，避免连续重试。
 - **115 云下载**：磁力和 ED2K 先落入 `SELF_SHARE_RECEIVE_CID`，按至少 30 秒间隔查询完成状态；云下载失败或超时不会触发后续清理。
 - **HDHive 搜索与解锁**：复用 CMS 已授权的 HDHive 账号，通过 Telegram 按钮用 TMDB 匹配影片/剧集、筛选网盘并单条或批量解锁；成功的 115 链接自动进入现有 TaskStore 入库流程，其他网盘链接只返回给用户。
+- **HDHive 剧集订阅**：直接发送 HDHive 剧集页面链接创建订阅，每天按北京时间 `01:30` 检查新集；有效性、分辨率优先，费用未知或超过阈值时必须点击“确认解锁”。
 - **离线诊断**：`doctor.py` 可检查配置、挂载路径、数据库质量和常见部署问题。
 - **可选兜底识别**：可接入 OpenAI 兼容接口，但默认思路仍是尽量依赖 CMS 分类。
 
@@ -141,6 +142,18 @@ Compose 挂载示例：
 ```yaml
 - /mnt/user/appdata/cloud-media-sync/config/hdhive-openapi.json:/config/hdhive-openapi.json:ro
 ```
+
+### HDHive 剧集订阅
+
+直接发送 HDHive 剧集页面链接（格式为 `https://hdhive.com/tv/<slug>`）即可创建订阅，不会立即解锁。程序每天按配置时间检查一次新增剧集资源；默认每天 `01:30`（`Asia/Shanghai`）。每一集只选择一个最佳的 115 资源，费用未知或超过自动解锁阈值时会停在待确认状态，点击“确认解锁”后才会继续。
+
+```env
+HDHIVE_SUBSCRIPTION_AUTO_ENABLED=true
+HDHIVE_SUBSCRIPTION_TIME=01:30
+HDHIVE_SUBSCRIPTION_TIMEZONE=Asia/Shanghai
+```
+
+Web 管理页地址为 `http://<unraid-ip>:8787/hdhive`，可查看 OAuth 账号状态、订阅来源、最近/下次检查、发现/入队/待确认/失败统计，并执行暂停、恢复、删除、立即检查和确认解锁。Telegram 也可通过 `HDHive 订阅` 菜单完成同样的日常操作。
 
 ## 推荐自分享工作流
 

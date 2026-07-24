@@ -49,6 +49,9 @@ HDHIVE_ENABLED=true
 HDHIVE_PROXY_BASE_URL=https://authx.771885.xyz
 HDHIVE_TOKEN_CONFIG_PATH=/config/hdhive-openapi.json
 HDHIVE_AUTO_UNLOCK_MAX_POINTS=20
+HDHIVE_SUBSCRIPTION_AUTO_ENABLED=true
+HDHIVE_SUBSCRIPTION_TIME=01:30
+HDHIVE_SUBSCRIPTION_TIMEZONE=Asia/Shanghai
 ```
 
 ```yaml
@@ -56,6 +59,8 @@ HDHIVE_AUTO_UNLOCK_MAX_POINTS=20
 ```
 
 Telegram 菜单中的 `HDHive 搜索` 会先让用户选择 TMDB 媒体，再显示资源和网盘筛选按钮。高费用或未知费用会二次确认；只有 115 结果会自动进入 CMS 整理、自有分享 STRM 和 Emby 入库流程。
+
+发送 `https://hdhive.com/tv/<slug>` 会创建剧集订阅，不会立即解锁。程序每天按 `01:30`（`Asia/Shanghai`）检查新增资源；费用未知或超过阈值时停在待确认状态，需要点击“确认解锁”。Web 管理页为 `/hdhive`，可以查看 OAuth 状态、下次检查时间和订阅统计。
 
 ## 安全边界
 

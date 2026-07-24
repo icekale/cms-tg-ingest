@@ -11,8 +11,10 @@ import sqlite3
 from collections import Counter
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import datetime, time as datetime_time, timedelta
 from pathlib import Path
 from typing import Mapping, Protocol
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 REQUIRED_ENV = ("TG_BOT_TOKEN", "TG_ALLOWED_CHAT_ID", "CMS_BASE_URL", "CMS_USERNAME", "CMS_PASSWORD")
 SECRET_MARKERS = ("TOKEN", "PASSWORD", "KEY", "COOKIE", "SECRET")
@@ -219,6 +221,86 @@ def _check_filesystem(env: Mapping[str, str], filesystem: Filesystem) -> CheckIt
     return CheckItem("filesystem", True, "configured local paths exist")
 
 
+def _hdhive_next_run(run_time: datetime_time, timezone: ZoneInfo) -> str:
+    now = datetime.now(timezone)
+    candidate = now.replace(
+        hour=run_time.hour,
+        minute=run_time.minute,
+        second=0,
+        microsecond=0,
+    )
+    if now >= candidate:
+        candidate += timedelta(days=1)
+    return candidate.isoformat(timespec="minutes")
+
+
+def _hdhive_subscription_counts(db_path: Path) -> tuple[int, int, str]:
+    if not db_path.exists():
+        return 0, 0, "not-created"
+    try:
+        with closing(sqlite3.connect(db_path)) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            if "hdhive_subscriptions" not in tables or "hdhive_subscription_items" not in tables:
+                return 0, 0, "not-initialized"
+            active = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM hdhive_subscriptions WHERE status = 'active'"
+                ).fetchone()[0]
+            )
+            pending = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM hdhive_subscription_items WHERE status = 'pending_confirmation'"
+                ).fetchone()[0]
+            )
+            return active, pending, "ready"
+    except sqlite3.Error as exc:
+        return 0, 0, f"error: {exc}"
+
+
+def _check_hdhive_subscriptions(env: Mapping[str, str], filesystem: Filesystem) -> CheckItem:
+    if not _env_bool(env, "HDHIVE_ENABLED"):
+        return CheckItem("hdhive_subscriptions", True, "HDHive disabled")
+
+    problems: list[str] = []
+    token_path = Path(_env_value(env, "HDHIVE_TOKEN_CONFIG_PATH") or "/config/hdhive-openapi.json")
+    if not filesystem.is_file(token_path):
+        problems.append(f"HDHive OAuth token file does not exist: {token_path}")
+
+    time_value = _env_value(env, "HDHIVE_SUBSCRIPTION_TIME") or "01:30"
+    timezone_value = _env_value(env, "HDHIVE_SUBSCRIPTION_TIMEZONE") or "Asia/Shanghai"
+    try:
+        if re.fullmatch(r"\d{2}:\d{2}", time_value) is None:
+            raise ValueError
+        hour, minute = (int(part) for part in time_value.split(":", 1))
+        run_time = datetime_time(hour, minute)
+    except ValueError:
+        run_time = datetime_time(1, 30)
+        problems.append("HDHIVE_SUBSCRIPTION_TIME must be a valid HH:MM time")
+    try:
+        timezone = ZoneInfo(timezone_value)
+    except (ValueError, ZoneInfoNotFoundError):
+        timezone = ZoneInfo("Asia/Shanghai")
+        problems.append("HDHIVE_SUBSCRIPTION_TIMEZONE must be a valid IANA timezone")
+
+    db_path = Path(_env_value(env, "TASK_DB_PATH") or "/data/tasks.db")
+    active, pending, database_status = _hdhive_subscription_counts(db_path)
+    if database_status.startswith("error:"):
+        problems.append(f"HDHive subscription database cannot be read: {database_status[6:]}")
+    message = (
+        f"scheduler={'enabled' if _env_bool(env, 'HDHIVE_SUBSCRIPTION_AUTO_ENABLED') else 'disabled'} "
+        f"schedule={time_value} {timezone_value} next_run={_hdhive_next_run(run_time, timezone)} "
+        f"database={database_status} active={active} pending_confirmation={pending}"
+    )
+    if problems:
+        return CheckItem("hdhive_subscriptions", False, "; ".join(problems) + "; " + message)
+    return CheckItem("hdhive_subscriptions", True, message)
+
+
 def run_checks(env: Mapping[str, str] | None = None, filesystem: Filesystem | None = None) -> DoctorReport:
     env = os.environ if env is None else env
     filesystem = RealFilesystem() if filesystem is None else filesystem
@@ -227,6 +309,7 @@ def run_checks(env: Mapping[str, str] | None = None, filesystem: Filesystem | No
         _check_optional_env(env),
         _check_runtime_safety(env),
         _check_filesystem(env, filesystem),
+        _check_hdhive_subscriptions(env, filesystem),
     ])
 
 
