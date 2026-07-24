@@ -67,6 +67,17 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(frontend_status, 404)
         self.assertIn(b"Frontend asset not found", frontend_body)
 
+    def test_frontend_history_route_falls_back_to_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = Path(tmp) / "dist"
+            dist.mkdir()
+            (dist / "index.html").write_text("<div id='app'>ok</div>", encoding="utf-8")
+            app = WebApp(TaskStore(Path(tmp) / "tasks.db"), frontend_dist_path=dist)
+            status, _headers, body = app.handle_request("GET", "/app/tasks", {}, b"")
+
+        self.assertEqual(status, 200)
+        self.assertIn(b"id='app'", body)
+
     def test_serialize_task_does_not_expose_secret_metadata(self):
         task = type(
             "Task",

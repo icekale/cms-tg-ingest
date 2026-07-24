@@ -1394,6 +1394,8 @@ class WebApp:
             candidate.relative_to(root)
         except ValueError:
             return 404, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"Not Found"
+        if not candidate.is_file() and not candidate.suffix:
+            candidate = root / "index.html"
         if not candidate.is_file():
             return 404, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"Frontend asset not found"
         content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
