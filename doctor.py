@@ -197,6 +197,10 @@ def _check_filesystem(env: Mapping[str, str], filesystem: Filesystem) -> CheckIt
     elif _env_bool(env, "TASK_ENGINE_ENABLED") and not filesystem.is_writable(task_db_path.parent):
         problems.append(f"TASK_DB directory is not writable: {task_db_path.parent}")
     workflow = _env_value(env, "WORKFLOW_MODE") or "direct"
+    if _env_bool(env, "HDHIVE_ENABLED"):
+        token_path = Path(_env_value(env, "HDHIVE_TOKEN_CONFIG_PATH") or "/config/hdhive-openapi.json")
+        if not filesystem.is_file(token_path):
+            problems.append(f"HDHive token file does not exist: {token_path}")
     if workflow == "self_share_sync":
         cookie = Path(_env_value(env, "P115_COOKIE_PATH") or "/config/115-cookies.txt")
         if not filesystem.is_file(cookie):

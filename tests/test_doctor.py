@@ -90,6 +90,28 @@ class DoctorConfigTests(unittest.TestCase):
         self.assertIn("WEB_PORT", text)
         self.assertIn("TASK_DB directory does not exist", text)
 
+    def test_hdhive_enabled_requires_mounted_oauth_token_file(self):
+        env = {
+            "TG_BOT_TOKEN": "123456:secret-token",
+            "TG_ALLOWED_CHAT_ID": "464100862",
+            "CMS_BASE_URL": "http://cms:9527",
+            "CMS_USERNAME": "user",
+            "CMS_PASSWORD": "secret-password",
+            "DB_PATH": "/data/submissions.db",
+            "TASK_DB_PATH": "/data/tasks.db",
+            "STRM_SOURCE_ROOTS": "/data",
+            "HDHIVE_ENABLED": "true",
+            "HDHIVE_TOKEN_CONFIG_PATH": "/config/hdhive-openapi.json",
+        }
+
+        report = doctor.run_checks(
+            env=env,
+            filesystem=doctor.MemoryFilesystem(existing_paths={"/data"}),
+        )
+
+        self.assertFalse(report.ok)
+        self.assertIn("HDHive token file does not exist", report.to_text())
+
     def test_web_exposure_and_unsupported_concurrency_are_nonblocking_warnings(self):
         env = {
             "TG_BOT_TOKEN": "123456:secret-token",

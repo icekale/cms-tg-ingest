@@ -82,6 +82,11 @@ class Config:
     openai_suggest_confidence: float = 0.45
     tmdb_api_key: str = ""
     tmdb_bearer_token: str = ""
+    hdhive_enabled: bool = False
+    hdhive_proxy_base_url: str = "https://authx.771885.xyz"
+    hdhive_token_config_path: str = "/config/hdhive-openapi.json"
+    hdhive_search_session_ttl_seconds: int = 900
+    hdhive_auto_unlock_max_points: int = 20
     workflow_mode: str = "direct"
     p115_cookie_path: str = "/config/115-cookies.txt"
     p115_min_request_interval_seconds: float = 2.0
@@ -156,6 +161,11 @@ class Config:
             openai_suggest_confidence=env_float("OPENAI_SUGGEST_CONFIDENCE", 0.45),
             tmdb_api_key=os.environ.get("TMDB_API_KEY", ""),
             tmdb_bearer_token=os.environ.get("TMDB_BEARER_TOKEN", ""),
+            hdhive_enabled=parse_bool_env(os.environ.get("HDHIVE_ENABLED"), False),
+            hdhive_proxy_base_url=os.environ.get("HDHIVE_PROXY_BASE_URL", "https://authx.771885.xyz").rstrip("/"),
+            hdhive_token_config_path=os.environ.get("HDHIVE_TOKEN_CONFIG_PATH", "/config/hdhive-openapi.json"),
+            hdhive_search_session_ttl_seconds=max(60, int(os.environ.get("HDHIVE_SEARCH_SESSION_TTL_SECONDS", "900"))),
+            hdhive_auto_unlock_max_points=max(0, int(os.environ.get("HDHIVE_AUTO_UNLOCK_MAX_POINTS", "20"))),
             workflow_mode=os.environ.get("WORKFLOW_MODE", "direct").strip().lower() or "direct",
             p115_cookie_path=os.environ.get("P115_COOKIE_PATH", "/config/115-cookies.txt"),
             p115_min_request_interval_seconds=env_float("P115_MIN_REQUEST_INTERVAL_SECONDS", 2.0),

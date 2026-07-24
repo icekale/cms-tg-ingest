@@ -90,6 +90,23 @@ class CmsClient:
             raise RuntimeError(resp.get("msg") or "CMS rejected the share link")
         return resp
 
+    def get_hdhive_info(self) -> dict:
+        return self._authorized("/api/hdhive/info", method="GET")
+
+    def search_movie(self, keyword: str, page: int = 1, page_size: int = 8) -> dict:
+        return self._authorized(
+            "/api/tmdb/search_movie",
+            method="GET",
+            params={"keyword": keyword, "page": page, "page_size": page_size},
+        )
+
+    def search_tv(self, keyword: str, page: int = 1, page_size: int = 8) -> dict:
+        return self._authorized(
+            "/api/tmdb/search_tv",
+            method="GET",
+            params={"keyword": keyword, "page": page, "page_size": page_size},
+        )
+
     def list_share_down(self, page_size: int = 20) -> list[dict]:
         resp = self._authorized("/api/share_down/list", method="GET", params={"page": 1, "page_size": page_size})
         if resp.get("code") != 200:

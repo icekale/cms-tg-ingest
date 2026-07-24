@@ -13,6 +13,7 @@ Cloud Media Sync（CMS）的 115 分享自动入库外挂。把一个或多个 1
 - 实际探测 STRM 播放端点，新版本验证失败时保留媒体库现有文件。
 - TaskStore 记录每个阶段、耗时、等待原因、失败和重试状态。
 - 限制 115 查询频率与扫描预算，遇到风控后自动进入冷却。
+- 可选 HDHive 搜索与解锁：通过 CMS 已授权账号按 TMDB 搜索和筛选资源，115 链接自动进入既有入库流程。
 
 ## 快速开始
 
@@ -38,6 +39,23 @@ docker pull icekale/cms-tg-ingest:latest
 - 已配置 115 Cookie、待整理目录和媒体库路径映射。
 - 已创建 Telegram Bot，并设置允许访问的用户或聊天 ID。
 - 如需自动确认入库，需提供可访问的 Emby 地址和 API Key。
+
+### HDHive 配置
+
+不需要额外的 HDHive API Key。先在 CMS `转存下载 -> 影巢账号` 完成授权，再将 OAuth 配置只读挂载到容器，并启用：
+
+```env
+HDHIVE_ENABLED=true
+HDHIVE_PROXY_BASE_URL=https://authx.771885.xyz
+HDHIVE_TOKEN_CONFIG_PATH=/config/hdhive-openapi.json
+HDHIVE_AUTO_UNLOCK_MAX_POINTS=20
+```
+
+```yaml
+- /mnt/user/appdata/cloud-media-sync/config/hdhive-openapi.json:/config/hdhive-openapi.json:ro
+```
+
+Telegram 菜单中的 `HDHive 搜索` 会先让用户选择 TMDB 媒体，再显示资源和网盘筛选按钮。高费用或未知费用会二次确认；只有 115 结果会自动进入 CMS 整理、自有分享 STRM 和 Emby 入库流程。
 
 ## 安全边界
 
