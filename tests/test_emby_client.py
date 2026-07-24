@@ -3,7 +3,7 @@ from io import BytesIO
 from urllib.error import HTTPError
 from unittest.mock import patch
 
-from app.clients.emby import EmbyClient
+from app.clients.emby import EmbyClient, _positive_episode_index
 from app.clients.http import HttpJson
 
 
@@ -120,6 +120,10 @@ class EmbyClientTests(unittest.TestCase):
 
         with self.assertRaises(HTTPError):
             client.episode_keys_for_series("series-1")
+
+    def test_boolean_episode_indexes_are_rejected_before_conversion(self):
+        self.assertIsNone(_positive_episode_index(True))
+        self.assertIsNone(_positive_episode_index(False))
 
 
 if __name__ == "__main__":
