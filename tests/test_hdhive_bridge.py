@@ -87,6 +87,31 @@ class FakeProxy:
 
 
 class HdhiveBridgeTests(unittest.TestCase):
+    def test_chinese_search_command_starts_hdhive_search(self):
+        telegram = FakeTelegram()
+        workflow = SimpleNamespace(
+            sessions=HdhiveSessionStore()
+        )
+
+        bridge.handle_update(
+            {
+                "message": {
+                    "chat": {"id": "464100862"},
+                    "from": {"id": "464100862"},
+                    "text": "/搜索",
+                }
+            },
+            object(),
+            telegram,
+            "464100862",
+            object(),
+            poll_status=False,
+            hdhive_workflow=workflow,
+        )
+
+        self.assertIn("请输入片名或 TMDB ID", telegram.messages[-1][1])
+        self.assertTrue(telegram.messages[-1][1].split("本次搜索编号：", 1)[1])
+
     def test_runtime_factory_is_disabled_without_config(self):
         config = SimpleNamespace(hdhive_enabled=False)
 

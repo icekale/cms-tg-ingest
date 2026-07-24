@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Telegram HDHive 搜索命令新增中文别名 `/搜索`，原 `/hdhive_search` 继续兼容。
 - 修复 HDHive Web 管理页在调度器完成一次运行后读取最近运行摘要时的异常。
 - 修复 Cloudflare 浏览器签名拦截 HDHive 代理请求的问题。
 - 改为挂载 CMS 配置目录，确保 OAuth 刷新替换文件后外挂读取到最新令牌。
