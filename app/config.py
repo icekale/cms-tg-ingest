@@ -87,6 +87,9 @@ class Config:
     hdhive_token_config_path: str = "/config/hdhive-openapi.json"
     hdhive_search_session_ttl_seconds: int = 900
     hdhive_auto_unlock_max_points: int = 20
+    hdhive_subscription_auto_enabled: bool = True
+    hdhive_subscription_time: str = "01:30"
+    hdhive_subscription_timezone: str = "Asia/Shanghai"
     workflow_mode: str = "direct"
     p115_cookie_path: str = "/config/115-cookies.txt"
     p115_min_request_interval_seconds: float = 2.0
@@ -166,6 +169,15 @@ class Config:
             hdhive_token_config_path=os.environ.get("HDHIVE_TOKEN_CONFIG_PATH", "/config/hdhive-openapi.json"),
             hdhive_search_session_ttl_seconds=max(60, int(os.environ.get("HDHIVE_SEARCH_SESSION_TTL_SECONDS", "900"))),
             hdhive_auto_unlock_max_points=max(0, int(os.environ.get("HDHIVE_AUTO_UNLOCK_MAX_POINTS", "20"))),
+            hdhive_subscription_auto_enabled=parse_bool_env(
+                os.environ.get("HDHIVE_SUBSCRIPTION_AUTO_ENABLED"), True
+            ),
+            hdhive_subscription_time=parse_quality_auto_time(
+                os.environ.get("HDHIVE_SUBSCRIPTION_TIME", "01:30")
+            ),
+            hdhive_subscription_timezone=parse_quality_auto_timezone(
+                os.environ.get("HDHIVE_SUBSCRIPTION_TIMEZONE", "Asia/Shanghai")
+            ),
             workflow_mode=os.environ.get("WORKFLOW_MODE", "direct").strip().lower() or "direct",
             p115_cookie_path=os.environ.get("P115_COOKIE_PATH", "/config/115-cookies.txt"),
             p115_min_request_interval_seconds=env_float("P115_MIN_REQUEST_INTERVAL_SECONDS", 2.0),

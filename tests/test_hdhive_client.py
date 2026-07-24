@@ -75,6 +75,42 @@ class HdhiveProxyClientTests(unittest.TestCase):
             )
             self.assertNotIn("refresh-should-not-be-used", repr(http.calls[0]))
 
+    def test_resolve_tv_page_extracts_server_rendered_metadata(self):
+        html = r'''
+        <script>
+        self.__next_f.push([1,"data:{\"id\":126561,\"slug\":\"542a1c1fe6ac4a5aab152369079596b5\",\"tmdb_id\":\"255358\",\"name\":\"攻壳机动队\",\"first_air_date\":\"2026-07-07\"}"])
+        </script>
+        '''
+        with tempfile.TemporaryDirectory() as directory:
+            client = HdhiveProxyClient(
+                "https://proxy.test",
+                self.token_file(directory),
+                http=FakeHttp([]),
+                page_fetcher=lambda _url: html,
+            )
+
+            page = client.resolve_tv_page(
+                "https://hdhive.com/tv/542a1c1fe6ac4a5aab152369079596b5"
+            )
+
+            self.assertEqual(page.slug, "542a1c1fe6ac4a5aab152369079596b5")
+            self.assertEqual(page.tmdb_id, "255358")
+            self.assertEqual(page.title, "攻壳机动队")
+            self.assertEqual(page.year, "2026")
+
+    def test_resolve_tv_page_rejects_page_without_tmdb_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = HdhiveProxyClient(
+                "https://proxy.test",
+                self.token_file(directory),
+                http=FakeHttp([]),
+                page_fetcher=lambda _url: '"slug":"542a1c1fe6ac4a5aab152369079596b5","name":"无 TMDB"',
+            )
+
+            with self.assertRaises(HdhiveProxyError) as context:
+                client.resolve_tv_page("https://hdhive.com/tv/542a1c1fe6ac4a5aab152369079596b5")
+            self.assertEqual(context.exception.error_code, "HDHIVE_PAGE_UNRESOLVED")
+
     def test_unlock_uses_slug_for_one_and_slugs_for_batch(self):
         with tempfile.TemporaryDirectory() as directory:
             http = FakeHttp(

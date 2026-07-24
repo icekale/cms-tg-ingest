@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from app.clients.http import HttpJson
 
@@ -69,6 +72,18 @@ class HdhiveResource:
     validate_status: str
     validate_message: str
     is_unlocked: bool
+    season_number: int | None = None
+    episode_number: int | None = None
+    episode_key: str = ""
+
+
+@dataclass(frozen=True)
+class HdhiveTvPage:
+    slug: str
+    tmdb_id: str
+    title: str
+    year: str
+    url: str
 
 
 @dataclass(frozen=True)
@@ -97,11 +112,13 @@ class HdhiveProxyClient:
         token_path: str | Path,
         http: HttpJson | None = None,
         refresh_via_cms: Callable[[], None] | None = None,
+        page_fetcher: Callable[[str], str] | None = None,
     ):
         self.base_url = _as_text(base_url).rstrip("/")
         self.token_path = Path(token_path)
         self.http = http or HttpJson(timeout=60)
         self.refresh_via_cms = refresh_via_cms
+        self.page_fetcher = page_fetcher
 
     def _access_token(self) -> str:
         try:
@@ -184,6 +201,52 @@ class HdhiveProxyClient:
         items = data if isinstance(data, list) else data.get("items", []) if isinstance(data, dict) else []
         return [self._resource(item) for item in items if isinstance(item, dict) and _as_text(item.get("slug"))]
 
+    def resolve_tv_page(self, url: str) -> HdhiveTvPage:
+        from app.hdhive_subscriptions import parse_hdhive_tv_url
+
+        try:
+            parsed = parse_hdhive_tv_url(url)
+            html = self.page_fetcher(url) if self.page_fetcher is not None else self._fetch_page(url)
+        except HdhiveProxyError:
+            raise
+        except Exception as exc:
+            raise HdhiveProxyError("HDHIVE_PAGE_UNRESOLVED", "HDHive 剧集页面暂时无法访问") from exc
+
+        normalized = str(html or "").replace(r'\"', '"')
+        slug_pattern = re.escape(parsed.slug)
+        match = re.search(
+            rf'"slug"\s*:\s*"{slug_pattern}"(?P<body>.{{0,3000}}?)"tmdb_id"\s*:\s*"?(?P<tmdb>\d+)"?',
+            normalized,
+            re.DOTALL,
+        )
+        if match is None:
+            raise HdhiveProxyError("HDHIVE_PAGE_UNRESOLVED", "HDHive 页面没有可用的 TMDB 剧集信息")
+        body = normalized[match.start() : match.end() + 2000]
+        title_match = re.search(r'"(?:name|title)"\s*:\s*"([^"]+)"', body)
+        year_match = re.search(r'"(?:first_air_date|release_date)"\s*:\s*"(\d{4})', body)
+        return HdhiveTvPage(
+            slug=parsed.slug,
+            tmdb_id=match.group("tmdb"),
+            title=title_match.group(1) if title_match else "",
+            year=year_match.group(1) if year_match else "",
+            url=parsed.url,
+        )
+
+    def _fetch_page(self, url: str) -> str:
+        request = Request(
+            url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml",
+                "User-Agent": "Mozilla/5.0 cms-tg-ingest",
+            },
+            method="GET",
+        )
+        try:
+            with urlopen(request, timeout=self.http.timeout) as response:
+                return response.read().decode("utf-8", "replace")
+        except (OSError, URLError, TimeoutError) as exc:
+            raise HdhiveProxyError("HDHIVE_PAGE_UNRESOLVED", "HDHive 剧集页面暂时无法访问") from exc
+
     @staticmethod
     def _resource(item: dict[str, Any]) -> HdhiveResource:
         return HdhiveResource(
@@ -199,6 +262,9 @@ class HdhiveProxyClient:
             validate_status=_as_text(item.get("validate_status")),
             validate_message=_as_text(item.get("validate_message")),
             is_unlocked=bool(item.get("is_unlocked")),
+            season_number=_as_int(item.get("season_number")),
+            episode_number=_as_int(item.get("episode_number")),
+            episode_key=_as_text(item.get("episode_key") or item.get("episode_code")),
         )
 
     def unlock(self, slugs: list[str]) -> list[HdhiveUnlockItem]:
