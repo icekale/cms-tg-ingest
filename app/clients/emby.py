@@ -11,7 +11,7 @@ from app.series_rules import parse_episode_key
 
 
 def _positive_episode_index(value: Any) -> int | None:
-    if value is None:
+    if isinstance(value, bool) or value is None:
         return None
     if isinstance(value, int):
         index = value
