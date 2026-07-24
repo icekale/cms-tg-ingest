@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import mimetypes
 import time
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +24,13 @@ from .task_diagnostics import (
 from .task_engine import decide_retry, stage_display_name
 from .task_health import build_task_health, format_task_health
 from .task_store import TaskStore
+from .web_api import (
+    api_response,
+    api_task_detail,
+    api_tasks,
+    serialize_health,
+    serialize_hdhive,
+)
 
 
 _NAV_ITEMS = (
@@ -1151,6 +1159,7 @@ class WebApp:
         quality_automation: QualityAutomation | None = None,
         hdhive_service: Any | None = None,
         hdhive_scheduler: Any | None = None,
+        frontend_dist_path: str | Path = "/app/frontend/dist",
     ):
         self.store = store
         self.web_token = web_token
@@ -1159,6 +1168,7 @@ class WebApp:
         self.quality_automation = quality_automation
         self.hdhive_service = hdhive_service
         self.hdhive_scheduler = hdhive_scheduler
+        self.frontend_dist_path = Path(frontend_dist_path)
 
     def _authorization_source(self, path: str, headers: dict[str, str]) -> str:
         if not self.web_token:
@@ -1197,6 +1207,10 @@ class WebApp:
         if method == "GET" and authorization_source == "query":
             return 303, {"Location": parsed.path or "/", "Set-Cookie": self._web_token_cookie()}, b""
         auth_headers = {"Set-Cookie": self._web_token_cookie()} if authorization_source in {"query", "header"} else {}
+        if parsed.path == "/app" or parsed.path == "/app/" or parsed.path.startswith("/app/"):
+            return self._serve_frontend(parsed.path, auth_headers)
+        if parsed.path.startswith("/api/v1/"):
+            return self._handle_api(method, parsed.path, headers, body, auth_headers)
         if method == "GET" and parsed.path == "/":
             page = render_task_list(self.store, task_engine_enabled=self.task_engine_enabled)
             return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, page.encode("utf-8")
@@ -1356,6 +1370,97 @@ class WebApp:
             return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
         return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"Not Found"
 
+    def _serve_frontend(self, path: str, auth_headers: dict[str, str]) -> tuple[int, dict[str, str], bytes]:
+        relative = "index.html" if path in {"/app", "/app/"} else path.removeprefix("/app/")
+        root = self.frontend_dist_path.resolve()
+        candidate = (root / relative).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            return 404, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"Not Found"
+        if not candidate.is_file():
+            return 404, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"Frontend asset not found"
+        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        return 200, {"Content-Type": f"{content_type}; charset=utf-8" if content_type.startswith("text/") or content_type in {"application/javascript", "application/json"} else content_type, **auth_headers}, candidate.read_bytes()
+
+    @staticmethod
+    def _api_body(body: bytes, headers: dict[str, str]) -> dict[str, Any]:
+        text = body.decode("utf-8") if body else ""
+        if "application/json" in str(headers.get("Content-Type") or headers.get("content-type") or ""):
+            import json
+
+            value = json.loads(text or "{}")
+            return value if isinstance(value, dict) else {}
+        values = parse_qs(text, keep_blank_values=True)
+        return {key: items[0] if items else "" for key, items in values.items()}
+
+    def _handle_api(
+        self,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        body: bytes,
+        auth_headers: dict[str, str],
+    ) -> tuple[int, dict[str, str], bytes]:
+        if method == "GET" and path == "/api/v1/overview":
+            payload = {
+                "tasks": api_tasks(self.store, limit=20),
+                "health": serialize_health(self.store, enabled=self.task_engine_enabled),
+                "strm_default_mode": self.store.get_default_strm_mode(),
+            }
+            status, response_headers, response_body = api_response(payload)
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "GET" and path == "/api/v1/tasks":
+            status, response_headers, response_body = api_response(api_tasks(self.store))
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "GET" and path.startswith("/api/v1/tasks/"):
+            try:
+                task_id = int(path.removeprefix("/api/v1/tasks/"))
+            except ValueError:
+                task_id = 0
+            detail = api_task_detail(self.store, task_id)
+            status, response_headers, response_body = api_response(
+                detail if detail is not None else {"error": "task_not_found"},
+                status=200 if detail is not None else 404,
+            )
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "GET" and path == "/api/v1/health":
+            status, response_headers, response_body = api_response(serialize_health(self.store, enabled=self.task_engine_enabled))
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "GET" and path == "/api/v1/hdhive":
+            try:
+                payload = serialize_hdhive(self.hdhive_service)
+            except Exception as exc:
+                status, response_headers, response_body = api_response({"error": "hdhive_unavailable", "message": str(exc)[:160]}, status=503)
+                return status, {**response_headers, **auth_headers}, response_body
+            status, response_headers, response_body = api_response(payload)
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path == "/api/v1/settings/strm-mode":
+            try:
+                values = self._api_body(body, headers)
+                mode = self.store.set_default_strm_mode(str(values.get("mode") or ""))
+            except (UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+                status, response_headers, response_body = api_response({"error": str(exc)}, status=400)
+                return status, {**response_headers, **auth_headers}, response_body
+            status, response_headers, response_body = api_response({"strm_default_mode": mode})
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path.startswith("/api/v1/tasks/") and path.endswith("/strm-mode"):
+            raw_id = path.removeprefix("/api/v1/tasks/").removesuffix("/strm-mode")
+            try:
+                task_id = int(raw_id)
+                values = self._api_body(body, headers)
+                task = self.store.set_task_strm_mode(task_id, str(values.get("mode") or ""))
+            except RuntimeError as exc:
+                status, response_headers, response_body = api_response({"error": str(exc), "code": "strm_mode_locked"}, status=409)
+                return status, {**response_headers, **auth_headers}, response_body
+            except (UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+                status, response_headers, response_body = api_response({"error": str(exc)}, status=400)
+                return status, {**response_headers, **auth_headers}, response_body
+            status, response_headers, response_body = api_response({"task": api_task_detail(self.store, task.id)})
+            return status, {**response_headers, **auth_headers}, response_body
+        status, response_headers, response_body = api_response({"error": "not_found"}, status=404)
+        return status, {**response_headers, **auth_headers}, response_body
+
 
 def start_web_server(
     store: TaskStore,
@@ -1367,6 +1472,7 @@ def start_web_server(
     quality_automation: QualityAutomation | None = None,
     hdhive_service: Any | None = None,
     hdhive_scheduler: Any | None = None,
+    frontend_dist_path: str | Path = "/app/frontend/dist",
 ) -> ThreadingHTTPServer:
     app = WebApp(
         store,
@@ -1376,6 +1482,7 @@ def start_web_server(
         quality_automation=quality_automation,
         hdhive_service=hdhive_service,
         hdhive_scheduler=hdhive_scheduler,
+        frontend_dist_path=frontend_dist_path,
     )
 
     class Handler(BaseHTTPRequestHandler):

@@ -363,6 +363,7 @@ def maybe_start_web_server(
     quality_automation: QualityAutomation | None = None,
     hdhive_service: HdhiveSubscriptionService | None = None,
     hdhive_scheduler: HdhiveSubscriptionScheduler | None = None,
+    frontend_dist_path: str | None = None,
     starter=start_web_server,
 ):
     if not config.web_enabled:
@@ -370,6 +371,7 @@ def maybe_start_web_server(
     kwargs = {
         "web_token": config.web_token,
         "task_engine_enabled": config.task_engine_enabled,
+        "frontend_dist_path": frontend_dist_path or getattr(config, "frontend_dist_path", "/app/frontend/dist"),
     }
     if submission_store is not None:
         kwargs["submission_store"] = submission_store
@@ -391,6 +393,7 @@ def call_maybe_start_web_server(
     quality_automation: QualityAutomation | None = None,
     hdhive_service: HdhiveSubscriptionService | None = None,
     hdhive_scheduler: HdhiveSubscriptionScheduler | None = None,
+    frontend_dist_path: str | None = None,
 ):
     try:
         parameters = inspect.signature(maybe_start_web_server).parameters
@@ -408,7 +411,10 @@ def call_maybe_start_web_server(
     supports_hdhive_scheduler = "hdhive_scheduler" in parameters or any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     )
-    if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler:
+    supports_frontend_dist_path = "frontend_dist_path" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler or supports_frontend_dist_path:
         return maybe_start_web_server(
             config,
             task_store,
@@ -416,6 +422,7 @@ def call_maybe_start_web_server(
             quality_automation=quality_automation if supports_quality_automation else None,
             hdhive_service=hdhive_service if supports_hdhive_service else None,
             hdhive_scheduler=hdhive_scheduler if supports_hdhive_scheduler else None,
+            frontend_dist_path=frontend_dist_path if supports_frontend_dist_path else None,
         )
     return maybe_start_web_server(config, task_store)
 
@@ -3513,6 +3520,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         quality_automation=quality_automation,
         hdhive_service=hdhive_subscription_service,
         hdhive_scheduler=hdhive_subscription_scheduler,
+        frontend_dist_path=getattr(config, "frontend_dist_path", "/app/frontend/dist"),
     )
 
     try:

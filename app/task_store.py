@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .models import TaskSnapshot, TaskStage, TaskStatus
-from .strm_mode import normalize_strm_mode
+from .strm_mode import is_strm_mode_locked, normalize_strm_mode
 
 
 STRM_DEFAULT_MODE_KEY = "strm_default_mode"
@@ -187,6 +187,23 @@ class TaskStore:
         normalized = normalize_strm_mode(mode)
         self.set_runtime_state(STRM_DEFAULT_MODE_KEY, normalized)
         return normalized
+
+    def set_task_strm_mode(self, task_id: int, mode: str) -> TaskSnapshot:
+        normalized = normalize_strm_mode(mode)
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+            if row is None:
+                raise KeyError(f"task not found: {task_id}")
+            if is_strm_mode_locked(row["current_stage"]):
+                raise RuntimeError("STRM 模式已锁定，不能修改")
+            merged_metadata = self._merge_metadata(row["metadata_json"], {"strm_mode": normalized})
+            conn.execute(
+                "UPDATE tasks SET metadata_json = ?, updated_at = ? WHERE id = ?",
+                (merged_metadata, time.time(), int(task_id)),
+            )
+            updated = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+        return self._snapshot(updated)
 
     def claim_quality_run(self, run_date: str, now: float) -> bool:
         state_key = f"quality_auto_run:{run_date}"
