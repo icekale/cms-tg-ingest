@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .strm_mode import normalize_strm_mode
+
 LOG = logging.getLogger("cms-tg-ingest")
 
 
@@ -72,6 +74,8 @@ class Config:
     emby_user_id: str = ""
     strm_source_roots: str = "/mnt/user/Unraid/strm/转存"
     strm_library_map: str = ""
+    strm_default_mode: str = "shared"
+    frontend_dist_path: str = "/app/frontend/dist"
     move_conflict_policy: str = "skip"
     strm_stable_seconds: int = 30
     openai_classify_enabled: bool = False
@@ -138,6 +142,16 @@ class Config:
         missing = [name for name in required if not os.environ.get(name)]
         if missing:
             raise RuntimeError("Missing environment variables: " + ", ".join(missing))
+        workflow_mode = os.environ.get("WORKFLOW_MODE", "direct").strip().lower() or "direct"
+        workflow_mode_explicit = "WORKFLOW_MODE" in os.environ
+        if "STRM_DEFAULT_MODE" in os.environ:
+            strm_default_mode = normalize_strm_mode(os.environ["STRM_DEFAULT_MODE"])
+        elif workflow_mode_explicit and workflow_mode == "self_share_sync":
+            strm_default_mode = "shared"
+        elif workflow_mode_explicit and workflow_mode == "direct":
+            strm_default_mode = "direct"
+        else:
+            strm_default_mode = "shared"
         return cls(
             tg_bot_token=os.environ["TG_BOT_TOKEN"],
             tg_allowed_chat_id=os.environ["TG_ALLOWED_CHAT_ID"],
@@ -154,6 +168,8 @@ class Config:
             emby_user_id=os.environ.get("EMBY_USER_ID", ""),
             strm_source_roots=os.environ.get("STRM_SOURCE_ROOTS", "/mnt/user/Unraid/strm/转存"),
             strm_library_map=os.environ.get("STRM_LIBRARY_MAP", ""),
+            strm_default_mode=strm_default_mode,
+            frontend_dist_path=os.environ.get("FRONTEND_DIST_PATH", "/app/frontend/dist"),
             move_conflict_policy=os.environ.get("MOVE_CONFLICT_POLICY", "skip"),
             strm_stable_seconds=int(os.environ.get("STRM_STABLE_SECONDS", "30")),
             openai_classify_enabled=parse_bool_env(os.environ.get("OPENAI_CLASSIFY_ENABLED"), False),
@@ -178,7 +194,7 @@ class Config:
             hdhive_subscription_timezone=parse_quality_auto_timezone(
                 os.environ.get("HDHIVE_SUBSCRIPTION_TIMEZONE", "Asia/Shanghai")
             ),
-            workflow_mode=os.environ.get("WORKFLOW_MODE", "direct").strip().lower() or "direct",
+            workflow_mode=workflow_mode,
             p115_cookie_path=os.environ.get("P115_COOKIE_PATH", "/config/115-cookies.txt"),
             p115_min_request_interval_seconds=env_float("P115_MIN_REQUEST_INTERVAL_SECONDS", 2.0),
             p115_risk_cooldown_seconds=int(os.environ.get("P115_RISK_COOLDOWN_SECONDS", "900")),
