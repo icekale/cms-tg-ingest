@@ -8,6 +8,13 @@
 - 修复 Cloudflare 浏览器签名拦截 HDHive 代理请求的问题。
 - 改为挂载 CMS 配置目录，确保 OAuth 刷新替换文件后外挂读取到最新令牌。
 
+## 0.2.16 - 2026-07-24
+
+- Web 管理台启用时强制配置 `WEB_TOKEN`，doctor 和实际启动路径都会阻止匿名 Web。
+- 115 风控冷却持久化到 TaskStore，重启或更换 TaskRunner 后继续遵守冷却窗口。
+- HDHive 解锁增加 SQLite 原子抢占和过期状态恢复，避免并发重复解锁或永久停在 `unlocking`。
+- Emby API Key 改用 `X-Emby-Token` 请求头，并在 HTTP 错误 URL 中脱敏敏感查询参数。
+
 ## 0.2.8 - 2026-07-24
 
 - 增加基于 CMS OAuth 授权账号的 HDHive Telegram 搜索、网盘筛选、单条/批量解锁和 115 自动入库。

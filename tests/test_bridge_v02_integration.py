@@ -146,6 +146,19 @@ class BridgeV02IntegrationTests(unittest.TestCase):
 
                 self.assertIsNone(server)
 
+    def test_maybe_start_web_server_rejects_enabled_web_without_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            env["WEB_TOKEN"] = ""
+            with patch.dict(os.environ, env, clear=True):
+                cfg = bridge.Config.from_env()
+                task_store = bridge.create_task_store(cfg)
+                starter = patch.object(bridge, "start_web_server")
+                with starter as start:
+                    with self.assertRaisesRegex(RuntimeError, "WEB_TOKEN"):
+                        bridge.maybe_start_web_server(cfg, task_store)
+                start.assert_not_called()
+
     def test_stop_web_server_closes_server(self):
         class FakeServer:
             def __init__(self):

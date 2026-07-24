@@ -309,6 +309,36 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.metadata["p115_total_request_count"], 2)
             self.assertEqual(updated.metadata["p115_request_count_snapshot"], 6)
 
+    def test_new_runner_restores_p115_risk_cooldown_from_runtime_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            first_task = store.upsert_task("first", "", "https://115cdn.com/s/first")
+            store.enqueue_task(first_task.id, TaskStage.ORGANIZING, next_run_at=100.0)
+            first_runner = TaskRunner(
+                store,
+                RiskCountingWorkflow(CountingP115(), increment=1),
+                worker_id="worker-1",
+                now=lambda: 100.0,
+                risk_cooldown_seconds=60,
+            )
+
+            self.assertTrue(first_runner.run_once())
+            cooldown = store.get_runtime_state("115:risk_cooldown_until")
+            self.assertIsNotNone(cooldown)
+            self.assertEqual(float(cooldown["value"]), 160.0)
+
+            second_task = store.upsert_task("second", "", "https://115cdn.com/s/second")
+            store.enqueue_task(second_task.id, TaskStage.ORGANIZING, next_run_at=101.0)
+            workflow = FakeWorkflow([StageResult.complete("不应执行")])
+            second_runner = TaskRunner(store, workflow, worker_id="worker-2", now=lambda: 101.0)
+
+            self.assertTrue(second_runner.run_once())
+            updated = store.find_task(second_task.id)
+
+            self.assertEqual(workflow.calls, [])
+            self.assertEqual(updated.next_run_at, 160.0)
+            self.assertEqual(updated.error_type, "p115_risk_cooldown")
+
     def test_run_once_records_p115_counts_when_stage_exception_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

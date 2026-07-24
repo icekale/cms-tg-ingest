@@ -16,6 +16,7 @@ from app.hdhive_subscription_store import HdhiveSubscription, HdhiveSubscription
 
 
 LOG = logging.getLogger("cms-tg-ingest")
+_UNLOCK_STALE_AFTER_SECONDS = 3600
 
 
 class HdhiveUrlError(ValueError):
@@ -237,9 +238,8 @@ class HdhiveSubscriptionService:
                     selected_item = stored_items.get(selected.slug) if selected is not None else None
                 if selected is None or selected_item is None:
                     continue
-            elif selected_item.status in {"pending_confirmation", "unlocking"}:
-                pending += 1 if selected_item.status == "pending_confirmation" else 0
-                skipped += 1 if selected_item.status == "unlocking" else 0
+            elif selected_item.status == "pending_confirmation":
+                pending += 1
                 continue
 
             requires_confirmation = not selected.is_unlocked and (
@@ -250,7 +250,13 @@ class HdhiveSubscriptionService:
                 pending += 1
                 continue
 
-            self.store.mark_item_unlocking(selected_item.id)
+            claimed_item = self.store.claim_item_unlocking(
+                selected_item.id,
+                stale_after_seconds=_UNLOCK_STALE_AFTER_SECONDS,
+            )
+            if claimed_item is None:
+                skipped += 1
+                continue
             try:
                 result = self._unlock_one(selected)
                 if not result.success or not result.full_url:
@@ -392,7 +398,7 @@ class HdhiveSubscriptionScheduler:
             return None
         run_date = local_now.date().isoformat()
         run_id = f"hdhive-{run_date}-{time.monotonic_ns():x}"
-        if not self.store.claim_daily_run(run_date, run_id, local_now.timestamp()):
+        if not self.store.claim_daily_run(run_date, run_id, local_now.timestamp(), serialize_active=True):
             return None
         return self._run_owned(run_id, local_now)
 
@@ -400,7 +406,7 @@ class HdhiveSubscriptionScheduler:
         local_now = self._local_now()
         run_id = f"hdhive-manual-{time.monotonic_ns():x}"
         run_date = f"manual-{local_now.date().isoformat()}-{time.monotonic_ns():x}"
-        if not self.store.claim_daily_run(run_date, run_id, local_now.timestamp()):
+        if not self.store.claim_daily_run(run_date, run_id, local_now.timestamp(), serialize_active=True):
             return None
         return self._run_owned(run_id, local_now)
 

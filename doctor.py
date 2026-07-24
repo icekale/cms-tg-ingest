@@ -157,6 +157,8 @@ def _check_optional_env(env: Mapping[str, str]) -> CheckItem:
     if _env_value(env, "EMBY_BASE_URL") and not _env_value(env, "EMBY_API_KEY"):
         warnings.append("EMBY_API_KEY is required when EMBY_BASE_URL is set")
     if _env_bool(env, "WEB_ENABLED"):
+        if not _env_value(env, "WEB_TOKEN"):
+            warnings.append("WEB_TOKEN is required when WEB_ENABLED is enabled")
         try:
             port = int(_env_value(env, "WEB_PORT") or "8787")
             if port <= 0 or port > 65535:

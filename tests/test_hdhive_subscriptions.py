@@ -1,5 +1,7 @@
 import unittest
 import tempfile
+import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -165,6 +167,32 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(stored.status, "pending_confirmation")
         self.assertEqual(proxy.unlock_calls, [])
 
+    def test_stale_unlocking_item_is_retried(self):
+        unlock_items = [HdhiveUnlockItem("stale", True, "https://115cdn.com/s/stale?password=abcd", "", "", False)]
+        directory, store, subscription, proxy, service, intake_calls = self.make_service(
+            [resource("stale", resolution="2160P", points=8)], unlock_items
+        )
+        try:
+            item = store.list_items(subscription.id)
+            self.assertEqual(item, [])
+            stored = store.upsert_item(subscription.id, "s01e01", "stale", "valid", 2160, 8)
+            store.mark_item_unlocking(stored.id)
+            with store._lock, store._connection() as connection:
+                connection.execute(
+                    "UPDATE hdhive_subscription_items SET updated_at = ? WHERE id = ?",
+                    (1.0, stored.id),
+                )
+
+            result = service.check(subscription.id)
+            current = store.get_item(stored.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.enqueued, 1)
+        self.assertEqual(current.status, "enqueued")
+        self.assertEqual(proxy.unlock_calls, [["stale"]])
+        self.assertEqual(intake_calls, [(["https://115cdn.com/s/stale?password=abcd"], "464100862")])
+
 
 class HdhiveSubscriptionSchedulerTests(unittest.TestCase):
     def test_scheduler_enqueues_one_best_episode_and_keeps_high_cost_episode_pending(self):
@@ -237,6 +265,38 @@ class HdhiveSubscriptionSchedulerTests(unittest.TestCase):
 
             self.assertIsNotNone(first)
             self.assertIsNone(second)
+
+    def test_manual_scheduler_runs_are_serialized_across_instances(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HdhiveSubscriptionStore(Path(directory) / "tasks.db")
+            subscription = store.create_subscription("464100862", "tmdb_tv", "255358", "剧集", "255358")
+            entered = threading.Event()
+            release = threading.Event()
+
+            class BlockingService:
+                def check(self, subscription_id):
+                    self.last_subscription_id = subscription_id
+                    entered.set()
+                    release.wait(timeout=2)
+                    return type("Result", (), {"discovered": 0, "enqueued": 0, "pending_confirmation": 0, "failed": 0})()
+
+            service = BlockingService()
+            first_scheduler = HdhiveSubscriptionScheduler(service, store, enabled=True)
+            second_scheduler = HdhiveSubscriptionScheduler(service, store, enabled=True)
+            results = []
+
+            first = threading.Thread(target=lambda: results.append(first_scheduler.run_now()))
+            first.start()
+            self.assertTrue(entered.wait(timeout=1))
+            second = threading.Thread(target=lambda: results.append(second_scheduler.run_now()))
+            second.start()
+            time.sleep(0.05)
+            release.set()
+            first.join(timeout=2)
+            second.join(timeout=2)
+
+            self.assertEqual(sum(result is not None for result in results), 1)
+            self.assertEqual(sum(result is None for result in results), 1)
 
     def test_status_snapshot_reads_summary_from_completed_in_memory_run(self):
         with tempfile.TemporaryDirectory() as directory:

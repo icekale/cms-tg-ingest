@@ -38,9 +38,14 @@ class EmbyClient:
         if not self.enabled:
             raise RuntimeError("Emby confirmation is disabled")
         params = dict(params or {})
-        params["api_key"] = self.api_key
-        url = self.base_url + path + "?" + urllib.parse.urlencode(params)
-        return self.http.request(url, method=method, payload=payload)
+        query = ("?" + urllib.parse.urlencode(params)) if params else ""
+        url = self.base_url + path + query
+        return self.http.request(
+            url,
+            method=method,
+            payload=payload,
+            headers={"X-Emby-Token": self.api_key},
+        )
 
     def get_user_id(self) -> str:
         if self.user_id:

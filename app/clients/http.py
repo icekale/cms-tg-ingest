@@ -14,6 +14,18 @@ _MAX_SAFE_GET_ATTEMPTS = 2
 _TRANSIENT_NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, http.client.RemoteDisconnected)
 
 
+def _redact_url(url: str) -> str:
+    parsed = urllib.parse.urlsplit(str(url))
+    query = []
+    for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+        if key.lower() in {"api_key", "apikey", "token", "access_token", "authorization"}:
+            value = "<redacted>"
+        query.append((key, value))
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query), parsed.fragment)
+    )
+
+
 def _safe_get_retryable(req: urllib.request.Request, error: BaseException) -> bool:
     if str(req.get_method()).upper() not in {"GET", "HEAD"}:
         return False
@@ -58,13 +70,13 @@ class HttpJson:
             raw = _read_response(req, self.timeout)
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", "replace")
-            raise RuntimeError(f"HTTP {exc.code} from {url}: {body[:300]}") from exc
+            raise RuntimeError(f"HTTP {exc.code} from {_redact_url(url)}: {body[:300]}") from exc
         except urllib.error.URLError as exc:
-            raise RuntimeError(f"Cannot reach {url}: {exc.reason}") from exc
+            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {exc.reason}") from exc
         except TimeoutError as exc:
-            raise RuntimeError(f"Cannot reach {url}: {exc}") from exc
+            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {exc}") from exc
         except http.client.RemoteDisconnected as exc:
-            raise RuntimeError(f"Cannot reach {url}: {exc}") from exc
+            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {exc}") from exc
         if not raw.strip():
             return {}
         try:
@@ -98,13 +110,13 @@ class FormHttp:
             raw = _read_response(req, self.timeout)
         except urllib.error.HTTPError as exc:
             body_text = exc.read().decode("utf-8", "replace")
-            raise RuntimeError(f"HTTP {exc.code} from {url}: {body_text[:300]}") from exc
+            raise RuntimeError(f"HTTP {exc.code} from {_redact_url(url)}: {body_text[:300]}") from exc
         except urllib.error.URLError as exc:
-            raise RuntimeError(f"Cannot reach {url}: {exc.reason}") from exc
+            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {exc.reason}") from exc
         except TimeoutError as exc:
-            raise RuntimeError(f"Cannot reach {url}: {exc}") from exc
+            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {exc}") from exc
         except http.client.RemoteDisconnected as exc:
-            raise RuntimeError(f"Cannot reach {url}: {exc}") from exc
+            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {exc}") from exc
         try:
             return json.loads(raw)
         except json.JSONDecodeError as exc:

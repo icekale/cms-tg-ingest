@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -71,6 +72,44 @@ class HdhiveSubscriptionStoreTests(unittest.TestCase):
             self.assertTrue(store.claim_daily_run("2026-07-25", "run-1", 100.0))
             self.assertFalse(store.claim_daily_run("2026-07-25", "run-2", 101.0))
             self.assertTrue(store.claim_daily_run("2026-07-26", "run-3", 200.0))
+
+    def test_item_unlock_claim_is_atomic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HdhiveSubscriptionStore(Path(directory) / "tasks.db")
+            subscription = store.create_subscription("464100862", "tmdb_tv", "255358", "剧集", "255358")
+            item = store.upsert_item(subscription.id, "s01e01", "resource-1", "valid", 2160, 8)
+            barrier = threading.Barrier(2)
+            results = []
+
+            def claim():
+                barrier.wait()
+                results.append(store.claim_item_unlocking(item.id, now=100.0))
+
+            threads = [threading.Thread(target=claim) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual(sum(result is not None for result in results), 1)
+            self.assertEqual(store.get_item(item.id).status, "unlocking")
+
+    def test_stale_unlock_claim_can_be_recovered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HdhiveSubscriptionStore(Path(directory) / "tasks.db")
+            subscription = store.create_subscription("464100862", "tmdb_tv", "255358", "剧集", "255358")
+            item = store.upsert_item(subscription.id, "s01e01", "resource-1", "valid", 2160, 8)
+            store.mark_item_unlocking(item.id)
+            with store._lock, store._connection() as connection:
+                connection.execute(
+                    "UPDATE hdhive_subscription_items SET updated_at = ? WHERE id = ?",
+                    (1.0, item.id),
+                )
+
+            claimed = store.claim_item_unlocking(item.id, now=7200.0, stale_after_seconds=3600)
+
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed.status, "unlocking")
 
 
 if __name__ == "__main__":

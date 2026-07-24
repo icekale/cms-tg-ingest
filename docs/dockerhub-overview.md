@@ -31,7 +31,7 @@ docker compose up -d
 固定版本部署：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.2.12
+docker pull icekale/cms-tg-ingest:0.2.16
 ```
 
 本地 compose 默认使用 `8787:8787`。Unraid 推荐映射 `8788:8787`，访问 `http://<unraid-ip>:8788/` 会默认进入 Vue 管理台（实际页面为 `/app/`）；旧版概览保留在 `/legacy`。镜像支持 `linux/amd64` 和 `linux/arm64`。
@@ -82,6 +82,7 @@ https://hdhive.com/tv/<slug>
 - 已部署可访问的 CMS，并准备好 115 Cookie、待整理目录和 STRM/媒体库映射。
 - Telegram Bot 通过 `TG_ALLOWED_CHAT_ID` 限制使用者。
 - Emby 确认需要 `EMBY_BASE_URL` 和 `EMBY_API_KEY`。
+- 启用 Web 管理台时必须设置随机 `WEB_TOKEN`，不要让局域网端口以匿名方式暴露。
 - 本项目不提供媒体资源，也不绕过 115、CMS、HDHive 或 Emby 的权限机制。
 - 不要公开 `.env`、115 Cookie、Telegram Token、Emby API Key 或 HDHive OAuth 文件。
 

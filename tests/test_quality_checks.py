@@ -187,7 +187,7 @@ class EmbyProviderSearchTests(unittest.TestCase):
                 self.calls = []
 
             def request(self, url, method="GET", payload=None, headers=None):
-                self.calls.append((url, method))
+                self.calls.append((url, method, headers or {}))
                 if method == "GET":
                     return {
                         "Items": [
@@ -209,7 +209,8 @@ class EmbyProviderSearchTests(unittest.TestCase):
         self.assertIn("/Library/VirtualFolders/Query", http.calls[0][0])
         self.assertEqual(http.calls[1][1], "POST")
         self.assertIn("/Library/Refresh", http.calls[1][0])
-        self.assertIn("api_key=key", http.calls[1][0])
+        self.assertNotIn("api_key", http.calls[1][0])
+        self.assertEqual(http.calls[1][2]["X-Emby-Token"], "key")
 
     def test_refresh_library_for_path_prefers_matching_library_item_refresh(self):
         class FakeHttp:

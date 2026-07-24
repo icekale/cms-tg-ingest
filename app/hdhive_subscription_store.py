@@ -328,7 +328,7 @@ class HdhiveSubscriptionStore:
                     validate_status = excluded.validate_status,
                     resolution_score = excluded.resolution_score,
                     unlock_points = COALESCE(excluded.unlock_points, unlock_points),
-                    updated_at = excluded.updated_at
+                    updated_at = CASE WHEN status = 'unlocking' THEN updated_at ELSE excluded.updated_at END
                 """,
                 (
                     int(subscription_id),
@@ -399,6 +399,37 @@ class HdhiveSubscriptionStore:
     def mark_item_unlocking(self, item_id: int) -> HdhiveSubscriptionItem:
         return self._update_item(item_id, status="unlocking", last_error="")
 
+    def claim_item_unlocking(
+        self,
+        item_id: int,
+        *,
+        now: float | None = None,
+        stale_after_seconds: int = 3600,
+    ) -> HdhiveSubscriptionItem | None:
+        """Atomically claim an item so concurrent checks cannot unlock it twice."""
+        current_time = time.time() if now is None else float(now)
+        stale_before = current_time - max(1, int(stale_after_seconds))
+        with self._lock, self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE hdhive_subscription_items
+                SET status = 'unlocking', last_error = '', updated_at = ?
+                WHERE id = ?
+                  AND (
+                      status IN ('discovered', 'failed', 'pending_confirmation')
+                      OR (status = 'unlocking' AND updated_at <= ?)
+                  )
+                """,
+                (current_time, int(item_id), stale_before),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = connection.execute(
+                "SELECT * FROM hdhive_subscription_items WHERE id = ?",
+                (int(item_id),),
+            ).fetchone()
+        return HdhiveSubscriptionItem.from_row(row) if row is not None else None
+
     def _update_item(
         self,
         item_id: int,
@@ -443,8 +474,35 @@ class HdhiveSubscriptionStore:
             raise KeyError(f"HDHive subscription item {item_id} does not exist")
         return HdhiveSubscriptionItem.from_row(row)
 
-    def claim_daily_run(self, run_date: str, run_id: str, now: float) -> bool:
+    def claim_daily_run(
+        self,
+        run_date: str,
+        run_id: str,
+        now: float,
+        *,
+        serialize_active: bool = False,
+    ) -> bool:
+        current_time = float(now)
+        stale_before = current_time - 21600
         with self._lock, self._connection() as connection:
+            if serialize_active:
+                connection.execute("BEGIN IMMEDIATE")
+                active = connection.execute(
+                    "SELECT id, started_at FROM hdhive_subscription_runs WHERE status = 'running' ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                if active is not None:
+                    if float(active["started_at"] or 0) > stale_before:
+                        return False
+                    connection.execute(
+                        """
+                        UPDATE hdhive_subscription_runs
+                        SET status = 'failed',
+                            summary_json = ?,
+                            finished_at = ?
+                        WHERE id = ? AND status = 'running'
+                        """,
+                        (json.dumps({"error": "stale scheduler lease recovered"}), current_time, int(active["id"])),
+                    )
             try:
                 connection.execute(
                     """

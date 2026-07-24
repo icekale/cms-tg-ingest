@@ -102,7 +102,7 @@ class HdhiveWebTests(unittest.TestCase):
         calls = []
         config = SimpleNamespace(
             web_enabled=True,
-            web_token="",
+            web_token="secret",
             task_engine_enabled=True,
             web_host="127.0.0.1",
             web_port=8787,

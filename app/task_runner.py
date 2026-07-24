@@ -41,6 +41,7 @@ _STAGE_MAX_DEFER_COUNT = {
 }
 _DEFER_METADATA_KEYS = ("_defer_stage", "_defer_message", "_defer_count")
 _HEARTBEAT_INTERVAL_SECONDS = 30.0
+_P115_RISK_COOLDOWN_STATE_KEY = "115:risk_cooldown_until"
 
 
 def _without_defer_metadata(metadata: dict[str, object]) -> dict[str, object]:
@@ -203,8 +204,21 @@ class TaskRunner:
         self._thread: threading.Thread | None = None
         self._heartbeat_thread: threading.Thread | None = None
         self._startup_claims_cleared = False
-        self._p115_risk_cooldown_until = 0.0
+        self._p115_risk_cooldown_until = self._load_p115_risk_cooldown()
         self._last_heartbeat_at = 0.0
+
+    def _load_p115_risk_cooldown(self) -> float:
+        try:
+            state = self.store.get_runtime_state(_P115_RISK_COOLDOWN_STATE_KEY)
+            return max(0.0, float(state["value"])) if state else 0.0
+        except (KeyError, TypeError, ValueError):
+            LOG.warning("Invalid persisted 115 risk cooldown state; ignoring it")
+            return 0.0
+
+    def _refresh_p115_risk_cooldown(self) -> None:
+        persisted_until = self._load_p115_risk_cooldown()
+        if persisted_until > self._p115_risk_cooldown_until:
+            self._p115_risk_cooldown_until = persisted_until
 
     def _record_heartbeat(self) -> None:
         now = self.now()
@@ -236,6 +250,11 @@ class TaskRunner:
             result = self.workflow.run_stage(task)
         except P115RiskControlError as exc:
             self._p115_risk_cooldown_until = self.now() + self.risk_cooldown_seconds
+            self.store.set_runtime_state(
+                _P115_RISK_COOLDOWN_STATE_KEY,
+                str(self._p115_risk_cooldown_until),
+                updated_at=self.now(),
+            )
             message = "115 风控/频率限制，已暂停自动重试；请稍后在 TG/Web 手动重试。"
             p115_metadata = _p115_request_metadata(task, p115_before, _p115_request_count(self.p115_client))
             observability_metadata = {}
@@ -294,6 +313,7 @@ class TaskRunner:
         return True
 
     def _defer_for_p115_risk_cooldown(self, task: TaskSnapshot) -> bool:
+        self._refresh_p115_risk_cooldown()
         now = self.now()
         if task.current_stage not in _GLOBAL_115_LOCK_STAGES or now >= self._p115_risk_cooldown_until:
             return False
