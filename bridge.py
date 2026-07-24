@@ -95,7 +95,11 @@ from app.media.classify import (
 from app.media.sources import parse_media_sources
 from app.hdhive import HdhiveSelectionError, HdhiveSessionStore, HdhiveWorkflow
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
-from app.hdhive_subscriptions import HdhiveSubscriptionScheduler, HdhiveSubscriptionService
+from app.hdhive_subscriptions import (
+    HdhiveSubscriptionScheduler,
+    HdhiveSubscriptionService,
+    extract_hdhive_tv_urls,
+)
 
 from app.media.strm import (
     category_for_self_share_row,
@@ -147,6 +151,8 @@ from app.telegram_ui import (
     hdhive_candidate_keyboard,
     hdhive_confirmation_keyboard,
     hdhive_resource_keyboard,
+    format_hdhive_subscriptions,
+    hdhive_subscriptions_keyboard,
     menu_keyboard,
     quality_issue_for_row,
     quality_issue_rows,
@@ -185,7 +191,7 @@ TRAILING_PUNCT = ".,;)。），]】》>"
 LOG = logging.getLogger("cms-tg-ingest")
 LAST_TELEGRAM_TRANSIENT_ERROR_AT: str | None = None
 ED2K_HELP_EXAMPLE = "ed2k://|file|Example.mkv|10|" + "0123456789ABCDEF" * 2 + "|/"
-HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 分享、磁力或 ED2K 链接\n- 磁力/ED2K 会进入 115 云下载，再复用 CMS 整理和分享 STRM 流程\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- HDHive 搜索可通过 TMDB 匹配影片/剧集，筛选网盘并解锁资源\n- /status 查看最近任务\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd\n""" + ED2K_HELP_EXAMPLE
+HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 分享、磁力或 ED2K 链接\n- 磁力/ED2K 会进入 115 云下载，再复用 CMS 整理和分享 STRM 流程\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- HDHive 搜索可通过 TMDB 匹配影片/剧集，筛选网盘并解锁资源\n- 发送 HDHive 剧集页面可直接订阅，例如 https://hdhive.com/tv/xxxxxxxx\n- /status 查看最近任务\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd\n""" + ED2K_HELP_EXAMPLE
 MENU_BUTTONS = {
     "📊 统计": "/metrics",
     "📋 最近任务": "/status",
@@ -193,6 +199,7 @@ MENU_BUTTONS = {
     "🧯 巡检": "/quality",
     "🧹 清理历史": "/clear_history",
     "HDHive 搜索": "/hdhive_search",
+    "HDHive 订阅": "/hdhive_subscriptions",
     "🩺 健康检查": "/health",
     "❓ 帮助": "/help",
 }
@@ -1619,9 +1626,19 @@ def parse_hdhive_callback(data: str) -> tuple[str, str, str] | None:
         return parts[1], parts[2], ""
     if len(parts) != 4 or parts[0] != "hive":
         return None
-    if parts[1] not in {"candidate", "filter", "toggle", "single"}:
+    if parts[1] not in {"candidate", "filter", "toggle", "single", "subscribe"}:
         return None
     return parts[1], parts[2], parts[3]
+
+
+def parse_hdhive_subscription_callback(data: str) -> tuple[str, int] | None:
+    parts = str(data or "").split(":")
+    if len(parts) != 3 or parts[0] != "hsub" or parts[1] not in {"pause", "resume", "delete", "check", "confirm"}:
+        return None
+    try:
+        return parts[1], int(parts[2])
+    except ValueError:
+        return None
 
 
 def format_hdhive_account(account: Any) -> str:
@@ -1660,6 +1677,70 @@ def format_hdhive_resources(workflow: HdhiveWorkflow, session_id: str) -> tuple[
         workflow.available_pan_types(session_id),
         session.pan_type,
     )
+
+
+def format_hdhive_subscription_view(
+    service: HdhiveSubscriptionService,
+    scheduler: HdhiveSubscriptionScheduler | None,
+    chat_id: int | str,
+) -> tuple[str, dict[str, Any] | None]:
+    subscriptions = service.list(str(chat_id))
+    pending_items = []
+    for subscription in subscriptions:
+        pending_items.extend(
+            item for item in service.store.list_items(subscription.id) if item.status == "pending_confirmation"
+        )
+    snapshot = scheduler.status_snapshot() if scheduler is not None else None
+    return (
+        format_hdhive_subscriptions(subscriptions, snapshot, pending_items),
+        hdhive_subscriptions_keyboard(subscriptions, pending_items),
+    )
+
+
+def handle_hdhive_subscription_callback(
+    data: str,
+    callback_id: str,
+    chat_id: int | str,
+    telegram: TelegramClient,
+    service: HdhiveSubscriptionService | None,
+    scheduler: HdhiveSubscriptionScheduler | None,
+) -> bool:
+    parsed = parse_hdhive_subscription_callback(data)
+    if parsed is None:
+        return False
+    action, target_id = parsed
+    if service is None:
+        telegram.answer_callback_query(callback_id, "HDHive 订阅未启用", show_alert=True)
+        return True
+    try:
+        if action == "pause":
+            service.pause(target_id)
+            message = "订阅已暂停。"
+        elif action == "resume":
+            service.resume(target_id)
+            message = "订阅已恢复。"
+        elif action == "delete":
+            service.delete(target_id)
+            message = "订阅已删除，已入库内容不会受影响。"
+        elif action == "check":
+            result = service.check(target_id)
+            message = (
+                f"检查完成：发现 {result.discovered} 个资源，入队 {result.enqueued} 个，"
+                f"待确认 {result.pending_confirmation} 个，失败 {result.failed} 个。"
+            )
+        else:
+            result = service.confirm_item(target_id)
+            message = (
+                f"已处理确认资源：入队 {result.enqueued} 个，"
+                f"待确认 {result.pending_confirmation} 个，失败 {result.failed} 个。"
+            )
+        telegram.answer_callback_query(callback_id, "操作完成", show_alert=False)
+        text, keyboard = format_hdhive_subscription_view(service, scheduler, chat_id)
+        telegram.send_message(chat_id, f"{message}\n\n{text}", reply_markup=keyboard)
+    except Exception as exc:
+        telegram.answer_callback_query(callback_id, "操作失败", show_alert=True)
+        telegram.send_message(chat_id, f"HDHive 订阅操作失败：{str(exc)[:160]}")
+    return True
 
 
 def execute_hdhive_unlock(
@@ -1722,6 +1803,8 @@ def handle_hdhive_callback(
     telegram: TelegramClient,
     workflow: HdhiveWorkflow | None,
     enqueue_unlocked_links: Any | None,
+    subscription_service: HdhiveSubscriptionService | None = None,
+    subscription_scheduler: HdhiveSubscriptionScheduler | None = None,
 ) -> bool:
     parsed = parse_hdhive_callback(data)
     if not parsed:
@@ -1748,6 +1831,22 @@ def handle_hdhive_callback(
             text, keyboard = format_hdhive_resources(workflow, session_id)
             telegram.answer_callback_query(callback_id, "已查询 HDHive 资源", show_alert=False)
             telegram.send_message(chat_id, text, reply_markup=keyboard)
+            return True
+        if action == "subscribe":
+            if subscription_service is None:
+                raise HdhiveSelectionError("HDHive 订阅未启用")
+            index = int(argument)
+            if index < 0 or index >= len(session.candidates):
+                raise HdhiveSelectionError("候选媒体不存在，请重新搜索")
+            candidate = session.candidates[index]
+            if candidate.get("media_type") != "tv":
+                raise HdhiveSelectionError("目前只支持订阅剧集")
+            subscription = subscription_service.create_from_tmdb(
+                str(chat_id), candidate["tmdb_id"], candidate.get("title") or candidate["tmdb_id"]
+            )
+            telegram.answer_callback_query(callback_id, "已创建订阅", show_alert=False)
+            text, keyboard = format_hdhive_subscription_view(subscription_service, subscription_scheduler, chat_id)
+            telegram.send_message(chat_id, f"已订阅：{subscription.title}\n\n{text}", reply_markup=keyboard)
             return True
         if action == "filter":
             if argument == "all":
@@ -1840,6 +1939,8 @@ def handle_callback_query(
     task_store: TaskStore | None = None,
     hdhive_workflow: HdhiveWorkflow | None = None,
     enqueue_unlocked_links: Any | None = None,
+    hdhive_subscription_service: HdhiveSubscriptionService | None = None,
+    hdhive_subscription_scheduler: HdhiveSubscriptionScheduler | None = None,
 ) -> None:
     sender_id = ((callback_query.get("from") or {}).get("id"))
     message = callback_query.get("message") or {}
@@ -1858,6 +1959,15 @@ def handle_callback_query(
         telegram.answer_callback_query(callback_id, f"已清理 {removed} 条", show_alert=False)
         telegram.send_message(chat_id, f"已清理 {removed} 条已结束历史记录。正在处理中的任务已保留。")
         return
+    if handle_hdhive_subscription_callback(
+        data,
+        callback_id,
+        chat_id,
+        telegram,
+        hdhive_subscription_service,
+        hdhive_subscription_scheduler,
+    ):
+        return
     if handle_hdhive_callback(
         data,
         callback_id,
@@ -1865,6 +1975,8 @@ def handle_callback_query(
         telegram,
         hdhive_workflow,
         enqueue_unlocked_links,
+        hdhive_subscription_service,
+        hdhive_subscription_scheduler,
     ):
         return
     task_action = parse_task_action_callback(data)
@@ -2808,6 +2920,8 @@ def handle_update(
     task_engine_enabled: bool = False,
     hdhive_workflow: HdhiveWorkflow | None = None,
     enqueue_unlocked_links: Any | None = None,
+    hdhive_subscription_service: HdhiveSubscriptionService | None = None,
+    hdhive_subscription_scheduler: HdhiveSubscriptionScheduler | None = None,
 ) -> None:
     if update.get("callback_query"):
         handle_callback_query(
@@ -2819,6 +2933,8 @@ def handle_update(
             task_store=task_store,
             hdhive_workflow=hdhive_workflow,
             enqueue_unlocked_links=enqueue_unlocked_links,
+            hdhive_subscription_service=hdhive_subscription_service,
+            hdhive_subscription_scheduler=hdhive_subscription_scheduler,
         )
         return
 
@@ -2843,6 +2959,17 @@ def handle_update(
             return
         session_id = hdhive_workflow.sessions.begin(str(chat_id), "")
         telegram.send_message(chat_id, f"请输入片名或 TMDB ID。\n本次搜索编号：{session_id}")
+        return
+    if command == "/hdhive_subscriptions":
+        if hdhive_subscription_service is None:
+            telegram.send_message(chat_id, "HDHive 订阅未启用，或 CMS 尚未完成影巢账号授权。")
+            return
+        text, keyboard = format_hdhive_subscription_view(
+            hdhive_subscription_service,
+            hdhive_subscription_scheduler,
+            chat_id,
+        )
+        telegram.send_message(chat_id, text, reply_markup=keyboard)
         return
     if command == "/status":
         if task_engine_enabled and task_store is not None:
@@ -2904,6 +3031,24 @@ def handle_update(
             ),
         )
         return
+
+    if hdhive_subscription_service is not None:
+        hdhive_urls = extract_hdhive_tv_urls(text)
+        if hdhive_urls:
+            lines = []
+            for url in hdhive_urls:
+                try:
+                    subscription = hdhive_subscription_service.create_from_url(str(chat_id), url)
+                    lines.append(f"已订阅：{subscription.title or subscription.tmdb_id}（#{subscription.id}）")
+                except Exception as exc:
+                    lines.append(f"订阅失败：{str(exc)[:160]}")
+            view_text, keyboard = format_hdhive_subscription_view(
+                hdhive_subscription_service,
+                hdhive_subscription_scheduler,
+                chat_id,
+            )
+            telegram.send_message(chat_id, "\n".join(lines) + "\n\n" + view_text, reply_markup=keyboard)
+            return
 
     if hdhive_workflow is not None:
         pending = hdhive_workflow.sessions.active_for_chat(str(chat_id))
@@ -3287,6 +3432,8 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
             task_engine_enabled=config.task_engine_enabled,
             hdhive_workflow=hdhive_workflow,
             enqueue_unlocked_links=enqueue_hdhive_links,
+            hdhive_subscription_service=hdhive_subscription_service,
+            hdhive_subscription_scheduler=hdhive_subscription_scheduler,
         )
 
     hdhive_subscription_service = create_hdhive_subscription_service(
@@ -3336,6 +3483,8 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
                         task_engine_enabled=config.task_engine_enabled,
                         hdhive_workflow=hdhive_workflow,
                         enqueue_unlocked_links=enqueue_hdhive_links if hdhive_workflow is not None else None,
+                        hdhive_subscription_service=hdhive_subscription_service,
+                        hdhive_subscription_scheduler=hdhive_subscription_scheduler,
                     )
             except Exception as exc:
                 if stop_event.is_set():

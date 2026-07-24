@@ -7,7 +7,7 @@ import bridge
 from app.clients.hdhive import HdhiveAccount, HdhiveResource, HdhiveUnlockItem
 from app.hdhive import HdhiveSessionStore, HdhiveWorkflow
 from app.hdhive_subscriptions import HdhiveSubscriptionService
-from app.telegram_ui import hdhive_resource_keyboard
+from app.telegram_ui import hdhive_candidate_keyboard, hdhive_resource_keyboard
 
 
 def resource(slug: str, pan_type: str = "115", points: int = 8) -> HdhiveResource:
@@ -37,6 +37,33 @@ class FakeTelegram:
 
     def answer_callback_query(self, callback_id, text="", show_alert=False):
         self.answers.append((callback_id, text, show_alert))
+
+
+class FakeSubscriptionService:
+    def __init__(self):
+        self.created_urls = []
+        self.paused = []
+        self.store = SimpleNamespace(list_items=lambda _subscription_id: [])
+        self.subscription = SimpleNamespace(
+            id=1,
+            title="攻壳机动队",
+            tmdb_id="255358",
+            source_url="https://hdhive.com/tv/542a1c1fe6ac4a5aab152369079596b5",
+            status="active",
+            last_error="",
+        )
+
+    def create_from_url(self, chat_id, url):
+        self.created_urls.append((str(chat_id), url))
+        return self.subscription
+
+    def list(self, _chat_id):
+        return [self.subscription]
+
+    def pause(self, subscription_id):
+        self.paused.append(subscription_id)
+        self.subscription.status = "paused"
+        return self.subscription
 
 
 class FakeProxy:
@@ -108,6 +135,69 @@ class HdhiveBridgeTests(unittest.TestCase):
             self.assertIsInstance(service, HdhiveSubscriptionService)
             self.assertIs(service.proxy, proxy)
             self.assertIs(service.enqueue_links, callback)
+
+    def test_direct_hdhive_url_creates_subscription_without_normal_intake(self):
+        telegram = FakeTelegram()
+        service = FakeSubscriptionService()
+
+        bridge.handle_update(
+            {
+                "message": {
+                    "chat": {"id": "464100862"},
+                    "from": {"id": "464100862"},
+                    "text": "https://hdhive.com/tv/542a1c1fe6ac4a5aab152369079596b5",
+                }
+            },
+            object(),
+            telegram,
+            "464100862",
+            object(),
+            hdhive_subscription_service=service,
+        )
+
+        self.assertEqual(
+            service.created_urls,
+            [("464100862", "https://hdhive.com/tv/542a1c1fe6ac4a5aab152369079596b5")],
+        )
+        self.assertIn("已订阅：攻壳机动队", telegram.messages[-1][1])
+
+    def test_subscription_pause_callback_updates_service(self):
+        telegram = FakeTelegram()
+        service = FakeSubscriptionService()
+
+        bridge.handle_callback_query(
+            {
+                "id": "callback-subscription",
+                "from": {"id": "464100862"},
+                "message": {"chat": {"id": "464100862"}},
+                "data": "hsub:pause:1",
+            },
+            telegram,
+            "464100862",
+            object(),
+            hdhive_subscription_service=service,
+        )
+
+        self.assertEqual(service.paused, [1])
+        self.assertIn("订阅已暂停", telegram.messages[-1][1])
+
+    def test_candidate_keyboard_only_offers_subscription_for_tv(self):
+        keyboard = hdhive_candidate_keyboard(
+            "session",
+            [
+                {"media_type": "movie", "title": "电影", "year": "2026"},
+                {"media_type": "tv", "title": "剧集", "year": "2026"},
+            ],
+        )
+        callbacks = [
+            button["callback_data"]
+            for row in keyboard["inline_keyboard"]
+            for button in row
+            if "callback_data" in button
+        ]
+
+        self.assertNotIn("hive:subscribe:session:0", callbacks)
+        self.assertIn("hive:subscribe:session:1", callbacks)
 
     def test_unlock_callback_enqueues_only_successful_115_links(self):
         proxy = FakeProxy()

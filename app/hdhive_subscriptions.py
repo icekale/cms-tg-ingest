@@ -29,6 +29,8 @@ class HdhiveTvUrl:
 
 
 _SLUG_RE = re.compile(r"^[A-Za-z0-9]{8,96}$")
+_URL_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
+_TRAILING_PUNCT = ".,;)。），]】》>"
 
 
 def parse_hdhive_tv_url(url: str) -> HdhiveTvUrl:
@@ -42,6 +44,21 @@ def parse_hdhive_tv_url(url: str) -> HdhiveTvUrl:
     if len(parts) != 2 or parts[0].lower() != "tv" or not _SLUG_RE.fullmatch(parts[1]):
         raise HdhiveUrlError("HDHive 链接必须是 /tv/<slug> 剧集页面")
     return HdhiveTvUrl(slug=parts[1], url=f"{parsed.scheme.lower()}://{parsed.netloc}{parsed.path}")
+
+
+def extract_hdhive_tv_urls(text: str) -> list[str]:
+    seen: set[str] = set()
+    urls: list[str] = []
+    for match in _URL_RE.findall(str(text or "")):
+        candidate = match.rstrip(_TRAILING_PUNCT)
+        try:
+            parsed = parse_hdhive_tv_url(candidate)
+        except HdhiveUrlError:
+            continue
+        if parsed.url not in seen:
+            seen.add(parsed.url)
+            urls.append(parsed.url)
+    return urls
 
 
 _INVALID_STATUSES = {"invalid", "expired", "unavailable"}
@@ -163,6 +180,12 @@ class HdhiveSubscriptionService:
 
     def delete(self, subscription_id: int) -> HdhiveSubscription:
         return self.store.set_status(subscription_id, "deleted")
+
+    def confirm_item(self, item_id: int) -> SubscriptionCheckResult:
+        item = self.store.get_item(item_id)
+        if item is None:
+            raise KeyError(f"HDHive subscription item {item_id} does not exist")
+        return self.check(item.subscription_id, confirmed_item_id=item.id)
 
     def check(self, subscription_id: int, confirmed_item_id: int | None = None) -> SubscriptionCheckResult:
         subscription = self.store.get_subscription(subscription_id)

@@ -217,9 +217,56 @@ def hdhive_candidate_keyboard(session_id: str, candidates: list[dict[str, str]])
         title = truncate_text(candidate.get("title") or "未命名", 34)
         year = candidate.get("year") or "年未知"
         media_type = "电影" if candidate.get("media_type") == "movie" else "剧集"
-        buttons.append([{"text": f"{index + 1}. {title} ({year}) [{media_type}]", "callback_data": f"hive:candidate:{session_id}:{index}"}])
+        row = [{"text": f"{index + 1}. {title} ({year}) [{media_type}]", "callback_data": f"hive:candidate:{session_id}:{index}"}]
+        if candidate.get("media_type") == "tv":
+            row.append({"text": "订阅此剧", "callback_data": f"hive:subscribe:{session_id}:{index}"})
+        buttons.append(row)
     buttons.append([{"text": "取消搜索", "callback_data": f"hive:cancel:{session_id}"}])
     return {"inline_keyboard": buttons}
+
+
+def format_hdhive_subscriptions(
+    subscriptions: list[Any],
+    scheduler_snapshot: dict[str, Any] | None = None,
+    pending_items: list[Any] | None = None,
+) -> str:
+    if not subscriptions:
+        return "暂无 HDHive 剧集订阅。"
+    lines = ["HDHive 剧集订阅："]
+    if scheduler_snapshot:
+        lines.append(
+            f"自动检查：{'开启' if scheduler_snapshot.get('enabled') else '关闭'}，"
+            f"每天 {scheduler_snapshot.get('time') or '01:30'}，下次：{scheduler_snapshot.get('next_run_at') or '-'}"
+        )
+    for index, subscription in enumerate(subscriptions, 1):
+        status = {"active": "运行中", "paused": "已暂停", "error": "异常"}.get(subscription.status, subscription.status)
+        source = subscription.source_url or f"TMDB:{subscription.tmdb_id}"
+        lines.append(f"{index}. #{subscription.id} {subscription.title or subscription.tmdb_id} | {status} | {source}")
+        if subscription.last_error:
+            lines.append(f"   最近错误：{truncate_text(subscription.last_error, 120)}")
+    if pending_items:
+        lines.append(f"待确认高费用资源：{len(pending_items)} 个，请点击按钮确认。")
+    return "\n".join(lines)
+
+
+def hdhive_subscriptions_keyboard(
+    subscriptions: list[Any],
+    pending_items: list[Any] | None = None,
+) -> dict[str, Any] | None:
+    buttons: list[list[dict[str, str]]] = []
+    for subscription in subscriptions:
+        toggle = "暂停" if subscription.status == "active" else "恢复"
+        action = "pause" if subscription.status == "active" else "resume"
+        buttons.append([{"text": f"{toggle} #{subscription.id}", "callback_data": f"hsub:{action}:{subscription.id}"}])
+        buttons.append(
+            [
+                {"text": f"立即检查 #{subscription.id}", "callback_data": f"hsub:check:{subscription.id}"},
+                {"text": f"删除 #{subscription.id}", "callback_data": f"hsub:delete:{subscription.id}"},
+            ]
+        )
+    for item in pending_items or []:
+        buttons.append([{"text": f"确认解锁资源 #{item.id}", "callback_data": f"hsub:confirm:{item.id}"}])
+    return {"inline_keyboard": buttons} if buttons else None
 
 
 def hdhive_resource_keyboard(
@@ -301,6 +348,7 @@ def menu_keyboard() -> dict[str, Any]:
             [{"text": "📊 统计"}, {"text": "📋 最近任务"}],
             [{"text": "🕘 历史"}, {"text": "🧹 清理历史"}],
             [{"text": "HDHive 搜索"}],
+            [{"text": "HDHive 订阅"}],
             [{"text": "🩺 健康检查"}, {"text": "❓ 帮助"}],
         ],
         "resize_keyboard": True,
