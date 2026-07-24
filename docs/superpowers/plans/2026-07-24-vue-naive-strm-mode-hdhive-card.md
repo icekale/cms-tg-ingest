@@ -764,7 +764,7 @@ def test_shared_and_direct_tasks_have_distinct_side_effects_and_observable_end_s
 运行：
 
 ```sh
-rg -n "(TG_BOT_TOKEN|OPENAI_API_KEY|TMDB_API_KEY|HDHIVE.*TOKEN|SESSDATA|bili_jct|sk-[A-Za-z0-9])" frontend app README.md PRODUCT.md docs Dockerfile
+rg -n "(TG_BOT_TOKEN|OPENAI_API_KEY|TMDB_API_KEY|HDHIVE.*TOKEN|cookie|sk-[A-Za-z0-9])" frontend app README.md PRODUCT.md docs Dockerfile
 python3 -m unittest tests.test_secret_hygiene tests.test_frontend tests.test_web_api -q
 ```
 
