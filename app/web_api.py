@@ -10,6 +10,7 @@ from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 from .models import TaskSnapshot
 from .task_diagnostics import explain_task_slowness, format_stage_observability
 from .task_health import build_task_health
+from .quality import scan_task_quality
 from .task_store import TaskStore
 
 
@@ -137,3 +138,14 @@ def api_task_detail(store: TaskStore, task_id: int, *, now: float | None = None)
     result = serialize_task(task, now=now)
     result["events"] = [serialize_event(event) for event in store.list_events(task.id)]
     return result
+
+
+def api_quality(store: TaskStore, *, limit: int = 100) -> dict[str, Any]:
+    issues = scan_task_quality(store, limit=max(1, min(int(limit), 500)))
+    return {
+        "count": len(issues),
+        "items": [
+            {"task_id": issue.task_id, "title": issue.title, "code": issue.code, "message": issue.message, "detail": issue.detail}
+            for issue in issues
+        ],
+    }

@@ -27,6 +27,7 @@ from .task_store import TaskStore
 from .web_api import (
     api_response,
     api_task_detail,
+    api_quality,
     api_tasks,
     serialize_health,
     serialize_hdhive,
@@ -1441,6 +1442,9 @@ class WebApp:
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/health":
             status, response_headers, response_body = api_response(serialize_health(self.store, enabled=self.task_engine_enabled))
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "GET" and path == "/api/v1/quality":
+            status, response_headers, response_body = api_response(api_quality(self.store))
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/hdhive":
             try:
