@@ -19,6 +19,13 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}", content)
         self.assertIn("platforms: linux/amd64,linux/arm64", content)
 
+    def test_release_workflow_syncs_dockerhub_description(self):
+        content = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("full_description", content)
+        self.assertIn("docs/dockerhub-overview.md", content)
+        self.assertIn("hub.docker.com/v2/repositories", content)
+
     def test_readme_documents_release_secrets(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 

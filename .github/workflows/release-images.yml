@@ -79,3 +79,24 @@ jobs:
           push: true
           tags: ${{ steps.meta-dockerhub.outputs.tags }}
           labels: ${{ steps.meta-dockerhub.outputs.labels }}
+
+      - name: Sync Docker Hub description
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
+        run: |
+          set -eu
+          login_payload=$(jq -n \
+            --arg username "$DOCKERHUB_USERNAME" \
+            --arg password "$DOCKERHUB_TOKEN" \
+            '{username: $username, password: $password}')
+          access_token=$(curl -fsSL \
+            -H 'Content-Type: application/json' \
+            -d "$login_payload" \
+            https://hub.docker.com/v2/users/login/ | jq -r '.token')
+          test -n "$access_token" -a "$access_token" != "null"
+          description_payload=$(jq -n --rawfile full_description docs/dockerhub-overview.md \
+            '{full_description: $full_description}')
+          curl -fsSL -X PATCH \
+            -H "Authorization: JWT $access_token" \
+            -H 'Content-Type: application/json' \
+            -d "$description_payload" \
+            "https://hub.docker.com/v2/repositories/$DOCKERHUB_USERNAME/cms-tg-ingest/" >/dev/null
