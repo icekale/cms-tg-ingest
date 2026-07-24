@@ -146,11 +146,13 @@ class HdhiveSubscriptionService:
         store: HdhiveSubscriptionStore,
         enqueue_links: Callable[[list[str], str], Any],
         auto_unlock_max_points: int = 20,
+        on_item_enqueued: Callable[[HdhiveSubscription, HdhiveSubscriptionItem], None] | None = None,
     ):
         self.proxy = proxy
         self.store = store
         self.enqueue_links = enqueue_links
         self.auto_unlock_max_points = max(0, int(auto_unlock_max_points))
+        self.on_item_enqueued = on_item_enqueued
 
     def create_from_url(self, chat_id: str, url: str) -> HdhiveSubscription:
         page = self.proxy.resolve_tv_page(url)
@@ -269,13 +271,18 @@ class HdhiveSubscriptionService:
                 else:
                     unlock_points_spent = selected.unlock_points
                     unlock_points_source = "estimated" if unlock_points_spent is not None else "unknown"
-                self.store.mark_item_enqueued(
+                saved_item = self.store.mark_item_enqueued(
                     selected_item.id,
                     _task_id_from_intake_result(intake_result),
                     unlock_points_spent=unlock_points_spent,
                     unlock_points_source=unlock_points_source,
                     unlocked_at=time.time(),
                 )
+                if self.on_item_enqueued is not None:
+                    try:
+                        self.on_item_enqueued(subscription, saved_item)
+                    except Exception:
+                        LOG.exception("HDHive unlock notification failed item_id=%s", saved_item.id)
                 enqueued += 1
             except Exception as exc:
                 self.store.mark_item_failed(selected_item.id, str(exc))

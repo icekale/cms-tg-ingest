@@ -246,6 +246,9 @@ class TmdbApiResolver:
             "language": language,
             "countries": [country for country in countries if country],
             "genres": genres,
+            "poster_path": str(data.get("poster_path") or ""),
+            "backdrop_path": str(data.get("backdrop_path") or ""),
+            "overview": str(data.get("overview") or ""),
             "category": category,
             "source": "tmdb_api",
         }

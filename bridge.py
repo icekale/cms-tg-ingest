@@ -94,6 +94,7 @@ from app.media.classify import (
 )
 from app.media.sources import parse_media_sources
 from app.hdhive import HdhiveSelectionError, HdhiveSessionStore, HdhiveWorkflow
+from app.hdhive_cards import TmdbDetailCache, build_hdhive_unlock_card
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
 from app.hdhive_subscriptions import (
     HdhiveSubscriptionScheduler,
@@ -345,6 +346,7 @@ def create_hdhive_subscription_service(
     config: Config,
     hdhive_workflow: HdhiveWorkflow | None,
     enqueue_links: Any,
+    on_item_enqueued: Any | None = None,
 ) -> HdhiveSubscriptionService | None:
     if not bool(getattr(config, "hdhive_enabled", False)) or hdhive_workflow is None:
         return None
@@ -353,6 +355,7 @@ def create_hdhive_subscription_service(
         store=HdhiveSubscriptionStore(getattr(config, "task_db_path", "/data/tasks.db")),
         enqueue_links=enqueue_links,
         auto_unlock_max_points=int(getattr(config, "hdhive_auto_unlock_max_points", 20)),
+        on_item_enqueued=on_item_enqueued,
     )
 
 
@@ -381,6 +384,15 @@ def maybe_start_web_server(
         kwargs["hdhive_service"] = hdhive_service
     if hdhive_scheduler is not None:
         kwargs["hdhive_scheduler"] = hdhive_scheduler
+    try:
+        starter_parameters = inspect.signature(starter).parameters
+        supports_frontend = "frontend_dist_path" in starter_parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in starter_parameters.values()
+        )
+    except (TypeError, ValueError):
+        supports_frontend = True
+    if not supports_frontend:
+        kwargs.pop("frontend_dist_path", None)
     server = starter(task_store, config.web_host, config.web_port, **kwargs)
     LOG.info("v0.2 web admin started host=%s port=%s", config.web_host, config.web_port)
     return server
@@ -1343,6 +1355,16 @@ class TelegramClient:
             payload["reply_markup"] = reply_markup
         self.http.request(
             self.base_url + "/sendMessage",
+            method="POST",
+            payload=payload,
+        )
+
+    def send_photo(self, chat_id: int | str, photo: str, caption: str, reply_markup: dict | None = None) -> None:
+        payload = {"chat_id": chat_id, "photo": photo, "caption": caption}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        self.http.request(
+            self.base_url + "/sendPhoto",
             method="POST",
             payload=payload,
         )
@@ -3457,10 +3479,10 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
             limit=max(1, int(config.status_repair_limit)),
         )
 
-    def enqueue_hdhive_links(urls: list[str], chat_id: str) -> None:
+    def enqueue_hdhive_links(urls: list[str], chat_id: str) -> int | None:
         links = [str(url).strip() for url in urls if str(url).strip()]
         if not links:
-            return
+            return None
         handle_update(
             {
                 "message": {
@@ -3490,11 +3512,36 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
             hdhive_subscription_service=hdhive_subscription_service,
             hdhive_subscription_scheduler=hdhive_subscription_scheduler,
         )
+        if task_store is not None:
+            try:
+                key = normalize_share_link(links[-1])
+                task = task_store.find_task_by_share_key(key.share_code, key.receive_code)
+                return task.id if task is not None else None
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    tmdb_card_cache = TmdbDetailCache(Path(config.task_db_path).with_name("tmdb-card-cache.db"))
+
+    def notify_hdhive_item(subscription: Any, item: Any) -> None:
+        details = {}
+        if tmdb_resolver is not None and getattr(tmdb_resolver, "enabled", False) and subscription.tmdb_id:
+            details = tmdb_card_cache.get(
+                "tv",
+                subscription.tmdb_id,
+                lambda: tmdb_resolver.lookup(subscription.tmdb_id, "tv", subscription.title),
+            )
+        caption, poster_url = build_hdhive_unlock_card(subscription, item, tmdb_details=details)
+        if poster_url and hasattr(telegram, "send_photo"):
+            telegram.send_photo(subscription.chat_id, poster_url, caption)
+        else:
+            telegram.send_message(subscription.chat_id, caption)
 
     hdhive_subscription_service = create_hdhive_subscription_service(
         config,
         hdhive_workflow,
         enqueue_hdhive_links,
+        on_item_enqueued=notify_hdhive_item,
     )
     if hdhive_subscription_service is not None and Path(
         getattr(config, "hdhive_token_config_path", "")
