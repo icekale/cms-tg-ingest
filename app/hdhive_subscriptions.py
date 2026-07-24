@@ -290,14 +290,16 @@ class HdhiveSubscriptionService:
                     self.store.reset_item_for_check(item.id, "filtered")
 
         emby_keys: set[str] = set()
-        emby_skip_unavailable = False
-        if self._dependency_enabled(self.emby):
+        emby_skip_unavailable = not self._dependency_enabled(self.emby)
+        if not emby_skip_unavailable:
             try:
                 raw_emby_keys = self.emby.existing_episode_keys_by_tmdb(subscription.tmdb_id)
                 for value in raw_emby_keys or ():
                     parsed = parse_episode_key(str(value))
                     if parsed is not None:
                         emby_keys.add(parsed.normalized)
+                if not emby_keys:
+                    emby_skip_unavailable = True
             except Exception:
                 emby_skip_unavailable = True
                 LOG.warning("HDHive Emby episode lookup unavailable subscription_id=%s", subscription.id, exc_info=True)
