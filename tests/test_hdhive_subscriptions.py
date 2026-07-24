@@ -234,6 +234,22 @@ class HdhiveSubscriptionSchedulerTests(unittest.TestCase):
             self.assertIsNotNone(first)
             self.assertIsNone(second)
 
+    def test_status_snapshot_reads_summary_from_completed_in_memory_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HdhiveSubscriptionStore(Path(directory) / "tasks.db")
+            scheduler = HdhiveSubscriptionScheduler(
+                service=object(),
+                store=store,
+                enabled=True,
+            )
+
+            run = scheduler.run_now()
+
+            snapshot = scheduler.status_snapshot()
+
+            self.assertEqual(snapshot["last_run_id"], run.run_id)
+            self.assertEqual(snapshot["last_summary"], run.summary)
+
 
 if __name__ == "__main__":
     unittest.main()

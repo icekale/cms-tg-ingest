@@ -446,11 +446,15 @@ class HdhiveSubscriptionScheduler:
         latest = self._last_run or self.store.latest_run()
         summary: dict[str, Any] = {}
         if latest is not None:
-            try:
-                parsed = json.loads(latest.summary_json)
-                summary = parsed if isinstance(parsed, dict) else {}
-            except (TypeError, ValueError):
-                summary = {}
+            in_memory_summary = getattr(latest, "summary", None)
+            if isinstance(in_memory_summary, dict):
+                summary = dict(in_memory_summary)
+            else:
+                try:
+                    parsed = json.loads(getattr(latest, "summary_json", "{}"))
+                    summary = parsed if isinstance(parsed, dict) else {}
+                except (TypeError, ValueError):
+                    summary = {}
         return {
             **self.settings(),
             "status": self._status,
