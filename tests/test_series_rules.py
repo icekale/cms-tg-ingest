@@ -3,7 +3,9 @@ from dataclasses import FrozenInstanceError
 
 from app.series_rules import (
     EpisodeKey,
+    EpisodeFilter,
     completion_state,
+    episode_filter_matches,
     is_special_episode,
     normalize_episode_key,
     parse_episode_filter,
@@ -34,6 +36,25 @@ class SeriesRuleTests(unittest.TestCase):
         self.assertTrue(episode_filter.matches(EpisodeKey(1, 2)))
         self.assertFalse(episode_filter.matches(EpisodeKey(1, 4)))
         self.assertTrue(episode_filter.matches(EpisodeKey(2, 99)))
+
+    def test_public_episode_filter_matches_wrapper(self):
+        episode_filter = parse_episode_filter("S01E01-S01E03")
+        self.assertTrue(episode_filter_matches(episode_filter, EpisodeKey(1, 2)))
+        self.assertFalse(episode_filter_matches(episode_filter, EpisodeKey(1, 4)))
+
+    def test_filter_copies_mutable_constructor_inputs(self):
+        exact_keys = {EpisodeKey(1, 1)}
+        seasons = {2}
+        ranges = [(EpisodeKey(3, 1), EpisodeKey(3, 2))]
+        episode_filter = EpisodeFilter(exact_keys, seasons, ranges)
+
+        exact_keys.clear()
+        seasons.clear()
+        ranges.clear()
+
+        self.assertTrue(episode_filter.matches(EpisodeKey(1, 1)))
+        self.assertTrue(episode_filter.matches(EpisodeKey(2, 1)))
+        self.assertTrue(episode_filter.matches(EpisodeKey(3, 2)))
 
     def test_rejects_cross_season_ranges_and_bad_tokens(self):
         with self.assertRaises(ValueError):

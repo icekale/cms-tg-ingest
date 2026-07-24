@@ -39,12 +39,21 @@ class EpisodeFilter:
     seasons: frozenset[int] = field(default_factory=frozenset)
     ranges: tuple[tuple[EpisodeKey, EpisodeKey], ...] = ()
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "exact_keys", frozenset(self.exact_keys))
+        object.__setattr__(self, "seasons", frozenset(self.seasons))
+        object.__setattr__(self, "ranges", tuple(tuple(item) for item in self.ranges))
+
     def matches(self, key: EpisodeKey) -> bool:
         return (
             key in self.exact_keys
             or key.season in self.seasons
             or any(start <= key <= end for start, end in self.ranges)
         ) or (not self.exact_keys and not self.seasons and not self.ranges and not is_special_episode(key))
+
+
+def episode_filter_matches(episode_filter: EpisodeFilter, episode_key: EpisodeKey) -> bool:
+    return episode_filter.matches(episode_key)
 
 
 def _episode_key(season: int, episode: int) -> EpisodeKey:
