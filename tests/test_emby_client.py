@@ -99,6 +99,7 @@ class EmbyClientTests(unittest.TestCase):
                 {"ParentIndexNumber": 1, "IndexNumber": 0},
                 {"ParentIndexNumber": "bad", "IndexNumber": 3},
                 {"ParentIndexNumber": 2},
+                {"ParentIndexNumber": 1.5, "IndexNumber": 1},
             ],
         }])
         client = EmbyClient("http://emby.test", "secret-key", user_id="user-1", http=http)
@@ -107,11 +108,17 @@ class EmbyClientTests(unittest.TestCase):
         self.assertIn("/Shows/series%2Fid/Episodes?", http.calls[0][0])
 
     def test_episode_query_http_errors_propagate(self):
-        error = RuntimeError("emby unavailable")
+        error = HTTPError(
+            "http://emby.test/Shows/series-1/Episodes",
+            503,
+            "service unavailable",
+            {},
+            BytesIO(b"service unavailable"),
+        )
         http = QueueHttp([error])
         client = EmbyClient("http://emby.test", "secret-key", user_id="user-1", http=http)
 
-        with self.assertRaisesRegex(RuntimeError, "emby unavailable"):
+        with self.assertRaises(HTTPError):
             client.episode_keys_for_series("series-1")
 
 

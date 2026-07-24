@@ -10,6 +10,25 @@ from app.media.classify import item_tmdb_id
 from app.series_rules import parse_episode_key
 
 
+def _positive_episode_index(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        index = value
+    elif isinstance(value, float):
+        if not value.is_integer():
+            return None
+        index = int(value)
+    elif isinstance(value, str):
+        value = value.strip()
+        if not value.isdecimal():
+            return None
+        index = int(value)
+    else:
+        return None
+    return index if index > 0 else None
+
+
 class EmbyClient:
     def __init__(self, base_url: str, api_key: str, user_id: str = "", http: HttpJson | None = None, timeout: int = 60):
         self.base_url = (base_url or "").rstrip("/")
@@ -133,16 +152,9 @@ class EmbyClient:
         for episode in episodes or []:
             if not isinstance(episode, dict):
                 continue
-            season = episode.get("ParentIndexNumber")
-            number = episode.get("IndexNumber")
-            if isinstance(season, bool) or isinstance(number, bool):
-                continue
-            try:
-                season = int(season)
-                number = int(number)
-            except (TypeError, ValueError):
-                continue
-            if season <= 0 or number <= 0:
+            season = _positive_episode_index(episode.get("ParentIndexNumber"))
+            number = _positive_episode_index(episode.get("IndexNumber"))
+            if season is None or number is None:
                 continue
             key = parse_episode_key(f"S{season}E{number}")
             if key is not None:
