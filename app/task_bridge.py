@@ -10,6 +10,16 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _optional_strm_mode(value: Any) -> str | None:
+    normalized = str(value).strip() if value is not None else ""
+    return normalized or None
+
+
+def _legacy_strm_mode(value: Any) -> str | None:
+    normalized = str(value).strip().lower() if value is not None else ""
+    return {"self_share_sync": "shared", "direct": "direct"}.get(normalized)
+
+
 def _row_key(row: dict[str, Any]) -> tuple[str, str, str]:
     share_code = _text(row.get("share_code"))
     receive_code = _text(row.get("receive_code"))
@@ -56,7 +66,13 @@ def _runtime_metadata(row: dict[str, Any], extra: dict[str, Any]) -> dict[str, A
         "cleanup_error",
     )
     metadata = {key: row.get(key) for key in keys if row.get(key) not in (None, "")}
-    metadata.update({str(key): value for key, value in extra.items() if value not in (None, "")})
+    metadata.update(
+        {
+            str(key): value
+            for key, value in extra.items()
+            if key != "strm_mode" and value not in (None, "")
+        }
+    )
     return metadata
 
 
@@ -79,10 +95,16 @@ def ensure_task_for_link(
     share_code: str,
     receive_code: str,
     url: str,
+    *,
+    strm_mode: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> TaskSnapshot | None:
     if task_store is None:
         return None
-    task = task_store.upsert_task(_text(share_code), _text(receive_code), _text(url))
+    if strm_mode is None and metadata:
+        strm_mode = metadata.get("strm_mode")
+    strm_mode = _optional_strm_mode(strm_mode)
+    task = task_store.upsert_task(_text(share_code), _text(receive_code), _text(url), strm_mode=strm_mode)
     if not task_store.list_events(task.id):
         task = task_store.record_event(task.id, TaskStage.RECEIVED, TaskStatus.PENDING, "收到链接")
     return task
@@ -101,7 +123,12 @@ def record_submission_event(
     share_code, receive_code, url = _row_key(row)
     if not share_code:
         return None
-    task = task_store.upsert_task(share_code, receive_code, url)
+    strm_mode = _optional_strm_mode(metadata.get("strm_mode"))
+    if strm_mode is None:
+        strm_mode = _optional_strm_mode(row.get("strm_mode"))
+    if strm_mode is None:
+        strm_mode = _legacy_strm_mode(row.get("workflow_mode"))
+    task = task_store.upsert_task(share_code, receive_code, url, strm_mode=strm_mode)
     error_summary = _text(metadata.get("error_summary"))
     if _last_event_matches(task_store, task.id, stage, status, message, error_summary):
         return task_store.find_task(task.id)

@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .models import TaskSnapshot, TaskStage, TaskStatus
+from .strm_mode import is_strm_mode_locked, normalize_strm_mode
+
+
+STRM_DEFAULT_MODE_KEY = "strm_default_mode"
 
 
 @dataclass(frozen=True)
@@ -47,8 +51,9 @@ class TaskLockClaimResult:
 
 
 class TaskStore:
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, default_strm_mode: str = "shared"):
         self.db_path = db_path if isinstance(db_path, Path) else Path(db_path)
+        self.default_strm_mode = normalize_strm_mode(default_strm_mode)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._init_db()
@@ -173,6 +178,32 @@ class TaskStore:
     def delete_runtime_state(self, key: str) -> None:
         with self._lock, self._connection() as conn:
             conn.execute("DELETE FROM runtime_state WHERE key = ?", (str(key),))
+
+    def get_default_strm_mode(self) -> str:
+        state = self.get_runtime_state(STRM_DEFAULT_MODE_KEY)
+        return normalize_strm_mode(state["value"] if state else self.default_strm_mode)
+
+    def set_default_strm_mode(self, mode: str) -> str:
+        normalized = normalize_strm_mode(mode)
+        self.set_runtime_state(STRM_DEFAULT_MODE_KEY, normalized)
+        return normalized
+
+    def set_task_strm_mode(self, task_id: int, mode: str) -> TaskSnapshot:
+        normalized = normalize_strm_mode(mode)
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+            if row is None:
+                raise KeyError(f"task not found: {task_id}")
+            if is_strm_mode_locked(row["current_stage"]):
+                raise RuntimeError("STRM 模式已锁定，不能修改")
+            merged_metadata = self._merge_metadata(row["metadata_json"], {"strm_mode": normalized})
+            conn.execute(
+                "UPDATE tasks SET metadata_json = ?, updated_at = ? WHERE id = ?",
+                (merged_metadata, time.time(), int(task_id)),
+            )
+            updated = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+        return self._snapshot(updated)
 
     def claim_quality_run(self, run_date: str, now: float) -> bool:
         state_key = f"quality_auto_run:{run_date}"
@@ -324,20 +355,62 @@ class TaskStore:
             current.update({str(key): value for key, value in patch.items() if value is not None})
         return json.dumps(current, ensure_ascii=False, sort_keys=True)
 
-    def upsert_task(self, share_code: str, receive_code: str, url: str, chat_id: str = "") -> TaskSnapshot:
+    def upsert_task(
+        self,
+        share_code: str,
+        receive_code: str,
+        url: str,
+        chat_id: str = "",
+        strm_mode: str | None = None,
+    ) -> TaskSnapshot:
         now = time.time()
+        explicit_mode = strm_mode is not None
+        effective_mode = normalize_strm_mode(strm_mode) if explicit_mode else self.get_default_strm_mode()
+        initial_metadata = json.dumps({"strm_mode": effective_mode}, ensure_ascii=False, sort_keys=True)
         with self._lock, self._connection() as conn:
             conn.execute(
                 """
-                INSERT INTO tasks (share_code, receive_code, source_type, source_key, url, chat_id, current_stage, status, created_at, updated_at)
-                VALUES (?, ?, 'share', ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO tasks (
+                    share_code, receive_code, source_type, source_key, url, chat_id,
+                    current_stage, status, metadata_json, created_at, updated_at
+                )
+                VALUES (?, ?, 'share', ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(share_code, receive_code) DO UPDATE SET
                     url = excluded.url,
                     chat_id = COALESCE(NULLIF(excluded.chat_id, ''), tasks.chat_id),
                     updated_at = excluded.updated_at
                 """,
-                (share_code, receive_code, f"share:{share_code}:{receive_code}", url, chat_id, TaskStage.RECEIVED.value, TaskStatus.PENDING.value, now, now),
+                (
+                    share_code,
+                    receive_code,
+                    f"share:{share_code}:{receive_code}",
+                    url,
+                    chat_id,
+                    TaskStage.RECEIVED.value,
+                    TaskStatus.PENDING.value,
+                    initial_metadata,
+                    now,
+                    now,
+                ),
             )
+            if explicit_mode:
+                current = conn.execute(
+                    "SELECT metadata_json FROM tasks WHERE share_code = ? AND receive_code = ?",
+                    (share_code, receive_code),
+                ).fetchone()
+                try:
+                    metadata = json.loads(current["metadata_json"] or "{}") if current else {}
+                except Exception:
+                    metadata = {}
+                if not isinstance(metadata, dict) or "strm_mode" not in metadata:
+                    merged_metadata = self._merge_metadata(
+                        current["metadata_json"] if current else "{}",
+                        {"strm_mode": effective_mode},
+                    )
+                    conn.execute(
+                        "UPDATE tasks SET metadata_json = ? WHERE share_code = ? AND receive_code = ?",
+                        (merged_metadata, share_code, receive_code),
+                    )
             row = conn.execute(
                 "SELECT * FROM tasks WHERE share_code = ? AND receive_code = ?",
                 (share_code, receive_code),

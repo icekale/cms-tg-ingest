@@ -11,6 +11,51 @@ from app.task_store import TaskStore
 
 
 class TaskStoreTests(unittest.TestCase):
+    def test_constructor_default_strm_mode_is_used_until_runtime_state_is_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db", default_strm_mode="direct")
+            first = store.upsert_task("constructor-direct", "", "https://115cdn.com/s/constructor-direct")
+
+            store.set_runtime_state("strm_default_mode", "shared")
+            second = store.upsert_task("runtime-shared", "", "https://115cdn.com/s/runtime-shared")
+
+            self.assertEqual(first.metadata["strm_mode"], "direct")
+            self.assertEqual(second.metadata["strm_mode"], "shared")
+
+    def test_default_strm_mode_uses_shared_and_setter_validates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            self.assertEqual(store.get_default_strm_mode(), "shared")
+            self.assertEqual(store.set_default_strm_mode("DIRECT"), "direct")
+            self.assertEqual(store.get_default_strm_mode(), "direct")
+            with self.assertRaises(ValueError):
+                store.set_default_strm_mode("self_share_sync")
+
+    def test_upsert_task_writes_mode_once_and_does_not_overwrite_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            first = store.upsert_task("abc", "", "https://115cdn.com/s/abc", strm_mode="direct")
+            repeated = store.upsert_task("abc", "", "https://115cdn.com/s/abc", strm_mode="shared")
+
+            self.assertEqual(first.metadata["strm_mode"], "direct")
+            self.assertEqual(repeated.metadata["strm_mode"], "direct")
+
+    def test_upsert_task_backfills_mode_only_for_legacy_task_when_explicitly_provided(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("legacy", "", "https://115cdn.com/s/legacy")
+            with store._connection() as conn:
+                conn.execute("UPDATE tasks SET metadata_json = '{}' WHERE id = ?", (task.id,))
+
+            legacy = store.find_task(task.id)
+            self.assertEqual(legacy.metadata, {})
+            untouched = store.upsert_task("legacy", "", "https://115cdn.com/s/legacy")
+            self.assertEqual(untouched.metadata, {})
+            backfilled = store.upsert_task("legacy", "", "https://115cdn.com/s/legacy", strm_mode="direct")
+            self.assertEqual(backfilled.metadata["strm_mode"], "direct")
+
     def test_upsert_cloud_task_is_idempotent_by_source_key(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

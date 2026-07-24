@@ -33,6 +33,26 @@ class HdhiveSubscriptionStoreTests(unittest.TestCase):
             self.assertEqual(reopened.get_item(second.id).status, "pending_confirmation")
             self.assertEqual(len(reopened.list_items(subscription.id)), 2)
 
+    def test_unlock_cost_and_time_survive_reopen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hdhive.db"
+            store = HdhiveSubscriptionStore(path)
+            subscription = store.create_subscription("1", "hdhive_tv", "slug", "剧集", "123")
+            item = store.upsert_item(subscription.id, "s01e01", "resource", "valid", 2160, 8, "资源")
+            store.mark_item_enqueued(
+                item.id,
+                42,
+                unlock_points_spent=7,
+                unlock_points_source="actual",
+                unlocked_at=1700000000,
+            )
+            reopened = HdhiveSubscriptionStore(path)
+            saved = reopened.get_item(item.id)
+
+        self.assertEqual(saved.unlock_points_spent, 7)
+        self.assertEqual(saved.unlock_points_source, "actual")
+        self.assertEqual(saved.unlocked_at, 1700000000)
+
     def test_subscription_status_actions_and_deleted_filter(self):
         with tempfile.TemporaryDirectory() as directory:
             store = HdhiveSubscriptionStore(Path(directory) / "tasks.db")

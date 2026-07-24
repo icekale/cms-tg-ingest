@@ -60,6 +60,9 @@ class HdhiveSubscriptionItem:
     status: str
     task_id: int | None
     last_error: str
+    unlock_points_spent: int | None
+    unlock_points_source: str
+    unlocked_at: float | None
     created_at: float
     updated_at: float
 
@@ -77,6 +80,9 @@ class HdhiveSubscriptionItem:
             status=str(row["status"] or "discovered"),
             task_id=int(row["task_id"]) if row["task_id"] is not None else None,
             last_error=str(row["last_error"] or ""),
+            unlock_points_spent=int(row["unlock_points_spent"]) if row["unlock_points_spent"] is not None else None,
+            unlock_points_source=str(row["unlock_points_source"] or ""),
+            unlocked_at=float(row["unlocked_at"]) if row["unlocked_at"] is not None else None,
             created_at=float(row["created_at"] or 0),
             updated_at=float(row["updated_at"] or 0),
         )
@@ -166,6 +172,9 @@ class HdhiveSubscriptionStore:
                     status TEXT NOT NULL DEFAULT 'discovered',
                     task_id INTEGER,
                     last_error TEXT NOT NULL DEFAULT '',
+                    unlock_points_spent INTEGER,
+                    unlock_points_source TEXT NOT NULL DEFAULT '',
+                    unlocked_at REAL,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     UNIQUE(subscription_id, episode_key, resource_slug),
@@ -189,6 +198,14 @@ class HdhiveSubscriptionStore:
                 );
                 """
             )
+            existing = {row[1] for row in connection.execute("PRAGMA table_info(hdhive_subscription_items)")}
+            for name, definition in {
+                "unlock_points_spent": "INTEGER",
+                "unlock_points_source": "TEXT NOT NULL DEFAULT ''",
+                "unlocked_at": "REAL",
+            }.items():
+                if name not in existing:
+                    connection.execute(f"ALTER TABLE hdhive_subscription_items ADD COLUMN {name} {definition}")
 
     @staticmethod
     def _row_or_none(row: sqlite3.Row | None, factory):
@@ -357,8 +374,24 @@ class HdhiveSubscriptionStore:
     def mark_item_pending(self, item_id: int, error: str = "") -> HdhiveSubscriptionItem:
         return self._update_item(item_id, status="pending_confirmation", last_error=error)
 
-    def mark_item_enqueued(self, item_id: int, task_id: int | None = None) -> HdhiveSubscriptionItem:
-        return self._update_item(item_id, status="enqueued", task_id=task_id, last_error="")
+    def mark_item_enqueued(
+        self,
+        item_id: int,
+        task_id: int | None = None,
+        *,
+        unlock_points_spent: int | None = None,
+        unlock_points_source: str = "",
+        unlocked_at: float | None = None,
+    ) -> HdhiveSubscriptionItem:
+        return self._update_item(
+            item_id,
+            status="enqueued",
+            task_id=task_id,
+            last_error="",
+            unlock_points_spent=unlock_points_spent,
+            unlock_points_source=unlock_points_source,
+            unlocked_at=unlocked_at,
+        )
 
     def mark_item_failed(self, item_id: int, error: str) -> HdhiveSubscriptionItem:
         return self._update_item(item_id, status="failed", last_error=error)
@@ -366,21 +399,41 @@ class HdhiveSubscriptionStore:
     def mark_item_unlocking(self, item_id: int) -> HdhiveSubscriptionItem:
         return self._update_item(item_id, status="unlocking", last_error="")
 
-    def _update_item(self, item_id: int, *, status: str, task_id: int | None = None, last_error: str = "") -> HdhiveSubscriptionItem:
+    def _update_item(
+        self,
+        item_id: int,
+        *,
+        status: str,
+        task_id: int | None = None,
+        last_error: str = "",
+        unlock_points_spent: int | None = None,
+        unlock_points_source: str = "",
+        unlocked_at: float | None = None,
+    ) -> HdhiveSubscriptionItem:
         with self._lock, self._connection() as connection:
             if task_id is None:
                 connection.execute(
-                    "UPDATE hdhive_subscription_items SET status = ?, last_error = ?, updated_at = ? WHERE id = ?",
-                    (status, str(last_error or ""), time.time(), int(item_id)),
+                    """
+                    UPDATE hdhive_subscription_items
+                    SET status = ?, last_error = ?,
+                        unlock_points_spent = COALESCE(?, unlock_points_spent),
+                        unlock_points_source = CASE WHEN ? <> '' THEN ? ELSE unlock_points_source END,
+                        unlocked_at = COALESCE(?, unlocked_at), updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (status, str(last_error or ""), unlock_points_spent, unlock_points_source, unlock_points_source, unlocked_at, time.time(), int(item_id)),
                 )
             else:
                 connection.execute(
                     """
                     UPDATE hdhive_subscription_items
-                    SET status = ?, task_id = ?, last_error = ?, updated_at = ?
+                    SET status = ?, task_id = ?, last_error = ?,
+                        unlock_points_spent = COALESCE(?, unlock_points_spent),
+                        unlock_points_source = CASE WHEN ? <> '' THEN ? ELSE unlock_points_source END,
+                        unlocked_at = COALESCE(?, unlocked_at), updated_at = ?
                     WHERE id = ?
                     """,
-                    (status, int(task_id), str(last_error or ""), time.time(), int(item_id)),
+                    (status, int(task_id), str(last_error or ""), unlock_points_spent, unlock_points_source, unlock_points_source, unlocked_at, time.time(), int(item_id)),
                 )
             row = connection.execute(
                 "SELECT * FROM hdhive_subscription_items WHERE id = ?",

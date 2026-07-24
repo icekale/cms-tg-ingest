@@ -1,20 +1,20 @@
 # cms-tg-ingest
 
-Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁力、ED2K 或 HDHive 资源发给 Bot，自动完成 CMS 整理分类、自有永久分享、分享 STRM、媒体库移动、Emby 入库确认和安全清理。
+Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁力、ED2K 或 HDHive 资源发给 Bot，自动完成 CMS 整理分类、STRM 生成、媒体库移动和 Emby 入库确认。
 
 ```text
-链接 -> 115 接收/云下载 -> CMS 整理 -> 自有永久分享 -> 分享 STRM -> Emby -> 清理源文件
+链接 -> 115 接收/云下载 -> CMS 整理 -> shared/direct STRM -> 媒体库 -> Emby
 ```
 
 ## 核心能力
 
 - Telegram 支持裸链接、多链接、任务状态和按钮式运维。
 - CMS 优先完成整理、改名、TMDB 匹配和分类。
-- 只允许自己的分享 STRM 入库，拒绝直链和错误分享码。
+- 支持 `shared` 共享 STRM 和 `direct` 直链 STRM；任务锁定后不允许切换，避免混用。
 - 共享别名保护：创建分享时使用中性别名，入库时恢复 CMS 的标准目录和文件名。
 - TaskStore 记录每个阶段、等待原因、失败、重试和耗时。
 - 115 调用有频率限制、扫描预算和风控冷却。
-- 支持磁力、ED2K 云下载，统一进入现有自分享 STRM 流程。
+- 支持磁力、ED2K 云下载，随后按 STRM 模式进入对应流程；direct 模式不会创建分享或清理源文件。
 - 支持 Emby 刷新、入库确认和媒体库名称反馈。
 - 支持 HDHive 搜索、网盘筛选、单条/批量解锁和剧集订阅。
 
@@ -34,7 +34,7 @@ docker compose up -d
 docker pull icekale/cms-tg-ingest:0.2.12
 ```
 
-本地 compose 默认使用 `8787:8787`。Unraid 推荐映射 `8788:8787`，访问 `http://<unraid-ip>:8788/`。镜像支持 `linux/amd64` 和 `linux/arm64`。
+本地 compose 默认使用 `8787:8787`。Unraid 推荐映射 `8788:8787`，访问 `http://<unraid-ip>:8788/`；Vue 管理壳访问 `/app/`。镜像支持 `linux/amd64` 和 `linux/arm64`。
 
 ## Telegram 使用
 
@@ -66,6 +66,8 @@ HDHIVE_SUBSCRIPTION_TIMEZONE=Asia/Shanghai
 ```
 
 HDHive 搜索默认筛选 `115`。费用未知或超过阈值时停在待确认状态，需要点击 `确认解锁`；只有成功的 115 链接会自动进入 CMS 整理、自有分享 STRM 和 Emby 入库流程，其他网盘链接不会误提交到 115 流程。
+
+成功解锁记录会保存实际或估算积分、解锁时间和关联 Task ID，并通过 Telegram 发送海报卡片；TMDB 海报不可用时自动降级为文字通知。
 
 直接发送 HDHive 剧集页面也可以创建订阅：
 

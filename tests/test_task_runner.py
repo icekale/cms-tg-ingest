@@ -153,6 +153,43 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(events[-1]["stage"], "organizing")
             self.assertEqual(events[-1]["status"], "pending")
 
+    def test_direct_task_runner_skips_shared_stages_and_stops_at_emby_confirmed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("direct", "", "https://115cdn.com/s/direct", strm_mode="direct")
+            store.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=1.0)
+            workflow = FakeWorkflow(
+                [
+                    StageResult.complete("received"),
+                    StageResult.complete("organized"),
+                    StageResult.complete("recognized", {"direct_strm": True}),
+                    StageResult.complete("strm ready", {"direct_strm": True, "strm_mode_locked": True}),
+                    StageResult.complete("moved"),
+                    StageResult.complete("emby confirmed"),
+                ]
+            )
+            runner = TaskRunner(store, workflow, worker_id="worker-1", now=lambda: 1.0)
+
+            for _ in range(6):
+                self.assertTrue(runner.run_once())
+
+            updated = store.find_task(task.id)
+            self.assertEqual(
+                [stage for _task_id, stage in workflow.calls],
+                [
+                    TaskStage.RECEIVED,
+                    TaskStage.ORGANIZING,
+                    TaskStage.RECOGNIZING,
+                    TaskStage.STRM_READY,
+                    TaskStage.MOVED,
+                    TaskStage.EMBY_CONFIRMED,
+                ],
+            )
+            self.assertEqual(updated.current_stage, TaskStage.EMBY_CONFIRMED)
+            self.assertEqual(updated.status, TaskStatus.SUCCEEDED)
+            self.assertTrue(updated.metadata["direct_strm"])
+            self.assertTrue(updated.metadata["strm_mode_locked"])
+
     def test_run_once_defers_stage_with_delay(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

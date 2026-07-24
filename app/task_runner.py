@@ -9,6 +9,7 @@ from typing import Callable, Protocol
 
 from .clients.p115 import P115RiskControlError
 from .models import TaskSnapshot, TaskStage, TaskStatus, next_stage_after_success
+from .strm_mode import effective_task_strm_mode
 from .task_store import TaskStore
 
 LOG = logging.getLogger(__name__)
@@ -394,7 +395,10 @@ class TaskRunner:
                 metadata_delete_keys=_DEFER_METADATA_KEYS,
                 clear_claim=True,
             )
-            next_stage = next_stage_after_success(task.current_stage)
+            next_stage = next_stage_after_success(
+                task.current_stage,
+                effective_task_strm_mode(task),
+            )
             if next_stage:
                 self.store.enqueue_task(task.id, next_stage, message="等待执行", next_run_at=now)
             return

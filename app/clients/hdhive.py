@@ -98,6 +98,7 @@ class HdhiveUnlockItem:
     message: str
     error_code: str
     already_owned: bool
+    points_spent: int | None = None
 
 
 class HdhiveProxyError(RuntimeError):
@@ -286,6 +287,11 @@ class HdhiveProxyClient:
 
     @staticmethod
     def _unlock_item(item: dict[str, Any], fallback_slug: str) -> HdhiveUnlockItem:
+        points_spent = None
+        for key in ("points_spent", "spent_points", "unlock_cost", "cost"):
+            if key in item and item.get(key) not in (None, ""):
+                points_spent = _as_int(item.get(key))
+                break
         return HdhiveUnlockItem(
             slug=_as_text(item.get("slug")) or fallback_slug,
             success=bool(item.get("success", bool(item.get("full_url") or item.get("url")))),
@@ -293,6 +299,7 @@ class HdhiveProxyClient:
             message=_as_text(item.get("message") or item.get("msg")),
             error_code=_as_text(item.get("error_code") or item.get("code")),
             already_owned=bool(item.get("already_owned")),
+            points_spent=points_spent,
         )
 
     def healthcheck(self) -> bool:

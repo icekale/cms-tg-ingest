@@ -94,6 +94,7 @@ from app.media.classify import (
 )
 from app.media.sources import parse_media_sources
 from app.hdhive import HdhiveSelectionError, HdhiveSessionStore, HdhiveWorkflow
+from app.hdhive_cards import TmdbDetailCache, build_hdhive_unlock_card
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
 from app.hdhive_subscriptions import (
     HdhiveSubscriptionScheduler,
@@ -163,6 +164,7 @@ from app.telegram_ui import (
 from app.task_runner import StageResult, TaskRunner
 from app.task_store import TaskStore
 from app.web import start_web_server
+from app.workflows.direct import DirectTaskWorkflow, ModeRoutingWorkflow
 from app.workflows.self_share import (
     BridgeSelfShareTaskWorkflow,
     SelfShareWorkflow,
@@ -318,7 +320,7 @@ def normalize_share_link(url: str) -> ShareKey:
 
 
 def create_task_store(config: Config) -> TaskStore:
-    return TaskStore(config.task_db_path)
+    return TaskStore(config.task_db_path, default_strm_mode=getattr(config, "strm_default_mode", "shared"))
 
 
 def create_hdhive_workflow(config: Config, cms: CmsClient) -> HdhiveWorkflow | None:
@@ -344,6 +346,7 @@ def create_hdhive_subscription_service(
     config: Config,
     hdhive_workflow: HdhiveWorkflow | None,
     enqueue_links: Any,
+    on_item_enqueued: Any | None = None,
 ) -> HdhiveSubscriptionService | None:
     if not bool(getattr(config, "hdhive_enabled", False)) or hdhive_workflow is None:
         return None
@@ -352,6 +355,7 @@ def create_hdhive_subscription_service(
         store=HdhiveSubscriptionStore(getattr(config, "task_db_path", "/data/tasks.db")),
         enqueue_links=enqueue_links,
         auto_unlock_max_points=int(getattr(config, "hdhive_auto_unlock_max_points", 20)),
+        on_item_enqueued=on_item_enqueued,
     )
 
 
@@ -362,6 +366,7 @@ def maybe_start_web_server(
     quality_automation: QualityAutomation | None = None,
     hdhive_service: HdhiveSubscriptionService | None = None,
     hdhive_scheduler: HdhiveSubscriptionScheduler | None = None,
+    frontend_dist_path: str | None = None,
     starter=start_web_server,
 ):
     if not config.web_enabled:
@@ -369,6 +374,7 @@ def maybe_start_web_server(
     kwargs = {
         "web_token": config.web_token,
         "task_engine_enabled": config.task_engine_enabled,
+        "frontend_dist_path": frontend_dist_path or getattr(config, "frontend_dist_path", "/app/frontend/dist"),
     }
     if submission_store is not None:
         kwargs["submission_store"] = submission_store
@@ -378,6 +384,15 @@ def maybe_start_web_server(
         kwargs["hdhive_service"] = hdhive_service
     if hdhive_scheduler is not None:
         kwargs["hdhive_scheduler"] = hdhive_scheduler
+    try:
+        starter_parameters = inspect.signature(starter).parameters
+        supports_frontend = "frontend_dist_path" in starter_parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in starter_parameters.values()
+        )
+    except (TypeError, ValueError):
+        supports_frontend = True
+    if not supports_frontend:
+        kwargs.pop("frontend_dist_path", None)
     server = starter(task_store, config.web_host, config.web_port, **kwargs)
     LOG.info("v0.2 web admin started host=%s port=%s", config.web_host, config.web_port)
     return server
@@ -390,6 +405,7 @@ def call_maybe_start_web_server(
     quality_automation: QualityAutomation | None = None,
     hdhive_service: HdhiveSubscriptionService | None = None,
     hdhive_scheduler: HdhiveSubscriptionScheduler | None = None,
+    frontend_dist_path: str | None = None,
 ):
     try:
         parameters = inspect.signature(maybe_start_web_server).parameters
@@ -407,7 +423,10 @@ def call_maybe_start_web_server(
     supports_hdhive_scheduler = "hdhive_scheduler" in parameters or any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     )
-    if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler:
+    supports_frontend_dist_path = "frontend_dist_path" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler or supports_frontend_dist_path:
         return maybe_start_web_server(
             config,
             task_store,
@@ -415,6 +434,7 @@ def call_maybe_start_web_server(
             quality_automation=quality_automation if supports_quality_automation else None,
             hdhive_service=hdhive_service if supports_hdhive_service else None,
             hdhive_scheduler=hdhive_scheduler if supports_hdhive_scheduler else None,
+            frontend_dist_path=frontend_dist_path if supports_frontend_dist_path else None,
         )
     return maybe_start_web_server(config, task_store)
 
@@ -1335,6 +1355,16 @@ class TelegramClient:
             payload["reply_markup"] = reply_markup
         self.http.request(
             self.base_url + "/sendMessage",
+            method="POST",
+            payload=payload,
+        )
+
+    def send_photo(self, chat_id: int | str, photo: str, caption: str, reply_markup: dict | None = None) -> None:
+        payload = {"chat_id": chat_id, "photo": photo, "caption": caption}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        self.http.request(
+            self.base_url + "/sendPhoto",
             method="POST",
             payload=payload,
         )
@@ -3136,10 +3166,10 @@ def handle_update(
                 LOG.info("Enqueued cloud source in TaskStore: type=%s key=%s task_id=%s", source.source_type, source.source_key, task.id)
                 continue
             key = normalize_share_link(link)
-            if self_share_workflow and task_engine_enabled and task_store is None:
-                raise RuntimeError("TaskStore is required when TASK_ENGINE_ENABLED=true for self_share_sync")
-            if self_share_workflow and task_engine_enabled and task_store is not None:
-                if explicit_series_update:
+            if task_engine_enabled and task_store is None:
+                raise RuntimeError("TaskStore is required when TASK_ENGINE_ENABLED=true")
+            if task_engine_enabled and task_store is not None:
+                if self_share_workflow and explicit_series_update:
                     existing_task = task_store.find_task_by_share_key(key.share_code, key.receive_code)
                     updated_task, update_result = start_series_update_task(
                         existing_task,
@@ -3337,32 +3367,46 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
     probe_stop_events: list[threading.Event] = []
     probe_threads: list[threading.Thread] = []
     probe_holder: dict[str, Any] = {"stop_event": None, "thread": None}
-    if config.task_engine_enabled and self_share_config.enabled and p115:
-        task_workflow = BridgeSelfShareTaskWorkflow(
+    if config.task_engine_enabled:
+        direct_workflow = DirectTaskWorkflow(
             cms=cms,
-            telegram=telegram,
-            chat_id=config.tg_allowed_chat_id,
             store=store,
-            task_store=task_store,
-            p115=p115,
-            self_share_config=self_share_config,
             move_config=move_config,
             emby=emby,
-            openai_classifier=openai_classifier,
-            tmdb_resolver=tmdb_resolver,
-            cleanup_client=p115 if self_share_config.cleanup_after_emby else None,
-            receive_cid=config.self_share_receive_cid,
-            cms_cloud_index=CmsCloudDataIndex(self_share_config.cms_state_db_path),
+        )
+        shared_workflow = None
+        if self_share_config.enabled and p115:
+            shared_workflow = BridgeSelfShareTaskWorkflow(
+                cms=cms,
+                telegram=telegram,
+                chat_id=config.tg_allowed_chat_id,
+                store=store,
+                task_store=task_store,
+                p115=p115,
+                self_share_config=self_share_config,
+                move_config=move_config,
+                emby=emby,
+                openai_classifier=openai_classifier,
+                tmdb_resolver=tmdb_resolver,
+                cleanup_client=p115 if self_share_config.cleanup_after_emby else None,
+                receive_cid=config.self_share_receive_cid,
+                cms_cloud_index=CmsCloudDataIndex(self_share_config.cms_state_db_path),
+            )
+        task_workflow = ModeRoutingWorkflow(
+            direct_workflow,
+            shared_workflow,
+            default_mode=task_store.get_default_strm_mode(),
         )
         task_runner = TaskRunner(
             task_store,
             task_workflow,
             interval_seconds=config.task_worker_interval_seconds,
             risk_cooldown_seconds=config.p115_risk_cooldown_seconds,
-            p115_client=p115,
+            p115_client=p115 if shared_workflow is not None else None,
         )
         task_runner.start()
         LOG.info("Task engine worker started interval_seconds=%s", config.task_worker_interval_seconds)
+    if config.task_engine_enabled and self_share_config.enabled and p115:
         def set_invalid_probe_enabled(quality_enabled: bool) -> None:
             if not config.self_share_invalid_cleanup_enabled:
                 return
@@ -3423,7 +3467,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         write_metrics_snapshot(store, metrics_path_for_store(store))
     except Exception:
         LOG.debug("Failed to write startup metrics snapshot", exc_info=True)
-    if config.status_repair_enabled and not (config.task_engine_enabled and self_share_config.enabled):
+    if config.status_repair_enabled and not config.task_engine_enabled:
         start_status_repair_loop(
             store,
             emby,
@@ -3435,10 +3479,10 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
             limit=max(1, int(config.status_repair_limit)),
         )
 
-    def enqueue_hdhive_links(urls: list[str], chat_id: str) -> None:
+    def enqueue_hdhive_links(urls: list[str], chat_id: str) -> int | None:
         links = [str(url).strip() for url in urls if str(url).strip()]
         if not links:
-            return
+            return None
         handle_update(
             {
                 "message": {
@@ -3468,11 +3512,36 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
             hdhive_subscription_service=hdhive_subscription_service,
             hdhive_subscription_scheduler=hdhive_subscription_scheduler,
         )
+        if task_store is not None:
+            try:
+                key = normalize_share_link(links[-1])
+                task = task_store.find_task_by_share_key(key.share_code, key.receive_code)
+                return task.id if task is not None else None
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    tmdb_card_cache = TmdbDetailCache(Path(config.task_db_path).with_name("tmdb-card-cache.db"))
+
+    def notify_hdhive_item(subscription: Any, item: Any) -> None:
+        details = {}
+        if tmdb_resolver is not None and getattr(tmdb_resolver, "enabled", False) and subscription.tmdb_id:
+            details = tmdb_card_cache.get(
+                "tv",
+                subscription.tmdb_id,
+                lambda: tmdb_resolver.lookup(subscription.tmdb_id, "tv", subscription.title),
+            )
+        caption, poster_url = build_hdhive_unlock_card(subscription, item, tmdb_details=details)
+        if poster_url and hasattr(telegram, "send_photo"):
+            telegram.send_photo(subscription.chat_id, poster_url, caption)
+        else:
+            telegram.send_message(subscription.chat_id, caption)
 
     hdhive_subscription_service = create_hdhive_subscription_service(
         config,
         hdhive_workflow,
         enqueue_hdhive_links,
+        on_item_enqueued=notify_hdhive_item,
     )
     if hdhive_subscription_service is not None and Path(
         getattr(config, "hdhive_token_config_path", "")
@@ -3498,6 +3567,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         quality_automation=quality_automation,
         hdhive_service=hdhive_subscription_service,
         hdhive_scheduler=hdhive_subscription_scheduler,
+        frontend_dist_path=getattr(config, "frontend_dist_path", "/app/frontend/dist"),
     )
 
     try:

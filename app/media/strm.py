@@ -373,6 +373,19 @@ def _strm_has_direct_link(path: Path) -> bool:
         return False
 
 
+def validate_direct_strm_source(source: Path) -> str:
+    source = safe_resolve(source)
+    if not source.exists() or not source.is_dir():
+        return "STRM 源目录不存在"
+    strm_files = sorted(iter_strm_files(source))
+    if not strm_files:
+        return "源目录不包含 STRM 文件"
+    for strm_file in strm_files:
+        if not _strm_has_direct_link(strm_file):
+            return f"发现非直链 STRM：{strm_file}"
+    return ""
+
+
 def find_recent_direct_library_strm_source_dir(
     config: MoveConfig,
     row: dict[str, Any],
