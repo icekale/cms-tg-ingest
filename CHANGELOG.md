@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 新增 `/订阅 <HDHive剧集链接>` 命令，明确创建 HDHive 剧集订阅。
 - Telegram HDHive 搜索命令新增中文别名 `/搜索`，原 `/hdhive_search` 继续兼容。
 - 修复 HDHive Web 管理页在调度器完成一次运行后读取最近运行摘要时的异常。
 - 修复 Cloudflare 浏览器签名拦截 HDHive 代理请求的问题。

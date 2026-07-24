@@ -191,7 +191,7 @@ TRAILING_PUNCT = ".,;)。），]】》>"
 LOG = logging.getLogger("cms-tg-ingest")
 LAST_TELEGRAM_TRANSIENT_ERROR_AT: str | None = None
 ED2K_HELP_EXAMPLE = "ed2k://|file|Example.mkv|10|" + "0123456789ABCDEF" * 2 + "|/"
-HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 分享、磁力或 ED2K 链接\n- 磁力/ED2K 会进入 115 云下载，再复用 CMS 整理和分享 STRM 流程\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- /搜索：通过 TMDB 匹配 HDHive 影片/剧集，筛选网盘并解锁资源（/hdhive_search 仍兼容）\n- 发送 HDHive 剧集页面可直接订阅，例如 https://hdhive.com/tv/xxxxxxxx\n- /status 查看最近任务\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd\n""" + ED2K_HELP_EXAMPLE
+HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 分享、磁力或 ED2K 链接\n- 磁力/ED2K 会进入 115 云下载，再复用 CMS 整理和分享 STRM 流程\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- /搜索：通过 TMDB 匹配 HDHive 影片/剧集，筛选网盘并解锁资源（/hdhive_search 仍兼容）\n- /订阅 <HDHive剧集链接>：创建 HDHive 剧集订阅\n- 发送 HDHive 剧集页面也可直接订阅，例如 https://hdhive.com/tv/xxxxxxxx\n- /status 查看最近任务\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd\n""" + ED2K_HELP_EXAMPLE
 MENU_BUTTONS = {
     "📊 统计": "/metrics",
     "📋 最近任务": "/status",
@@ -2975,6 +2975,28 @@ def handle_update(
             return
         session_id = hdhive_workflow.sessions.begin(str(chat_id), "")
         telegram.send_message(chat_id, f"请输入片名或 TMDB ID。\n本次搜索编号：{session_id}")
+        return
+    if command == "/订阅":
+        if hdhive_subscription_service is None:
+            telegram.send_message(chat_id, "HDHive 订阅未启用，或 CMS 尚未完成影巢账号授权。")
+            return
+        hdhive_urls = extract_hdhive_tv_urls(text)
+        if not hdhive_urls:
+            telegram.send_message(chat_id, "用法：/订阅 https://hdhive.com/tv/<slug>")
+            return
+        lines = []
+        for url in hdhive_urls:
+            try:
+                subscription = hdhive_subscription_service.create_from_url(str(chat_id), url)
+                lines.append(f"已订阅：{subscription.title or subscription.tmdb_id}（#{subscription.id}）")
+            except Exception as exc:
+                lines.append(f"订阅失败：{str(exc)[:160]}")
+        view_text, keyboard = format_hdhive_subscription_view(
+            hdhive_subscription_service,
+            hdhive_subscription_scheduler,
+            chat_id,
+        )
+        telegram.send_message(chat_id, "\n".join(lines) + "\n\n" + view_text, reply_markup=keyboard)
         return
     if command == "/hdhive_subscriptions":
         if hdhive_subscription_service is None:

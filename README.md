@@ -147,6 +147,14 @@ Compose 挂载示例：
 
 直接发送 HDHive 剧集页面链接（格式为 `https://hdhive.com/tv/<slug>`）即可创建订阅，不会立即解锁。程序每天按配置时间检查一次新增剧集资源；默认每天 `01:30`（`Asia/Shanghai`）。每一集只选择一个最佳的 115 资源，费用未知或超过自动解锁阈值时会停在待确认状态，点击“确认解锁”后才会继续。
 
+也可以明确使用命令创建订阅：
+
+```text
+/订阅 https://hdhive.com/tv/<slug>
+```
+
+`/hdhive_subscriptions` 或 Telegram 菜单中的 `HDHive 订阅` 用于查看和管理已有订阅。
+
 ```env
 HDHIVE_SUBSCRIPTION_AUTO_ENABLED=true
 HDHIVE_SUBSCRIPTION_TIME=01:30

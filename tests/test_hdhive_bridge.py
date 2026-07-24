@@ -112,6 +112,28 @@ class HdhiveBridgeTests(unittest.TestCase):
         self.assertIn("请输入片名或 TMDB ID", telegram.messages[-1][1])
         self.assertTrue(telegram.messages[-1][1].split("本次搜索编号：", 1)[1])
 
+    def test_chinese_subscription_command_requires_a_hdhive_url(self):
+        telegram = FakeTelegram()
+        service = FakeSubscriptionService()
+
+        bridge.handle_update(
+            {
+                "message": {
+                    "chat": {"id": "464100862"},
+                    "from": {"id": "464100862"},
+                    "text": "/订阅",
+                }
+            },
+            object(),
+            telegram,
+            "464100862",
+            object(),
+            poll_status=False,
+            hdhive_subscription_service=service,
+        )
+
+        self.assertIn("用法：/订阅", telegram.messages[-1][1])
+
     def test_runtime_factory_is_disabled_without_config(self):
         config = SimpleNamespace(hdhive_enabled=False)
 
