@@ -786,6 +786,58 @@ def _apply_web_transition(
     return updated is not None
 
 
+def _apply_task_action(store: TaskStore, task: Any, action: str) -> bool:
+    """Apply the same guarded task transition used by HTML and JSON controls."""
+    if action == "emby" and _task_can_use_downstream_actions(task):
+        return _apply_web_transition(
+            store,
+            task,
+            target_stage=TaskStage.EMBY_CONFIRMED,
+            target_event_message="Web 触发 Emby 检查",
+        )
+    if action == "restore" and _task_can_use_downstream_actions(task):
+        return _apply_web_transition(
+            store,
+            task,
+            target_stage=TaskStage.EMBY_CONFIRMED,
+            target_event_message="Web STRM 恢复已入队",
+            initial_event_message="Web 触发 STRM 恢复",
+            initial_event_stage=TaskStage.EMBY_CONFIRMED,
+            metadata_patch={
+                "retry_from_stage": task.current_stage.value,
+                "retry_stage": TaskStage.EMBY_CONFIRMED.value,
+            },
+        )
+    if action == "reprocess" and _task_can_reprocess(task):
+        return _apply_web_transition(
+            store,
+            task,
+            target_stage=TaskStage.RECEIVED,
+            target_event_message="Web 触发从头重跑",
+            increment_retry=True,
+            metadata_patch={
+                "retry_from_stage": task.current_stage.value,
+                "retry_stage": TaskStage.RECEIVED.value,
+                "force_reprocess": True,
+            },
+        )
+    if action == "retry":
+        decision = decide_retry(task)
+        if _task_can_retry(task, decision):
+            target_stage = decision.stage or task.current_stage
+            if target_stage in {TaskStage.NEEDS_ACTION, TaskStage.FAILED}:
+                target_stage = TaskStage.RECEIVED
+            return _apply_web_transition(
+                store,
+                task,
+                target_stage=target_stage,
+                target_event_message="手动重试已入队",
+                initial_event_message="手动触发重试",
+                increment_retry=True,
+            )
+    return False
+
+
 def render_quality_page(store: TaskStore, quality_automation: QualityAutomation | None = None) -> str:
     issues = scan_task_quality(store)
     report = format_task_quality_report(issues)
@@ -1228,6 +1280,8 @@ class WebApp:
         if parsed.path.startswith("/api/v1/"):
             return self._handle_api(method, parsed.path, headers, body, auth_headers)
         if method == "GET" and parsed.path == "/":
+            return 302, {"Location": "/app/", **auth_headers}, b""
+        if method == "GET" and parsed.path == "/legacy":
             page = render_task_list(self.store, task_engine_enabled=self.task_engine_enabled)
             return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, page.encode("utf-8")
         if method == "GET" and parsed.path == "/quality":
@@ -1334,53 +1388,8 @@ class WebApp:
         if task_action is not None:
             task_id, action = task_action
             task = self.store.find_task(task_id)
-            if task and action == "emby" and _task_can_use_downstream_actions(task):
-                _apply_web_transition(
-                    self.store,
-                    task,
-                    target_stage=TaskStage.EMBY_CONFIRMED,
-                    target_event_message="Web 触发 Emby 检查",
-                )
-            elif task and action == "restore" and _task_can_use_downstream_actions(task):
-                _apply_web_transition(
-                    self.store,
-                    task,
-                    target_stage=TaskStage.EMBY_CONFIRMED,
-                    target_event_message="Web STRM 恢复已入队",
-                    initial_event_message="Web 触发 STRM 恢复",
-                    initial_event_stage=TaskStage.EMBY_CONFIRMED,
-                    metadata_patch={
-                        "retry_from_stage": task.current_stage.value,
-                        "retry_stage": TaskStage.EMBY_CONFIRMED.value,
-                    },
-                )
-            elif task and action == "reprocess" and _task_can_reprocess(task):
-                _apply_web_transition(
-                    self.store,
-                    task,
-                    target_stage=TaskStage.RECEIVED,
-                    target_event_message="Web 触发从头重跑",
-                    increment_retry=True,
-                    metadata_patch={
-                        "retry_from_stage": task.current_stage.value,
-                        "retry_stage": TaskStage.RECEIVED.value,
-                        "force_reprocess": True,
-                    },
-                )
-            elif task and action == "retry":
-                decision = decide_retry(task)
-                if _task_can_retry(task, decision):
-                    target_stage = decision.stage or task.current_stage
-                    if target_stage in {TaskStage.NEEDS_ACTION, TaskStage.FAILED}:
-                        target_stage = TaskStage.RECEIVED
-                    _apply_web_transition(
-                        self.store,
-                        task,
-                        target_stage=target_stage,
-                        target_event_message="手动重试已入队",
-                        initial_event_message="手动触发重试",
-                        increment_retry=True,
-                    )
+            if task:
+                _apply_task_action(self.store, task, action)
             return 303, {"Location": f"/task/{task_id}", **auth_headers}, b""
         if parsed.path.startswith("/task/"):
             return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
@@ -1420,6 +1429,116 @@ class WebApp:
         body: bytes,
         auth_headers: dict[str, str],
     ) -> tuple[int, dict[str, str], bytes]:
+        if method == "POST" and path.startswith("/api/v1/tasks/"):
+            parts = path.split("/")
+            if len(parts) == 7 and parts[5] == "actions" and parts[4].isdigit():
+                task_id = int(parts[4])
+                action = parts[6]
+                task = self.store.find_task(task_id)
+                if task is None:
+                    status, response_headers, response_body = api_response({"error": "task_not_found"}, status=404)
+                    return status, {**response_headers, **auth_headers}, response_body
+                if action not in _TASK_ACTIONS or not _apply_task_action(self.store, task, action):
+                    status, response_headers, response_body = api_response(
+                        {"error": "action_not_allowed", "action": action}, status=409
+                    )
+                    return status, {**response_headers, **auth_headers}, response_body
+                status, response_headers, response_body = api_response(api_task_detail(self.store, task_id))
+                return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path == "/api/v1/history/clear":
+            cleared = self.store.clear_finished_tasks()
+            status, response_headers, response_body = api_response({"cleared": cleared})
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path == "/api/v1/quality/fix":
+            fixed = fix_quality_issues(self.store)
+            status, response_headers, response_body = api_response({"fixed": fixed})
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path == "/api/v1/quality/run":
+            if self.quality_automation is None:
+                status, response_headers, response_body = api_response({"error": "quality_unavailable"}, status=409)
+                return status, {**response_headers, **auth_headers}, response_body
+            Thread(target=self.quality_automation.run_now, name="quality-api-run", daemon=True).start()
+            status, response_headers, response_body = api_response({"started": True}, status=202)
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path == "/api/v1/quality/settings/reset":
+            if self.quality_automation is None:
+                status, response_headers, response_body = api_response({"error": "quality_unavailable"}, status=409)
+                return status, {**response_headers, **auth_headers}, response_body
+            settings = self.quality_automation.reset_settings()
+            status, response_headers, response_body = api_response({"settings": settings})
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path == "/api/v1/quality/settings":
+            if self.quality_automation is None:
+                status, response_headers, response_body = api_response({"error": "quality_unavailable"}, status=409)
+                return status, {**response_headers, **auth_headers}, response_body
+            try:
+                values = self._api_body(body, headers)
+                settings = self.quality_automation.update_settings(
+                    enabled=str(values.get("enabled") or "").lower() in {"1", "true", "on", "yes"},
+                    run_time=str(values.get("time") or ""),
+                    timezone_name=str(values.get("timezone") or ""),
+                    max_tasks=int(values.get("max_tasks")),
+                    check_limit=int(values.get("check_limit")),
+                )
+            except (UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+                status, response_headers, response_body = api_response({"error": str(exc)}, status=400)
+                return status, {**response_headers, **auth_headers}, response_body
+            status, response_headers, response_body = api_response({"settings": settings})
+            return status, {**response_headers, **auth_headers}, response_body
+        parts = path.split("/")
+        if method == "POST" and len(parts) == 7 and parts[3] == "hdhive" and parts[4] in {"subscription", "subscriptions"} and parts[5].isdigit():
+            service = self.hdhive_service
+            if service is None:
+                status, response_headers, response_body = api_response({"error": "hdhive_unavailable"}, status=409)
+                return status, {**response_headers, **auth_headers}, response_body
+            subscription_id = int(parts[5])
+            action = parts[6]
+            if action in {"pause", "resume", "delete"}:
+                try:
+                    getattr(service, action)(subscription_id)
+                except KeyError as exc:
+                    status, response_headers, response_body = api_response({"error": str(exc)}, status=404)
+                    return status, {**response_headers, **auth_headers}, response_body
+                status, response_headers, response_body = api_response({"ok": True})
+                return status, {**response_headers, **auth_headers}, response_body
+            if action == "check":
+                Thread(target=service.check, args=(subscription_id,), name=f"hdhive-api-check-{subscription_id}", daemon=True).start()
+                status, response_headers, response_body = api_response({"started": True}, status=202)
+                return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and len(parts) == 7 and parts[3:5] == ["hdhive", "items"] and parts[5].isdigit() and parts[6] == "confirm":
+            service = self.hdhive_service
+            if service is None:
+                status, response_headers, response_body = api_response({"error": "hdhive_unavailable"}, status=409)
+                return status, {**response_headers, **auth_headers}, response_body
+            item_id = int(parts[5])
+            Thread(target=service.confirm_item, args=(item_id,), name=f"hdhive-api-confirm-{item_id}", daemon=True).start()
+            status, response_headers, response_body = api_response({"started": True}, status=202)
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path == "/api/v1/hdhive/settings":
+            scheduler = self.hdhive_scheduler
+            if scheduler is None:
+                status, response_headers, response_body = api_response({"error": "hdhive_scheduler_unavailable"}, status=409)
+                return status, {**response_headers, **auth_headers}, response_body
+            try:
+                values = self._api_body(body, headers)
+                settings = scheduler.update_settings(
+                    enabled=str(values.get("enabled") or "").lower() in {"1", "true", "on", "yes"},
+                    run_time=str(values.get("time") or ""),
+                    timezone_name=str(values.get("timezone") or ""),
+                )
+            except (UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+                status, response_headers, response_body = api_response({"error": str(exc)}, status=400)
+                return status, {**response_headers, **auth_headers}, response_body
+            status, response_headers, response_body = api_response({"settings": settings})
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path == "/api/v1/hdhive/run":
+            scheduler = self.hdhive_scheduler
+            if scheduler is None:
+                status, response_headers, response_body = api_response({"error": "hdhive_scheduler_unavailable"}, status=409)
+                return status, {**response_headers, **auth_headers}, response_body
+            Thread(target=scheduler.run_now, name="hdhive-api-run", daemon=True).start()
+            status, response_headers, response_body = api_response({"started": True}, status=202)
+            return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/overview":
             payload = {
                 "tasks": api_tasks(self.store, limit=20),
@@ -1446,11 +1565,13 @@ class WebApp:
             status, response_headers, response_body = api_response(serialize_health(self.store, enabled=self.task_engine_enabled))
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/quality":
-            status, response_headers, response_body = api_response(api_quality(self.store))
+            status, response_headers, response_body = api_response(
+                api_quality(self.store, quality_automation=self.quality_automation)
+            )
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/hdhive":
             try:
-                payload = serialize_hdhive(self.hdhive_service)
+                payload = serialize_hdhive(self.hdhive_service, self.hdhive_scheduler)
             except Exception as exc:
                 status, response_headers, response_body = api_response({"error": "hdhive_unavailable", "message": str(exc)[:160]}, status=503)
                 return status, {**response_headers, **auth_headers}, response_body

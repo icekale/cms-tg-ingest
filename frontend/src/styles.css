@@ -18,5 +18,11 @@ body { margin: 0; min-width: 320px; background: #f5f7fb; }
 .task-link { color: #2563eb; text-decoration: none; font-weight: 600; }
 .task-link:hover { text-decoration: underline; }
 .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.event-row, .subscription-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid #edf0f5; }
+.event-row:last-child, .subscription-row:last-child { border-bottom: 0; }
+.health-list { margin-top: 18px; padding-top: 14px; border-top: 1px solid #edf0f5; }
+.health-list h3 { margin: 0 0 8px; font-size: 15px; }
+.error-text { color: #c0392b; margin-bottom: 12px; }
+.detail-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: #526075; font-size: 12px; }
 @media (max-width: 860px) { .content-wrap { padding: 18px; } .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .section-grid { grid-template-columns: 1fr; } .header-note { display: none; } }
 @media (max-width: 520px) { .metric-grid { grid-template-columns: 1fr; } .top-header { padding: 0 14px; } }

@@ -1817,7 +1817,7 @@ class WebAdminTests(unittest.TestCase):
             store = TaskStore(Path(tmp) / "tasks.db")
             app = WebApp(store, web_token="", task_engine_enabled=False)
 
-            status, headers, body = app.handle_request("GET", "/", {}, b"")
+            status, headers, body = app.handle_request("GET", "/legacy", {}, b"")
             page_html = body.decode("utf-8")
 
             self.assertEqual(status, 200)

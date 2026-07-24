@@ -1,17 +1,25 @@
 <script setup>
-import { h, onMounted, ref } from 'vue'
-import { NButton, NCard, NGrid, NGridItem, NStatistic, NSpace, NTag } from 'naive-ui'
+import { onMounted, ref } from 'vue'
+import { NButton, NCard, NPopconfirm, NSpace, NTag, useMessage } from 'naive-ui'
 import { RouterLink } from 'vue-router'
 import { api } from '../api'
 
 const data = ref(null)
 const error = ref('')
+const message = useMessage()
 async function load() { try { data.value = await api.overview(); error.value = '' } catch (err) { error.value = err.message } }
+async function clearHistory() {
+  try {
+    const result = await api.clearHistory()
+    message.success(`已清理 ${result.cleared || 0} 条历史记录`)
+    await load()
+  } catch (err) { message.error(err.message) }
+}
 onMounted(load)
 </script>
 
 <template>
-  <div class="page-title"><div><h1>运行概览</h1><p>把当前队列、风险和下一步操作放在一个页面。</p></div><n-button secondary @click="load">刷新</n-button></div>
+  <div class="page-title"><div><h1>运行概览</h1><p>把当前队列、风险和下一步操作放在一个页面。</p></div><n-space><n-popconfirm @positive-click="clearHistory"><template #trigger><n-button secondary>清理历史</n-button></template>确认清理已完成历史任务？</n-popconfirm><n-button secondary @click="load">刷新</n-button></n-space></div>
   <n-card v-if="error" type="error" class="section-card">{{ error }}</n-card>
   <template v-else-if="data">
     <div class="metric-grid">

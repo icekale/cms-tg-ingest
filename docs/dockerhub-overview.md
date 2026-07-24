@@ -34,7 +34,7 @@ docker compose up -d
 docker pull icekale/cms-tg-ingest:0.2.12
 ```
 
-本地 compose 默认使用 `8787:8787`。Unraid 推荐映射 `8788:8787`，访问 `http://<unraid-ip>:8788/`；Vue 管理壳访问 `/app/`。镜像支持 `linux/amd64` 和 `linux/arm64`。
+本地 compose 默认使用 `8787:8787`。Unraid 推荐映射 `8788:8787`，访问 `http://<unraid-ip>:8788/` 会默认进入 Vue 管理台（实际页面为 `/app/`）；旧版概览保留在 `/legacy`。镜像支持 `linux/amd64` 和 `linux/arm64`。
 
 ## Telegram 使用
 

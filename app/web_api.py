@@ -106,9 +106,9 @@ def serialize_health(store: TaskStore, *, enabled: bool = True, now: float | Non
     }
 
 
-def serialize_hdhive(service: Any | None) -> dict[str, Any]:
+def serialize_hdhive(service: Any | None, scheduler: Any | None = None) -> dict[str, Any]:
     if service is None:
-        return {"enabled": False, "subscriptions": []}
+        return {"enabled": False, "subscriptions": [], "account": None, "schedule": {}}
     subscriptions = []
     for subscription in service.list():
         item_rows = []
@@ -118,7 +118,29 @@ def serialize_hdhive(service: Any | None) -> dict[str, Any]:
         row = asdict(subscription) if is_dataclass(subscription) else {"id": subscription.id}
         row["items"] = item_rows
         subscriptions.append(row)
-    return {"enabled": True, "subscriptions": subscriptions}
+    account = None
+    account_getter = getattr(getattr(service, "proxy", None), "account", None)
+    if callable(account_getter):
+        try:
+            value = account_getter()
+            account = {
+                "nickname": str(getattr(value, "nickname", "")),
+                "points": int(getattr(value, "points", 0)),
+                "weekly_free_quota_remaining": int(getattr(value, "weekly_free_quota_remaining", 0)),
+                "weekly_free_quota_unlimited": bool(getattr(value, "weekly_free_quota_unlimited", False)),
+                "level": str(getattr(value, "level", "")),
+                "is_blocked": bool(getattr(value, "is_blocked", False)),
+                "is_forever_vip": bool(getattr(value, "is_forever_vip", False)),
+            }
+        except Exception as exc:
+            account = {"error": str(exc)[:160]}
+    schedule = {}
+    if scheduler is not None:
+        try:
+            schedule = dict(scheduler.status_snapshot())
+        except Exception as exc:
+            schedule = {"error": str(exc)[:160]}
+    return {"enabled": True, "subscriptions": subscriptions, "account": account, "schedule": schedule}
 
 
 def api_response(payload: Any, *, status: int = 200) -> tuple[int, dict[str, str], bytes]:
@@ -140,12 +162,15 @@ def api_task_detail(store: TaskStore, task_id: int, *, now: float | None = None)
     return result
 
 
-def api_quality(store: TaskStore, *, limit: int = 100) -> dict[str, Any]:
+def api_quality(store: TaskStore, *, limit: int = 100, quality_automation: Any | None = None) -> dict[str, Any]:
     issues = scan_task_quality(store, limit=max(1, min(int(limit), 500)))
-    return {
+    payload = {
         "count": len(issues),
         "items": [
             {"task_id": issue.task_id, "title": issue.title, "code": issue.code, "message": issue.message, "detail": issue.detail}
             for issue in issues
         ],
     }
+    if quality_automation is not None:
+        payload["automation"] = quality_automation.status_snapshot()
+    return payload
