@@ -48,7 +48,37 @@ class FakeSubscriptionProxy:
 
     def unlock(self, slugs):
         self.unlock_calls.append(list(slugs))
-        return list(self.unlock_items)
+        return [item for item in self.unlock_items if item.slug in slugs]
+
+
+class FakeTmdbResolver:
+    enabled = True
+
+    def __init__(self, details=None, error=None):
+        self.details = details if details is not None else {"ok": False}
+        self.error = error
+        self.calls = []
+
+    def lookup(self, tmdb_id, media_type, share_name):
+        self.calls.append((str(tmdb_id), media_type, share_name))
+        if self.error is not None:
+            raise self.error
+        return dict(self.details)
+
+
+class FakeEmby:
+    enabled = True
+
+    def __init__(self, existing=None, error=None):
+        self.existing = set(existing or ())
+        self.error = error
+        self.calls = []
+
+    def existing_episode_keys_by_tmdb(self, tmdb_id):
+        self.calls.append(str(tmdb_id))
+        if self.error is not None:
+            raise self.error
+        return set(self.existing)
 
 
 class HdhiveSubscriptionUrlTests(unittest.TestCase):
@@ -96,7 +126,7 @@ class HdhiveSubscriptionUrlTests(unittest.TestCase):
 
 
 class HdhiveSubscriptionServiceTests(unittest.TestCase):
-    def make_service(self, resources, unlock_items=None):
+    def make_service(self, resources, unlock_items=None, *, tmdb_resolver=None, emby=None):
         directory = tempfile.TemporaryDirectory()
         store = HdhiveSubscriptionStore(Path(directory.name) / "tasks.db")
         subscription = store.create_subscription("464100862", "tmdb_tv", "255358", "剧集", "255358")
@@ -107,6 +137,8 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
             store=store,
             enqueue_links=lambda urls, chat_id: intake_calls.append((list(urls), str(chat_id))),
             auto_unlock_max_points=20,
+            tmdb_resolver=tmdb_resolver,
+            emby=emby,
         )
         return directory, store, subscription, proxy, service, intake_calls
 
@@ -192,6 +224,199 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(current.status, "enqueued")
         self.assertEqual(proxy.unlock_calls, [["stale"]])
         self.assertEqual(intake_calls, [(["https://115cdn.com/s/stale?password=abcd"], "464100862")])
+
+    def test_smart_check_skips_emby_existing_episode_across_multiple_seasons(self):
+        tmdb = FakeTmdbResolver({"ok": True, "status": "Returning Series", "seasons": []})
+        emby = FakeEmby({"S01E01"})
+        unlock_items = [
+            HdhiveUnlockItem("s2e1", True, "https://115cdn.com/s/s2e1?password=abcd", "", "", False)
+        ]
+        directory, store, subscription, proxy, service, intake_calls = self.make_service(
+            [
+                resource("s1e1", episode_key="s1e1"),
+                resource("s2e1", episode_key="s2e1"),
+            ],
+            unlock_items,
+            tmdb_resolver=tmdb,
+            emby=emby,
+        )
+        try:
+            result = service.check(subscription.id)
+            items = {item.normalized_episode_key: item for item in store.list_items(subscription.id)}
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(result.enqueued, 1)
+        self.assertEqual(items["S01E01"].status, "emby_exists")
+        self.assertEqual(items["S02E01"].status, "enqueued")
+        self.assertEqual(emby.calls, ["255358"])
+        self.assertEqual(intake_calls, [(["https://115cdn.com/s/s2e1?password=abcd"], "464100862")])
+
+    def test_smart_check_applies_filter_and_skips_special_season_by_default(self):
+        unlock_items = [
+            HdhiveUnlockItem("s1e2", True, "https://115cdn.com/s/s1e2?password=abcd", "", "", False)
+        ]
+        directory, store, subscription, proxy, service, _intake_calls = self.make_service(
+            [
+                resource("s0e1", episode_key="s0e1"),
+                resource("s1e1", episode_key="s1e1"),
+                resource("s1e2", episode_key="s1e2"),
+            ],
+            unlock_items,
+        )
+        try:
+            store.update_episode_filter(subscription.id, "S01E02-S01E03")
+            result = service.check(subscription.id)
+            items = {item.normalized_episode_key: item for item in store.list_items(subscription.id)}
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.summary["filtered"], 2)
+        self.assertEqual(items["S00E01"].status, "filtered")
+        self.assertEqual(items["S01E01"].status, "filtered")
+        self.assertNotIn(["s0e1"], proxy.unlock_calls)
+
+    def test_ended_series_becomes_completed_after_expected_episodes_are_terminal(self):
+        tmdb = FakeTmdbResolver(
+            {
+                "ok": True,
+                "status": "Ended",
+                "seasons": [{"season_number": 1, "episode_count": 2}],
+            }
+        )
+        emby = FakeEmby({"S01E01"})
+        unlock_items = [
+            HdhiveUnlockItem("s1e2", True, "https://115cdn.com/s/s1e2?password=abcd", "", "", False)
+        ]
+        directory, store, subscription, _proxy, service, _intake_calls = self.make_service(
+            [resource("s1e1", episode_key="s1e1"), resource("s1e2", episode_key="s1e2")],
+            unlock_items,
+            tmdb_resolver=tmdb,
+            emby=emby,
+        )
+        try:
+            result = service.check(subscription.id)
+            current = store.get_subscription(subscription.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.subscription_status, "completed")
+        self.assertEqual(current.status, "completed")
+        self.assertEqual(result.summary["expected"], 2)
+        self.assertEqual(result.summary["tmdb_status"], "Ended")
+
+    def test_emby_failure_continues_without_skipping_and_reports_reason(self):
+        emby = FakeEmby(error=RuntimeError("Emby unavailable"))
+        unlock_items = [
+            HdhiveUnlockItem("s1e1", True, "https://115cdn.com/s/s1e1?password=abcd", "", "", False)
+        ]
+        directory, _store, subscription, _proxy, service, _intake_calls = self.make_service(
+            [resource("s1e1", episode_key="s1e1")],
+            unlock_items,
+            emby=emby,
+        )
+        try:
+            result = service.check(subscription.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.enqueued, 1)
+        self.assertTrue(result.summary["emby_skip_unavailable"])
+        self.assertEqual(result.subscription_status, "active")
+
+    def test_unknown_tmdb_result_never_marks_subscription_completed(self):
+        tmdb = FakeTmdbResolver({"ok": False, "status": ""})
+        unlock_items = [
+            HdhiveUnlockItem("s1e1", True, "https://115cdn.com/s/s1e1?password=abcd", "", "", False)
+        ]
+        directory, store, subscription, _proxy, service, _intake_calls = self.make_service(
+            [resource("s1e1", episode_key="s1e1")],
+            unlock_items,
+            tmdb_resolver=tmdb,
+        )
+        try:
+            result = service.check(subscription.id)
+            current = store.get_subscription(subscription.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.subscription_status, "active")
+        self.assertEqual(current.status, "active")
+        self.assertEqual(result.summary["expected"], 0)
+        self.assertEqual(len(tmdb.calls), 1)
+
+    def test_high_cost_confirmation_blocks_completion(self):
+        tmdb = FakeTmdbResolver(
+            {
+                "ok": True,
+                "status": "Canceled",
+                "seasons": [{"season_number": 1, "episode_count": 1}],
+            }
+        )
+        directory, _store, subscription, _proxy, service, _intake_calls = self.make_service(
+            [resource("expensive", episode_key="s1e1", points=21)],
+            tmdb_resolver=tmdb,
+        )
+        try:
+            result = service.check(subscription.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.pending_confirmation, 1)
+        self.assertGreaterEqual(result.summary["blocked"], 1)
+        self.assertEqual(result.subscription_status, "active")
+
+    def test_unparsed_resource_blocks_completion_and_is_never_unlocked(self):
+        tmdb = FakeTmdbResolver(
+            {
+                "ok": True,
+                "status": "Ended",
+                "seasons": [{"season_number": 1, "episode_count": 1}],
+            }
+        )
+        unlock_items = [
+            HdhiveUnlockItem("s1e1", True, "https://115cdn.com/s/s1e1?password=abcd", "", "", False),
+            HdhiveUnlockItem("unknown", True, "https://115cdn.com/s/unknown?password=abcd", "", "", False),
+        ]
+        directory, store, subscription, proxy, service, _intake_calls = self.make_service(
+            [resource("s1e1", episode_key="s1e1"), resource("unknown", episode_key="")],
+            unlock_items,
+            tmdb_resolver=tmdb,
+        )
+        try:
+            result = service.check(subscription.id)
+            items = {item.resource_slug: item for item in store.list_items(subscription.id)}
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.summary["unparsed"], 1)
+        self.assertEqual(items["unknown"].status, "unparsed")
+        self.assertNotIn(["unknown"], proxy.unlock_calls)
+        self.assertEqual(result.subscription_status, "active")
+
+    def test_filter_change_resets_filtered_item_for_later_unlock(self):
+        unlock_items = [
+            HdhiveUnlockItem("s1e1", True, "https://115cdn.com/s/s1e1?password=abcd", "", "", False),
+            HdhiveUnlockItem("s1e2", True, "https://115cdn.com/s/s1e2?password=abcd", "", "", False),
+        ]
+        directory, store, subscription, proxy, service, _intake_calls = self.make_service(
+            [resource("s1e1", episode_key="s1e1"), resource("s1e2", episode_key="s1e2")],
+            unlock_items,
+        )
+        try:
+            store.update_episode_filter(subscription.id, "S01E02")
+            first = service.check(subscription.id)
+            store.update_episode_filter(subscription.id, "")
+            second = service.check(subscription.id)
+            item = next(item for item in store.list_items(subscription.id) if item.resource_slug == "s1e1")
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(first.summary["filtered"], 1)
+        self.assertEqual(second.enqueued, 1)
+        self.assertEqual(item.status, "enqueued")
+        self.assertEqual(proxy.unlock_calls, [["s1e2"], ["s1e1"]])
 
 
 class HdhiveSubscriptionSchedulerTests(unittest.TestCase):
