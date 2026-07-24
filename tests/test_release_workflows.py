@@ -32,7 +32,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("GHCR", readme)
         self.assertIn("DOCKERHUB_USERNAME", readme)
         self.assertIn("DOCKERHUB_TOKEN", readme)
-        self.assertIn("git tag v0.2.17", readme)
+        self.assertIn("git tag v0.2.18", readme)
 
 
 if __name__ == "__main__":

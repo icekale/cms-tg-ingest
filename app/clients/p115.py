@@ -5,6 +5,7 @@ import logging
 import re
 import threading
 import time
+from copy import deepcopy
 from typing import Any
 
 from app.clients.http import FormHttp, load_cookie_value
@@ -335,16 +336,19 @@ class P115WebClient:
         http: Any | None = None,
         timeout: int = 60,
         min_interval_seconds: float = 0.0,
+        cache_ttl_seconds: float = 3.0,
         clock: Any | None = None,
         sleeper: Any | None = None,
     ):
         self.cookie = load_cookie_value(cookie)
         self.http = http or FormHttp(timeout)
         self.min_interval_seconds = max(0.0, float(min_interval_seconds or 0.0))
+        self.cache_ttl_seconds = max(0.0, float(cache_ttl_seconds or 0.0))
         self.clock = clock or time.monotonic
         self.sleeper = sleeper or time.sleep
         self._last_request_at: float | None = None
         self._request_lock = threading.Lock()
+        self._get_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self.request_count = 0
         if not self.cookie:
             raise RuntimeError("115 cookie is empty")
@@ -376,12 +380,37 @@ class P115WebClient:
         headers: dict[str, str] | None = None,
     ) -> dict:
         with self._request_lock:
+            method = str(method or "GET").upper()
+            cache_key = None
+            if method == "GET" and self.cache_ttl_seconds > 0:
+                cache_key = json.dumps(
+                    {
+                        "url": str(url),
+                        "params": params or {},
+                        "headers": headers or {},
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                )
+                cached = self._get_cache.get(cache_key)
+                if cached is not None:
+                    expires_at, response = cached
+                    if float(self.clock()) < expires_at:
+                        return deepcopy(response)
+                    self._get_cache.pop(cache_key, None)
+            else:
+                # Any mutating request can invalidate a previously cached listing or share snapshot.
+                self._get_cache.clear()
             self._rate_limit()
             self.request_count += 1
             request_headers = self._headers()
             if headers:
                 request_headers.update(headers)
-            return self.http.request(url, method=method, data=data, params=params, headers=request_headers)
+            response = self.http.request(url, method=method, data=data, params=params, headers=request_headers)
+            if cache_key and isinstance(response, dict) and response.get("state") is not False:
+                self._get_cache[cache_key] = (float(self.clock()) + self.cache_ttl_seconds, deepcopy(response))
+            return response
 
     @staticmethod
     def _ensure_state(resp: dict, fallback: str) -> dict:

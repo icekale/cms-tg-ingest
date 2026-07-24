@@ -274,8 +274,8 @@ class TaskRunner:
                 "_lock_waiting": False,
                 "_lock_owner_task_id": "",
             }
-            self.store.record_event(
-                task.id,
+            self._record_claimed_event(
+                task,
                 TaskStage.NEEDS_ACTION,
                 TaskStatus.NEEDS_ACTION,
                 message,
@@ -296,8 +296,8 @@ class TaskRunner:
                     task.current_stage,
                     p115_metadata["p115_stage_request_count"],
                 )
-            self.store.record_event(
-                task.id,
+            self._record_claimed_event(
+                task,
                 task.current_stage,
                 TaskStatus.FAILED,
                 str(exc) or exc.__class__.__name__,
@@ -318,8 +318,8 @@ class TaskRunner:
         if task.current_stage not in _GLOBAL_115_LOCK_STAGES or now >= self._p115_risk_cooldown_until:
             return False
         message = "115 风控冷却中，暂停 115/CMS 阶段自动执行"
-        self.store.record_event(
-            task.id,
+        self._record_claimed_event(
+            task,
             task.current_stage,
             TaskStatus.RUNNING,
             message,
@@ -335,6 +335,35 @@ class TaskRunner:
             clear_claim=True,
         )
         return True
+
+    def _record_claimed_event(
+        self,
+        task: TaskSnapshot,
+        stage: TaskStage,
+        status: TaskStatus,
+        message: str,
+        **kwargs,
+    ) -> TaskSnapshot | None:
+        recorded = self.store.record_event(
+            task.id,
+            stage,
+            status,
+            message,
+            expected_stage=task.current_stage,
+            expected_status=TaskStatus.RUNNING,
+            expected_claimed_by=self.worker_id,
+            expected_claimed_at=task.claimed_at,
+            expected_updated_at=task.updated_at,
+            **kwargs,
+        )
+        if recorded is None:
+            LOG.warning(
+                "Discarded stale task result task_id=%s stage=%s worker_id=%s",
+                task.id,
+                task.current_stage.value,
+                self.worker_id,
+            )
+        return recorded
 
     def _clear_startup_claims_once(self) -> None:
         if self._startup_claims_cleared:
@@ -376,19 +405,6 @@ class TaskRunner:
         p115_before: int | None = None,
         p115_after: int | None = None,
     ) -> None:
-        current = self.store.find_task(task.id)
-        if (
-            current is None
-            or current.current_stage != task.current_stage
-            or current.claimed_by != self.worker_id
-        ):
-            LOG.warning(
-                "Discarded stale task result task_id=%s stage=%s worker_id=%s",
-                task.id,
-                task.current_stage.value,
-                self.worker_id,
-            )
-            return
         now = self.now()
         timing_metadata = _stage_timing_metadata(task, now)
         p115_metadata = _p115_request_metadata(task, p115_before, p115_after)
@@ -406,8 +422,8 @@ class TaskRunner:
                 p115_metadata["p115_stage_request_count"],
             )
         if result.outcome == StageOutcome.COMPLETE:
-            self.store.record_event(
-                task.id,
+            committed = self._record_claimed_event(
+                task,
                 task.current_stage,
                 TaskStatus.SUCCEEDED,
                 result.message,
@@ -415,6 +431,8 @@ class TaskRunner:
                 metadata_delete_keys=_DEFER_METADATA_KEYS,
                 clear_claim=True,
             )
+            if committed is None:
+                return
             next_stage = next_stage_after_success(
                 task.current_stage,
                 effective_task_strm_mode(task),
@@ -448,8 +466,8 @@ class TaskRunner:
                         "_lock_owner_task_id": "",
                     }
                 )
-                self.store.record_event(
-                    task.id,
+                self._record_claimed_event(
+                    task,
                     TaskStage.NEEDS_ACTION,
                     TaskStatus.NEEDS_ACTION,
                     "CMS 整理等待超时，请人工检查分享内容或稍后重试",
@@ -471,8 +489,8 @@ class TaskRunner:
                         "_lock_owner_task_id": "",
                     }
                 )
-                self.store.record_event(
-                    task.id,
+                self._record_claimed_event(
+                    task,
                     TaskStage.NEEDS_ACTION,
                     TaskStatus.NEEDS_ACTION,
                     error_summary,
@@ -483,8 +501,8 @@ class TaskRunner:
                     clear_claim=True,
                 )
                 return
-            self.store.record_event(
-                task.id,
+            self._record_claimed_event(
+                task,
                 task.current_stage,
                 TaskStatus.RUNNING,
                 result.message,
@@ -494,8 +512,8 @@ class TaskRunner:
             )
             return
         if result.outcome == StageOutcome.NEEDS_ACTION:
-            self.store.record_event(
-                task.id,
+            self._record_claimed_event(
+                task,
                 task.current_stage,
                 TaskStatus.NEEDS_ACTION,
                 result.message,
@@ -507,8 +525,8 @@ class TaskRunner:
                 clear_claim=True,
             )
             return
-        self.store.record_event(
-            task.id,
+        self._record_claimed_event(
+            task,
             task.current_stage,
             TaskStatus.FAILED,
             result.message,

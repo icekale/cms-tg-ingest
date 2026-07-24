@@ -174,6 +174,44 @@ class CmsPlaybackProbeTests(unittest.TestCase):
         self.assertEqual(sleeps, [2.0])
         self.assertEqual(client.request_count, 2)
 
+    def test_identical_get_requests_use_short_cache_without_extra_115_call(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, method, params))
+                return {"state": True, "data": []}
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3, cache_ttl_seconds=5)
+
+        client.search_files("same")
+        client.search_files("same")
+
+        self.assertEqual(len(http.calls), 1)
+        self.assertEqual(client.request_count, 1)
+
+    def test_post_request_invalidates_short_get_cache(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, method, data, params))
+                if method == "POST":
+                    return {"state": True}
+                return {"state": True, "data": []}
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3, cache_ttl_seconds=5)
+
+        client.search_files("same")
+        client.rename_file("fid-1", "renamed")
+        client.search_files("same")
+
+        self.assertEqual([call[1] for call in http.calls], ["GET", "POST", "GET"])
+
     def test_create_long_share_keeps_share_and_sets_permanent_duration(self):
         class FakeHttp:
             def __init__(self):

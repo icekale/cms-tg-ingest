@@ -886,14 +886,33 @@ class TaskStore:
         metadata_delete_keys: tuple[str, ...] | None = None,
         next_run_at: float | None = None,
         clear_claim: bool = False,
-    ) -> TaskSnapshot:
+        expected_stage: TaskStage | None = None,
+        expected_status: TaskStatus | None = None,
+        expected_claimed_by: str | None = None,
+        expected_claimed_at: float | None = None,
+        expected_updated_at: float | None = None,
+    ) -> TaskSnapshot | None:
         now = time.time()
         with self._lock, self._connection() as conn:
             # Acquire the write lock before reading metadata so concurrent patches do not lose updates.
             conn.execute("BEGIN IMMEDIATE")
-            current = conn.execute("SELECT metadata_json FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            current = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if current is None:
+                if any(value is not None for value in (expected_stage, expected_status, expected_claimed_by, expected_claimed_at, expected_updated_at)):
+                    return None
+                raise KeyError(f"task not found: {task_id}")
+            if expected_stage is not None and current["current_stage"] != expected_stage.value:
+                return None
+            if expected_status is not None and current["status"] != expected_status.value:
+                return None
+            if expected_claimed_by is not None and str(current["claimed_by"] or "") != str(expected_claimed_by):
+                return None
+            if expected_claimed_at is not None and float(current["claimed_at"] or 0) != float(expected_claimed_at):
+                return None
+            if expected_updated_at is not None and float(current["updated_at"] or 0) != float(expected_updated_at):
+                return None
             merged_metadata = self._merge_metadata(
-                current["metadata_json"] if current else "{}",
+                current["metadata_json"],
                 metadata_patch,
                 metadata_delete_keys,
             )
@@ -956,7 +975,7 @@ class TaskStore:
             values.append(task_id)
             conn.execute(f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?", values)
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        return self._snapshot(row)
+        return self._snapshot(row) if row else None
 
     def compare_and_set_transition(
         self,

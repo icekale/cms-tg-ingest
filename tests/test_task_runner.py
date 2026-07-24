@@ -501,6 +501,38 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.claimed_by, "")
             self.assertEqual(updated.metadata["force_reprocess"], True)
 
+    def test_run_once_does_not_overwrite_state_changed_during_result_commit(self):
+        class RaceStore(TaskStore):
+            def __init__(self, db_path):
+                super().__init__(db_path)
+                self.raced = False
+
+            def record_event(self, task_id, stage, status, message, **kwargs):
+                if kwargs.get("expected_claimed_by") and not self.raced:
+                    self.raced = True
+                    self.reprocess_task(task_id, message="用户从头重跑", next_run_at=0)
+                return super().record_event(task_id, stage, status, message, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = RaceStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            runner = TaskRunner(
+                store,
+                FakeWorkflow([StageResult.complete("不应覆盖重跑状态")]),
+                worker_id="worker-1",
+                now=lambda: 1.0,
+            )
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(updated.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.next_run_at, 0)
+            self.assertEqual(updated.claimed_by, "")
+            self.assertEqual(store.list_events(task.id)[-1]["message"], "用户从头重跑")
+
     def test_repeated_defer_uses_backoff_without_growing_event_log(self):
         current_time = 1.0
 
