@@ -238,7 +238,7 @@ class TmdbApiResolver:
         title = str(data.get("title") or data.get("name") or data.get("original_title") or data.get("original_name") or "")
         language = str(data.get("original_language") or "")
         category = infer_region_category(media_type, title, language, countries, genres)
-        return {
+        result = {
             "ok": True,
             "title": title,
             "type": media_type,
@@ -252,6 +252,49 @@ class TmdbApiResolver:
             "category": category,
             "source": "tmdb_api",
         }
+        if media_type == "tv":
+            result.update(
+                {
+                    "status": str(data.get("status") or ""),
+                    "number_of_seasons": _normalized_int(data.get("number_of_seasons")),
+                    "number_of_episodes": _normalized_int(data.get("number_of_episodes")),
+                    "seasons": _normalize_tv_seasons(data.get("seasons")),
+                }
+            )
+        return result
+
+
+def _normalized_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    return number
+
+
+def _normalize_tv_seasons(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    seasons = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        season_number = _normalized_int(item.get("season_number"))
+        episode_count = _normalized_int(item.get("episode_count"))
+        if season_number is None or episode_count is None or season_number < 0 or episode_count < 0:
+            continue
+        seasons.append(
+            {
+                "season_number": season_number,
+                "episode_count": episode_count,
+                "air_date": str(item.get("air_date") or ""),
+            }
+        )
+    return seasons
 
 
 def extract_tmdb_search_query(share_name: str) -> str:
