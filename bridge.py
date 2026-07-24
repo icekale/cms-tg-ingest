@@ -360,6 +360,8 @@ def maybe_start_web_server(
     task_store: TaskStore,
     submission_store: Any | None = None,
     quality_automation: QualityAutomation | None = None,
+    hdhive_service: HdhiveSubscriptionService | None = None,
+    hdhive_scheduler: HdhiveSubscriptionScheduler | None = None,
     starter=start_web_server,
 ):
     if not config.web_enabled:
@@ -372,6 +374,10 @@ def maybe_start_web_server(
         kwargs["submission_store"] = submission_store
     if quality_automation is not None:
         kwargs["quality_automation"] = quality_automation
+    if hdhive_service is not None:
+        kwargs["hdhive_service"] = hdhive_service
+    if hdhive_scheduler is not None:
+        kwargs["hdhive_scheduler"] = hdhive_scheduler
     server = starter(task_store, config.web_host, config.web_port, **kwargs)
     LOG.info("v0.2 web admin started host=%s port=%s", config.web_host, config.web_port)
     return server
@@ -382,6 +388,8 @@ def call_maybe_start_web_server(
     task_store: TaskStore,
     submission_store: Any | None = None,
     quality_automation: QualityAutomation | None = None,
+    hdhive_service: HdhiveSubscriptionService | None = None,
+    hdhive_scheduler: HdhiveSubscriptionScheduler | None = None,
 ):
     try:
         parameters = inspect.signature(maybe_start_web_server).parameters
@@ -393,12 +401,20 @@ def call_maybe_start_web_server(
     supports_quality_automation = "quality_automation" in parameters or any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     )
-    if supports_submission_store or supports_quality_automation:
+    supports_hdhive_service = "hdhive_service" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    supports_hdhive_scheduler = "hdhive_scheduler" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler:
         return maybe_start_web_server(
             config,
             task_store,
             submission_store=submission_store if supports_submission_store else None,
             quality_automation=quality_automation if supports_quality_automation else None,
+            hdhive_service=hdhive_service if supports_hdhive_service else None,
+            hdhive_scheduler=hdhive_scheduler if supports_hdhive_scheduler else None,
         )
     return maybe_start_web_server(config, task_store)
 
@@ -3295,6 +3311,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
     quality_thread = None
     hdhive_subscription_service = None
     hdhive_subscription_scheduler = None
+    web_server = None
     probe_stop_events: list[threading.Event] = []
     probe_threads: list[threading.Thread] = []
     probe_holder: dict[str, Any] = {"stop_event": None, "thread": None}
@@ -3375,12 +3392,6 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
             config.tg_allowed_chat_id,
             stop_event,
         )
-    web_server = call_maybe_start_web_server(
-        config,
-        task_store,
-        submission_store=store,
-        quality_automation=quality_automation,
-    )
     offset = None
     LOG.info("cms-tg-ingest started db_path=%s", config.db_path)
     try:
@@ -3457,6 +3468,15 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
             getattr(config, "hdhive_subscription_time", "01:30"),
             getattr(config, "hdhive_subscription_timezone", "Asia/Shanghai"),
         )
+
+    web_server = call_maybe_start_web_server(
+        config,
+        task_store,
+        submission_store=store,
+        quality_automation=quality_automation,
+        hdhive_service=hdhive_subscription_service,
+        hdhive_scheduler=hdhive_subscription_scheduler,
+    )
 
     try:
         while not stop_event.is_set():

@@ -29,6 +29,7 @@ _NAV_ITEMS = (
     ("overview", "/", "运行概览"),
     ("quality", "/quality", "质量巡检"),
     ("health", "/health", "本地健康"),
+    ("hdhive", "/hdhive", "HDHive 订阅"),
 )
 
 _TASK_PHASES = (
@@ -1010,6 +1011,136 @@ def render_health_page(store: TaskStore, *, task_engine_enabled: bool = True) ->
 """
     return _page("本地健康", body, active="health")
 
+
+def _hdhive_time_label(value: float) -> str:
+    if not value:
+        return "从未检查"
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(value))
+
+
+def _hdhive_account_markup(service: Any | None) -> str:
+    if service is None:
+        return '<div class="empty-state">HDHive 功能未启用。</div>'
+    account_getter = getattr(getattr(service, "proxy", None), "account", None)
+    if not callable(account_getter):
+        return '<div class="empty-state">未配置 HDHive 授权。</div>'
+    try:
+        account = account_getter()
+    except Exception as exc:
+        return f'<div class="health-status is-warning"><div><strong>HDHive 授权不可用</strong><p>{html.escape(str(exc)[:180])}</p></div></div>'
+    quota = "无限制" if getattr(account, "weekly_free_quota_unlimited", False) else str(getattr(account, "weekly_free_quota_remaining", 0))
+    values = (
+        ("账号", getattr(account, "nickname", "-")),
+        ("等级", getattr(account, "level", "-")),
+        ("积分", getattr(account, "points", "-")),
+        ("本周免费次数", quota),
+    )
+    return '<div class="status-strip"><div class="status-summary"><span class="badge status-succeeded">已授权</span><span>HDHive 账号可用</span></div></div><div class="summary-grid">' + "".join(
+        f'<div class="summary-item"><div class="summary-label">{html.escape(label)}</div><div class="summary-value">{html.escape(str(value))}</div></div>'
+        for label, value in values
+    ) + "</div>"
+
+
+def render_hdhive_page(
+    service: Any | None = None,
+    scheduler: Any | None = None,
+) -> str:
+    subscriptions = []
+    if service is not None:
+        try:
+            subscriptions = service.list()
+        except Exception as exc:
+            subscriptions = []
+            subscription_error = f'<div class="health-status is-warning"><div><strong>订阅读取失败</strong><p>{html.escape(str(exc)[:180])}</p></div></div>'
+        else:
+            subscription_error = ""
+    else:
+        subscription_error = ""
+
+    snapshot = scheduler.status_snapshot() if scheduler is not None else {}
+    schedule_markup = (
+        f'<div class="summary-grid">'
+        f'<div class="summary-item"><div class="summary-label">自动检查</div><div class="summary-value">{"已启用" if snapshot.get("enabled") else "已停用"}</div></div>'
+        f'<div class="summary-item"><div class="summary-label">执行时间</div><div class="summary-value">{html.escape(str(snapshot.get("time") or "-"))} · {html.escape(str(snapshot.get("timezone") or "-"))}</div></div>'
+        f'<div class="summary-item"><div class="summary-label">下次检查</div><div class="summary-value">{html.escape(str(snapshot.get("next_run_at") or "-"))}</div></div>'
+        f'<div class="summary-item"><div class="summary-label">最近状态</div><div class="summary-value">{html.escape(str(snapshot.get("status") or "idle"))}</div></div>'
+        f'</div>'
+        if scheduler is not None
+        else '<div class="empty-state">未配置自动检查。</div>'
+    )
+
+    rows = []
+    pending_rows = []
+    for subscription in subscriptions:
+        title = str(subscription.title or subscription.tmdb_id or subscription.source_value)
+        status_label = {"active": "运行中", "paused": "已暂停", "error": "异常"}.get(subscription.status, subscription.status)
+        status_class = {"active": "status-succeeded", "paused": "status-pending", "error": "status-failed"}.get(subscription.status, "status-pending")
+        source = subscription.source_url or f"TMDB:{subscription.tmdb_id}"
+        items = service.store.list_items(subscription.id) if service is not None else []
+        item_counts = {
+            "discovered": len(items),
+            "enqueued": sum(item.status == "enqueued" for item in items),
+            "pending_confirmation": sum(item.status == "pending_confirmation" for item in items),
+            "failed": sum(item.status == "failed" for item in items),
+        }
+        actions = []
+        if subscription.status == "active":
+            actions.append(f'<form method="post" action="/hdhive/subscriptions/{subscription.id}/pause"><button class="button-secondary" type="submit">暂停</button></form>')
+        else:
+            actions.append(f'<form method="post" action="/hdhive/subscriptions/{subscription.id}/resume"><button class="button-secondary" type="submit">恢复</button></form>')
+        actions.extend(
+            (
+                f'<form method="post" action="/hdhive/subscriptions/{subscription.id}/check"><button class="button-primary" type="submit">立即检查</button></form>',
+                f'<form method="post" action="/hdhive/subscriptions/{subscription.id}/delete" onsubmit="return confirm(\'确认删除此订阅？\')"><button class="button-danger" type="submit">删除</button></form>',
+            )
+        )
+        rows.append(
+            f'''<article class="task-row">
+  <div>
+    <div class="task-title">#{subscription.id} {html.escape(title)}</div>
+    <div class="task-meta"><span class="badge {status_class}">{html.escape(status_label)}</span><span>{html.escape(source)}</span><span>TMDB：{html.escape(subscription.tmdb_id)}</span><span>最近检查：{html.escape(_hdhive_time_label(subscription.last_checked_at))}</span></div>
+    <div class="task-meta"><span>发现 {item_counts["discovered"]}</span><span>已解锁/入队 {item_counts["enqueued"]}</span><span>待确认 {item_counts["pending_confirmation"]}</span><span>失败 {item_counts["failed"]}</span></div>
+    {f'<div class="task-message error">{html.escape(subscription.last_error)}</div>' if subscription.last_error else ''}
+  </div>
+  <div class="actions">{"".join(actions)}</div>
+</article>'''
+        )
+        if service is not None:
+            for item in items:
+                if item.status == "pending_confirmation":
+                    pending_rows.append(
+                        f'''<tr><td>{html.escape(title)}</td><td>{html.escape(item.episode_key)}</td><td>{html.escape(item.title or item.resource_slug)}</td><td>{html.escape(str(item.unlock_points if item.unlock_points is not None else "未知"))}</td><td><form method="post" action="/hdhive/item/{item.id}/confirm"><button class="button-primary" type="submit">确认解锁</button></form></td></tr>'''
+                    )
+
+    subscriptions_markup = "".join(rows) or '<div class="empty-state">暂无 HDHive 剧集订阅。可在 Telegram 发送 HDHive 的剧集页面链接创建订阅。</div>'
+    pending_markup = (
+        '<div class="table-wrap"><table><thead><tr><th>剧集</th><th>集数</th><th>资源</th><th>积分</th><th>操作</th></tr></thead><tbody>'
+        + "".join(pending_rows)
+        + "</tbody></table></div>"
+        if pending_rows
+        else '<div class="empty-state">暂无待确认资源。</div>'
+    )
+    settings_markup = ""
+    if scheduler is not None:
+        settings_markup = f'''<form method="post" action="/hdhive/settings" class="actions">
+  <label>启用 <input type="checkbox" name="enabled" value="true" {'checked' if snapshot.get("enabled") else ''}></label>
+  <label>时间 <input name="time" value="{html.escape(str(snapshot.get("time") or "01:30"))}" size="5"></label>
+  <label>时区 <input name="timezone" value="{html.escape(str(snapshot.get("timezone") or "Asia/Shanghai"))}" size="18"></label>
+  <button class="button-primary" type="submit">保存设置</button>
+</form>
+<div class="actions"><form method="post" action="/hdhive/run"><button class="button-secondary" type="submit">立即检查全部订阅</button></form></div>'''
+    body = f'''
+<div class="topbar">
+  <div><p class="eyebrow">HDHive 自动追剧</p><h1>HDHive 订阅</h1><p class="subtle">只处理剧集的 115 资源，按有效性、分辨率和费用选择最佳资源。</p></div>
+  <a class="button" href="/">返回运行概览</a>
+</div>
+<section class="panel"><div class="panel-header"><h2>账号状态</h2></div>{_hdhive_account_markup(service)}</section>
+<section class="panel"><div class="panel-header"><h2>自动检查</h2></div>{schedule_markup}{settings_markup}</section>
+<section class="panel"><div class="panel-header"><h2>当前订阅</h2></div>{subscription_error}{subscriptions_markup}</section>
+<section class="panel"><div class="panel-header"><h2>待确认资源</h2><span class="subtle">费用超过自动解锁阈值时需要确认</span></div>{pending_markup}</section>
+'''
+    return _page("HDHive 订阅", body, active="hdhive")
+
 class WebApp:
     def __init__(
         self,
@@ -1018,12 +1149,16 @@ class WebApp:
         submission_store: Any | None = None,
         task_engine_enabled: bool = True,
         quality_automation: QualityAutomation | None = None,
+        hdhive_service: Any | None = None,
+        hdhive_scheduler: Any | None = None,
     ):
         self.store = store
         self.web_token = web_token
         self.submission_store = submission_store
         self.task_engine_enabled = task_engine_enabled
         self.quality_automation = quality_automation
+        self.hdhive_service = hdhive_service
+        self.hdhive_scheduler = hdhive_scheduler
 
     def _authorization_source(self, path: str, headers: dict[str, str]) -> str:
         if not self.web_token:
@@ -1098,6 +1233,65 @@ class WebApp:
         if method == "GET" and parsed.path == "/health":
             page = render_health_page(self.store, task_engine_enabled=self.task_engine_enabled)
             return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, page.encode("utf-8")
+        if method == "GET" and parsed.path == "/hdhive":
+            page = render_hdhive_page(self.hdhive_service, self.hdhive_scheduler)
+            status = 200 if self.hdhive_service is not None else 409
+            return status, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, page.encode("utf-8")
+        if method == "POST" and parsed.path == "/hdhive/settings":
+            scheduler = self.hdhive_scheduler
+            if scheduler is None:
+                return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"HDHive scheduler unavailable"
+            try:
+                values = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+                scheduler.update_settings(
+                    enabled=values.get("enabled", [""])[0].lower() in {"1", "true", "on", "yes"},
+                    run_time=values.get("time", [""])[0],
+                    timezone_name=values.get("timezone", [""])[0],
+                )
+            except (UnicodeDecodeError, ValueError, TypeError) as exc:
+                return 400, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, str(exc).encode("utf-8")
+            return 303, {"Location": "/hdhive", **auth_headers}, b""
+        if method == "POST" and parsed.path == "/hdhive/run":
+            scheduler = self.hdhive_scheduler
+            if scheduler is None:
+                return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"HDHive scheduler unavailable"
+            Thread(target=scheduler.run_now, name="hdhive-manual-run", daemon=True).start()
+            return 303, {"Location": "/hdhive", **auth_headers}, b""
+        if method == "POST":
+            hdhive_parts = [part for part in parsed.path.split("/") if part]
+            service = self.hdhive_service
+            if len(hdhive_parts) == 4 and hdhive_parts[0] == "hdhive" and hdhive_parts[1] in {"subscription", "subscriptions"} and hdhive_parts[2].isdigit():
+                if service is None:
+                    return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"HDHive service unavailable"
+                subscription_id = int(hdhive_parts[2])
+                action = hdhive_parts[3]
+                if action in {"pause", "resume", "delete"}:
+                    try:
+                        getattr(service, action)(subscription_id)
+                    except KeyError as exc:
+                        return 404, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, str(exc).encode("utf-8")
+                    return 303, {"Location": "/hdhive", **auth_headers}, b""
+                if action == "check":
+                    def check_subscription() -> None:
+                        try:
+                            service.check(subscription_id)
+                        except Exception:
+                            return
+
+                    Thread(target=check_subscription, name=f"hdhive-check-{subscription_id}", daemon=True).start()
+                    return 303, {"Location": "/hdhive", **auth_headers}, b""
+            if len(hdhive_parts) == 4 and hdhive_parts[:2] == ["hdhive", "item"] and hdhive_parts[2].isdigit() and hdhive_parts[3] == "confirm":
+                if service is None:
+                    return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"HDHive service unavailable"
+                item_id = int(hdhive_parts[2])
+                def confirm_item() -> None:
+                    try:
+                        service.confirm_item(item_id)
+                    except Exception:
+                        return
+
+                Thread(target=confirm_item, name=f"hdhive-confirm-{item_id}", daemon=True).start()
+                return 303, {"Location": "/hdhive", **auth_headers}, b""
         if method == "POST" and parsed.path == "/history/clear":
             self.store.clear_finished_tasks()
             return 303, {"Location": "/", **auth_headers}, b""
@@ -1171,6 +1365,8 @@ def start_web_server(
     submission_store: Any | None = None,
     task_engine_enabled: bool = True,
     quality_automation: QualityAutomation | None = None,
+    hdhive_service: Any | None = None,
+    hdhive_scheduler: Any | None = None,
 ) -> ThreadingHTTPServer:
     app = WebApp(
         store,
@@ -1178,6 +1374,8 @@ def start_web_server(
         submission_store=submission_store,
         task_engine_enabled=task_engine_enabled,
         quality_automation=quality_automation,
+        hdhive_service=hdhive_service,
+        hdhive_scheduler=hdhive_scheduler,
     )
 
     class Handler(BaseHTTPRequestHandler):
