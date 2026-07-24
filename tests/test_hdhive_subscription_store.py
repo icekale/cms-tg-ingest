@@ -1,3 +1,5 @@
+import json
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -7,6 +9,138 @@ from app.hdhive_subscription_store import HdhiveSubscriptionStore
 
 
 class HdhiveSubscriptionStoreTests(unittest.TestCase):
+    def test_pre_feature_database_migrates_without_losing_existing_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.db"
+            with sqlite3.connect(path) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE hdhive_subscriptions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        chat_id TEXT NOT NULL,
+                        source_type TEXT NOT NULL,
+                        source_value TEXT NOT NULL,
+                        source_url TEXT NOT NULL DEFAULT '',
+                        title TEXT NOT NULL DEFAULT '',
+                        tmdb_id TEXT NOT NULL,
+                        media_type TEXT NOT NULL DEFAULT 'tv',
+                        pan_type TEXT NOT NULL DEFAULT '115',
+                        status TEXT NOT NULL DEFAULT 'active',
+                        last_checked_at REAL NOT NULL DEFAULT 0,
+                        last_error TEXT NOT NULL DEFAULT '',
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        UNIQUE(chat_id, source_type, source_value)
+                    );
+                    CREATE TABLE hdhive_subscription_items (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        subscription_id INTEGER NOT NULL,
+                        episode_key TEXT NOT NULL,
+                        resource_slug TEXT NOT NULL,
+                        title TEXT NOT NULL DEFAULT '',
+                        validate_status TEXT NOT NULL DEFAULT '',
+                        resolution_score INTEGER NOT NULL DEFAULT 0,
+                        unlock_points INTEGER,
+                        status TEXT NOT NULL DEFAULT 'discovered',
+                        task_id INTEGER,
+                        last_error TEXT NOT NULL DEFAULT '',
+                        unlock_points_spent INTEGER,
+                        unlock_points_source TEXT NOT NULL DEFAULT '',
+                        unlocked_at REAL,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        UNIQUE(subscription_id, episode_key, resource_slug),
+                        FOREIGN KEY(subscription_id) REFERENCES hdhive_subscriptions(id)
+                    );
+                    INSERT INTO hdhive_subscriptions
+                        (chat_id, source_type, source_value, title, tmdb_id, created_at, updated_at)
+                    VALUES ('chat', 'hdhive_tv', 'legacy', '旧订阅', '1416', 1, 1);
+                    INSERT INTO hdhive_subscription_items
+                        (subscription_id, episode_key, resource_slug, title, validate_status,
+                         resolution_score, unlock_points, task_id, unlock_points_spent,
+                         unlock_points_source, unlocked_at, created_at, updated_at)
+                    VALUES (1, 's01e01', 'legacy-resource', '旧资源', 'valid', 1080, 3,
+                            NULL, 2, 'legacy', 100, 1, 1);
+                    """
+                )
+
+            store = HdhiveSubscriptionStore(path)
+            subscription = store.get_subscription(1)
+            item = store.get_item(1)
+
+            self.assertEqual(subscription.title, "旧订阅")
+            self.assertEqual(subscription.episode_filter, "")
+            self.assertEqual(subscription.last_summary_json, "{}")
+            self.assertEqual(item.title, "旧资源")
+            self.assertEqual(item.unlock_points_spent, 2)
+            self.assertEqual(item.unlock_points_source, "legacy")
+            self.assertEqual(item.unlocked_at, 100)
+            self.assertEqual(item.normalized_episode_key, "")
+            self.assertEqual(item.skip_reason, "")
+
+            claimed = store.claim_item_unlocking(item.id, now=200)
+            self.assertEqual(claimed.status, "unlocking")
+            self.assertEqual(claimed.unlock_points_spent, 2)
+            self.assertEqual(claimed.unlock_points_source, "legacy")
+            self.assertEqual(claimed.unlocked_at, 100)
+
+    def test_filter_summary_skip_state_and_completed_status_persist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tasks.db"
+            store = HdhiveSubscriptionStore(path)
+            subscription = store.create_subscription("1", "tmdb_tv", "1416", "剧集", "1416")
+
+            updated = store.update_episode_filter(subscription.id, "S01E01-S01E03")
+            store.record_check(subscription.id, summary={"emby_exists": 2, "title": "剧集"})
+            saved = store.get_subscription(subscription.id)
+
+            self.assertEqual(updated.episode_filter, "S01E01-S01E03")
+            self.assertEqual(saved.episode_filter, "S01E01-S01E03")
+            self.assertEqual(json.loads(saved.last_summary_json), {"emby_exists": 2, "title": "剧集"})
+            self.assertNotIn(": ", saved.last_summary_json)
+
+            item = store.upsert_item(
+                subscription.id,
+                "S01E02",
+                "resource",
+                "valid",
+                1080,
+                8,
+                normalized_episode_key="S01E02",
+            )
+            self.assertEqual(item.normalized_episode_key, "S01E02")
+            skipped = store.mark_item_skipped(item.id, "emby_exists", "Emby 已存在")
+            self.assertEqual(skipped.status, "emby_exists")
+            self.assertEqual(skipped.skip_reason, "Emby 已存在")
+
+            unchanged = store.reset_item_for_check(item.id, "filtered")
+            self.assertEqual(unchanged.status, "emby_exists")
+            reset = store.reset_item_for_check(item.id, "emby_exists")
+            self.assertEqual(reset.status, "discovered")
+            self.assertEqual(reset.skip_reason, "")
+
+            self.assertEqual(store.set_status(subscription.id, "completed").status, "completed")
+            reopened = HdhiveSubscriptionStore(path)
+            self.assertEqual(reopened.get_subscription(subscription.id).status, "completed")
+
+    def test_skip_statuses_are_restricted_and_each_can_be_reset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = HdhiveSubscriptionStore(Path(directory) / "tasks.db")
+            subscription = store.create_subscription("1", "tmdb_tv", "1416", "剧集", "1416")
+
+            for index, status in enumerate(("filtered", "emby_exists", "unparsed")):
+                item = store.upsert_item(subscription.id, f"S01E0{index + 1}", f"resource-{index}", "valid", 1080, None)
+                skipped = store.mark_item_skipped(item.id, status, f"reason-{index}")
+                self.assertEqual(skipped.status, status)
+                self.assertEqual(store.reset_item_for_check(item.id, status).status, "discovered")
+
+            item = store.upsert_item(subscription.id, "S01E04", "resource", "valid", 1080, None)
+            with self.assertRaises(ValueError):
+                store.mark_item_skipped(item.id, "failed", "not a skip status")
+
+            with self.assertRaises(ValueError):
+                store.reset_item_for_check(item.id, "failed")
+
     def test_same_chat_and_source_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             store = HdhiveSubscriptionStore(Path(directory) / "tasks.db")
