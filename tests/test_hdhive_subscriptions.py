@@ -81,7 +81,8 @@ class FakeTmdbResolver:
 class FakeEmby:
     enabled = True
 
-    def __init__(self, existing=None, error=None):
+    def __init__(self, existing=None, error=None, *, enabled=True):
+        self.enabled = enabled
         self.existing = set(existing or ())
         self.error = error
         self.calls = []
@@ -362,6 +363,57 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(result.enqueued, 1)
         self.assertTrue(result.summary["emby_skip_unavailable"])
         self.assertEqual(result.subscription_status, "active")
+
+    def test_unconfigured_emby_reports_skip_unavailable(self):
+        unlock_items = [
+            HdhiveUnlockItem("s1e1", True, "https://115cdn.com/s/s1e1?password=abcd", "", "", False)
+        ]
+        directory, _store, subscription, _proxy, service, _intake_calls = self.make_service(
+            [resource("s1e1", episode_key="s1e1")],
+            unlock_items,
+        )
+        try:
+            result = service.check(subscription.id)
+        finally:
+            directory.cleanup()
+
+        self.assertTrue(result.summary["emby_skip_unavailable"])
+
+    def test_disabled_emby_reports_skip_unavailable(self):
+        emby = FakeEmby(enabled=False)
+        unlock_items = [
+            HdhiveUnlockItem("s1e1", True, "https://115cdn.com/s/s1e1?password=abcd", "", "", False)
+        ]
+        directory, _store, subscription, _proxy, service, _intake_calls = self.make_service(
+            [resource("s1e1", episode_key="s1e1")],
+            unlock_items,
+            emby=emby,
+        )
+        try:
+            result = service.check(subscription.id)
+        finally:
+            directory.cleanup()
+
+        self.assertTrue(result.summary["emby_skip_unavailable"])
+        self.assertEqual(emby.calls, [])
+
+    def test_empty_emby_episode_result_reports_skip_unavailable(self):
+        emby = FakeEmby()
+        unlock_items = [
+            HdhiveUnlockItem("s1e1", True, "https://115cdn.com/s/s1e1?password=abcd", "", "", False)
+        ]
+        directory, _store, subscription, _proxy, service, _intake_calls = self.make_service(
+            [resource("s1e1", episode_key="s1e1")],
+            unlock_items,
+            emby=emby,
+        )
+        try:
+            result = service.check(subscription.id)
+        finally:
+            directory.cleanup()
+
+        self.assertTrue(result.summary["emby_skip_unavailable"])
+        self.assertEqual(emby.calls, ["255358"])
 
     def test_unknown_tmdb_result_never_marks_subscription_completed(self):
         tmdb = FakeTmdbResolver({"ok": False, "status": ""})
