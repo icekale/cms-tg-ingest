@@ -23,7 +23,7 @@ from app.media.strm import (
 from app.models import TaskSnapshot, TaskStage
 from app.strm_mode import effective_task_strm_mode
 from app.task_runner import StageResult
-from app.workflows.self_share import emby_parent_label, match_emby_item
+from app.workflows.self_share import BridgeSelfShareTaskWorkflow, emby_parent_label, match_emby_item
 
 
 _CMS_FAILURE_MARKERS = ("failed", "error", "失败", "timeout", "超时", "cancel")
@@ -477,7 +477,7 @@ class DirectTaskWorkflow:
         )
 
 
-class ModeRoutingWorkflow:
+class ModeRoutingWorkflow(BridgeSelfShareTaskWorkflow):
     def __init__(self, direct: DirectTaskWorkflow, shared: Any | None, default_mode: str = "shared"):
         self.direct = direct
         self.shared = shared
@@ -490,3 +490,10 @@ class ModeRoutingWorkflow:
         if self.shared is None:
             return StageResult.failed("共享 STRM 工作流需要 P115", error_type="p115_required")
         return self.shared.run_stage(task)
+
+    def __getattr__(self, name: str) -> Any:
+        # Keep integrations that inspect the historical shared workflow surface working.
+        for workflow in (self.shared, self.direct):
+            if workflow is not None and hasattr(workflow, name):
+                return getattr(workflow, name)
+        raise AttributeError(name)
