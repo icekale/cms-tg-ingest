@@ -139,6 +139,16 @@ class HdhiveProxyClientTests(unittest.TestCase):
             self.assertEqual(http.calls[0][2], {"slug": "slug-1", "access_token": "access-1"})
             self.assertEqual(http.calls[1][2], {"slugs": ["slug-1", "slug-2"], "access_token": "access-1"})
 
+    def test_unlock_reads_actual_points_spent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            http = FakeHttp([
+                {"success": True, "code": "200", "data": {"slug": "slug-1", "full_url": "https://115cdn.com/s/a", "points_spent": 6}},
+            ])
+            client = HdhiveProxyClient("https://proxy.test", self.token_file(directory), http=http)
+            result = client.unlock(["slug-1"])
+
+        self.assertEqual(result[0].points_spent, 6)
+
     def test_expired_access_token_delegates_refresh_to_cms_and_retries(self):
         with tempfile.TemporaryDirectory() as directory:
             path = self.token_file(directory, access_token="expired")

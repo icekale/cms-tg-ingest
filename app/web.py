@@ -1079,6 +1079,7 @@ def render_hdhive_page(
 
     rows = []
     pending_rows = []
+    unlocked_rows = []
     for subscription in subscriptions:
         title = str(subscription.title or subscription.tmdb_id or subscription.source_value)
         status_label = {"active": "运行中", "paused": "已暂停", "error": "异常"}.get(subscription.status, subscription.status)
@@ -1115,6 +1116,12 @@ def render_hdhive_page(
         )
         if service is not None:
             for item in items:
+                if item.status == "enqueued":
+                    points = item.unlock_points_spent if item.unlock_points_spent is not None else item.unlock_points
+                    source_label = {"actual": "实际", "estimated": "估算"}.get(item.unlock_points_source, "")
+                    unlocked_rows.append(
+                        f'<tr><td>{html.escape(title)}</td><td>{html.escape(item.episode_key)}</td><td>{html.escape(item.title or item.resource_slug)}</td><td>{html.escape(str(points) if points is not None else "未知")} {html.escape(source_label)}</td><td>{html.escape(_hdhive_time_label(item.unlocked_at or 0))}</td><td>{html.escape(str(item.task_id or "-"))}</td></tr>'
+                    )
                 if item.status == "pending_confirmation":
                     pending_rows.append(
                         f'''<tr><td>{html.escape(title)}</td><td>{html.escape(item.episode_key)}</td><td>{html.escape(item.title or item.resource_slug)}</td><td>{html.escape(str(item.unlock_points if item.unlock_points is not None else "未知"))}</td><td><form method="post" action="/hdhive/item/{item.id}/confirm"><button class="button-primary" type="submit">确认解锁</button></form></td></tr>'''
@@ -1127,6 +1134,13 @@ def render_hdhive_page(
         + "</tbody></table></div>"
         if pending_rows
         else '<div class="empty-state">暂无待确认资源。</div>'
+    )
+    unlocked_markup = (
+        '<div class="table-wrap"><table><thead><tr><th>剧集</th><th>集数</th><th>资源</th><th>积分</th><th>解锁时间</th><th>任务号</th></tr></thead><tbody>'
+        + "".join(unlocked_rows)
+        + "</tbody></table></div>"
+        if unlocked_rows
+        else '<div class="empty-state">暂无解锁记录。</div>'
     )
     settings_markup = ""
     if scheduler is not None:
@@ -1146,6 +1160,7 @@ def render_hdhive_page(
 <section class="panel"><div class="panel-header"><h2>自动检查</h2></div>{schedule_markup}{settings_markup}</section>
 <section class="panel"><div class="panel-header"><h2>当前订阅</h2></div>{subscription_error}{subscriptions_markup}</section>
 <section class="panel"><div class="panel-header"><h2>待确认资源</h2><span class="subtle">费用超过自动解锁阈值时需要确认</span></div>{pending_markup}</section>
+<section class="panel"><div class="panel-header"><h2>解锁记录</h2><span class="subtle">显示实际/估算积分、解锁时间和关联任务号</span></div>{unlocked_markup}</section>
 '''
     return _page("HDHive 订阅", body, active="hdhive")
 

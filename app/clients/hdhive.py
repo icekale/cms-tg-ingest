@@ -98,6 +98,7 @@ class HdhiveUnlockItem:
     message: str
     error_code: str
     already_owned: bool
+    points_spent: int | None = None
 
 
 class HdhiveProxyError(RuntimeError):
@@ -293,6 +294,7 @@ class HdhiveProxyClient:
             message=_as_text(item.get("message") or item.get("msg")),
             error_code=_as_text(item.get("error_code") or item.get("code")),
             already_owned=bool(item.get("already_owned")),
+            points_spent=_as_int(item.get("points_spent") or item.get("spent_points") or item.get("unlock_cost") or item.get("cost")),
         )
 
     def healthcheck(self) -> bool:

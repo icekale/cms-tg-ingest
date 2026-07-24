@@ -128,6 +128,7 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         try:
             result = service.check(subscription.id)
             repeated = service.check(subscription.id)
+            item = _store.list_items(subscription.id)[0]
         finally:
             directory.cleanup()
 
@@ -135,6 +136,9 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(repeated.enqueued, 0)
         self.assertEqual(proxy.unlock_calls, [["best"]])
         self.assertEqual(intake_calls, [(["https://115cdn.com/s/new?password=abcd"], "464100862")])
+        self.assertEqual(item.unlock_points_spent, 20)
+        self.assertEqual(item.unlock_points_source, "estimated")
+        self.assertGreater(item.unlocked_at or 0, 0)
 
     def test_high_cost_resource_waits_for_confirmation(self):
         directory, store, subscription, proxy, service, intake_calls = self.make_service([resource("high", points=21)])

@@ -260,7 +260,22 @@ class HdhiveSubscriptionService:
                     failed += 1
                     continue
                 intake_result = self.enqueue_links([result.full_url], subscription.chat_id)
-                self.store.mark_item_enqueued(selected_item.id, _task_id_from_intake_result(intake_result))
+                if result.points_spent is not None:
+                    unlock_points_spent = result.points_spent
+                    unlock_points_source = "actual"
+                elif result.already_owned:
+                    unlock_points_spent = 0
+                    unlock_points_source = "actual"
+                else:
+                    unlock_points_spent = selected.unlock_points
+                    unlock_points_source = "estimated" if unlock_points_spent is not None else "unknown"
+                self.store.mark_item_enqueued(
+                    selected_item.id,
+                    _task_id_from_intake_result(intake_result),
+                    unlock_points_spent=unlock_points_spent,
+                    unlock_points_source=unlock_points_source,
+                    unlocked_at=time.time(),
+                )
                 enqueued += 1
             except Exception as exc:
                 self.store.mark_item_failed(selected_item.id, str(exc))
