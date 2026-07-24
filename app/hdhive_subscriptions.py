@@ -5,7 +5,7 @@ import logging
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.clients.hdhive import HdhiveResource, HdhiveUnlockItem
 from app.hdhive_subscription_store import HdhiveSubscription, HdhiveSubscriptionItem, HdhiveSubscriptionStore
+from app.series_rules import completion_state, is_special_episode, parse_episode_filter, parse_episode_key
 
 
 LOG = logging.getLogger("cms-tg-ingest")
@@ -76,6 +77,8 @@ class SubscriptionCheckResult:
     failed: int = 0
     skipped: int = 0
     error: str = ""
+    summary: dict[str, Any] = field(default_factory=dict)
+    subscription_status: str = "active"
 
 
 @dataclass(frozen=True)
@@ -148,12 +151,16 @@ class HdhiveSubscriptionService:
         enqueue_links: Callable[[list[str], str], Any],
         auto_unlock_max_points: int = 20,
         on_item_enqueued: Callable[[HdhiveSubscription, HdhiveSubscriptionItem], None] | None = None,
+        tmdb_resolver: Any | None = None,
+        emby: Any | None = None,
     ):
         self.proxy = proxy
         self.store = store
         self.enqueue_links = enqueue_links
         self.auto_unlock_max_points = max(0, int(auto_unlock_max_points))
         self.on_item_enqueued = on_item_enqueued
+        self.tmdb_resolver = tmdb_resolver
+        self.emby = emby
 
     def create_from_url(self, chat_id: str, url: str) -> HdhiveSubscription:
         page = self.proxy.resolve_tv_page(url)
@@ -200,27 +207,117 @@ class HdhiveSubscriptionService:
             self.store.record_check(subscription.id, str(exc))
             raise
 
+        episode_filter = parse_episode_filter(subscription.episode_filter)
         grouped: dict[str, list[HdhiveResource]] = {}
+        parsed_by_resource: dict[int, Any | None] = {}
+        resource_item_ids: dict[int, int] = {}
+        existing_items = self.store.list_items(subscription.id)
         discovered = 0
         for resource in resources:
             if str(resource.pan_type or "").strip().lower() != "115":
                 continue
-            key = episode_key(resource)
+            raw_key = episode_key(resource)
+            parsed_key = parse_episode_key(raw_key)
+            key = parsed_key.normalized if parsed_key is not None else str(raw_key or resource.slug)
             grouped.setdefault(key, []).append(resource)
-            self.store.upsert_item(
+            parsed_by_resource[id(resource)] = parsed_key
+            previous = next(
+                (
+                    item
+                    for item in existing_items
+                    if item.resource_slug == resource.slug
+                    and self._stored_episode_key(item) == parsed_key
+                ),
+                None,
+            )
+            item = self.store.upsert_item(
                 subscription.id,
-                key,
+                previous.episode_key if previous is not None else key,
                 resource.slug,
                 resource.validate_status,
                 resolution_score(resource),
                 resource.unlock_points,
                 resource.title,
+                normalized_episode_key=parsed_key.normalized if parsed_key is not None else "",
             )
+            resource_item_ids[id(resource)] = item.id
             discovered += 1
 
         enqueued = pending = failed = skipped = 0
+        filtered_groups: set[str] = set()
+        emby_groups: set[str] = set()
+        unparsed_groups: set[str] = set()
+
+        def group_items(key: str) -> list[HdhiveSubscriptionItem]:
+            items: list[HdhiveSubscriptionItem] = []
+            for candidate in grouped[key]:
+                item_id = resource_item_ids.get(id(candidate))
+                if item_id is None:
+                    continue
+                item = self.store.get_item(item_id)
+                if item is not None:
+                    items.append(item)
+            return items
+
         for key, candidates in grouped.items():
-            stored_items = {item.resource_slug: item for item in self.store.list_items(subscription.id) if item.episode_key == key}
+            parsed = parsed_by_resource.get(id(candidates[0]))
+            items = group_items(key)
+            if parsed is None:
+                unparsed_groups.add(key)
+                for item in items:
+                    if item.status != "enqueued":
+                        self.store.mark_item_skipped(item.id, "unparsed", "无法识别季集编号")
+                continue
+            if not episode_filter.matches(parsed):
+                filtered_groups.add(key)
+                reason = "不在订阅集数过滤范围内"
+                if is_special_episode(parsed) and not subscription.episode_filter.strip():
+                    reason = "特殊集默认跳过"
+                for item in items:
+                    if item.status != "enqueued":
+                        self.store.mark_item_skipped(item.id, "filtered", reason)
+                continue
+            for item in items:
+                if item.status == "filtered":
+                    self.store.reset_item_for_check(item.id, "filtered")
+
+        emby_keys: set[str] = set()
+        emby_skip_unavailable = False
+        if self._dependency_enabled(self.emby):
+            try:
+                raw_emby_keys = self.emby.existing_episode_keys_by_tmdb(subscription.tmdb_id)
+                for value in raw_emby_keys or ():
+                    parsed = parse_episode_key(str(value))
+                    if parsed is not None:
+                        emby_keys.add(parsed.normalized)
+            except Exception:
+                emby_skip_unavailable = True
+                LOG.warning("HDHive Emby episode lookup unavailable subscription_id=%s", subscription.id, exc_info=True)
+
+        for key, candidates in grouped.items():
+            parsed = parsed_by_resource.get(id(candidates[0]))
+            if parsed is None or not episode_filter.matches(parsed):
+                continue
+            items = group_items(key)
+            if key in emby_keys:
+                emby_groups.add(key)
+                for item in items:
+                    if item.status not in {"enqueued", "emby_exists"}:
+                        self.store.mark_item_skipped(item.id, "emby_exists", "Emby 中已存在该集")
+            else:
+                for item in items:
+                    if item.status == "emby_exists":
+                        self.store.reset_item_for_check(item.id, "emby_exists")
+
+        for key, candidates in grouped.items():
+            parsed = parsed_by_resource.get(id(candidates[0]))
+            stored_items = {item.resource_slug: item for item in group_items(key)}
+            if parsed is None or not episode_filter.matches(parsed):
+                skipped += 1
+                continue
+            if key in emby_keys:
+                skipped += 1
+                continue
             if any(item.status == "enqueued" for item in stored_items.values()):
                 skipped += 1
                 continue
@@ -294,14 +391,103 @@ class HdhiveSubscriptionService:
                 self.store.mark_item_failed(selected_item.id, str(exc))
                 failed += 1
 
-        self.store.record_check(subscription.id, "")
+        tmdb_details: dict[str, Any] = {}
+        tmdb_status = ""
+        tmdb_lookup_failed = False
+        if self._dependency_enabled(self.tmdb_resolver):
+            try:
+                details = self.tmdb_resolver.lookup(subscription.tmdb_id, "tv", subscription.title)
+                if isinstance(details, dict):
+                    tmdb_details = details
+                    tmdb_status = str(details.get("status") or "")
+            except Exception:
+                tmdb_lookup_failed = True
+                LOG.warning("HDHive TMDB lookup unavailable subscription_id=%s", subscription.id, exc_info=True)
+
+        expected = self._expected_episode_keys(tmdb_details, episode_filter)
+        terminal: set[Any] = set()
+        blocked: set[Any] = set()
+        unparsed_count = 0
+        for item in self.store.list_items(subscription.id):
+            item_key = self._stored_episode_key(item)
+            if item_key is None:
+                if item.status == "unparsed":
+                    unparsed_count += 1
+                continue
+            if item.status in {"enqueued", "emby_exists", "filtered"}:
+                terminal.add(item_key)
+            if item.status in {"pending_confirmation", "failed", "unlocking", "unparsed"}:
+                blocked.add(item_key)
+        blocked.update(expected - terminal)
+        completion = completion_state(tmdb_status, expected, terminal, blocked)
+        if unparsed_count or emby_skip_unavailable or tmdb_lookup_failed:
+            completion = "active"
+
+        subscription_status = subscription.status
+        if completion == "completed":
+            subscription_status = self.store.set_status(subscription.id, "completed").status
+        elif subscription.status == "active":
+            subscription_status = "active"
+        summary: dict[str, Any] = {
+            "discovered": discovered,
+            "enqueued": enqueued,
+            "pending_confirmation": pending,
+            "failed": failed,
+            "emby_exists": len(emby_groups),
+            "filtered": len(filtered_groups),
+            "unparsed": len(unparsed_groups),
+            "blocked": len(blocked) + unparsed_count,
+            "expected": len(expected),
+            "tmdb_status": tmdb_status,
+            "emby_skip_unavailable": emby_skip_unavailable,
+        }
+        self.store.record_check(subscription.id, "", summary=summary)
         return SubscriptionCheckResult(
             discovered=discovered,
             enqueued=enqueued,
             pending_confirmation=pending,
             failed=failed,
             skipped=skipped,
+            summary=summary,
+            subscription_status=subscription_status,
         )
+
+    @staticmethod
+    def _dependency_enabled(dependency: Any | None) -> bool:
+        return dependency is not None and bool(getattr(dependency, "enabled", True))
+
+    @staticmethod
+    def _stored_episode_key(item: HdhiveSubscriptionItem):
+        value = item.normalized_episode_key or item.episode_key
+        return parse_episode_key(value)
+
+    @staticmethod
+    def _expected_episode_keys(details: dict[str, Any], episode_filter: Any) -> set[Any]:
+        if not details or details.get("ok") is False:
+            return set()
+        expected: set[Any] = set()
+        seasons = details.get("seasons")
+        if not isinstance(seasons, list):
+            return expected
+        for season in seasons:
+            if not isinstance(season, dict):
+                continue
+            season_number = season.get("season_number")
+            episode_count = season.get("episode_count")
+            if isinstance(season_number, bool) or isinstance(episode_count, bool):
+                continue
+            try:
+                season_number = int(season_number)
+                episode_count = int(episode_count)
+            except (TypeError, ValueError):
+                continue
+            if season_number < 0 or episode_count <= 0:
+                continue
+            for number in range(1, episode_count + 1):
+                parsed = parse_episode_key(f"S{season_number}E{number}")
+                if parsed is not None and episode_filter.matches(parsed):
+                    expected.add(parsed)
+        return expected
 
     def _unlock_one(self, resource: HdhiveResource) -> HdhiveUnlockItem:
         results = self.proxy.unlock([resource.slug])
