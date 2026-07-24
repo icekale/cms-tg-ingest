@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import bridge
 from app.config import Config
 from app.models import TaskStage, TaskStatus, next_stage_after_success
 from app.strm_mode import (
@@ -107,6 +108,17 @@ class ConfigStrmModeTests(unittest.TestCase):
         self.assertEqual(config.strm_default_mode, "shared")
         self.assertEqual(config.workflow_mode, "direct")
 
+    def test_create_task_store_uses_config_strm_default_mode_without_runtime_state(self):
+        env = {**self.REQUIRED, "STRM_DEFAULT_MODE": "direct"}
+        with tempfile.TemporaryDirectory() as tmp:
+            env["TASK_DB_PATH"] = str(Path(tmp) / "tasks.db")
+            with patch.dict(os.environ, env, clear=True):
+                config = Config.from_env()
+                store = bridge.create_task_store(config)
+                task = store.upsert_task("config-direct", "", "https://115cdn.com/s/config-direct")
+
+        self.assertEqual(task.metadata["strm_mode"], "direct")
+
     def test_config_keeps_old_positional_field_order(self):
         config = Config(
             "token",
@@ -179,6 +191,24 @@ class TaskBridgeStrmModeTests(unittest.TestCase):
 
             self.assertEqual(task.metadata["strm_mode"], "direct")
             self.assertEqual(store.find_task(task.id).metadata["strm_mode"], "direct")
+
+    def test_record_submission_event_maps_legacy_direct_workflow_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = record_submission_event(
+                store,
+                {
+                    "share_code": "legacy-direct",
+                    "receive_code": "",
+                    "url": "https://115cdn.com/s/legacy-direct",
+                    "workflow_mode": "direct",
+                },
+                TaskStage.RECEIVED,
+                TaskStatus.PENDING,
+                "received",
+            )
+
+            self.assertEqual(task.metadata["strm_mode"], "direct")
 
     def test_bridge_blank_strm_mode_uses_task_store_direct_default(self):
         with tempfile.TemporaryDirectory() as tmp:

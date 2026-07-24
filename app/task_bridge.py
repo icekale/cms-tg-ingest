@@ -15,6 +15,11 @@ def _optional_strm_mode(value: Any) -> str | None:
     return normalized or None
 
 
+def _legacy_strm_mode(value: Any) -> str | None:
+    normalized = str(value).strip().lower() if value is not None else ""
+    return {"self_share_sync": "shared", "direct": "direct"}.get(normalized)
+
+
 def _row_key(row: dict[str, Any]) -> tuple[str, str, str]:
     share_code = _text(row.get("share_code"))
     receive_code = _text(row.get("receive_code"))
@@ -118,10 +123,11 @@ def record_submission_event(
     share_code, receive_code, url = _row_key(row)
     if not share_code:
         return None
-    strm_mode = metadata.get("strm_mode")
+    strm_mode = _optional_strm_mode(metadata.get("strm_mode"))
     if strm_mode is None:
-        strm_mode = row.get("strm_mode")
-    strm_mode = _optional_strm_mode(strm_mode)
+        strm_mode = _optional_strm_mode(row.get("strm_mode"))
+    if strm_mode is None:
+        strm_mode = _legacy_strm_mode(row.get("workflow_mode"))
     task = task_store.upsert_task(share_code, receive_code, url, strm_mode=strm_mode)
     error_summary = _text(metadata.get("error_summary"))
     if _last_event_matches(task_store, task.id, stage, status, message, error_summary):

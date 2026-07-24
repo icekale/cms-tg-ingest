@@ -318,7 +318,7 @@ def normalize_share_link(url: str) -> ShareKey:
 
 
 def create_task_store(config: Config) -> TaskStore:
-    return TaskStore(config.task_db_path)
+    return TaskStore(config.task_db_path, default_strm_mode=getattr(config, "strm_default_mode", "shared"))
 
 
 def create_hdhive_workflow(config: Config, cms: CmsClient) -> HdhiveWorkflow | None:

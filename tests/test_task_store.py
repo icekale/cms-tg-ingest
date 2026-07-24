@@ -11,6 +11,17 @@ from app.task_store import TaskStore
 
 
 class TaskStoreTests(unittest.TestCase):
+    def test_constructor_default_strm_mode_is_used_until_runtime_state_is_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db", default_strm_mode="direct")
+            first = store.upsert_task("constructor-direct", "", "https://115cdn.com/s/constructor-direct")
+
+            store.set_runtime_state("strm_default_mode", "shared")
+            second = store.upsert_task("runtime-shared", "", "https://115cdn.com/s/runtime-shared")
+
+            self.assertEqual(first.metadata["strm_mode"], "direct")
+            self.assertEqual(second.metadata["strm_mode"], "shared")
+
     def test_default_strm_mode_uses_shared_and_setter_validates(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

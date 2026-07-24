@@ -51,8 +51,9 @@ class TaskLockClaimResult:
 
 
 class TaskStore:
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, default_strm_mode: str = "shared"):
         self.db_path = db_path if isinstance(db_path, Path) else Path(db_path)
+        self.default_strm_mode = normalize_strm_mode(default_strm_mode)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._init_db()
@@ -180,7 +181,7 @@ class TaskStore:
 
     def get_default_strm_mode(self) -> str:
         state = self.get_runtime_state(STRM_DEFAULT_MODE_KEY)
-        return normalize_strm_mode(state["value"] if state else None)
+        return normalize_strm_mode(state["value"] if state else self.default_strm_mode)
 
     def set_default_strm_mode(self, mode: str) -> str:
         normalized = normalize_strm_mode(mode)
