@@ -163,6 +163,7 @@ from app.telegram_ui import (
 from app.task_runner import StageResult, TaskRunner
 from app.task_store import TaskStore
 from app.web import start_web_server
+from app.workflows.direct import DirectTaskWorkflow, ModeRoutingWorkflow
 from app.workflows.self_share import (
     BridgeSelfShareTaskWorkflow,
     SelfShareWorkflow,
@@ -3136,10 +3137,10 @@ def handle_update(
                 LOG.info("Enqueued cloud source in TaskStore: type=%s key=%s task_id=%s", source.source_type, source.source_key, task.id)
                 continue
             key = normalize_share_link(link)
-            if self_share_workflow and task_engine_enabled and task_store is None:
-                raise RuntimeError("TaskStore is required when TASK_ENGINE_ENABLED=true for self_share_sync")
-            if self_share_workflow and task_engine_enabled and task_store is not None:
-                if explicit_series_update:
+            if task_engine_enabled and task_store is None:
+                raise RuntimeError("TaskStore is required when TASK_ENGINE_ENABLED=true")
+            if task_engine_enabled and task_store is not None:
+                if self_share_workflow and explicit_series_update:
                     existing_task = task_store.find_task_by_share_key(key.share_code, key.receive_code)
                     updated_task, update_result = start_series_update_task(
                         existing_task,
@@ -3337,32 +3338,46 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
     probe_stop_events: list[threading.Event] = []
     probe_threads: list[threading.Thread] = []
     probe_holder: dict[str, Any] = {"stop_event": None, "thread": None}
-    if config.task_engine_enabled and self_share_config.enabled and p115:
-        task_workflow = BridgeSelfShareTaskWorkflow(
+    if config.task_engine_enabled:
+        direct_workflow = DirectTaskWorkflow(
             cms=cms,
-            telegram=telegram,
-            chat_id=config.tg_allowed_chat_id,
             store=store,
-            task_store=task_store,
-            p115=p115,
-            self_share_config=self_share_config,
             move_config=move_config,
             emby=emby,
-            openai_classifier=openai_classifier,
-            tmdb_resolver=tmdb_resolver,
-            cleanup_client=p115 if self_share_config.cleanup_after_emby else None,
-            receive_cid=config.self_share_receive_cid,
-            cms_cloud_index=CmsCloudDataIndex(self_share_config.cms_state_db_path),
+        )
+        shared_workflow = None
+        if self_share_config.enabled and p115:
+            shared_workflow = BridgeSelfShareTaskWorkflow(
+                cms=cms,
+                telegram=telegram,
+                chat_id=config.tg_allowed_chat_id,
+                store=store,
+                task_store=task_store,
+                p115=p115,
+                self_share_config=self_share_config,
+                move_config=move_config,
+                emby=emby,
+                openai_classifier=openai_classifier,
+                tmdb_resolver=tmdb_resolver,
+                cleanup_client=p115 if self_share_config.cleanup_after_emby else None,
+                receive_cid=config.self_share_receive_cid,
+                cms_cloud_index=CmsCloudDataIndex(self_share_config.cms_state_db_path),
+            )
+        task_workflow = ModeRoutingWorkflow(
+            direct_workflow,
+            shared_workflow,
+            default_mode=task_store.get_default_strm_mode(),
         )
         task_runner = TaskRunner(
             task_store,
             task_workflow,
             interval_seconds=config.task_worker_interval_seconds,
             risk_cooldown_seconds=config.p115_risk_cooldown_seconds,
-            p115_client=p115,
+            p115_client=p115 if shared_workflow is not None else None,
         )
         task_runner.start()
         LOG.info("Task engine worker started interval_seconds=%s", config.task_worker_interval_seconds)
+    if config.task_engine_enabled and self_share_config.enabled and p115:
         def set_invalid_probe_enabled(quality_enabled: bool) -> None:
             if not config.self_share_invalid_cleanup_enabled:
                 return
@@ -3423,7 +3438,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         write_metrics_snapshot(store, metrics_path_for_store(store))
     except Exception:
         LOG.debug("Failed to write startup metrics snapshot", exc_info=True)
-    if config.status_repair_enabled and not (config.task_engine_enabled and self_share_config.enabled):
+    if config.status_repair_enabled and not config.task_engine_enabled:
         start_status_repair_loop(
             store,
             emby,

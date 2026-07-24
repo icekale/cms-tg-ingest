@@ -53,6 +53,7 @@ from app.media.strm import (
     validate_self_share_strm_source,
 )
 from app.models import TaskStage, TaskStatus
+from app.strm_mode import effective_task_strm_mode
 from app.task_runner import StageResult
 
 LOG = logging.getLogger("cms-tg-ingest")
@@ -358,7 +359,24 @@ class BridgeSelfShareTaskWorkflow:
         self.cms_cloud_index = cms_cloud_index
         self._now = time.time
 
+    @staticmethod
+    def _shared_only_stage(stage: TaskStage) -> bool:
+        return stage in {
+            TaskStage.SHARE_ALIAS_PREPARED,
+            TaskStage.OWN_SHARE_CREATED,
+            TaskStage.SHARE_VALIDATED,
+            TaskStage.SHARE_SYNC_SUBMITTED,
+            TaskStage.CMS_DELETE_SETTLED,
+            TaskStage.CLEANED,
+        }
+
     def run_stage(self, task):
+        if self._shared_only_stage(task.current_stage) and effective_task_strm_mode(task) != "shared":
+            return StageResult.failed(
+                "直链任务误入共享 STRM 阶段，已阻止 115 分享和清理操作",
+                error_type="strm_mode_mismatch",
+                metadata={"strm_mode": effective_task_strm_mode(task)},
+            )
         if task.current_stage == TaskStage.RECEIVED:
             return self._stage_received(task)
         if task.current_stage == TaskStage.CLOUD_DOWNLOADING:

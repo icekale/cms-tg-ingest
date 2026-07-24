@@ -2579,5 +2579,109 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["cleanup_status"], "deleted")
 
 
+class DirectTaskEngineBridgeTests(unittest.TestCase):
+    def test_direct_task_engine_intake_queues_without_cms_submission(self):
+        class CmsWithoutDirectSubmission:
+            def __init__(self):
+                self.calls = 0
+
+            def add_share_down(self, _url):
+                self.calls += 1
+                raise AssertionError("direct task engine must submit CMS from the worker")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cms = CmsWithoutDirectSubmission()
+            telegram = FakeTelegram()
+            submissions = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db", default_strm_mode="direct")
+
+            bridge.handle_update(
+                {
+                    "message": {
+                        "chat": {"id": "chat"},
+                        "from": {"id": "chat"},
+                        "text": "https://115cdn.com/s/direct?password=1234",
+                    }
+                },
+                cms,
+                telegram,
+                "chat",
+                submissions,
+                poll_status=False,
+                task_store=task_store,
+                task_engine_enabled=True,
+            )
+
+            task = task_store.find_task_by_share_key("direct", "1234")
+
+        self.assertEqual(cms.calls, 0)
+        self.assertIsNotNone(task)
+        self.assertEqual(task.metadata["strm_mode"], "direct")
+
+    def test_direct_task_engine_run_forever_constructs_without_p115(self):
+        captured = {}
+
+        class FakeCmsClient:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+        class FakeSelfShareConfig:
+            enabled = False
+
+            @classmethod
+            def from_config(cls, _config, _cms):
+                return cls()
+
+        class FakeTelegramClient:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_updates(self, **_kwargs):
+                stop_event.set()
+                return []
+
+        class FakeTaskRunner:
+            def __init__(self, _store, workflow, **kwargs):
+                captured["workflow"] = workflow
+                captured["p115_client"] = kwargs.get("p115_client")
+
+            def start(self):
+                captured["started"] = True
+
+            def stop(self, **_kwargs):
+                captured["stopped"] = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stop_event = __import__("threading").Event()
+            config = bridge.Config(
+                "token",
+                "chat",
+                "http://cms.test",
+                "user",
+                "password",
+                db_path=str(Path(tmp) / "submissions.db"),
+                task_db_path=str(Path(tmp) / "tasks.db"),
+                task_engine_enabled=True,
+                strm_default_mode="direct",
+                status_repair_enabled=False,
+                web_enabled=False,
+            )
+
+            with patch.object(bridge, "CmsClient", FakeCmsClient), patch.object(
+                bridge, "TelegramClient", FakeTelegramClient
+            ), patch.object(bridge, "SelfShareConfig", FakeSelfShareConfig), patch.object(
+                bridge, "TaskRunner", FakeTaskRunner
+            ), patch.object(bridge, "normalize_emby_parents", lambda *_args, **_kwargs: 0), patch.object(
+                bridge, "write_metrics_snapshot", lambda *_args, **_kwargs: None
+            ), patch.object(bridge, "call_maybe_start_web_server", lambda *_args, **_kwargs: None), patch.object(
+                bridge, "start_status_repair_loop", lambda *_args, **_kwargs: None
+            ):
+                bridge.run_forever(config, stop_event=stop_event)
+
+        self.assertTrue(captured["started"])
+        self.assertTrue(captured["stopped"])
+        self.assertIsNone(captured["p115_client"])
+
+
 if __name__ == "__main__":
     unittest.main()

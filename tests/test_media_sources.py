@@ -1,6 +1,9 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 from app.media.sources import parse_media_sources
+from app.media.strm import validate_direct_strm_source
 
 
 ED2K = "ed2k://|file|Example.mkv|10|" + "ABCDEF0123456789" + "ABCDEF0123456789|/"
@@ -29,6 +32,39 @@ class MediaSourceTests(unittest.TestCase):
         sources = parse_media_sources(link + "\n" + MAGNET)
 
         self.assertEqual(len(sources), 1)
+
+    def test_validate_direct_strm_source_reports_missing_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            issue = validate_direct_strm_source(Path(tmp) / "missing")
+
+        self.assertIn("目录不存在", issue)
+
+    def test_validate_direct_strm_source_reports_directory_without_strm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source"
+            source.mkdir()
+            issue = validate_direct_strm_source(source)
+
+        self.assertIn("不包含 STRM", issue)
+
+    def test_validate_direct_strm_source_rejects_shared_strm_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source"
+            source.mkdir()
+            (source / "movie.strm").write_text("https://115.com/s/share_pwd_/movie.mkv", encoding="utf-8")
+            issue = validate_direct_strm_source(source)
+
+        self.assertIn("发现非直链 STRM", issue)
+
+    def test_validate_direct_strm_source_accepts_direct_strm_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source"
+            source.mkdir()
+            (source / "movie.strm").write_text("https://115.com/d/file-id/movie.mkv", encoding="utf-8")
+
+            issue = validate_direct_strm_source(source)
+
+        self.assertEqual(issue, "")
 
 
 if __name__ == "__main__":

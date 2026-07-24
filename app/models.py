@@ -134,10 +134,10 @@ _SUCCESS_FLOW = {
 }
 
 
-def next_stage_after_success(stage: TaskStage, strm_mode: str | None = None) -> TaskStage | None:
+def next_stage_after_success(stage: TaskStage, strm_mode: str = "shared") -> TaskStage | None:
     from .strm_mode import next_stage_for_mode
 
-    return next_stage_for_mode(stage, strm_mode or "shared")
+    return next_stage_for_mode(stage, strm_mode)
 
 
 def terminal_stages() -> set[TaskStage]:
