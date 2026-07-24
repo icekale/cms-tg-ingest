@@ -34,6 +34,10 @@ class StrmModeTests(unittest.TestCase):
             "shared",
         )
         self.assertEqual(
+            effective_task_strm_mode(SimpleNamespace(metadata={}), legacy_workflow_mode="direct"),
+            "direct",
+        )
+        self.assertEqual(
             effective_task_strm_mode({"metadata": {}}, default_mode="direct", legacy_workflow_mode="unknown"),
             "direct",
         )
@@ -126,6 +130,25 @@ class TaskBridgeStrmModeTests(unittest.TestCase):
                 "received",
             )
             self.assertEqual(shared.metadata["strm_mode"], "shared")
+
+    def test_record_submission_event_preserves_explicit_strm_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = record_submission_event(
+                store,
+                {
+                    "share_code": "explicit-direct",
+                    "receive_code": "",
+                    "url": "https://115cdn.com/s/explicit-direct",
+                },
+                TaskStage.RECEIVED,
+                TaskStatus.PENDING,
+                "received",
+                strm_mode="direct",
+            )
+
+            self.assertEqual(task.metadata["strm_mode"], "direct")
+            self.assertEqual(store.find_task(task.id).metadata["strm_mode"], "direct")
 
 
 if __name__ == "__main__":
