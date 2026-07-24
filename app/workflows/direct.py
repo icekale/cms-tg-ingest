@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,7 +7,6 @@ from typing import Any, Callable
 
 from app.config import MoveConfig, is_relative_to, is_under_any_root, safe_resolve
 from app.media.classify import (
-    expected_task_tmdb_id,
     extract_tmdb_id_from_name,
     item_tmdb_id,
     media_type_for_category,
@@ -30,16 +28,6 @@ from app.workflows.self_share import emby_parent_label, match_emby_item
 
 _CMS_FAILURE_MARKERS = ("failed", "error", "失败", "timeout", "超时", "cancel")
 _CMS_SUCCESS_MARKERS = ("done", "finish", "success", "complete", "完成", "成功")
-_DIRECT_STAGES = {
-    TaskStage.RECEIVED,
-    TaskStage.ORGANIZING,
-    TaskStage.RECOGNIZING,
-    TaskStage.STRM_READY,
-    TaskStage.MOVED,
-    TaskStage.EMBY_CONFIRMED,
-}
-
-
 @dataclass(frozen=True)
 class _ShareKey:
     share_code: str
