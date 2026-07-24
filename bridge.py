@@ -371,8 +371,6 @@ def maybe_start_web_server(
 ):
     if not config.web_enabled:
         return None
-    if not str(config.web_token or "").strip():
-        raise RuntimeError("WEB_TOKEN is required when WEB_ENABLED is enabled")
     kwargs = {
         "web_token": config.web_token,
         "task_engine_enabled": config.task_engine_enabled,

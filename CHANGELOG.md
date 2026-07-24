@@ -10,10 +10,14 @@
 
 ## 0.2.16 - 2026-07-24
 
-- Web 管理台启用时强制配置 `WEB_TOKEN`，doctor 和实际启动路径都会阻止匿名 Web。
+- Web 管理台支持局域网免 Token 模式；`WEB_TOKEN` 留空时直接访问，配置后仍启用鉴权。
 - 115 风控冷却持久化到 TaskStore，重启或更换 TaskRunner 后继续遵守冷却窗口。
 - HDHive 解锁增加 SQLite 原子抢占和过期状态恢复，避免并发重复解锁或永久停在 `unlocking`。
 - Emby API Key 改用 `X-Emby-Token` 请求头，并在 HTTP 错误 URL 中脱敏敏感查询参数。
+
+## 0.2.17 - 2026-07-24
+
+- 支持局域网免 Token Web 模式；`WEB_TOKEN` 留空时可直接访问，配置后仍启用鉴权。
 
 ## 0.2.8 - 2026-07-24
 

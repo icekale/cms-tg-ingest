@@ -1789,6 +1789,18 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(status, 403)
             self.assertIn(b"Forbidden", body)
 
+    def test_empty_web_token_allows_lan_mode_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            app = WebApp(store, web_token="")
+
+            status, headers, body = app.handle_request("GET", "/", {}, b"")
+
+            self.assertEqual(status, 302)
+            self.assertEqual(headers["Location"], "/app/")
+            self.assertNotIn("Set-Cookie", headers)
+            self.assertEqual(body, b"")
+
     def test_web_token_bootstraps_cookie_and_cleans_query_url(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

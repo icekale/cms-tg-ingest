@@ -153,7 +153,7 @@ class DoctorConfigTests(unittest.TestCase):
         self.assertIn("active=1", text)
         self.assertIn("pending_confirmation=1", text)
 
-    def test_web_exposure_without_token_blocks_startup(self):
+    def test_web_exposure_without_token_is_a_non_blocking_warning(self):
         env = {
             "TG_BOT_TOKEN": "123456:secret-token",
             "TG_ALLOWED_CHAT_ID": "464100862",
@@ -171,10 +171,10 @@ class DoctorConfigTests(unittest.TestCase):
 
         report = doctor.run_checks(env=env, filesystem=doctor.MemoryFilesystem(existing_paths={"/data"}))
 
-        self.assertFalse(report.ok)
+        self.assertTrue(report.ok, report.to_text())
         text = report.to_text()
         self.assertIn("WEB_TOKEN", text)
-        self.assertIn("required", text)
+        self.assertIn("without WEB_TOKEN", text)
         self.assertIn("TASK_MAX_CONCURRENT", text)
 
     def test_task_engine_requires_self_share_workflow_without_leaking_secrets(self):
