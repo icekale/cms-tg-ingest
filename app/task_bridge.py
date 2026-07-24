@@ -10,6 +10,11 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _optional_strm_mode(value: Any) -> str | None:
+    normalized = str(value).strip() if value is not None else ""
+    return normalized or None
+
+
 def _row_key(row: dict[str, Any]) -> tuple[str, str, str]:
     share_code = _text(row.get("share_code"))
     receive_code = _text(row.get("receive_code"))
@@ -93,6 +98,7 @@ def ensure_task_for_link(
         return None
     if strm_mode is None and metadata:
         strm_mode = metadata.get("strm_mode")
+    strm_mode = _optional_strm_mode(strm_mode)
     task = task_store.upsert_task(_text(share_code), _text(receive_code), _text(url), strm_mode=strm_mode)
     if not task_store.list_events(task.id):
         task = task_store.record_event(task.id, TaskStage.RECEIVED, TaskStatus.PENDING, "收到链接")
@@ -115,6 +121,7 @@ def record_submission_event(
     strm_mode = metadata.get("strm_mode")
     if strm_mode is None:
         strm_mode = row.get("strm_mode")
+    strm_mode = _optional_strm_mode(strm_mode)
     task = task_store.upsert_task(share_code, receive_code, url, strm_mode=strm_mode)
     error_summary = _text(metadata.get("error_summary"))
     if _last_event_matches(task_store, task.id, stage, status, message, error_summary):

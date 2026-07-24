@@ -16,7 +16,7 @@ class TaskStoreTests(unittest.TestCase):
             store = TaskStore(Path(tmp) / "tasks.db")
 
             self.assertEqual(store.get_default_strm_mode(), "shared")
-            store.set_default_strm_mode("DIRECT")
+            self.assertEqual(store.set_default_strm_mode("DIRECT"), "direct")
             self.assertEqual(store.get_default_strm_mode(), "direct")
             with self.assertRaises(ValueError):
                 store.set_default_strm_mode("self_share_sync")

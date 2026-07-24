@@ -62,6 +62,8 @@ def effective_task_strm_mode(
         return normalize_strm_mode(metadata_mode)
 
     legacy_mode = str(legacy_workflow_mode or "").strip().lower()
+    if not legacy_mode:
+        legacy_mode = str(metadata.get("workflow_mode") or "").strip().lower()
     if legacy_mode == "self_share_sync":
         return "shared"
     if legacy_mode == "direct":

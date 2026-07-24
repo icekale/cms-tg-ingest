@@ -74,8 +74,6 @@ class Config:
     emby_user_id: str = ""
     strm_source_roots: str = "/mnt/user/Unraid/strm/转存"
     strm_library_map: str = ""
-    strm_default_mode: str = "shared"
-    frontend_dist_path: str = "/app/frontend/dist"
     move_conflict_policy: str = "skip"
     strm_stable_seconds: int = 30
     openai_classify_enabled: bool = False
@@ -129,6 +127,8 @@ class Config:
     quality_auto_timezone: str = "Asia/Shanghai"
     quality_auto_max_tasks: int = 50
     quality_auto_115_check_limit: int = 3
+    strm_default_mode: str = "shared"
+    frontend_dist_path: str = "/app/frontend/dist"
 
     @classmethod
     def from_env(cls) -> "Config":

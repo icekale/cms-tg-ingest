@@ -38,6 +38,10 @@ class StrmModeTests(unittest.TestCase):
             "direct",
         )
         self.assertEqual(
+            effective_task_strm_mode(SimpleNamespace(metadata={"workflow_mode": "direct"})),
+            "direct",
+        )
+        self.assertEqual(
             effective_task_strm_mode({"metadata": {}}, default_mode="direct", legacy_workflow_mode="unknown"),
             "direct",
         )
@@ -103,6 +107,32 @@ class ConfigStrmModeTests(unittest.TestCase):
         self.assertEqual(config.strm_default_mode, "shared")
         self.assertEqual(config.workflow_mode, "direct")
 
+    def test_config_keeps_old_positional_field_order(self):
+        config = Config(
+            "token",
+            "chat",
+            "http://cms.test",
+            "user",
+            "password",
+            31,
+            61,
+            "/tmp/submissions.db",
+            301,
+            21,
+            "http://emby.test",
+            "emby-key",
+            "emby-user",
+            "/source",
+            "category=/library",
+            "merge",
+            45,
+        )
+
+        self.assertEqual(config.move_conflict_policy, "merge")
+        self.assertEqual(config.strm_stable_seconds, 45)
+        self.assertEqual(config.strm_default_mode, "shared")
+        self.assertEqual(config.frontend_dist_path, "/app/frontend/dist")
+
 
 class TaskBridgeStrmModeTests(unittest.TestCase):
     def test_bridge_preserves_explicit_strm_mode_without_guessing_from_url_or_title(self):
@@ -149,6 +179,34 @@ class TaskBridgeStrmModeTests(unittest.TestCase):
 
             self.assertEqual(task.metadata["strm_mode"], "direct")
             self.assertEqual(store.find_task(task.id).metadata["strm_mode"], "direct")
+
+    def test_bridge_blank_strm_mode_uses_task_store_direct_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            store.set_default_strm_mode("direct")
+
+            ensured = ensure_task_for_link(
+                store,
+                "blank-ensure",
+                "",
+                "https://115cdn.com/s/blank-ensure",
+                strm_mode="  ",
+            )
+            recorded = record_submission_event(
+                store,
+                {
+                    "share_code": "blank-record",
+                    "receive_code": "",
+                    "url": "https://115cdn.com/s/blank-record",
+                },
+                TaskStage.RECEIVED,
+                TaskStatus.PENDING,
+                "received",
+                strm_mode="",
+            )
+
+            self.assertEqual(ensured.metadata["strm_mode"], "direct")
+            self.assertEqual(recorded.metadata["strm_mode"], "direct")
 
 
 if __name__ == "__main__":

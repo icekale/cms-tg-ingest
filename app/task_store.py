@@ -182,9 +182,10 @@ class TaskStore:
         state = self.get_runtime_state(STRM_DEFAULT_MODE_KEY)
         return normalize_strm_mode(state["value"] if state else None)
 
-    def set_default_strm_mode(self, mode: str) -> None:
+    def set_default_strm_mode(self, mode: str) -> str:
         normalized = normalize_strm_mode(mode)
         self.set_runtime_state(STRM_DEFAULT_MODE_KEY, normalized)
+        return normalized
 
     def claim_quality_run(self, run_date: str, now: float) -> bool:
         state_key = f"quality_auto_run:{run_date}"
