@@ -85,6 +85,10 @@ def p115_file_id(item: dict[str, Any]) -> str:
     return str(item.get("cid") or item.get("fid") or item.get("file_id") or "").strip()
 
 
+def p115_share_item_id(item: dict[str, Any]) -> str:
+    return str(item.get("fid") or item.get("file_id") or item.get("cid") or "").strip()
+
+
 def p115_parent_id(item: dict[str, Any]) -> str:
     return str(item.get("pid") or item.get("parent_id") or item.get("wp_path_id") or "").strip()
 
@@ -483,23 +487,25 @@ class P115WebClient:
         first_snap: dict[str, Any] | None = None
 
         while True:
+            request_limit = min(page_size, 5000 - page_offset)
             snap = self.share_snap(
                 share_code,
                 receive_code,
                 cid=cid,
-                limit=page_size,
+                limit=request_limit,
                 offset=page_offset,
             )
             if first_snap is None:
                 first_snap = snap
             data = snap.get("data") if isinstance(snap.get("data"), dict) else snap
             page = iter_items(data)
+            page = page[:request_limit]
             for item in page:
-                file_id = p115_file_id(item)
+                file_id = p115_share_item_id(item)
                 if file_id and file_id not in seen_file_ids:
                     seen_file_ids.add(file_id)
                     items.append(item)
-            if len(page) < page_size:
+            if len(page) < request_limit:
                 break
             page_offset += len(page)
             if page_offset >= 5000:
@@ -555,7 +561,7 @@ class P115WebClient:
     def receive_share_to_cid(self, share_code: str, receive_code: str, target_cid: str) -> dict[str, Any]:
         items, snap = self.share_root_items(share_code, receive_code, cid="0", limit=100)
         data = snap.get("data") if isinstance(snap.get("data"), dict) else {}
-        file_ids = [p115_file_id(item) for item in items]
+        file_ids = [p115_share_item_id(item) for item in items]
         if not file_ids:
             raise RuntimeError("115 share snap did not return file ids")
         resp = self._request(

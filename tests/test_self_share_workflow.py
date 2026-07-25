@@ -372,6 +372,64 @@ class CmsPlaybackProbeTests(unittest.TestCase):
         self.assertEqual(result["file_ids"], [f"fid-{index}" for index in range(101)])
         self.assertEqual(http.received_file_ids, result["file_ids"])
 
+    def test_receive_share_to_cid_uses_fid_when_share_item_also_has_cid(self):
+        class FakeHttp:
+            def __init__(self):
+                self.received_file_ids = None
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                if url.endswith("/share/snap"):
+                    return {
+                        "state": True,
+                        "data": {
+                            "shareinfo": {"share_title": "双标识分享"},
+                            "list": [
+                                {"fid": "fid-1", "cid": "same-cid"},
+                                {"fid": "fid-2", "cid": "same-cid"},
+                            ],
+                        },
+                    }
+                if url.endswith("/share/receive"):
+                    self.received_file_ids = data["file_id"].split(",")
+                    return {"state": True, "data": {}}
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        result = client.receive_share_to_cid("abc", "1234", "pending-cid")
+
+        self.assertEqual(result["file_ids"], ["fid-1", "fid-2"])
+        self.assertEqual(http.received_file_ids, ["fid-1", "fid-2"])
+
+    def test_share_root_items_caps_limit_99_requests_at_5000_entries_before_post(self):
+        class FakeHttp:
+            def __init__(self):
+                self.snap_requests = []
+                self.post_called = False
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                if url.endswith("/share/snap"):
+                    offset = int(params["offset"])
+                    limit = int(params["limit"])
+                    self.snap_requests.append((offset, limit))
+                    return {
+                        "state": True,
+                        "data": {"list": [{"fid": f"fid-{index}"} for index in range(offset, offset + limit)]},
+                    }
+                self.post_called = True
+                raise AssertionError("share receive must not be called")
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        with self.assertRaisesRegex(RuntimeError, "^115 share root exceeds 5000 entries$"):
+            client.share_root_items("abc", "1234", limit=99)
+
+        self.assertFalse(http.post_called)
+        self.assertEqual(sum(limit for _offset, limit in http.snap_requests), 5000)
+        self.assertLessEqual(max(offset + limit for offset, limit in http.snap_requests), 5000)
+
     def test_receive_share_to_cid_rejects_root_at_safe_entry_limit_before_post(self):
         class FakeHttp:
             def __init__(self):
