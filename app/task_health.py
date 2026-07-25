@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, replace
 
@@ -144,4 +145,18 @@ def format_taskstore_health(
 ) -> str:
     current_time = time.time() if now is None else float(now)
     summary = build_task_health(store, enabled=enabled, limit=limit, now=current_time)
-    return format_task_health(summary, now=current_time)
+    report = format_task_health(summary, now=current_time)
+    backup_line = "数据库备份: 未执行"
+    if store is not None:
+        state = store.get_runtime_state("backup_last_result")
+        if state:
+            try:
+                payload = json.loads(str(state.get("value") or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = {}
+            if isinstance(payload, dict):
+                backup_line = f"数据库备份: {str(payload.get('status') or 'unknown')}"
+                error = str(payload.get("error") or "").strip()
+                if error:
+                    backup_line += f" ({error[:160]})"
+    return report + "\n" + backup_line

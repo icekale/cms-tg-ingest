@@ -127,6 +127,11 @@ class Config:
     quality_auto_timezone: str = "Asia/Shanghai"
     quality_auto_max_tasks: int = 50
     quality_auto_115_check_limit: int = 3
+    backup_enabled: bool = True
+    backup_time: str = "03:30"
+    backup_timezone: str = "Asia/Shanghai"
+    backup_dir: str = "/data/backups"
+    backup_retention_days: int = 14
     strm_default_mode: str = "shared"
     frontend_dist_path: str = "/app/frontend/dist"
 
@@ -231,6 +236,11 @@ class Config:
             ),
             quality_auto_max_tasks=positive_int_env("QUALITY_AUTO_MAX_TASKS", 50),
             quality_auto_115_check_limit=positive_int_env("QUALITY_AUTO_115_CHECK_LIMIT", 3),
+            backup_enabled=parse_bool_env(os.environ.get("BACKUP_ENABLED"), True),
+            backup_time=parse_quality_auto_time(os.environ.get("BACKUP_TIME", "03:30")),
+            backup_timezone=parse_quality_auto_timezone(os.environ.get("BACKUP_TIMEZONE", "Asia/Shanghai")),
+            backup_dir=os.environ.get("BACKUP_DIR", "/data/backups"),
+            backup_retention_days=positive_int_env("BACKUP_RETENTION_DAYS", 14),
         )
 
 

@@ -31,7 +31,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.2.19`。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.2.20`。
 4. 拉取固定版本并启动：
 
 ```sh
@@ -103,6 +103,11 @@ STRM_LIBRARY_MAP=华语电影=/mnt/user/Unraid/strm/转存/Movie/电影/华语�
 
 TASK_ENGINE_ENABLED=true
 TASK_DB_PATH=/data/tasks.db
+BACKUP_ENABLED=true
+BACKUP_TIME=03:30
+BACKUP_TIMEZONE=Asia/Shanghai
+BACKUP_DIR=/data/backups
+BACKUP_RETENTION_DAYS=14
 WEB_ENABLED=true
 WEB_HOST=0.0.0.0
 WEB_PORT=8787
@@ -302,6 +307,38 @@ QUALITY_AUTO_115_CHECK_LIMIT=3
 
 质量巡检只读取本地 TaskStore 和 STRM 文件，检查缺失 STRM、直链 STRM、异常目录和需要恢复的任务。它不扫描整个 115 网盘。风控、未知分享状态和路径不安全时只记录问题，不自动删除文件。
 
+## 数据库备份
+
+程序默认每天在 `03:30`（`Asia/Shanghai`）使用 SQLite 在线备份 API 快照 `/data/submissions.db` 和 `/data/tasks.db`，保存到 `/data/backups`，默认保留 14 天。`/health` 和 Web `/api/v1/health` 只显示最近一次备份的状态、文件数和错误摘要，不显示备份绝对路径或任何凭据。
+
+```env
+BACKUP_ENABLED=true
+BACKUP_TIME=03:30
+BACKUP_TIMEZONE=Asia/Shanghai
+BACKUP_DIR=/data/backups
+BACKUP_RETENTION_DAYS=14
+```
+
+`./data` 已映射到容器 `/data`，不需要新增 volume。首次部署后可检查：
+
+```sh
+docker compose exec cms-tg-ingest python /app/doctor.py
+docker compose exec cms-tg-ingest sh -c 'ls -lh /data/backups'
+```
+
+恢复前先停止容器并备份当前数据库；选择同一时间戳的两个快照复制回 `/data` 后再启动：
+
+```sh
+docker compose stop cms-tg-ingest
+cp data/submissions.db data/submissions.db.before-restore
+cp data/tasks.db data/tasks.db.before-restore
+cp data/backups/submissions-YYYYMMDDTHHMMSSZ.db data/submissions.db
+cp data/backups/tasks-YYYYMMDDTHHMMSSZ.db data/tasks.db
+docker compose up -d --no-build
+```
+
+备份只覆盖本程序的 SQLite 数据库，不包含 115 Cookie、CMS 配置、媒体文件或 Emby 数据库；这些内容需要按各自服务的方式单独备份。若磁盘或 SQLite 临时故障导致备份失败，程序会写入健康状态并在当天下一次调度 tick 重试，不会等到第二天。
+
 ## 路径与风控配置
 
 容器内路径必须和 `.env` 保持一致：
@@ -385,8 +422,8 @@ python3 -m unittest discover -s tests -q
 发布版本通过 GitHub Actions 构建并推送 GHCR 和 Docker Hub：
 
 ```sh
-git tag v0.2.19
-git push origin v0.2.19
+git tag v0.2.20
+git push origin v0.2.20
 ```
 
 如果 fork 后要发布自己的 Docker Hub 镜像，在 GitHub Secrets 中配置：
@@ -397,7 +434,7 @@ git push origin v0.2.19
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.2.19
+docker pull icekale/cms-tg-ingest:0.2.20
 docker pull icekale/cms-tg-ingest:latest
 ```
 

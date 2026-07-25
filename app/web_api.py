@@ -148,6 +148,21 @@ def serialize_event(event: dict[str, Any]) -> dict[str, Any]:
 def serialize_health(store: TaskStore, *, enabled: bool = True, now: float | None = None) -> dict[str, Any]:
     current_time = time.time() if now is None else float(now)
     summary = build_task_health(store, enabled=enabled, now=current_time)
+    backup = {"status": "never", "file_count": 0, "skipped_count": 0, "error": ""}
+    backup_state = store.get_runtime_state("backup_last_result")
+    if backup_state:
+        try:
+            parsed_backup = json.loads(str(backup_state.get("value") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed_backup = {}
+        if isinstance(parsed_backup, dict):
+            backup = {
+                "status": str(parsed_backup.get("status") or "unknown"),
+                "file_count": len(parsed_backup.get("files") or []) if isinstance(parsed_backup.get("files"), list) else 0,
+                "skipped_count": len(parsed_backup.get("skipped") or []) if isinstance(parsed_backup.get("skipped"), list) else 0,
+                "error": _safe_error(str(parsed_backup.get("error") or ""))[:160],
+                "finished_at": str(parsed_backup.get("finished_at") or ""),
+            }
     return {
         "enabled": summary.enabled,
         "recent_count": summary.recent_count,
@@ -160,6 +175,7 @@ def serialize_health(store: TaskStore, *, enabled: bool = True, now: float | Non
         "p115_cooldown_active": summary.p115_cooldown_until > current_time,
         "runner_heartbeat_at": summary.runner_heartbeat_at,
         "runner_heartbeat_stale": summary.runner_heartbeat_stale,
+        "backup": backup,
         "wait_details": list(summary.wait_details),
         "latest_problem": serialize_task(summary.latest_problem, now=current_time) if summary.latest_problem else None,
         "latest_lock_wait": serialize_task(summary.latest_lock_wait, now=current_time) if summary.latest_lock_wait else None,

@@ -170,6 +170,25 @@ def _check_optional_env(env: Mapping[str, str]) -> CheckItem:
                 warnings.append("TASK_WORKER_INTERVAL_SECONDS must be a positive number")
         except ValueError:
             warnings.append("TASK_WORKER_INTERVAL_SECONDS must be a positive number")
+    if _env_bool(env, "BACKUP_ENABLED") or "BACKUP_ENABLED" not in env:
+        backup_time = _env_value(env, "BACKUP_TIME") or "03:30"
+        try:
+            if re.fullmatch(r"\d{2}:\d{2}", backup_time) is None:
+                raise ValueError
+            hour, minute = (int(part) for part in backup_time.split(":", 1))
+            datetime_time(hour, minute)
+        except ValueError:
+            warnings.append("BACKUP_TIME must be a valid HH:MM time")
+        backup_timezone = _env_value(env, "BACKUP_TIMEZONE") or "Asia/Shanghai"
+        try:
+            ZoneInfo(backup_timezone)
+        except (ValueError, ZoneInfoNotFoundError):
+            warnings.append("BACKUP_TIMEZONE must be a valid IANA timezone")
+        try:
+            if int(_env_value(env, "BACKUP_RETENTION_DAYS") or "14") <= 0:
+                raise ValueError
+        except ValueError:
+            warnings.append("BACKUP_RETENTION_DAYS must be a positive number")
     if warnings:
         return CheckItem("optional_env", False, "; ".join(warnings))
     return CheckItem("optional_env", True, "optional feature variables are consistent")
@@ -210,6 +229,14 @@ def _check_filesystem(env: Mapping[str, str], filesystem: Filesystem) -> CheckIt
         share_root = Path(_env_value(env, "SELF_SHARE_STRM_ROOT") or "/mnt/user/Unraid/strm/share")
         if not filesystem.is_dir(share_root):
             problems.append(f"self-share STRM root does not exist: {share_root}")
+    backup_dir = Path(_env_value(env, "BACKUP_DIR") or "/data/backups")
+    if _env_bool(env, "BACKUP_ENABLED") or "BACKUP_ENABLED" not in env:
+        if not filesystem.exists(backup_dir.parent):
+            problems.append(f"backup directory parent does not exist: {backup_dir.parent}")
+        elif not filesystem.is_dir(backup_dir.parent):
+            problems.append(f"backup directory parent is not a directory: {backup_dir.parent}")
+        elif not filesystem.is_writable(backup_dir.parent):
+            problems.append(f"backup directory parent is not writable: {backup_dir.parent}")
     for root in _split_env_list(_env_value(env, "STRM_SOURCE_ROOTS") or "/mnt/user/Unraid/strm/转存"):
         if not filesystem.is_dir(Path(root)):
             problems.append(f"STRM source root does not exist: {root}")

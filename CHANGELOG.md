@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.20 - 2026-07-25
+
+- 新增每日 SQLite 在线备份，默认 `03:30`（`Asia/Shanghai`）保存 `submissions.db` 和 `tasks.db` 到 `/data/backups`，默认保留 14 天。
+- `/health`、Web 健康 API 和 `doctor.py` 增加备份状态与配置检查；备份失败会在当天下一次调度 tick 重试。
+- 将备份调度接入主进程生命周期，使用项目日志输出并在停机时等待线程退出。
+
 ## 0.2.19 - 2026-07-25
 
 - HDHive 订阅支持多季识别、集数过滤、跳过 Emby 已有集数和 TMDB 完结判断。

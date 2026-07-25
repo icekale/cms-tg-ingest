@@ -1,4 +1,5 @@
 import tempfile
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -20,6 +21,18 @@ class TaskHealthTests(unittest.TestCase):
             self.assertEqual(summary.runner_heartbeat_at, 1.0)
             self.assertTrue(summary.runner_heartbeat_stale)
             self.assertIn("TaskRunner心跳: stale", report)
+
+    def test_health_reports_last_database_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            store.set_runtime_state(
+                "backup_last_result",
+                json.dumps({"status": "succeeded", "files": ["/data/backups/tasks.db"]}),
+            )
+
+            report = format_taskstore_health(store, enabled=True, now=100.0)
+
+        self.assertIn("数据库备份: succeeded", report)
 
     def test_health_uses_all_open_tasks_beyond_recent_window(self):
         with tempfile.TemporaryDirectory() as tmp:

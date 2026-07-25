@@ -9,7 +9,7 @@ from app.hdhive_subscription_store import HdhiveSubscriptionStore
 from app.series_rules import parse_episode_filter
 from app.task_store import TaskStore
 from app.web import WebApp
-from app.web_api import _safe_error, _safe_url, serialize_task
+from app.web_api import _safe_error, _safe_url, serialize_health, serialize_task
 
 
 class WebApiTests(unittest.TestCase):
@@ -30,6 +30,19 @@ class WebApiTests(unittest.TestCase):
                 self.assertNotIn("variant-secret", _safe_url(f"https://hdhive.test/tv/x?{key}=variant-secret"))
                 self.assertNotIn("variant-secret", _safe_error(f"{key}=variant-secret"))
         self.assertNotIn("user-secret", _safe_url("https://user:user-secret@hdhive.test/tv/x"))
+
+    def test_health_api_reports_last_database_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            store.set_runtime_state(
+                "backup_last_result",
+                json.dumps({"status": "partial", "files": ["/data/backups/tasks.db"], "error": "missing source"}),
+            )
+
+            payload = serialize_health(store, enabled=True, now=100.0)
+
+        self.assertEqual(payload["backup"]["status"], "partial")
+        self.assertEqual(payload["backup"]["error"], "missing source")
 
     def test_hdhive_filter_api_returns_safe_subscription_summary_and_skip_reasons(self):
         with tempfile.TemporaryDirectory() as tmp:

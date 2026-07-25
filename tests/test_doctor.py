@@ -48,6 +48,7 @@ class DoctorConfigTests(unittest.TestCase):
                 "CMS_PASSWORD": "secret-password",
                 "DB_PATH": str(data / "submissions.db"),
                 "TASK_DB_PATH": str(data / "tasks.db"),
+                "BACKUP_DIR": str(data / "backups"),
                 "WORKFLOW_MODE": "self_share_sync",
                 "P115_COOKIE_PATH": str(cookie),
                 "SELF_SHARE_RECEIVE_CID": "pending-cid",
@@ -134,6 +135,7 @@ class DoctorConfigTests(unittest.TestCase):
                 "CMS_PASSWORD": "secret-password",
                 "DB_PATH": str(data / "submissions.db"),
                 "TASK_DB_PATH": str(task_db),
+                "BACKUP_DIR": str(data / "backups"),
                 "STRM_SOURCE_ROOTS": str(data),
                 "HDHIVE_ENABLED": "true",
                 "HDHIVE_TOKEN_CONFIG_PATH": str(token),
@@ -176,6 +178,53 @@ class DoctorConfigTests(unittest.TestCase):
         self.assertIn("WEB_TOKEN", text)
         self.assertIn("without WEB_TOKEN", text)
         self.assertIn("TASK_MAX_CONCURRENT", text)
+
+    def test_backup_settings_require_valid_time_timezone_and_retention(self):
+        env = {
+            "TG_BOT_TOKEN": "123456:secret-token",
+            "TG_ALLOWED_CHAT_ID": "464100862",
+            "CMS_BASE_URL": "http://cms:9527",
+            "CMS_USERNAME": "user",
+            "CMS_PASSWORD": "secret-password",
+            "DB_PATH": "/data/submissions.db",
+            "TASK_DB_PATH": "/data/tasks.db",
+            "STRM_SOURCE_ROOTS": "/data",
+            "BACKUP_ENABLED": "true",
+            "BACKUP_TIME": "bad",
+            "BACKUP_TIMEZONE": "Not/AZone",
+            "BACKUP_RETENTION_DAYS": "0",
+        }
+
+        report = doctor.run_checks(env=env, filesystem=doctor.MemoryFilesystem(existing_paths={"/data"}))
+
+        self.assertFalse(report.ok)
+        text = report.to_text()
+        self.assertIn("BACKUP_TIME", text)
+        self.assertIn("BACKUP_TIMEZONE", text)
+        self.assertIn("BACKUP_RETENTION_DAYS", text)
+
+    def test_backup_directory_parent_must_be_a_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_file = root / "backup-parent"
+            parent_file.write_text("not a directory", encoding="utf-8")
+            env = {
+                "TG_BOT_TOKEN": "123456:secret-token",
+                "TG_ALLOWED_CHAT_ID": "464100862",
+                "CMS_BASE_URL": "http://cms:9527",
+                "CMS_USERNAME": "user",
+                "CMS_PASSWORD": "secret-password",
+                "DB_PATH": str(root / "submissions.db"),
+                "TASK_DB_PATH": str(root / "tasks.db"),
+                "STRM_SOURCE_ROOTS": str(root),
+                "BACKUP_DIR": str(parent_file / "backups"),
+                "BACKUP_ENABLED": "true",
+            }
+
+            report = doctor.run_checks(env=env)
+
+        self.assertFalse(report.ok)
+        self.assertIn("backup directory parent is not a directory", report.to_text())
 
     def test_task_engine_requires_self_share_workflow_without_leaking_secrets(self):
         env = {

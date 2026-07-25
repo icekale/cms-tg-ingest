@@ -42,6 +42,7 @@ from app.clients.p115 import (
     select_recent_tmdb_115_folder,
     select_source_residue_115_files,
 )
+from app.backup import BackupScheduler, start_backup_loop
 
 from app.config import (
     Config,
@@ -324,6 +325,18 @@ def normalize_share_link(url: str) -> ShareKey:
 
 def create_task_store(config: Config) -> TaskStore:
     return TaskStore(config.task_db_path, default_strm_mode=getattr(config, "strm_default_mode", "shared"))
+
+
+def create_backup_scheduler(config: Config, task_store: TaskStore) -> BackupScheduler:
+    return BackupScheduler(
+        task_store,
+        [config.db_path, config.task_db_path],
+        config.backup_dir,
+        run_time=config.backup_time,
+        timezone_name=config.backup_timezone,
+        retention_days=config.backup_retention_days,
+        enabled=config.backup_enabled,
+    )
 
 
 def create_hdhive_workflow(config: Config, cms: CmsClient) -> HdhiveWorkflow | None:
@@ -3428,6 +3441,8 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
             stable_seconds=move_config.stable_seconds,
         )
     task_runner = None
+    backup_scheduler = None
+    backup_thread = None
     quality_automation = None
     quality_thread = None
     hdhive_subscription_service = None
@@ -3475,6 +3490,15 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         )
         task_runner.start()
         LOG.info("Task engine worker started interval_seconds=%s", config.task_worker_interval_seconds)
+    if config.backup_enabled:
+        backup_scheduler = create_backup_scheduler(config, task_store)
+        backup_thread = start_backup_loop(backup_scheduler, stop_event)
+        LOG.info(
+            "Database backup scheduler started time=%s timezone=%s retention_days=%s",
+            config.backup_time,
+            config.backup_timezone,
+            config.backup_retention_days,
+        )
     if config.task_engine_enabled and self_share_config.enabled and p115:
         def set_invalid_probe_enabled(quality_enabled: bool) -> None:
             if not config.self_share_invalid_cleanup_enabled:
@@ -3690,6 +3714,8 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
                     stop()
         if quality_thread is not None:
             quality_thread.join(timeout=5)
+        if backup_thread is not None:
+            backup_thread.join(timeout=5)
         if hdhive_subscription_scheduler is not None:
             hdhive_subscription_scheduler.stop(join_timeout=5)
         stop_web_server(web_server)

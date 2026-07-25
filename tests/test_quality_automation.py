@@ -38,6 +38,37 @@ class QualityAutomationConfigTests(unittest.TestCase):
         self.assertEqual(config.quality_auto_max_tasks, 50)
         self.assertEqual(config.quality_auto_115_check_limit, 3)
 
+    def test_backup_defaults_to_daily_local_database_snapshots(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):
+            config = Config.from_env()
+
+        self.assertTrue(config.backup_enabled)
+        self.assertEqual(config.backup_time, "03:30")
+        self.assertEqual(config.backup_timezone, "Asia/Shanghai")
+        self.assertEqual(config.backup_dir, "/data/backups")
+        self.assertEqual(config.backup_retention_days, 14)
+
+    def test_backup_settings_parse_from_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            env.update(
+                {
+                    "BACKUP_ENABLED": "false",
+                    "BACKUP_TIME": "04:05",
+                    "BACKUP_TIMEZONE": "UTC",
+                    "BACKUP_DIR": "/var/backups/cms",
+                    "BACKUP_RETENTION_DAYS": "30",
+                }
+            )
+            with patch.dict(os.environ, env, clear=True):
+                config = Config.from_env()
+
+        self.assertFalse(config.backup_enabled)
+        self.assertEqual(config.backup_time, "04:05")
+        self.assertEqual(config.backup_timezone, "UTC")
+        self.assertEqual(config.backup_dir, "/var/backups/cms")
+        self.assertEqual(config.backup_retention_days, 30)
+
     def test_quality_automation_settings_parse_from_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = self.required_env(tmp)

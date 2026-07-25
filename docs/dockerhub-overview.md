@@ -23,7 +23,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 固定版本镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.2.19
+docker pull icekale/cms-tg-ingest:0.2.20
 ```
 
 ### 完整 Docker Compose
@@ -33,7 +33,7 @@ docker pull icekale/cms-tg-ingest:0.2.19
 ```yaml
 services:
   cms-tg-ingest:
-    image: icekale/cms-tg-ingest:0.2.19
+    image: icekale/cms-tg-ingest:0.2.20
     container_name: cms-tg-ingest
     restart: unless-stopped
     env_file:
@@ -74,6 +74,11 @@ STRM_DEFAULT_MODE=shared
 TASK_ENGINE_ENABLED=true
 WEB_ENABLED=true
 WEB_TOKEN=
+BACKUP_ENABLED=true
+BACKUP_TIME=03:30
+BACKUP_TIMEZONE=Asia/Shanghai
+BACKUP_DIR=/data/backups
+BACKUP_RETENTION_DAYS=14
 EMBY_BASE_URL=http://192.168.1.10:8096
 EMBY_API_KEY=你的Emby_API_Key
 ```
@@ -148,6 +153,16 @@ https://hdhive.com/tv/<slug>
 
 订阅支持智能判断：集数过滤示例为 `S01E01-S01E10,S02`，默认跳过 `S00` 特殊集；多季资源按季集编号识别，Emby 已有集数会跳过。程序根据 TMDB 完结状态和季集数量标记已完结订阅；无法解析季集、费用未知或超过自动阈值的资源不自动解锁，完结订阅可手动恢复。
 
+### SQLite 数据库备份
+
+默认每天 `03:30`（`Asia/Shanghai`）在线备份 `/data/submissions.db` 和 `/data/tasks.db` 到 `/data/backups`，保留 14 天。由于 Compose 已将 `./data` 映射到 `/data`，不需要额外挂载目录。最近一次结果可在 `/health` 或 Web `/api/v1/health` 查看。
+
+```sh
+docker compose exec cms-tg-ingest sh -c 'ls -lh /data/backups'
+```
+
+恢复时先停止容器、备份当前文件，再将同一时间戳的 `submissions-*.db` 和 `tasks-*.db` 快照复制回 `data/submissions.db`、`data/tasks.db`，最后启动容器。备份不包含 Cookie、CMS 配置或媒体文件；失败会在健康状态中显示，并在当天下一次调度 tick 重试。
+
 ## 更新、回滚和排障
 
 固定版本更新：
@@ -159,7 +174,7 @@ docker compose up -d --no-build
 docker compose ps
 ```
 
-回滚时将 Compose 的镜像改回上一版本，例如 `icekale/cms-tg-ingest:0.2.18`，然后执行：
+回滚时将 Compose 的镜像改回上一版本，例如 `icekale/cms-tg-ingest:0.2.19`，然后执行：
 
 ```sh
 docker compose pull
