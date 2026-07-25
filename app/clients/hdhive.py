@@ -154,7 +154,15 @@ class HdhiveProxyClient:
     def _is_expired_response(cls, response: dict[str, Any]) -> bool:
         code, message = cls._response_error(response)
         haystack = f"{code} {message}".upper()
-        return "TOKEN_EXPIRED" in haystack or "TOKEN_REFRESH_REQUIRED" in haystack
+        return any(
+            marker in haystack
+            for marker in (
+                "TOKEN_EXPIRED",
+                "TOKEN_REFRESH_REQUIRED",
+                "REAUTH_REQUIRED",
+                "REAUTHORIZATION_REQUIRED",
+            )
+        )
 
     def _request(self, path: str, fields: dict[str, Any]) -> dict[str, Any]:
         refreshed = False

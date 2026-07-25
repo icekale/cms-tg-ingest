@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.23 - 2026-07-25
+
+- 兼容 HDHive 代理返回的 `OPENAPI_REAUTH_REQUIRED`，仍先交由 CMS 使用有效 OAuth 刷新令牌，再重试原请求。
+
 ## 0.2.22 - 2026-07-25
 
 - HDHive OAuth 刷新失败时统一转换为可操作的错误提示，避免 Telegram 直接显示底层 `OpenAPI token refresh required`。

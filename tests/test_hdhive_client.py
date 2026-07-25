@@ -204,6 +204,35 @@ class HdhiveProxyClientTests(unittest.TestCase):
         self.assertEqual(context.exception.error_code, "HDHIVE_TOKEN_REFRESH_FAILED")
         self.assertIn("重新授权", str(context.exception))
 
+    def test_reauthorization_required_response_also_refreshes_via_cms(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.token_file(directory, access_token="expired")
+            http = FakeHttp(
+                [
+                    {
+                        "success": False,
+                        "code": "OPENAPI_REAUTH_REQUIRED",
+                        "message": "OpenAPI reauthorization required",
+                    },
+                    {"success": True, "code": "200", "data": {}},
+                ]
+            )
+
+            def refresh_via_cms():
+                path.write_text(json.dumps({"access_token": "fresh"}), encoding="utf-8")
+
+            client = HdhiveProxyClient(
+                "https://proxy.test",
+                path,
+                http=http,
+                refresh_via_cms=refresh_via_cms,
+            )
+
+            client.account()
+
+        self.assertEqual(http.calls[0][2]["access_token"], "expired")
+        self.assertEqual(http.calls[1][2]["access_token"], "fresh")
+
     def test_missing_token_is_a_stable_error(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "missing.json"
