@@ -48,6 +48,15 @@ class ReleaseWorkflowTests(unittest.TestCase):
         ):
             self.assertIn(term, overview)
 
+    def test_dockerhub_description_can_sync_without_rebuilding_images(self):
+        workflow = (ROOT / ".github/workflows/sync-dockerhub-description.yml").read_text(encoding="utf-8")
+
+        self.assertIn("workflow_dispatch", workflow)
+        self.assertIn("DOCKERHUB_USERNAME", workflow)
+        self.assertIn("DOCKERHUB_TOKEN", workflow)
+        self.assertIn("docs/dockerhub-overview.md", workflow)
+        self.assertIn("hub.docker.com/v2/repositories", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
