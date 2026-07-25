@@ -10,6 +10,18 @@ from app.task_store import TaskStore
 
 
 class TaskHealthTests(unittest.TestCase):
+    def test_health_reports_fresh_task_runner_error_as_problem(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            store.set_runtime_state("task_runner", "error", updated_at=100.0)
+
+            summary = build_task_health(store, enabled=True, now=100.0)
+            report = format_task_health(summary, now=100.0)
+
+            self.assertEqual(summary.runner_state, "error")
+            self.assertFalse(summary.runner_heartbeat_stale)
+            self.assertIn("TaskRunner心跳: error", report)
+
     def test_health_reports_stale_task_runner_heartbeat(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

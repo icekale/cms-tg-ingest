@@ -175,6 +175,7 @@ def serialize_health(store: TaskStore, *, enabled: bool = True, now: float | Non
         "p115_cooldown_active": summary.p115_cooldown_until > current_time,
         "runner_heartbeat_at": summary.runner_heartbeat_at,
         "runner_heartbeat_stale": summary.runner_heartbeat_stale,
+        "runner_state": summary.runner_state,
         "backup": backup,
         "wait_details": list(summary.wait_details),
         "latest_problem": serialize_task(summary.latest_problem, now=current_time) if summary.latest_problem else None,

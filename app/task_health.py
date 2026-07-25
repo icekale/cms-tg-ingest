@@ -29,6 +29,7 @@ class TaskHealthSummary:
     p115_cooldown_until: float = 0.0
     runner_heartbeat_at: float = 0.0
     runner_heartbeat_stale: bool = False
+    runner_state: str = ""
 
 
 def _truncate(value: object, limit: int) -> str:
@@ -91,6 +92,7 @@ def build_task_health(
         p115_cooldown_until=cooldown_until,
         runner_heartbeat_at=runner_heartbeat_at,
         runner_heartbeat_stale=runner_heartbeat_stale,
+        runner_state=aggregate.runner_state,
     )
 
 
@@ -107,8 +109,12 @@ def format_task_health(summary: TaskHealthSummary, *, now: float | None = None) 
     ]
     if not summary.enabled:
         lines.append("TaskRunner心跳: disabled")
+    elif summary.runner_state == "error":
+        lines.append("TaskRunner心跳: error")
     elif summary.runner_heartbeat_stale:
         lines.append("TaskRunner心跳: stale")
+    elif summary.runner_state == "stopped":
+        lines.append("TaskRunner心跳: stopped")
     elif summary.runner_heartbeat_at > 0:
         lines.append("TaskRunner心跳: active")
     else:

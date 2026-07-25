@@ -39,6 +39,7 @@ class TaskHealthAggregate:
     lock_wait_count: int
     p115_cooldown_until: float
     runner_heartbeat_at: float = 0.0
+    runner_state: str = ""
     wait_tasks: tuple[TaskSnapshot, ...] = ()
     latest_problem: TaskSnapshot | None = None
     latest_lock_wait: TaskSnapshot | None = None
@@ -639,7 +640,7 @@ class TaskStore:
                 (TaskStatus.RUNNING.value,),
             ).fetchone()
             runner_heartbeat_row = conn.execute(
-                "SELECT updated_at FROM runtime_state WHERE key = ?",
+                "SELECT value, updated_at FROM runtime_state WHERE key = ?",
                 ("task_runner",),
             ).fetchone()
 
@@ -668,6 +669,7 @@ class TaskStore:
             lock_wait_count=int(aggregate["lock_wait_count"]),
             p115_cooldown_until=float(aggregate["p115_cooldown_until"] or 0),
             runner_heartbeat_at=float(runner_heartbeat_row["updated_at"] or 0) if runner_heartbeat_row else 0.0,
+            runner_state=str(runner_heartbeat_row["value"] or "") if runner_heartbeat_row else "",
             wait_tasks=tuple(task for task in wait_tasks if task is not None),
             latest_problem=snapshot(latest_problem_row),
             latest_lock_wait=snapshot(latest_lock_wait_row),

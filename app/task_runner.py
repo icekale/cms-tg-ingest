@@ -220,18 +220,30 @@ class TaskRunner:
         if persisted_until > self._p115_risk_cooldown_until:
             self._p115_risk_cooldown_until = persisted_until
 
+    def _safe_runtime_state(self, key: str, value: str, *, updated_at: float | None = None) -> bool:
+        try:
+            self.store.set_runtime_state(key, value, updated_at=updated_at)
+            return True
+        except Exception:
+            LOG.debug("Failed to update TaskRunner runtime state key=%s", key, exc_info=True)
+            return False
+
     def _record_heartbeat(self) -> None:
         now = self.now()
         if now - self._last_heartbeat_at < _HEARTBEAT_INTERVAL_SECONDS:
             return
         try:
-            self.store.set_runtime_state("task_runner", "running", updated_at=now)
-            self._last_heartbeat_at = now
+            state = self.store.get_runtime_state("task_runner")
+            if state and self._safe_runtime_state("task_runner", state["value"], updated_at=now):
+                self._last_heartbeat_at = now
         except Exception:
             LOG.debug("Failed to record TaskRunner heartbeat", exc_info=True)
 
     def _run_heartbeat(self) -> None:
         while not self._stop.is_set():
+            if self._thread is None or not self._thread.is_alive():
+                self._safe_runtime_state("task_runner", "error")
+                return
             self._record_heartbeat()
             self._stop.wait(_HEARTBEAT_INTERVAL_SECONDS)
 
@@ -547,10 +559,10 @@ class TaskRunner:
             return self._thread
         self._stop.clear()
         self._last_heartbeat_at = 0.0
-        self._heartbeat_thread = threading.Thread(target=self._run_heartbeat, daemon=True)
-        self._heartbeat_thread.start()
         self._thread = threading.Thread(target=self.run_forever, daemon=True)
         self._thread.start()
+        self._heartbeat_thread = threading.Thread(target=self._run_heartbeat, daemon=True)
+        self._heartbeat_thread.start()
         return self._thread
 
     def stop(self, join_timeout: float = 5) -> None:
@@ -561,8 +573,19 @@ class TaskRunner:
                 thread.join(max(0.0, deadline - time.monotonic()))
 
     def run_forever(self) -> None:
+        failure_count = 0
         while not self._stop.is_set():
-            self._record_heartbeat()
-            did_work = self.run_once()
+            try:
+                did_work = self.run_once()
+            except Exception as exc:
+                failure_count += 1
+                LOG.exception("Task runner infrastructure failure")
+                self._safe_runtime_state("task_runner", "error")
+                self._safe_runtime_state("task_runner_last_error", str(exc)[:300])
+                self._stop.wait(min(30.0, self.interval_seconds * (2 ** min(failure_count, 5))))
+                continue
+            failure_count = 0
+            self._safe_runtime_state("task_runner", "running")
             if not did_work:
                 self._stop.wait(self.interval_seconds)
+        self._safe_runtime_state("task_runner", "stopped")

@@ -13,6 +13,15 @@ from app.web_api import _safe_error, _safe_url, serialize_health, serialize_task
 
 
 class WebApiTests(unittest.TestCase):
+    def test_health_api_exposes_runner_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            store.set_runtime_state("task_runner", "error", updated_at=100.0)
+
+            payload = serialize_health(store, enabled=True, now=100.0)
+
+        self.assertEqual(payload["runner_state"], "error")
+
     def test_hdhive_sensitive_url_and_error_variants_are_redacted(self):
         for key in (
             "share_password",

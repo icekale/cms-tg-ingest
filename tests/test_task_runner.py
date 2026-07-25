@@ -1,3 +1,5 @@
+import sqlite3
+import threading
 import tempfile
 import time
 import unittest
@@ -82,6 +84,37 @@ class TimeAdvancingCountingWorkflow:
 
 
 class TaskRunnerTests(unittest.TestCase):
+    def test_run_forever_survives_store_error_and_reports_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real_store = TaskStore(Path(tmp) / "tasks.db")
+
+            class FailOnceClaimStore:
+                def __init__(self, delegate):
+                    self.delegate = delegate
+                    self.calls = 0
+                    self.second_claim = threading.Event()
+
+                def __getattr__(self, name):
+                    return getattr(self.delegate, name)
+
+                def claim_next_runnable(self, worker_id, now=None, stale_after_seconds=21600):
+                    self.calls += 1
+                    if self.calls == 1:
+                        raise sqlite3.OperationalError("database is temporarily locked")
+                    self.second_claim.set()
+                    return None
+
+            store = FailOnceClaimStore(real_store)
+            runner = TaskRunner(store, FakeWorkflow([]), interval_seconds=0.01)
+            thread = runner.start()
+            try:
+                self.assertTrue(store.second_claim.wait(timeout=1))
+                self.assertTrue(thread.is_alive())
+                state = real_store.get_runtime_state("task_runner")
+                self.assertEqual(state["value"], "running")
+            finally:
+                runner.stop()
+
     def test_heartbeat_refreshes_while_worker_waits(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
@@ -120,7 +153,7 @@ class TaskRunnerTests(unittest.TestCase):
             runner.stop(join_timeout=1)
 
             heartbeat = store.get_runtime_state("task_runner")
-            self.assertEqual(heartbeat["value"], "running")
+            self.assertEqual(heartbeat["value"], "stopped")
             self.assertGreater(heartbeat["updated_at"], 0)
 
     def test_stop_wakes_and_joins_idle_worker(self):
