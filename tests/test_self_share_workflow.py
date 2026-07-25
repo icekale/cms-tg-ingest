@@ -1892,6 +1892,55 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertIn("文件夹 TMDB 1356587", updated["move_error"])
             self.assertFalse((dest / "movie.strm").exists())
 
+    def test_merge_self_share_folder_rejects_wrong_destination_tmdb_for_required_episode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Show-[tmdb=73375]"
+            dest = root / "library" / "Show-[tmdb=99999]"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            marker = "http://cms/s/ownshare_1212_episode.mkv"
+            (source / "episode.strm").write_text(marker, encoding="utf-8")
+            (dest / "episode.strm").write_text(marker, encoding="utf-8")
+            store = bridge.SubmissionStore(root / "db.sqlite")
+            row = store.upsert_submission(
+                bridge.ShareKey("abc", "1212"),
+                "https://115cdn.com/s/abc?password=1212",
+                "submitted",
+                title="Show (2020)",
+            )
+            row = store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_code="ownshare",
+                own_share_receive_code="1212",
+                own_share_file_name=source.name,
+            ) or row
+            row = store.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": "Show", "tmdb_id": "73375", "category": "外国电视", "type": "tv"},
+                "confident",
+            ) or row
+            config = bridge.MoveConfig(
+                source_roots=[root / "share"],
+                library_roots={"外国电视": root / "library"},
+            )
+            plan = bridge.MovePlan("conflict", "ready", source, dest, "外国电视")
+
+            updated = bridge.merge_self_share_strm_folder(
+                plan,
+                store,
+                row,
+                config,
+                required_relative_path="episode.strm",
+            )
+
+            self.assertEqual(updated["move_status"], "error")
+            self.assertIn("任务 TMDB 73375", updated["move_error"])
+            self.assertIn("文件夹 TMDB 99999", updated["move_error"])
+            self.assertTrue(source.exists())
+            self.assertEqual((dest / "episode.strm").read_text(encoding="utf-8"), marker)
+
     def test_cleanup_pending_self_share_sources_requires_task_runner_review(self):
         class FakeP115:
             def __init__(self):
@@ -2273,6 +2322,53 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertTrue(source.exists())
             self.assertFalse(dest.exists())
 
+    def test_repair_skips_existing_error_with_complete_persisted_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            dest = root / "library" / "Movie"
+            store = bridge.SubmissionStore(root / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("share-repair-error", "pass001"),
+                "https://115cdn.com/s/repair-error",
+                "submitted",
+                title="Movie",
+            )
+            row = store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_name=source.name,
+                own_share_code="repair_error",
+            ) or row
+            store.update_category(int(row["id"]), "欧美电影", "selected")
+            store.update_move(
+                int(row["id"]),
+                "error",
+                source_path=str(source),
+                dest_path=str(dest),
+                category_final="欧美电影",
+                error="保留原始错误",
+            )
+            old_updated_at = 1234.5
+            with store._lock, store._connection() as conn:
+                conn.execute("UPDATE submissions SET updated_at = ? WHERE id = ?", (old_updated_at, int(row["id"])))
+            config = bridge.MoveConfig(
+                source_roots=[root / "share"],
+                library_roots={"欧美电影": root / "library"},
+            )
+
+            with patch.object(store, "update_move", wraps=store.update_move) as update_move:
+                candidates = store.invalid_self_share_move_candidates(limit=10)
+                repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
+
+            updated = store.find_by_id(int(row["id"]))
+            self.assertEqual(candidates, [])
+            self.assertEqual(repaired, 0)
+            update_move.assert_not_called()
+            self.assertEqual(updated["move_status"], "error")
+            self.assertEqual(updated["move_error"], "保留原始错误")
+            self.assertEqual(updated["updated_at"], old_updated_at)
+
     def test_repair_skips_canonical_manifest_rename_for_source_outside_whitelist(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2353,6 +2449,54 @@ class SelfShareWorkflowTests(unittest.TestCase):
             replace.assert_not_called()
             self.assertTrue(alias.exists())
             self.assertFalse((source / "canonical.strm").exists())
+
+    def test_repair_rejects_non_directory_source_names_before_manifest_restore(self):
+        for source_name_case in ("absolute", "..", ".", "foo/../Movie"):
+            with self.subTest(source_name=source_name_case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                share_root = root / "share"
+                source = share_root / "Movie"
+                share_root.mkdir(parents=True)
+                source.mkdir()
+                source_name = str(source) if source_name_case == "absolute" else source_name_case
+                actual_source = share_root if source_name_case == "." else source
+                alias = actual_source / "alias.strm"
+                alias.write_text("http://cms/s/repair_name_1212_movie", encoding="utf-8")
+                store = bridge.SubmissionStore(root / "submissions.db")
+                row = store.upsert_submission(
+                    bridge.ShareKey("share-repair-name", "pass001"),
+                    "https://115cdn.com/s/repair-name",
+                    "submitted",
+                    title="Movie",
+                )
+                row = store.update_self_share(
+                    int(row["id"]),
+                    workflow_mode="self_share_sync",
+                    own_share_file_name=source_name,
+                    own_share_code="repair_name",
+                    canonical_manifest_json=json.dumps(
+                        {
+                            "root_name": "Movie",
+                            "entries": [{"alias_path": "alias", "canonical_path": "canonical"}],
+                        }
+                    ),
+                ) or row
+                store.update_category(int(row["id"]), "欧美电影", "selected")
+                store.update_move(int(row["id"]), "skipped", category_final="欧美电影")
+                config = bridge.MoveConfig(
+                    source_roots=[share_root],
+                    library_roots={"欧美电影": root / "library"},
+                )
+
+                with patch("app.media.strm.Path.replace") as replace, patch("app.media.strm.shutil.move") as move:
+                    repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
+
+                updated = store.find_by_id(int(row["id"]))
+                self.assertEqual(repaired, 0)
+                replace.assert_not_called()
+                move.assert_not_called()
+                self.assertEqual(updated["move_status"], "skipped")
+                self.assertTrue(alias.exists())
 
     def test_repair_stranded_self_share_folder_moves_it_to_library(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2570,6 +2714,50 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertIn("媒体库白名单", metadata["destination_validation_error"])
             cleanup.assert_not_called()
             self.assertTrue((outside / "movie.strm").exists())
+
+    def test_restore_missing_rejects_non_directory_source_name_before_manifest_restore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            source = share_root / "Movie"
+            library_root = root / "library"
+            dest = library_root / "Movie"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            row = {
+                "id": 1,
+                "workflow_mode": "self_share_sync",
+                "dest_path": str(dest),
+                "category_final": "欧美电影",
+                "own_share_file_name": "foo/../Movie",
+                "own_share_code": "restore_name",
+                "own_share_receive_code": "1212",
+                "workflow_phase": "restore_share_sync_submitted",
+                "canonical_manifest_json": json.dumps(
+                    {
+                        "root_name": "Movie",
+                        "entries": [{"alias_path": "alias", "canonical_path": "canonical"}],
+                    }
+                ),
+            }
+            self_share_config = bridge.SelfShareConfig(enabled=True, strm_root=share_root)
+            move_config = bridge.MoveConfig(
+                source_roots=[share_root],
+                library_roots={"欧美电影": library_root},
+            )
+
+            with patch("app.media.strm.restore_canonical_strm_paths") as restore:
+                status, metadata = bridge.restore_missing_self_share_library_folder(
+                    None,
+                    None,
+                    row,
+                    self_share_config,
+                    move_config,
+                )
+
+            self.assertEqual(status, "skipped")
+            self.assertEqual(metadata["restore_reason"], "自有分享源目录名称无效")
+            restore.assert_not_called()
 
     def test_restore_alias_share_strm_uses_canonical_library_folder(self):
         with tempfile.TemporaryDirectory() as tmp:

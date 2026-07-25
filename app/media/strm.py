@@ -342,6 +342,14 @@ def validate_self_share_strm_file(path: Path, expected_marker: str) -> str:
     return ""
 
 
+def _validate_self_share_strm_directory_tmdb(destination: Path, row: dict[str, Any]) -> str:
+    expected_tmdb = expected_task_tmdb_id(parse_recognition_json(row), row)
+    folder_tmdb = extract_tmdb_id_from_name(destination.name)
+    if expected_tmdb and folder_tmdb and expected_tmdb != folder_tmdb:
+        return f"任务 TMDB {expected_tmdb} 与文件夹 TMDB {folder_tmdb} 不一致，阻止移动 STRM"
+    return ""
+
+
 def validate_self_share_strm_destination(
     destination: Path,
     row: dict[str, Any],
@@ -352,6 +360,9 @@ def validate_self_share_strm_destination(
     destination = safe_resolve(destination)
     if not destination.exists() or not destination.is_dir():
         return "目标 STRM 目录不存在"
+    directory_issue = _validate_self_share_strm_directory_tmdb(destination, row)
+    if directory_issue:
+        return directory_issue
     own_share_code = str(row.get("own_share_code") or "").strip()
     if not own_share_code:
         return "等待自有分享码，暂不确认目标 STRM"
@@ -974,12 +985,33 @@ def _invalidate_persisted_self_share_move(store: Any, row: dict[str, Any]) -> No
     )
 
 
+def _single_relative_directory_name(value: str) -> str | None:
+    name = str(value or "").strip()
+    path = Path(name)
+    if (
+        not name
+        or path.is_absolute()
+        or len(path.parts) != 1
+        or path.parts[0] in {".", ".."}
+        or path.parts[0] != name
+    ):
+        return None
+    return name
+
+
 def repair_stranded_self_share_moves(store: Any, move_config: MoveConfig, limit: int = 50) -> int:
     repaired = 0
     invalid_candidates = getattr(store, "invalid_self_share_move_candidates", None)
     if invalid_candidates:
         for row in invalid_candidates(limit=max(1, int(limit))):
-            if str(row.get("move_status") or "").lower() == "moving":
+            move_status = str(row.get("move_status") or "").lower()
+            has_persisted_paths = bool(
+                str(row.get("source_path") or "").strip()
+                and str(row.get("dest_path") or "").strip()
+            )
+            if move_status == "error" and has_persisted_paths:
+                continue
+            if move_status == "moving":
                 reconcile_self_share_move(store, move_config, row)
             else:
                 _invalidate_persisted_self_share_move(store, row)
@@ -991,7 +1023,9 @@ def repair_stranded_self_share_moves(store: Any, move_config: MoveConfig, limit:
                     repaired += 1
                 continue
         category = category_for_self_share_row(row)
-        source_name = str(row.get("share_alias_name") or row.get("own_share_file_name") or "").strip()
+        source_name = _single_relative_directory_name(
+            str(row.get("share_alias_name") or row.get("own_share_file_name") or "")
+        )
         canonical_name = canonical_self_share_root_name(row)
         if not category or not source_name or not canonical_name:
             continue
@@ -1042,8 +1076,13 @@ def restore_missing_self_share_library_folder(
     metadata["destination_validation_error"] = destination_issue
     category = category_for_self_share_row(row)
     canonical_name = canonical_self_share_root_name(row)
-    source_name = str(row.get("share_alias_name") or row.get("own_share_file_name") or "").strip()
-    if not category or not canonical_name or not source_name:
+    if not category or not canonical_name:
+        return "skipped", metadata
+    source_name = _single_relative_directory_name(
+        str(row.get("share_alias_name") or row.get("own_share_file_name") or "")
+    )
+    if not source_name:
+        metadata["restore_reason"] = "自有分享源目录名称无效"
         return "skipped", metadata
     trusted_strm_root = safe_resolve(self_share_config.strm_root)
     source = safe_resolve(trusted_strm_root / source_name)

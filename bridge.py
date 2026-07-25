@@ -999,6 +999,11 @@ class SubmissionStore:
                   AND lower(COALESCE(move_status, '')) <> 'moved'
                   AND (COALESCE(source_path, '') <> '' OR COALESCE(dest_path, '') <> '')
                   AND NOT (
+                      lower(COALESCE(move_status, '')) = 'error'
+                      AND COALESCE(source_path, '') <> ''
+                      AND COALESCE(dest_path, '') <> ''
+                  )
+                  AND NOT (
                       lower(COALESCE(move_status, '')) = 'moving'
                       AND COALESCE(source_path, '') <> ''
                       AND COALESCE(dest_path, '') <> ''
