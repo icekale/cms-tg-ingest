@@ -12,7 +12,6 @@ env:
 
 jobs:
   sync:
-    if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +19,7 @@ jobs:
       - name: Sync Docker Hub description
         run: |
           set -eu
+          test -n "$DOCKERHUB_USERNAME" -a -n "$DOCKERHUB_TOKEN"
           login_payload=$(jq -n \
             --arg username "$DOCKERHUB_USERNAME" \
             --arg password "$DOCKERHUB_TOKEN" \
