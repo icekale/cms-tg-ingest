@@ -625,6 +625,9 @@ def merge_self_share_strm_folder(plan: MovePlan, store: Any, row: dict[str, Any]
         return journaled or row
     temp_path: Path | None = None
     try:
+        own_share_code = str(row.get("own_share_code") or "").strip()
+        receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+        expected_marker = f"/s/{own_share_code}_{receive_code}_" if own_share_code else ""
         for child in source.rglob("*"):
             if not child.is_file():
                 continue
@@ -632,6 +635,8 @@ def merge_self_share_strm_folder(plan: MovePlan, store: Any, row: dict[str, Any]
             target = dest / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             if child.suffix.lower() == ".strm":
+                if target.is_file() and expected_marker and not validate_self_share_strm_file(target, expected_marker):
+                    continue
                 temp_path = target.with_name(target.name + ".cms-ingest.tmp")
                 shutil.copy2(child, temp_path)
                 os.replace(temp_path, target)
@@ -661,6 +666,89 @@ def merge_self_share_strm_folder(plan: MovePlan, store: Any, row: dict[str, Any]
         category_final=plan.category,
         error="目标目录已存在，已合并并覆盖同名 STRM",
     ) or row
+
+
+def reconcile_self_share_move(store: Any, move_config: MoveConfig, row: dict[str, Any]) -> str:
+    if str(row.get("move_status") or "").lower() != "moving":
+        return "invalid"
+    source_value = str(row.get("source_path") or "").strip()
+    dest_value = str(row.get("dest_path") or "").strip()
+    if not source_value or not dest_value:
+        return "invalid"
+
+    source = safe_resolve(Path(source_value))
+    dest = safe_resolve(Path(dest_value))
+    category = category_for_self_share_row(row)
+    if not is_under_any_root(dest, list(move_config.library_roots.values())):
+        store.update_move(
+            int(row["id"]),
+            "error",
+            source_path=str(source),
+            dest_path=str(dest),
+            category_final=category,
+            error="目标目录不在媒体库白名单内",
+        )
+        return "invalid"
+
+    source_exists = source.exists() and source.is_dir()
+    dest_exists = dest.exists() and dest.is_dir()
+    if not source_exists and dest_exists:
+        issue = validate_self_share_strm_destination(dest, row)
+        if issue:
+            store.update_move(
+                int(row["id"]),
+                "error",
+                source_path=str(source),
+                dest_path=str(dest),
+                category_final=category,
+                error=issue,
+            )
+            return "invalid"
+        store.update_move(
+            int(row["id"]),
+            "moved",
+            source_path=str(source),
+            dest_path=str(dest),
+            category_final=category,
+        )
+        return "moved"
+
+    if source_exists and dest_exists:
+        updated = merge_self_share_strm_folder(
+            MovePlan("conflict", "目标目录已存在，恢复中合并", source, dest, category),
+            store,
+            row,
+        )
+        return "merged" if str(updated.get("move_status") or "").lower() == "moved" else "invalid"
+
+    if source_exists:
+        issue = validate_self_share_strm_source(source, row)
+        if issue:
+            store.update_move(
+                int(row["id"]),
+                "error",
+                source_path=str(source),
+                dest_path=str(dest),
+                category_final=category,
+                error=issue,
+            )
+            return "invalid"
+        updated = execute_strm_move(
+            MovePlan("pending", "ready", source, dest, category),
+            store,
+            row,
+        )
+        return "replayed" if str(updated.get("move_status") or "").lower() == "moved" else "invalid"
+
+    store.update_move(
+        int(row["id"]),
+        "error",
+        source_path=str(source),
+        dest_path=str(dest),
+        category_final=category,
+        error="STRM 源目录和目标目录均不存在",
+    )
+    return "missing"
 
 
 def find_self_share_strm_source_dir(
@@ -778,6 +866,12 @@ def _cleanup_own_share_source(store: Any, row: dict[str, Any], cleanup_client: A
 def repair_stranded_self_share_moves(store: Any, move_config: MoveConfig, limit: int = 50) -> int:
     repaired = 0
     for row in store.stranded_self_share_move_candidates(limit=max(1, int(limit))):
+        if str(row.get("move_status") or "").lower() == "moving":
+            if str(row.get("source_path") or "").strip() and str(row.get("dest_path") or "").strip():
+                result = reconcile_self_share_move(store, move_config, row)
+                if result in {"moved", "replayed", "merged"}:
+                    repaired += 1
+                continue
         category = category_for_self_share_row(row)
         source_name = str(row.get("share_alias_name") or row.get("own_share_file_name") or "").strip()
         canonical_name = canonical_self_share_root_name(row)

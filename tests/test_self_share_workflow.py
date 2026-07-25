@@ -1925,6 +1925,143 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertEqual(p115.deleted, [])
             self.assertEqual(updated["cleanup_status"], "pending")
 
+    def _moving_self_share_row(self, root, source, dest, category, share_code):
+        store = bridge.SubmissionStore(root / "submissions.db")
+        row = store.upsert_submission(
+            bridge.ShareKey(f"share-{share_code}", "pass001"),
+            f"https://115cdn.com/s/{share_code}",
+            "submitted",
+            title=source.name,
+        )
+        row = store.update_self_share(
+            int(row["id"]),
+            workflow_mode="self_share_sync",
+            own_share_file_name=source.name,
+            own_share_code=share_code,
+        ) or row
+        store.update_category(int(row["id"]), category, "selected")
+        row = store.update_move(
+            int(row["id"]),
+            "moving",
+            source_path=str(source),
+            dest_path=str(dest),
+            category_final=category,
+        ) or row
+        return store, row
+
+    def test_reconcile_stranded_move_marks_valid_existing_destination_moved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            dest = root / "library" / "Movie"
+            dest.mkdir(parents=True)
+            (dest / "movie.strm").write_text("http://cms/s/reconcilemoved_1212_movie", encoding="utf-8")
+            store, row = self._moving_self_share_row(root, source, dest, "欧美电影", "reconcilemoved")
+            config = bridge.MoveConfig(source_roots=[root / "share"], library_roots={"欧美电影": root / "library"})
+
+            result = bridge.reconcile_self_share_move(store, config, row)
+
+            self.assertEqual(result, "moved")
+            self.assertEqual(store.find_by_id(int(row["id"]))["move_status"], "moved")
+            self.assertTrue((dest / "movie.strm").exists())
+
+    def test_reconcile_stranded_move_replays_source_only_move(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            dest = root / "library" / "Movie"
+            source.mkdir(parents=True)
+            (source / "movie.strm").write_text("http://cms/s/reconcilereplay_1212_movie", encoding="utf-8")
+            store, row = self._moving_self_share_row(root, source, dest, "欧美电影", "reconcilereplay")
+            config = bridge.MoveConfig(source_roots=[root / "share"], library_roots={"欧美电影": root / "library"})
+
+            result = bridge.reconcile_self_share_move(store, config, row)
+
+            self.assertEqual(result, "replayed")
+            self.assertFalse(source.exists())
+            self.assertTrue((dest / "movie.strm").exists())
+            self.assertEqual(store.find_by_id(int(row["id"]))["move_status"], "moved")
+
+    def test_reconcile_stranded_move_merges_without_recopying_valid_target_strm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            dest = root / "library" / "Movie"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            same = "http://cms/s/reconcilemerge_1212_same"
+            (source / "same.strm").write_text(same, encoding="utf-8")
+            (source / "new.strm").write_text("http://cms/s/reconcilemerge_1212_new", encoding="utf-8")
+            (dest / "same.strm").write_text(same, encoding="utf-8")
+            store, row = self._moving_self_share_row(root, source, dest, "欧美电影", "reconcilemerge")
+            config = bridge.MoveConfig(source_roots=[root / "share"], library_roots={"欧美电影": root / "library"})
+
+            with patch("app.media.strm.shutil.copy2", wraps=__import__("shutil").copy2) as copy2:
+                result = bridge.reconcile_self_share_move(store, config, row)
+
+            self.assertEqual(result, "merged")
+            self.assertFalse(source.exists())
+            self.assertEqual(copy2.call_args_list, [
+                unittest.mock.call(
+                    bridge.safe_resolve(source / "new.strm"),
+                    bridge.safe_resolve(dest / "new.strm.cms-ingest.tmp"),
+                )
+            ])
+            self.assertEqual((dest / "same.strm").read_text(encoding="utf-8"), same)
+
+    def test_reconcile_stranded_move_rejects_direct_marker_in_existing_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            dest = root / "library" / "Movie"
+            dest.mkdir(parents=True)
+            direct = dest / "movie.strm"
+            direct.write_text("http://cms/d/direct_movie", encoding="utf-8")
+            store, row = self._moving_self_share_row(root, source, dest, "欧美电影", "reconcileinvalid")
+            config = bridge.MoveConfig(source_roots=[root / "share"], library_roots={"欧美电影": root / "library"})
+
+            result = bridge.reconcile_self_share_move(store, config, row)
+
+            updated = store.find_by_id(int(row["id"]))
+            self.assertEqual(result, "invalid")
+            self.assertEqual(updated["move_status"], "error")
+            self.assertIn("直链 STRM", updated["move_error"])
+            self.assertEqual(direct.read_text(encoding="utf-8"), "http://cms/d/direct_movie")
+
+    def test_reconcile_stranded_move_reports_missing_source_and_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            dest = root / "library" / "Movie"
+            store, row = self._moving_self_share_row(root, source, dest, "欧美电影", "reconcilemissing")
+            config = bridge.MoveConfig(source_roots=[root / "share"], library_roots={"欧美电影": root / "library"})
+
+            result = bridge.reconcile_self_share_move(store, config, row)
+
+            updated = store.find_by_id(int(row["id"]))
+            self.assertEqual(result, "missing")
+            self.assertEqual(updated["move_status"], "error")
+            self.assertEqual(updated["move_error"], "STRM 源目录和目标目录均不存在")
+
+    def test_reconcile_stranded_move_rejects_destination_outside_library_whitelist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            outside = root / "outside" / "Movie"
+            source.mkdir(parents=True)
+            (source / "movie.strm").write_text("http://cms/s/reconcileoutside_1212_movie", encoding="utf-8")
+            store, row = self._moving_self_share_row(root, source, outside, "欧美电影", "reconcileoutside")
+            config = bridge.MoveConfig(source_roots=[root / "share"], library_roots={"欧美电影": root / "library"})
+
+            result = bridge.reconcile_self_share_move(store, config, row)
+
+            updated = store.find_by_id(int(row["id"]))
+            self.assertEqual(result, "invalid")
+            self.assertEqual(updated["move_status"], "error")
+            self.assertEqual(updated["move_error"], "目标目录不在媒体库白名单内")
+            self.assertTrue(source.exists())
+            self.assertFalse(outside.exists())
+
     def test_repair_stranded_self_share_folder_moves_it_to_library(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

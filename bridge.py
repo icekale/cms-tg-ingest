@@ -124,6 +124,7 @@ from app.media.strm import (
     newest_mtime,
     plan_strm_move,
     prepare_self_share_move_inputs,
+    reconcile_self_share_move,
     remove_direct_strm_files,
     repair_stranded_self_share_moves,
     restore_missing_self_share_library_folder,
@@ -969,7 +970,14 @@ class SubmissionStore:
                 """
                 SELECT * FROM submissions
                 WHERE workflow_mode = 'self_share_sync'
-                  AND COALESCE(own_share_file_name, '') <> ''
+                  AND (
+                      COALESCE(own_share_file_name, '') <> ''
+                      OR (
+                          lower(COALESCE(move_status, '')) = 'moving'
+                          AND COALESCE(source_path, '') <> ''
+                          AND COALESCE(dest_path, '') <> ''
+                      )
+                  )
                   AND lower(COALESCE(move_status, '')) <> 'moved'
                 ORDER BY updated_at DESC, id DESC
                 LIMIT ?
@@ -2342,6 +2350,7 @@ def start_self_share_maintenance_loop(
     def loop() -> None:
         while True:
             try:
+                moved = repair_stranded_self_share_moves(store, move_config, limit=limit)
                 restored = restore_missing_self_share_library_folders(
                     store,
                     cms,
@@ -2349,8 +2358,11 @@ def start_self_share_maintenance_loop(
                     move_config,
                     limit=limit,
                 )
+                if moved:
+                    LOG.info("Self-share maintenance reconciled %s stranded STRM moves", moved)
                 if restored:
                     LOG.info("Self-share maintenance restored %s missing STRM folders", restored)
+                if moved or restored:
                     write_metrics_snapshot(store, metrics_path_for_store(store))
             except Exception:
                 LOG.debug("Self-share maintenance loop failed", exc_info=True)
