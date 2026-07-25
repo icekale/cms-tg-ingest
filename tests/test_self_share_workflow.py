@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -979,6 +980,22 @@ class OrganizedFolderSelectionTests(unittest.TestCase):
 
 
 class SelfShareWorkflowTests(unittest.TestCase):
+    def test_self_share_maintenance_loop_honors_stop_event(self):
+        stop_event = threading.Event()
+        stop_event.set()
+
+        thread = bridge.start_self_share_maintenance_loop(
+            None,
+            None,
+            None,
+            None,
+            interval_seconds=1,
+            stop_event=stop_event,
+        )
+
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+
     def test_self_share_skipped_move_is_retryable(self):
         self.assertTrue(bridge.should_attempt_strm_move({"move_status": "skipped"}, self_share_enabled=True))
         self.assertFalse(bridge.should_attempt_strm_move({"move_status": "skipped"}, self_share_enabled=False))
@@ -2132,6 +2149,24 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertEqual(store.find_by_id(int(row["id"]))["move_status"], "moved")
             self.assertTrue((dest / "movie.strm").exists())
 
+    def test_reconcile_stranded_move_rejects_empty_source_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            dest = root / "library" / "Movie"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            (dest / "movie.strm").write_text("http://cms/s/reconcileempty_1212_movie", encoding="utf-8")
+            store, row = self._moving_self_share_row(root, source, dest, "欧美电影", "reconcileempty")
+            config = bridge.MoveConfig(source_roots=[root / "share"], library_roots={"欧美电影": root / "library"})
+
+            result = bridge.reconcile_self_share_move(store, config, row)
+
+            self.assertEqual(result, "invalid")
+            self.assertTrue(source.exists())
+            self.assertTrue((dest / "movie.strm").exists())
+            self.assertEqual(store.find_by_id(int(row["id"]))["move_status"], "error")
+
     def test_reconcile_stranded_move_replays_stale_moving_row_without_rewriting_moved_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3017,6 +3052,85 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertTrue((dest / "Troy.2004.strm").is_file())
             self.assertFalse((movie_root / alias_name).exists())
 
+    def test_restore_alias_without_strm_falls_back_to_own_share_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            movie_root = root / "Movie"
+            own_name = "T-特洛伊-2004-[tmdb=652]"
+            alias_name = "asset-42-abcd1234"
+            (share_root / alias_name).mkdir(parents=True)
+            source = share_root / own_name
+            source.mkdir(parents=True)
+            (source / "Troy.2004.strm").write_text(
+                "http://cms/s/owncode_1212_file.mkv",
+                encoding="utf-8",
+            )
+            store = bridge.SubmissionStore(root / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("external-fallback", "pass"),
+                "https://115cdn.com/s/external-fallback?password=pass",
+                "submitted",
+                title="特洛伊",
+            )
+            store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_name=own_name,
+                own_share_code="owncode",
+                own_share_receive_code="1212",
+                share_alias_name=alias_name,
+                share_alias_level=2,
+            )
+            store.update_recognition(
+                int(row["id"]),
+                {"title": own_name, "type": "movie", "category": "欧美电影", "tmdb_id": "652"},
+                "self_share_resolved",
+            )
+            store.update_category(int(row["id"]), "欧美电影", "selected")
+            store.update_move(int(row["id"]), "moved", dest_path=str(movie_root / own_name), category_final="欧美电影")
+
+            class FakeCms:
+                def add_share115_sync_task(self, *args, **kwargs):
+                    raise AssertionError("valid fallback source should not resubmit share sync")
+
+            status, metadata = bridge.restore_missing_self_share_library_folder(
+                store,
+                FakeCms(),
+                store.find_by_id(int(row["id"])),
+                bridge.SelfShareConfig(enabled=True, strm_root=share_root),
+                bridge.MoveConfig(source_roots=[share_root], library_roots={"欧美电影": movie_root}, stable_seconds=0),
+            )
+
+            self.assertEqual(status, "restored")
+            self.assertEqual(metadata["source_path"], str(bridge.safe_resolve(source)))
+            self.assertTrue((movie_root / own_name / "Troy.2004.strm").exists())
+            self.assertFalse(source.exists())
+
+    def test_find_self_share_source_falls_back_when_alias_has_no_strm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            alias_name = "asset-42-abcd1234"
+            own_name = "T-特洛伊-2004-[tmdb=652]"
+            (share_root / alias_name).mkdir(parents=True)
+            source = share_root / own_name
+            source.mkdir(parents=True)
+            (source / "movie.strm").write_text("http://cms/s/owncode_1212_file.mkv", encoding="utf-8")
+
+            found = bridge.find_self_share_strm_source_dir(
+                bridge.SelfShareConfig(enabled=True, strm_root=share_root),
+                {
+                    "workflow_mode": "self_share_sync",
+                    "share_alias_name": alias_name,
+                    "own_share_file_name": own_name,
+                },
+                {},
+                own_name,
+            )
+
+            self.assertEqual(found, bridge.safe_resolve(source))
+
     def test_restore_single_episode_rejects_unrelated_direct_episode(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3076,6 +3190,66 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertEqual(preserved.read_text(encoding="utf-8"), "http://cms/d/direct/S03E02.mkv")
             self.assertTrue((source / "Show - S03E03.strm").exists())
             self.assertFalse((dest / "Show - S03E03.strm").exists())
+
+    def test_restore_single_episode_requires_source_episode_before_merging_other_strm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            tv_root = root / "TV"
+            folder_name = "Q-Show-2022-[tmdb=94997]"
+            source = share_root / folder_name
+            dest = tv_root / folder_name
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            (source / "Show - S03E04.strm").write_text(
+                "http://cms/s/owncode_ownpwd_S03E04.mkv",
+                encoding="utf-8",
+            )
+            existing = dest / "Show - S03E02.strm"
+            existing.write_text("http://cms/s/owncode_ownpwd_S03E02.mkv", encoding="utf-8")
+            store = bridge.SubmissionStore(root / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("dummyshare008", "pass008"),
+                "https://115cdn.com/s/dummyshare008?password=pass008",
+                "submitted",
+                title="Show S03",
+            )
+            store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_name=folder_name,
+                own_share_code="owncode",
+                own_share_receive_code="ownpwd",
+                share_sync_status="restore_submitted",
+            )
+            store.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": folder_name, "type": "tv", "category": "外国电视", "tmdb_id": "94997"},
+                "self_share_resolved",
+            )
+            store.update_category(int(row["id"]), "外国电视", "selected")
+            store.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(source),
+                dest_path=str(dest),
+                category_final="外国电视",
+            )
+
+            status, _metadata = bridge.restore_missing_self_share_library_folder(
+                store,
+                cms=None,
+                row=store.find_by_id(int(row["id"])),
+                self_share_config=bridge.SelfShareConfig(enabled=True, strm_root=share_root),
+                move_config=bridge.MoveConfig(source_roots=[share_root], library_roots={"外国电视": tv_root}, stable_seconds=0),
+                required_relative_path="Season 03/Show - S03E03.strm",
+            )
+
+            self.assertEqual(status, "move_failed")
+            self.assertTrue(source.exists())
+            self.assertTrue((source / "Show - S03E04.strm").exists())
+            self.assertTrue(existing.exists())
+            self.assertFalse((dest / "Season 03" / "Show - S03E03.strm").exists())
 
     def test_restore_missing_self_share_library_folder_removes_duplicate_direct_tmdb_strm(self):
         with tempfile.TemporaryDirectory() as tmp:

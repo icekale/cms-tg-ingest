@@ -1714,10 +1714,17 @@ class BridgeSelfShareTaskWorkflow:
                 "任务状态已完成，但目标 STRM 未通过自有分享校验，请检查媒体库目录",
                 metadata,
             )
-        return StageResult.defer(
-            "等待已移动 STRM 目标目录恢复",
-            delay,
-            metadata,
+        if restore_status not in {"skipped", "error"}:
+            return StageResult.defer(
+                "等待已移动 STRM 目标目录恢复",
+                delay,
+                metadata,
+            )
+        restore_metadata = restore_metadata or metadata
+        return StageResult.failed(
+            "自有分享 STRM 目标恢复失败，请检查源目录和媒体库目录",
+            error_type="self_share_restore_failed",
+            metadata=restore_metadata,
         )
 
     def _strm_destination_ready(

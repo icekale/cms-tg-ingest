@@ -2372,12 +2372,14 @@ def start_self_share_maintenance_loop(
     move_config: MoveConfig,
     interval_seconds: int = 15,
     limit: int = 50,
+    stop_event: threading.Event | None = None,
 ) -> threading.Thread | None:
     if interval_seconds <= 0:
         return None
+    loop_stop_event = stop_event or threading.Event()
 
     def loop() -> None:
-        while True:
+        while not loop_stop_event.is_set():
             try:
                 moved = repair_stranded_self_share_moves(store, move_config, limit=limit)
                 restored = restore_missing_self_share_library_folders(
@@ -2395,7 +2397,8 @@ def start_self_share_maintenance_loop(
                     write_metrics_snapshot(store, metrics_path_for_store(store))
             except Exception:
                 LOG.debug("Self-share maintenance loop failed", exc_info=True)
-            time.sleep(interval_seconds)
+            if loop_stop_event.wait(interval_seconds):
+                break
 
     thread = threading.Thread(target=loop, name="self-share-maintenance", daemon=True)
     thread.start()
@@ -3585,6 +3588,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
                 move_config,
                 interval_seconds=max(1, int(config.status_repair_interval_seconds)),
                 limit=max(1, int(config.status_repair_limit)),
+                stop_event=stop_event,
             )
     if config.backup_enabled:
         backup_scheduler = create_backup_scheduler(config, task_store)

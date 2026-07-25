@@ -3,6 +3,7 @@ import tempfile
 import os
 import time
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -2559,6 +2560,23 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(restored.outcome, StageOutcome.DEFER)
             self.assertTrue((dest / "movie.strm").exists())
             self.assertFalse(source.exists())
+
+    def test_moved_stage_fails_permanent_restore_outcomes_instead_of_deferring_forever(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._self_share_row()
+            task = SimpleNamespace(metadata={})
+            metadata = {"dest_path": str(Path(tmp) / "library" / "missing")}
+
+            for restore_status in ("skipped", "error"):
+                with self.subTest(restore_status=restore_status), patch(
+                    "app.workflows.self_share.restore_missing_self_share_library_folder",
+                    return_value=(restore_status, {"restore_reason": restore_status}),
+                ):
+                    result = workflow._restore_missing_moved_destination(task, row, metadata)
+
+                self.assertEqual(result.outcome, StageOutcome.FAILED)
+                self.assertEqual(result.metadata["restore_reason"], restore_status)
 
     def test_emby_confirmed_stage_revalidates_stored_confirmation(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -677,31 +677,36 @@ def merge_self_share_strm_folder(
                 category_final=plan.category,
                 error=issue,
             ) or row
-        if str(row.get("workflow_mode") or "") == "self_share_sync" and dest.exists():
-            issue = ""
-            if required_relative_path:
-                relative = Path(required_relative_path)
-                if relative.is_absolute() or ".." in relative.parts:
+        issue = ""
+        relative = None
+        if str(row.get("workflow_mode") or "") == "self_share_sync" and required_relative_path:
+            relative = Path(required_relative_path)
+            if relative.is_absolute() or ".." in relative.parts:
+                issue = "单集 STRM 相对路径无效"
+            else:
+                source_target = safe_resolve(source / relative)
+                if not is_relative_to(source_target, source) or not source_target.is_file():
+                    issue = f"源自有分享 STRM 不存在：{relative}"
+        if not issue and str(row.get("workflow_mode") or "") == "self_share_sync" and dest.exists():
+            if relative is not None:
+                target = safe_resolve(dest / relative)
+                if not is_relative_to(target, dest):
                     issue = "单集 STRM 相对路径无效"
                 else:
-                    target = safe_resolve(dest / relative)
-                    if not is_relative_to(target, dest):
-                        issue = "单集 STRM 相对路径无效"
-                    else:
-                        issue = validate_self_share_strm_destination(dest, row, required_relative_path)
-                        if not target.exists() and issue == f"目标自有分享 STRM 不存在：{relative}":
-                            issue = validate_self_share_strm_source(dest, row) if has_strm_file(dest) else ""
+                    issue = validate_self_share_strm_destination(dest, row, required_relative_path)
+                    if not target.exists() and issue == f"目标自有分享 STRM 不存在：{relative}":
+                        issue = validate_self_share_strm_source(dest, row) if has_strm_file(dest) else ""
             else:
                 issue = validate_self_share_strm_destination(dest, row)
-            if issue:
-                return store.update_move(
-                    int(row["id"]),
-                    "error",
-                    source_path=str(source),
-                    dest_path=str(dest),
-                    category_final=plan.category,
-                    error=issue,
-                ) or row
+        if issue:
+            return store.update_move(
+                int(row["id"]),
+                "error",
+                source_path=str(source),
+                dest_path=str(dest),
+                category_final=plan.category,
+                error=issue,
+            ) or row
     if plan.status != "conflict" or not plan.source_path or not plan.dest_path:
         return execute_strm_move(plan, store, row)
     source = safe_resolve(plan.source_path)
@@ -718,11 +723,12 @@ def merge_self_share_strm_folder(
         own_share_code = str(row.get("own_share_code") or "").strip()
         receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
         expected_marker = f"/s/{own_share_code}_{receive_code}_" if own_share_code else ""
+        required_relative = relative
         for child in source.rglob("*"):
             if not child.is_file():
                 continue
-            relative = child.relative_to(source)
-            target = dest / relative
+            child_relative = child.relative_to(source)
+            target = dest / child_relative
             target.parent.mkdir(parents=True, exist_ok=True)
             if child.suffix.lower() == ".strm":
                 if target.is_file() and expected_marker and str(row.get("workflow_mode") or "") == "self_share_sync":
@@ -733,6 +739,10 @@ def merge_self_share_strm_folder(
                 temp_path = None
             else:
                 shutil.copy2(child, target)
+        if required_relative is not None:
+            required_target = safe_resolve(dest / required_relative)
+            if not required_target.is_file():
+                raise RuntimeError(f"复制后目标自有分享 STRM 不存在：{required_relative_path}")
         shutil.rmtree(source)
     except Exception as exc:
         if temp_path is not None:
@@ -794,6 +804,16 @@ def reconcile_self_share_move(store: Any, move_config: MoveConfig, row: dict[str
 
     source_exists = source.exists() and source.is_dir()
     dest_exists = dest.exists() and dest.is_dir()
+    if source_exists and not has_strm_file(source):
+        store.update_move(
+            int(row["id"]),
+            "error",
+            source_path=str(source),
+            dest_path=str(dest),
+            category_final=category,
+            error="源目录不包含 STRM 文件",
+        )
+        return "invalid"
     find_by_id = getattr(store, "find_by_id", None)
     if dest_exists and callable(find_by_id):
         current = find_by_id(int(row["id"]))
@@ -885,17 +905,23 @@ def find_self_share_strm_source_dir(
 ) -> Path | None:
     trusted_root = safe_resolve(config.strm_root)
     move_config = MoveConfig(source_roots=[trusted_root], library_roots={}, stable_seconds=0)
-    folder_value = str(row.get("share_alias_name") or row.get("own_share_file_name") or "").strip()
-    if folder_value:
+    folder_values = (
+        str(row.get("share_alias_name") or "").strip(),
+        str(row.get("own_share_file_name") or "").strip(),
+    )
+    candidates = []
+    for folder_value in folder_values:
         folder_name = _single_relative_directory_name(folder_value)
-        if not folder_name:
-            return None
-        folder = Path(folder_name)
-        candidate = safe_resolve(trusted_root / folder)
+        if not folder_name or folder_name in candidates:
+            continue
+        candidates.append(folder_name)
+    for folder_name in candidates:
+        candidate = safe_resolve(trusted_root / folder_name)
         if not is_relative_to(candidate, trusted_root):
-            return None
+            continue
         if candidate.exists() and has_strm_file(candidate):
             return candidate
+    if candidates:
         return None
     return find_strm_source_dir(move_config, recognition, share_name=share_name)
 
@@ -1106,9 +1132,22 @@ def restore_missing_self_share_library_folder(
     canonical_name = canonical_self_share_root_name(row)
     if not category or not canonical_name:
         return "skipped", metadata
-    source_name = _single_relative_directory_name(
-        str(row.get("share_alias_name") or row.get("own_share_file_name") or "")
-    )
+    source_name = None
+    candidate_names = []
+    for folder_value in (
+        str(row.get("share_alias_name") or "").strip(),
+        str(row.get("own_share_file_name") or "").strip(),
+    ):
+        folder_name = _single_relative_directory_name(folder_value)
+        if folder_name and folder_name not in candidate_names:
+            candidate_names.append(folder_name)
+    for folder_name in candidate_names:
+        candidate = safe_resolve(safe_resolve(self_share_config.strm_root) / folder_name)
+        if candidate.is_dir() and has_strm_file(candidate):
+            source_name = folder_name
+            break
+    if source_name is None and candidate_names:
+        source_name = candidate_names[0]
     if not source_name:
         metadata["restore_reason"] = "自有分享源目录名称无效"
         return "skipped", metadata
