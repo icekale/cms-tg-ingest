@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import time
 from pathlib import Path
@@ -257,6 +258,22 @@ def plan_strm_move(
     return MovePlan(status="pending", reason="ready", source_path=source, dest_path=dest, category=category)
 
 
+def _journal_strm_move(plan: MovePlan, store: Any, row: dict[str, Any]) -> dict[str, Any] | None:
+    assert plan.source_path is not None and plan.dest_path is not None
+    return store.update_move(
+        int(row["id"]),
+        "moving",
+        source_path=str(plan.source_path),
+        dest_path=str(plan.dest_path),
+        category_final=plan.category,
+        error="",
+    )
+
+
+def _moving_status_confirmed(row: dict[str, Any] | None) -> bool:
+    return bool(row and str(row.get("move_status") or "").lower() == "moving")
+
+
 def execute_strm_move(plan: MovePlan, store: Any, row: dict[str, Any]) -> dict[str, Any]:
     if plan.status != "pending":
         return store.update_move(
@@ -268,6 +285,9 @@ def execute_strm_move(plan: MovePlan, store: Any, row: dict[str, Any]) -> dict[s
             error=plan.reason,
         ) or row
     assert plan.source_path is not None and plan.dest_path is not None
+    journaled = _journal_strm_move(plan, store, row)
+    if not _moving_status_confirmed(journaled):
+        return journaled or row
     plan.dest_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         shutil.move(str(plan.source_path), str(plan.dest_path))
@@ -600,6 +620,10 @@ def merge_self_share_strm_folder(plan: MovePlan, store: Any, row: dict[str, Any]
         return execute_strm_move(MovePlan("skipped", "STRM 源目录不存在", source, dest, plan.category), store, row)
     if not dest.exists() or not dest.is_dir():
         return execute_strm_move(MovePlan("pending", "ready", source, dest, plan.category), store, row)
+    journaled = _journal_strm_move(plan, store, row)
+    if not _moving_status_confirmed(journaled):
+        return journaled or row
+    temp_path: Path | None = None
     try:
         for child in source.rglob("*"):
             if not child.is_file():
@@ -607,9 +631,20 @@ def merge_self_share_strm_folder(plan: MovePlan, store: Any, row: dict[str, Any]
             relative = child.relative_to(source)
             target = dest / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(child, target)
+            if child.suffix.lower() == ".strm":
+                temp_path = target.with_name(target.name + ".cms-ingest.tmp")
+                shutil.copy2(child, temp_path)
+                os.replace(temp_path, target)
+                temp_path = None
+            else:
+                shutil.copy2(child, target)
         shutil.rmtree(source)
     except Exception as exc:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
         return store.update_move(
             int(row["id"]),
             "error",
