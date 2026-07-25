@@ -236,6 +236,53 @@ class CmsPlaybackProbeTests(unittest.TestCase):
         self.assertEqual(http.calls[1][2]["share_duration"], -1)
         self.assertNotIn("action", http.calls[1][2])
 
+    def test_create_long_share_does_not_ignore_115_warning(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, method, dict(data or {})))
+                if url.endswith("/share/send"):
+                    return {"state": True, "data": {"share_code": "dummytest", "receive_code": "1212"}}
+                if url.endswith("/share/updateshare"):
+                    return {"state": True}
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        bridge.P115WebClient("UID=1", http=http, timeout=3).create_long_share("folder-id")
+
+        self.assertEqual(http.calls[0][2]["ignore_warn"], 0)
+
+    def test_list_own_share_states_returns_state_and_violation_flags_with_cache(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = 0
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls += 1
+                assert url == "https://webapi.115.com/share/slist"
+                return {
+                    "state": True,
+                    "data": {
+                        "list": [
+                            {"share_code": "share-a", "share_state": 1, "have_vio_file": 0, "create_time": 10},
+                            {"share_code": "share-b", "share_state": 6, "have_vio_file": 1, "create_time": 11},
+                        ]
+                    },
+                }
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3, share_list_cache_ttl_seconds=300)
+
+        first = client.list_own_share_states()
+        second = client.list_own_share_states()
+
+        self.assertEqual(first["share-a"], {"share_state": "1", "have_vio_file": False, "create_time": 10})
+        self.assertEqual(first["share-b"], {"share_state": "6", "have_vio_file": True, "create_time": 11})
+        self.assertEqual(first, second)
+        self.assertEqual(http.calls, 1)
+
     def test_receive_share_to_cid_gets_snap_file_ids_then_receives_to_target_cid(self):
         class FakeHttp:
             def __init__(self):

@@ -3426,6 +3426,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
             config.p115_cookie_path,
             timeout=config.http_timeout,
             min_interval_seconds=config.p115_min_request_interval_seconds,
+            share_list_cache_ttl_seconds=config.self_share_review_list_cache_seconds,
         )
         if self_share_config.enabled
         else None
