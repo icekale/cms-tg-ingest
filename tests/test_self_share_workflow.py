@@ -1965,6 +1965,23 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertEqual(store.find_by_id(int(row["id"]))["move_status"], "moved")
             self.assertTrue((dest / "movie.strm").exists())
 
+    def test_reconcile_stranded_move_replays_stale_moving_row_without_rewriting_moved_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            dest = root / "library" / "Movie"
+            dest.mkdir(parents=True)
+            (dest / "movie.strm").write_text("http://cms/s/reconcile_idempotent_1212_movie", encoding="utf-8")
+            store, row = self._moving_self_share_row(root, source, dest, "欧美电影", "reconcile_idempotent")
+            config = bridge.MoveConfig(source_roots=[root / "share"], library_roots={"欧美电影": root / "library"})
+
+            self.assertEqual(bridge.reconcile_self_share_move(store, config, row), "moved")
+            with patch.object(store, "update_move", wraps=store.update_move) as update_move:
+                self.assertEqual(bridge.reconcile_self_share_move(store, config, row), "moved")
+
+            update_move.assert_not_called()
+            self.assertEqual(store.find_by_id(int(row["id"]))["move_status"], "moved")
+
     def test_reconcile_stranded_move_replays_source_only_move(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2085,6 +2102,52 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertTrue(source.exists())
             self.assertFalse(dest.exists())
 
+    def test_reconcile_stranded_move_rejects_source_inside_library_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            library_root = root / "library"
+            source = library_root / "Movie"
+            dest = library_root / "Other"
+            source.mkdir(parents=True)
+            (source / "movie.strm").write_text("http://cms/s/reconcile_library_1212_movie", encoding="utf-8")
+            store, row = self._moving_self_share_row(root, source, dest, "欧美电影", "reconcile_library")
+            config = bridge.MoveConfig(
+                source_roots=[root],
+                library_roots={"欧美电影": library_root},
+            )
+
+            result = bridge.reconcile_self_share_move(store, config, row)
+
+            updated = store.find_by_id(int(row["id"]))
+            self.assertEqual(result, "invalid")
+            self.assertEqual(updated["move_status"], "error")
+            self.assertIn("媒体库", updated["move_error"])
+            self.assertTrue(source.exists())
+            self.assertFalse(dest.exists())
+
+    def test_reconcile_stranded_move_rejects_nested_source_and_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            library_root = source / "library"
+            dest = library_root / "Movie"
+            source.mkdir(parents=True)
+            (source / "movie.strm").write_text("http://cms/s/reconcile_nested_1212_movie", encoding="utf-8")
+            store, row = self._moving_self_share_row(root, source, dest, "欧美电影", "reconcile_nested")
+            config = bridge.MoveConfig(
+                source_roots=[root / "share"],
+                library_roots={"欧美电影": library_root},
+            )
+
+            result = bridge.reconcile_self_share_move(store, config, row)
+
+            updated = store.find_by_id(int(row["id"]))
+            self.assertEqual(result, "invalid")
+            self.assertEqual(updated["move_status"], "error")
+            self.assertIn("嵌套", updated["move_error"])
+            self.assertTrue(source.exists())
+            self.assertFalse(dest.exists())
+
     def test_reconcile_stranded_move_rejects_direct_existing_destination_before_merge(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2102,6 +2165,30 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
             updated = store.find_by_id(int(row["id"]))
             self.assertEqual(result, "invalid")
+            self.assertEqual(updated["move_status"], "error")
+            self.assertIn("直链 STRM", updated["move_error"])
+            self.assertTrue(source.exists())
+            self.assertEqual(direct.read_text(encoding="utf-8"), "http://cms/d/direct_movie")
+
+    def test_merge_self_share_folder_rejects_direct_existing_destination_before_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            dest = root / "library" / "Movie"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            (source / "movie.strm").write_text("http://cms/s/direct_target_1212_movie", encoding="utf-8")
+            direct = dest / "movie.strm"
+            direct.write_text("http://cms/d/direct_movie", encoding="utf-8")
+            store, row = self._moving_self_share_row(root, source, dest, "欧美电影", "direct_target")
+            config = bridge.MoveConfig(
+                source_roots=[root / "share"],
+                library_roots={"欧美电影": root / "library"},
+            )
+            plan = bridge.MovePlan("conflict", "目标目录已存在，恢复中合并", source, dest, "欧美电影")
+
+            updated = bridge.merge_self_share_strm_folder(plan, store, row, config)
+
             self.assertEqual(updated["move_status"], "error")
             self.assertIn("直链 STRM", updated["move_error"])
             self.assertTrue(source.exists())
@@ -2265,7 +2352,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertTrue((tv_root / "M-梦魇绝镇-2022-[tmdb=124364]" / "Season 01" / "梦魇绝镇.strm").exists())
             self.assertEqual(updated["move_status"], "moved")
 
-    def test_repair_stranded_self_share_folder_merges_when_target_exists(self):
+    def test_repair_stranded_self_share_folder_rejects_direct_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             share_root = root / "share"
@@ -2301,10 +2388,11 @@ class SelfShareWorkflowTests(unittest.TestCase):
             repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
             updated = store.find_by_id(int(row["id"]))
 
-            self.assertEqual(repaired, 1)
-            self.assertFalse(source.exists())
-            self.assertEqual((dest / strm_name).read_text(encoding="utf-8"), "http://cms/s/swswmerge_1212_1.mp4")
-            self.assertEqual(updated["move_status"], "moved")
+            self.assertEqual(repaired, 0)
+            self.assertTrue(source.exists())
+            self.assertEqual((dest / strm_name).read_text(encoding="utf-8"), "http://cms/d/direct.mp4")
+            self.assertEqual(updated["move_status"], "error")
+            self.assertIn("直链 STRM", updated["move_error"])
 
     def test_remove_direct_strm_files_deletes_uppercase_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2405,6 +2493,41 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertEqual((dest / "一战再战.strm").read_text(encoding="utf-8"), "http://cms/s/swsw43a3wul_1212_3455387345258282790.mkv")
             self.assertEqual(cms.sync_payloads, [])
             self.assertEqual(updated["move_status"], "moved")
+
+    def test_restore_missing_library_folder_rejects_library_external_destination_before_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = root / "outside" / "Movie"
+            outside.mkdir(parents=True)
+            (outside / "movie.strm").write_text("http://cms/s/outside_1212_movie", encoding="utf-8")
+            row = {
+                "id": 1,
+                "workflow_mode": "self_share_sync",
+                "dest_path": str(outside),
+                "category_final": "欧美电影",
+                "own_share_file_name": "Movie",
+                "own_share_code": "outside",
+                "own_share_receive_code": "1212",
+            }
+            self_share_config = bridge.SelfShareConfig(enabled=True, strm_root=root / "share")
+            move_config = bridge.MoveConfig(
+                source_roots=[root / "share"],
+                library_roots={"欧美电影": root / "library"},
+            )
+
+            with patch("app.media.strm.cleanup_direct_strm_for_task_identity") as cleanup:
+                status, metadata = bridge.restore_missing_self_share_library_folder(
+                    None,
+                    None,
+                    row,
+                    self_share_config,
+                    move_config,
+                )
+
+            self.assertEqual(status, "skipped")
+            self.assertIn("媒体库白名单", metadata["destination_validation_error"])
+            cleanup.assert_not_called()
+            self.assertTrue((outside / "movie.strm").exists())
 
     def test_restore_alias_share_strm_uses_canonical_library_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2677,6 +2800,28 @@ class P115FailureHandlingTests(unittest.TestCase):
             )
 
             self.assertIsNone(found)
+
+    def test_self_share_source_lookup_rejects_absolute_and_parent_folder_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            outside = root / "outside" / "Movie"
+            outside.mkdir(parents=True)
+            (outside / "movie.strm").write_text("http://cms/s/unsafe_1212_movie", encoding="utf-8")
+            config = bridge.SelfShareConfig(enabled=True, strm_root=share_root)
+
+            for folder_name in (str(outside), "../outside/Movie"):
+                with self.subTest(folder_name=folder_name):
+                    found = bridge.find_self_share_strm_source_dir(
+                        config,
+                        {
+                            "workflow_mode": "self_share_sync",
+                            "own_share_file_name": folder_name,
+                        },
+                        {},
+                        "Movie",
+                    )
+                    self.assertIsNone(found)
 
     def test_maintenance_restore_skips_stale_completed_rows_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:

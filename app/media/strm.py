@@ -599,19 +599,75 @@ def remove_direct_strm_relative_paths(path: Path, relative_paths: set[Path]) -> 
     return removed
 
 
-def merge_self_share_strm_folder(plan: MovePlan, store: Any, row: dict[str, Any]) -> dict[str, Any]:
+def _self_share_move_path_issue(source: Path, dest: Path, move_config: MoveConfig) -> str:
+    if not is_under_any_root(source, move_config.source_roots):
+        return "源目录不在允许范围内"
+    library_roots = list(move_config.library_roots.values())
+    if is_under_any_root(source, library_roots):
+        return "源目录位于媒体库白名单内，拒绝移动"
+    if source == dest:
+        return "源目录和目标目录不能相同"
+    if is_relative_to(source, dest) or is_relative_to(dest, source):
+        return "源目录和目标目录不能互相嵌套"
+    if not is_under_any_root(dest, library_roots):
+        return "目标目录不在媒体库白名单内"
+    return ""
+
+
+def merge_self_share_strm_folder(
+    plan: MovePlan,
+    store: Any,
+    row: dict[str, Any],
+    move_config: MoveConfig | None = None,
+    required_relative_path: str = "",
+) -> dict[str, Any]:
     if plan.status in {"pending", "conflict"} and plan.source_path and plan.dest_path:
         source = safe_resolve(plan.source_path)
+        dest = safe_resolve(plan.dest_path)
+        if str(row.get("workflow_mode") or "") == "self_share_sync" and move_config:
+            path_issue = _self_share_move_path_issue(source, dest, move_config)
+            if path_issue:
+                return store.update_move(
+                    int(row["id"]),
+                    "error",
+                    source_path=str(source),
+                    dest_path=str(dest),
+                    category_final=plan.category,
+                    error=path_issue,
+                ) or row
         issue = validate_self_share_strm_source(source, row)
         if issue:
             return store.update_move(
                 int(row["id"]),
                 "error",
                 source_path=str(source),
-                dest_path=str(safe_resolve(plan.dest_path)),
+                dest_path=str(dest),
                 category_final=plan.category,
                 error=issue,
             ) or row
+        if str(row.get("workflow_mode") or "") == "self_share_sync" and dest.exists():
+            issue = ""
+            if required_relative_path:
+                relative = Path(required_relative_path)
+                if relative.is_absolute() or ".." in relative.parts:
+                    issue = "单集 STRM 相对路径无效"
+                else:
+                    target = safe_resolve(dest / relative)
+                    if not is_relative_to(target, dest):
+                        issue = "单集 STRM 相对路径无效"
+                    elif target.exists():
+                        issue = validate_self_share_strm_destination(dest, row, required_relative_path)
+            else:
+                issue = validate_self_share_strm_destination(dest, row)
+            if issue:
+                return store.update_move(
+                    int(row["id"]),
+                    "error",
+                    source_path=str(source),
+                    dest_path=str(dest),
+                    category_final=plan.category,
+                    error=issue,
+                ) or row
     if plan.status != "conflict" or not plan.source_path or not plan.dest_path:
         return execute_strm_move(plan, store, row)
     source = safe_resolve(plan.source_path)
@@ -635,7 +691,7 @@ def merge_self_share_strm_folder(plan: MovePlan, store: Any, row: dict[str, Any]
             target = dest / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             if child.suffix.lower() == ".strm":
-                if target.is_file() and expected_marker and not validate_self_share_strm_file(target, expected_marker):
+                if target.is_file() and expected_marker and str(row.get("workflow_mode") or "") == "self_share_sync":
                     continue
                 temp_path = target.with_name(target.name + ".cms-ingest.tmp")
                 shutil.copy2(child, temp_path)
@@ -690,29 +746,32 @@ def reconcile_self_share_move(store: Any, move_config: MoveConfig, row: dict[str
     source = safe_resolve(Path(source_value))
     dest = safe_resolve(Path(dest_value))
     category = category_for_self_share_row(row)
-    if not is_under_any_root(source, move_config.source_roots):
+    path_issue = _self_share_move_path_issue(source, dest, move_config)
+    if path_issue:
         store.update_move(
             int(row["id"]),
             "error",
             source_path=str(source),
             dest_path=str(dest),
             category_final=category,
-            error="源目录不在允许范围内",
-        )
-        return "invalid"
-    if not is_under_any_root(dest, list(move_config.library_roots.values())):
-        store.update_move(
-            int(row["id"]),
-            "error",
-            source_path=str(source),
-            dest_path=str(dest),
-            category_final=category,
-            error="目标目录不在媒体库白名单内",
+            error=path_issue,
         )
         return "invalid"
 
     source_exists = source.exists() and source.is_dir()
     dest_exists = dest.exists() and dest.is_dir()
+    find_by_id = getattr(store, "find_by_id", None)
+    if dest_exists and callable(find_by_id):
+        current = find_by_id(int(row["id"]))
+        current_dest = str(current.get("dest_path") or "").strip() if current else ""
+        if (
+            current
+            and str(current.get("move_status") or "").lower() == "moved"
+            and current_dest
+            and safe_resolve(Path(current_dest)) == dest
+            and not validate_self_share_strm_destination(dest, row)
+        ):
+            return "moved"
     if not source_exists and dest_exists:
         issue = validate_self_share_strm_destination(dest, row)
         if issue:
@@ -750,6 +809,7 @@ def reconcile_self_share_move(store: Any, move_config: MoveConfig, row: dict[str
             MovePlan("conflict", "目标目录已存在，恢复中合并", source, dest, category),
             store,
             row,
+            move_config,
         )
         return "merged" if str(updated.get("move_status") or "").lower() == "moved" else "invalid"
 
@@ -789,10 +849,16 @@ def find_self_share_strm_source_dir(
     recognition: dict[str, Any],
     share_name: str,
 ) -> Path | None:
-    move_config = MoveConfig(source_roots=[config.strm_root], library_roots={}, stable_seconds=0)
+    trusted_root = safe_resolve(config.strm_root)
+    move_config = MoveConfig(source_roots=[trusted_root], library_roots={}, stable_seconds=0)
     folder_name = str(row.get("share_alias_name") or row.get("own_share_file_name") or "").strip()
     if folder_name:
-        candidate = safe_resolve(config.strm_root / folder_name)
+        folder = Path(folder_name)
+        if folder.is_absolute() or ".." in folder.parts:
+            return None
+        candidate = safe_resolve(trusted_root / folder)
+        if not is_relative_to(candidate, trusted_root):
+            return None
         if candidate.exists() and has_strm_file(candidate):
             return candidate
         return None
@@ -936,7 +1002,7 @@ def repair_stranded_self_share_moves(store: Any, move_config: MoveConfig, limit:
             restore_canonical_strm_paths(source, row)
             plan = plan_strm_move(source, category, move_config, destination_name=canonical_name)
             if plan.status in {"pending", "conflict"}:
-                updated = merge_self_share_strm_folder(plan, store, row)
+                updated = merge_self_share_strm_folder(plan, store, row, move_config)
                 if updated.get("move_status") == "moved":
                     repaired += 1
                 break
@@ -960,6 +1026,9 @@ def restore_missing_self_share_library_folder(
         "category": category_for_self_share_row(row),
     }
     dest = safe_resolve(Path(str(row.get("dest_path") or "")))
+    if not is_under_any_root(dest, list(move_config.library_roots.values())):
+        metadata["destination_validation_error"] = "目标目录不在媒体库白名单内"
+        return "skipped", metadata
     destination_issue = validate_self_share_strm_destination(dest, row, required_relative_path)
     if not destination_issue:
         metadata["direct_strm_removed"] = cleanup_direct_strm_for_task_identity(
@@ -996,7 +1065,13 @@ def restore_missing_self_share_library_folder(
         }
     )
     if plan.status in {"pending", "conflict"}:
-        updated = merge_self_share_strm_folder(plan, store, row)
+        updated = merge_self_share_strm_folder(
+            plan,
+            store,
+            row,
+            restore_move_config,
+            required_relative_path=required_relative_path,
+        )
         metadata.update(
             {
                 "source_path": str(updated.get("source_path") or metadata["source_path"]),

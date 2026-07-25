@@ -1159,7 +1159,7 @@ class BridgeSelfShareTaskWorkflow:
                 self.self_share_config.auto_organize_retry_seconds or 30,
                 metadata,
             )
-        moved_row = merge_self_share_strm_folder(plan, self.store, row)
+        moved_row = merge_self_share_strm_folder(plan, self.store, row, move_config)
         move_status = str(moved_row.get("move_status") or "").lower()
         metadata.update(
             {
@@ -1483,24 +1483,35 @@ class BridgeSelfShareTaskWorkflow:
         receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
         if not relative_path or not folder_name or not own_share_code:
             return None
-        source_root = safe_resolve(self.self_share_config.strm_root / folder_name)
+        trusted_root = safe_resolve(self.self_share_config.strm_root)
+        folder = Path(folder_name)
+        if folder.is_absolute() or ".." in folder.parts:
+            return None
+        source_root = safe_resolve(trusted_root / folder)
         relative = Path(relative_path)
         target = safe_resolve(source_root / relative)
+        if not is_relative_to(source_root, trusted_root) or not is_relative_to(target, trusted_root):
+            return None
         if target.exists():
             return source_root
         marker = f"/s/{own_share_code}_{receive_code}_"
         candidates: list[Path] = []
         if self.self_share_config.strm_root.exists():
             for strm_path in self.self_share_config.strm_root.rglob("*.strm"):
+                candidate = safe_resolve(strm_path)
+                if not is_relative_to(candidate, trusted_root):
+                    continue
                 try:
-                    text = strm_path.read_text(encoding="utf-8", errors="replace")
+                    text = candidate.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     continue
                 if marker in text:
-                    candidates.append(strm_path)
+                    candidates.append(candidate)
         if not candidates:
             return None
         source_file = max(candidates, key=lambda path: path.stat().st_mtime)
+        if not is_relative_to(source_file, trusted_root) or not is_relative_to(target, trusted_root):
+            return None
         if safe_resolve(source_file) == target:
             return source_root
         try:

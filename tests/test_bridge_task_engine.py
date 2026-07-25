@@ -1925,6 +1925,35 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertTrue(expected.exists())
             self.assertFalse(source_file.exists())
 
+    def test_direct_file_share_rejects_absolute_folder_before_copy_or_unlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            outside = Path(tmp) / "outside" / "Movie"
+            source_file = workflow.self_share_config.strm_root / "candidate.strm"
+            source_file.parent.mkdir(parents=True)
+            source_file.write_text("https://115.com/s/owncode_ownpwd_/episode.mkv", encoding="utf-8")
+            task = self._claim_task(
+                "direct-boundary",
+                "1234",
+                TaskStage.STRM_READY,
+                {
+                    "direct_file_share": True,
+                    "direct_file_share_file_id": "episode-id",
+                    "direct_file_share_relative_path": "episode.strm",
+                },
+            )
+            row = {
+                "own_share_file_name": str(outside),
+                "own_share_code": "owncode",
+                "own_share_receive_code": "ownpwd",
+            }
+
+            prepared = workflow._prepare_direct_file_share_strm(task, row)
+
+            self.assertIsNone(prepared)
+            self.assertTrue(source_file.exists())
+            self.assertFalse((outside / "episode.strm").exists())
+
     def test_organizing_stage_keeps_direct_strm_until_share_strm_is_ready(self):
         with tempfile.TemporaryDirectory() as tmp:
             western_root = Path(tmp) / "library" / "western"
@@ -2310,7 +2339,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.cms.share_sync_calls, [("owncode", "ownpwd", "0", "/media/share")])
             self.assertEqual(updated["workflow_phase"], "restore_share_sync_submitted")
 
-    def test_moved_stage_restores_expected_direct_file_share_episode_before_completion(self):
+    def test_moved_stage_rejects_direct_existing_episode_target_without_deleting_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             tv_root = Path(tmp) / "library" / "tv"
             emby = FakeEmby()
@@ -2360,16 +2389,14 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 row["id"],
             )
 
-            restored = workflow.run_stage(task)
-            completed = workflow.run_stage(task)
+            result = workflow.run_stage(task)
 
             target = episode_dir / "权力的游戏前传：龙族 (2022) - S03E03.strm"
-            self.assertEqual(restored.outcome, StageOutcome.DEFER)
-            self.assertEqual(completed.outcome, StageOutcome.COMPLETE)
-            self.assertIn("/s/owncode_ownpwd_", target.read_text(encoding="utf-8"))
-            self.assertFalse(generated.exists())
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(target.read_text(encoding="utf-8"), "https://115.com/d/direct/S03E03.mkv")
+            self.assertTrue((self.config.strm_root / row["own_share_file_name"] / relative_path).exists())
             self.assertEqual(self.cms.share_sync_calls, [])
-            self.assertEqual(emby.refreshed_paths, [str(bridge.safe_resolve(dest))])
+            self.assertEqual(emby.refreshed_paths, [])
 
     def test_moved_stage_requests_emby_refresh_for_destination_once(self):
         with tempfile.TemporaryDirectory() as tmp:

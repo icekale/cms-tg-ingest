@@ -2928,7 +2928,7 @@ def _start_status_poll_impl(
                         if is_move_plan_retryable(move_plan):
                             row = current_row
                             continue
-                        moved_row = merge_self_share_strm_folder(move_plan, store, current_row)
+                        moved_row = merge_self_share_strm_folder(move_plan, store, current_row, active_move_config)
                         sync_move_task_event(task_store, moved_row)
                         send_move_result(telegram, chat_id, move_plan, moved_row)
                         row = moved_row
@@ -3058,7 +3058,11 @@ def _start_status_poll_impl(
                         if is_move_plan_retryable(move_plan):
                             row = current_row
                             continue
-                        moved_row = merge_self_share_strm_folder(move_plan, store, current_row) if self_share_workflow else execute_strm_move(move_plan, store, current_row)
+                        moved_row = (
+                            merge_self_share_strm_folder(move_plan, store, current_row, active_move_config)
+                            if self_share_workflow
+                            else execute_strm_move(move_plan, store, current_row)
+                        )
                         sync_move_task_event(task_store, moved_row)
                         send_move_result(telegram, chat_id, move_plan, moved_row)
                         row = moved_row
