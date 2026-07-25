@@ -2568,6 +2568,50 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertTrue(alias.exists())
             self.assertFalse((source / "canonical.strm").exists())
 
+    def test_repair_skips_canonical_manifest_rename_for_nested_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            source = share_root / "Movie"
+            library_root = source / "nested"
+            source.mkdir(parents=True)
+            (library_root / "Movie").mkdir(parents=True)
+            alias = source / "alias.strm"
+            alias.write_text("http://cms/s/reconcile_nested_manifest_1212_movie", encoding="utf-8")
+            store = bridge.SubmissionStore(root / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("share-reconcile-nested-manifest", "pass001"),
+                "https://115cdn.com/s/reconcile-nested-manifest",
+                "submitted",
+                title="Movie",
+            )
+            row = store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_name=source.name,
+                own_share_code="reconcile_nested_manifest",
+                canonical_manifest_json=json.dumps(
+                    {
+                        "root_name": "Movie",
+                        "entries": [{"alias_path": "alias", "canonical_path": "canonical"}],
+                    }
+                ),
+            ) or row
+            store.update_category(int(row["id"]), "欧美电影", "selected")
+            store.update_move(int(row["id"]), "skipped", category_final="欧美电影")
+            config = bridge.MoveConfig(
+                source_roots=[share_root],
+                library_roots={"欧美电影": library_root},
+            )
+
+            with patch("app.media.strm.Path.replace") as replace:
+                repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
+
+            self.assertEqual(repaired, 0)
+            replace.assert_not_called()
+            self.assertTrue(alias.exists())
+            self.assertFalse((source / "canonical.strm").exists())
+
     def test_repair_rejects_non_directory_source_names_before_manifest_restore(self):
         for source_name_case in ("absolute", "..", ".", "foo/bar", "foo/../Movie"):
             with self.subTest(source_name=source_name_case), tempfile.TemporaryDirectory() as tmp:

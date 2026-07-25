@@ -635,6 +635,17 @@ def _self_share_move_path_issue(source: Path, dest: Path, move_config: MoveConfi
     return ""
 
 
+def _validate_self_share_move_plan(plan: MovePlan, move_config: MoveConfig) -> MovePlan:
+    if plan.status not in {"pending", "conflict"} or not plan.source_path or not plan.dest_path:
+        return plan
+    source = safe_resolve(plan.source_path)
+    dest = safe_resolve(plan.dest_path)
+    issue = _self_share_move_path_issue(source, dest, move_config)
+    if issue:
+        return MovePlan("error", issue, source, dest, plan.category)
+    return plan
+
+
 def merge_self_share_strm_folder(
     plan: MovePlan,
     store: Any,
@@ -1048,8 +1059,12 @@ def repair_stranded_self_share_moves(store: Any, move_config: MoveConfig, limit:
                 continue
             if is_under_any_root(source, list(move_config.library_roots.values())):
                 continue
-            restore_canonical_strm_paths(source, row)
             plan = plan_strm_move(source, category, move_config, destination_name=canonical_name)
+            plan = _validate_self_share_move_plan(plan, move_config)
+            if plan.status in {"pending", "conflict"}:
+                restore_canonical_strm_paths(source, row)
+                plan = plan_strm_move(source, category, move_config, destination_name=canonical_name)
+                plan = _validate_self_share_move_plan(plan, move_config)
             if plan.status in {"pending", "conflict"}:
                 updated = merge_self_share_strm_folder(plan, store, row, move_config)
                 if updated.get("move_status") == "moved":
@@ -1102,7 +1117,6 @@ def restore_missing_self_share_library_folder(
     if not is_relative_to(source, trusted_strm_root):
         metadata["restore_reason"] = "源目录不在自有分享 STRM 根目录内"
         return "skipped", metadata
-    restore_canonical_strm_paths(source, row)
     restore_move_config = MoveConfig(
         source_roots=[trusted_strm_root],
         library_roots=move_config.library_roots,
@@ -1110,6 +1124,11 @@ def restore_missing_self_share_library_folder(
         stable_seconds=move_config.stable_seconds,
     )
     plan = plan_strm_move(source, category, restore_move_config, destination_name=canonical_name)
+    plan = _validate_self_share_move_plan(plan, restore_move_config)
+    if plan.status in {"pending", "conflict"}:
+        restore_canonical_strm_paths(source, row)
+        plan = plan_strm_move(source, category, restore_move_config, destination_name=canonical_name)
+        plan = _validate_self_share_move_plan(plan, restore_move_config)
     metadata.update(
         {
             "source_path": str(plan.source_path or source),
