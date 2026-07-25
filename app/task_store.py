@@ -376,9 +376,12 @@ class TaskStore:
                 )
                 VALUES (?, ?, 'share', ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(share_code, receive_code) DO UPDATE SET
-                    url = excluded.url,
-                    chat_id = COALESCE(NULLIF(excluded.chat_id, ''), tasks.chat_id),
-                    updated_at = excluded.updated_at
+                    url = CASE WHEN tasks.claimed_by = '' THEN excluded.url ELSE tasks.url END,
+                    chat_id = CASE
+                        WHEN tasks.claimed_by = '' THEN COALESCE(NULLIF(excluded.chat_id, ''), tasks.chat_id)
+                        ELSE tasks.chat_id
+                    END,
+                    updated_at = CASE WHEN tasks.claimed_by = '' THEN excluded.updated_at ELSE tasks.updated_at END
                 """,
                 (
                     share_code,

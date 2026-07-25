@@ -153,6 +153,36 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(events[-1]["stage"], "organizing")
             self.assertEqual(events[-1]["status"], "pending")
 
+    def test_run_once_commits_when_workflow_reupserts_its_active_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("same", "1212", "https://115cdn.com/s/same?password=1212")
+            store.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=1.0)
+
+            class ReupsertingWorkflow:
+                def __init__(self):
+                    self.calls = []
+
+                def run_stage(self, claimed_task):
+                    self.calls.append(claimed_task.id)
+                    store.upsert_task(
+                        "same",
+                        "1212",
+                        "https://115cdn.com/s/same?password=1212",
+                        chat_id="464100862",
+                    )
+                    return StageResult.complete("已接收")
+
+            workflow = ReupsertingWorkflow()
+            runner = TaskRunner(store, workflow, worker_id="worker-1", now=lambda: 1.0)
+
+            self.assertTrue(runner.run_once())
+
+            updated = store.find_task(task.id)
+            self.assertEqual(workflow.calls, [task.id])
+            self.assertEqual(updated.current_stage, TaskStage.ORGANIZING)
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+
     def test_direct_task_runner_skips_shared_stages_and_stops_at_emby_confirmed(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

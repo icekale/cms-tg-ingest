@@ -103,6 +103,24 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(second.current_stage, TaskStage.RECEIVED)
             self.assertEqual(second.status, TaskStatus.PENDING)
 
+    def test_duplicate_upsert_does_not_change_active_claim_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("same", "1212", "https://115cdn.com/s/same?password=1212")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            claimed = store.claim_next_runnable("worker-a", now=10)
+
+            duplicate = store.upsert_task(
+                "same",
+                "1212",
+                "https://115cdn.com/s/same?password=1212",
+                chat_id="464100862",
+            )
+
+            self.assertEqual(duplicate.claimed_by, "worker-a")
+            self.assertEqual(duplicate.claimed_at, claimed.claimed_at)
+            self.assertEqual(duplicate.updated_at, claimed.updated_at)
+
     def test_find_task_by_share_key_returns_only_matching_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
