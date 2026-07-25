@@ -679,7 +679,7 @@ def merge_self_share_strm_folder(
                     else:
                         issue = validate_self_share_strm_destination(dest, row, required_relative_path)
                         if not target.exists() and issue == f"目标自有分享 STRM 不存在：{relative}":
-                            issue = ""
+                            issue = validate_self_share_strm_source(dest, row) if has_strm_file(dest) else ""
             else:
                 issue = validate_self_share_strm_destination(dest, row)
             if issue:

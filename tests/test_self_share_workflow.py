@@ -2005,6 +2005,60 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
             self.assertIn("TMDB 无法确认", issue)
 
+    def test_missing_required_episode_rejects_existing_unsafe_destination_strm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Show-[tmdb=73375]"
+            dest = root / "library" / "Show-[tmdb=73375]"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            (source / "episode.strm").write_text(
+                "http://cms/s/ownshare_1212_episode.mkv", encoding="utf-8"
+            )
+            direct_marker = "http://cms/d/direct_other.mkv"
+            wrong_marker = "http://cms/s/other-share_1212_other.mkv"
+            (dest / "other-direct.strm").write_text(direct_marker, encoding="utf-8")
+            (dest / "other-wrong.strm").write_text(wrong_marker, encoding="utf-8")
+            store = bridge.SubmissionStore(root / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("abc", "1212"),
+                "https://115cdn.com/s/abc?password=1212",
+                "submitted",
+                title="Show (2020)",
+            )
+            row = store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_code="ownshare",
+                own_share_receive_code="1212",
+                own_share_file_name=source.name,
+            ) or row
+            row = store.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": "Show", "tmdb_id": "73375", "category": "外国电视", "type": "tv"},
+                "confident",
+            ) or row
+            config = bridge.MoveConfig(
+                source_roots=[root / "share"],
+                library_roots={"外国电视": root / "library"},
+            )
+            plan = bridge.MovePlan("conflict", "ready", source, dest, "外国电视")
+
+            updated = bridge.merge_self_share_strm_folder(
+                plan,
+                store,
+                row,
+                config,
+                required_relative_path="episode.strm",
+            )
+
+            self.assertEqual(updated["move_status"], "error")
+            self.assertIn("直链 STRM", updated["move_error"])
+            self.assertTrue(source.exists())
+            self.assertFalse((dest / "episode.strm").exists())
+            self.assertEqual((dest / "other-direct.strm").read_text(encoding="utf-8"), direct_marker)
+            self.assertEqual((dest / "other-wrong.strm").read_text(encoding="utf-8"), wrong_marker)
+
     def test_cleanup_pending_self_share_sources_requires_task_runner_review(self):
         class FakeP115:
             def __init__(self):
@@ -2919,7 +2973,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertTrue((dest / "Troy.2004.strm").is_file())
             self.assertFalse((movie_root / alias_name).exists())
 
-    def test_restore_single_episode_preserves_unrelated_direct_episode(self):
+    def test_restore_single_episode_rejects_unrelated_direct_episode(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             share_root = root / "share"
@@ -2973,10 +3027,11 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 required_relative_path="Season 03/Show - S03E03.strm",
             )
 
-            self.assertEqual(status, "restored")
+            self.assertEqual(status, "move_failed")
             self.assertTrue(preserved.exists())
             self.assertEqual(preserved.read_text(encoding="utf-8"), "http://cms/d/direct/S03E02.mkv")
-            self.assertIn("/s/owncode_ownpwd_", (dest / "Show - S03E03.strm").read_text(encoding="utf-8"))
+            self.assertTrue((source / "Show - S03E03.strm").exists())
+            self.assertFalse((dest / "Show - S03E03.strm").exists())
 
     def test_restore_missing_self_share_library_folder_removes_duplicate_direct_tmdb_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
