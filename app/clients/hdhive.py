@@ -5,6 +5,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any, Callable
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -124,6 +125,7 @@ class HdhiveProxyClient:
         self.http = http or HttpJson(timeout=60)
         self.refresh_via_cms = refresh_via_cms
         self.page_fetcher = page_fetcher
+        self._refresh_lock = Lock()
 
     def _access_token(self) -> str:
         try:
@@ -175,7 +177,14 @@ class HdhiveProxyClient:
                 if refreshed or self.refresh_via_cms is None:
                     raise HdhiveProxyError("HDHIVE_TOKEN_EXPIRED", "HDHive 授权已过期，请在 CMS 中重新授权")
                 refreshed = True
-                self.refresh_via_cms()
+                try:
+                    with self._refresh_lock:
+                        self.refresh_via_cms()
+                except Exception as exc:
+                    raise HdhiveProxyError(
+                        "HDHIVE_TOKEN_REFRESH_FAILED",
+                        "HDHive 授权刷新失败，请在 CMS 中重新授权",
+                    ) from exc
                 continue
             if not self._is_success(response):
                 code, message = self._response_error(response)
