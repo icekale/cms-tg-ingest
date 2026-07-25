@@ -5,12 +5,108 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from app.models import TaskStage, TaskStatus
+from app.hdhive_subscription_store import HdhiveSubscriptionStore
+from app.series_rules import parse_episode_filter
 from app.task_store import TaskStore
 from app.web import WebApp
-from app.web_api import serialize_task
+from app.web_api import _safe_error, _safe_url, serialize_task
 
 
 class WebApiTests(unittest.TestCase):
+    def test_hdhive_sensitive_url_and_error_variants_are_redacted(self):
+        for key in (
+            "share_password",
+            "share_pwd",
+            "refresh_token",
+            "hdhive_token",
+            "api_key",
+            "auth_token",
+            "bearer_token",
+            "session_token",
+            "csrf_token",
+            "p115_cookie",
+        ):
+            with self.subTest(key=key):
+                self.assertNotIn("variant-secret", _safe_url(f"https://hdhive.test/tv/x?{key}=variant-secret"))
+                self.assertNotIn("variant-secret", _safe_error(f"{key}=variant-secret"))
+        self.assertNotIn("user-secret", _safe_url("https://user:user-secret@hdhive.test/tv/x"))
+
+    def test_hdhive_filter_api_returns_safe_subscription_summary_and_skip_reasons(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            subscription_store = HdhiveSubscriptionStore(Path(tmp) / "hdhive.db")
+            subscription = subscription_store.create_subscription(
+                "464100862",
+                "tmdb_tv",
+                "1416",
+                "剧集",
+                "1416",
+                source_url="https://hdhive.com/tv/secret-page",
+            )
+            item = subscription_store.upsert_item(subscription.id, "S01E01", "resource-1", "valid", 1080, 8)
+            subscription_store.mark_item_skipped(item.id, "filtered", "不在过滤范围")
+            subscription_store.record_check(subscription.id, "password=subscription-secret token=subscription-token")
+            error_item = subscription_store.upsert_item(subscription.id, "S01E02", "resource-2", "valid", 1080, 8)
+            subscription_store.mark_item_failed(error_item.id, "password=item-secret token=item-token")
+
+            class Service:
+                store = subscription_store
+
+                def list(self):
+                    return self.store.list_subscriptions()
+
+                def set_episode_filter(self, subscription_id, value):
+                    parse_episode_filter(value)
+                    return self.store.update_episode_filter(subscription_id, value)
+
+            app = WebApp(task_store, hdhive_service=Service())
+            status, _headers, body = app.handle_request(
+                "POST",
+                f"/api/v1/hdhive/subscriptions/{subscription.id}/episode-filter",
+                {"Content-Type": "application/json"},
+                b'{"episode_filter":"S02"}',
+            )
+            payload = json.loads(body)
+
+        self.assertEqual(status, 200)
+        row = payload["subscription"]
+        self.assertEqual(row["episode_filter"], "S02")
+        self.assertIn("last_summary_json", row)
+        self.assertFalse(row["completed"])
+        self.assertEqual(row["items"][0]["skip_reason"], "不在过滤范围")
+        self.assertNotIn("source_url", row)
+        self.assertNotIn("subscription-secret", json.dumps(row, ensure_ascii=False))
+        self.assertNotIn("item-secret", json.dumps(row, ensure_ascii=False))
+        self.assertIn("password=***", row["last_error"])
+
+    def test_hdhive_filter_api_rejects_invalid_filter_without_changing_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            subscription_store = HdhiveSubscriptionStore(Path(tmp) / "hdhive.db")
+            subscription = subscription_store.create_subscription("464100862", "tmdb_tv", "1416", "剧集", "1416")
+
+            class Service:
+                store = subscription_store
+
+                def list(self):
+                    return self.store.list_subscriptions()
+
+                def set_episode_filter(self, subscription_id, value):
+                    parse_episode_filter(value)
+                    return self.store.update_episode_filter(subscription_id, value)
+
+            app = WebApp(task_store, hdhive_service=Service())
+            status, _headers, body = app.handle_request(
+                "POST",
+                f"/api/v1/hdhive/subscriptions/{subscription.id}/episode-filter",
+                {"Content-Type": "application/json"},
+                b'{"episode_filter":"S01E"}',
+            )
+            current = subscription_store.get_subscription(subscription.id)
+
+        self.assertEqual(status, 400)
+        self.assertEqual(current.episode_filter, "")
+        self.assertIn("episode", json.loads(body)["error"])
     def test_task_api_redacts_share_password_and_returns_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

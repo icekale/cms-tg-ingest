@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from typing import Any
@@ -239,9 +240,35 @@ def format_hdhive_subscriptions(
             f"每天 {scheduler_snapshot.get('time') or '01:30'}，下次：{scheduler_snapshot.get('next_run_at') or '-'}"
         )
     for index, subscription in enumerate(subscriptions, 1):
-        status = {"active": "运行中", "paused": "已暂停", "error": "异常"}.get(subscription.status, subscription.status)
+        status = {"active": "运行中", "paused": "已暂停", "error": "异常", "completed": "已完结"}.get(
+            subscription.status,
+            subscription.status,
+        )
         source = subscription.source_url or f"TMDB:{subscription.tmdb_id}"
         lines.append(f"{index}. #{subscription.id} {subscription.title or subscription.tmdb_id} | {status} | {source}")
+        episode_filter = str(getattr(subscription, "episode_filter", "") or "").strip()
+        if episode_filter:
+            lines.append(f"   集数过滤：{episode_filter}")
+        try:
+            summary = json.loads(str(getattr(subscription, "last_summary_json", "{}") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            summary = {}
+        if isinstance(summary, dict) and summary:
+            counters = []
+            for key, label in (
+                ("discovered", "发现"),
+                ("enqueued", "入队"),
+                ("emby_exists", "Emby已有"),
+                ("filtered", "过滤"),
+                ("pending_confirmation", "待确认"),
+                ("failed", "失败"),
+            ):
+                if key in summary:
+                    counters.append(f"{label} {summary[key]}")
+            if counters:
+                lines.append("   最近检查：" + "，".join(counters))
+            if summary.get("emby_skip_unavailable"):
+                lines.append("   警告：Emby 集数检查不可用，未据此跳过资源")
         if subscription.last_error:
             lines.append(f"   最近错误：{truncate_text(subscription.last_error, 120)}")
     if pending_items:
@@ -258,6 +285,7 @@ def hdhive_subscriptions_keyboard(
         toggle = "暂停" if subscription.status == "active" else "恢复"
         action = "pause" if subscription.status == "active" else "resume"
         buttons.append([{"text": f"{toggle} #{subscription.id}", "callback_data": f"hsub:{action}:{subscription.id}"}])
+        buttons.append([{"text": f"设置集数过滤 #{subscription.id}", "callback_data": f"hsub:filter:{subscription.id}"}])
         buttons.append(
             [
                 {"text": f"立即检查 #{subscription.id}", "callback_data": f"hsub:check:{subscription.id}"},

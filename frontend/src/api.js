@@ -24,6 +24,7 @@ export const api = {
   qualitySettings: (settings) => request('quality/settings', { method: 'POST', body: JSON.stringify(settings) }),
   qualityReset: () => request('quality/settings/reset', { method: 'POST' }),
   hdhiveSubscriptionAction: (id, action) => request(`hdhive/subscriptions/${id}/${action}`, { method: 'POST' }),
+  hdhiveSubscriptionFilter: (id, episode_filter) => request(`hdhive/subscriptions/${id}/episode-filter`, { method: 'POST', body: JSON.stringify({ episode_filter }) }),
   hdhiveItemConfirm: (id) => request(`hdhive/items/${id}/confirm`, { method: 'POST' }),
   hdhiveSettings: (settings) => request('hdhive/settings', { method: 'POST', body: JSON.stringify(settings) }),
   hdhiveRun: () => request('hdhive/run', { method: 'POST' }),

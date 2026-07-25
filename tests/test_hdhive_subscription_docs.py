@@ -30,6 +30,26 @@ class HdhiveSubscriptionDocsTests(unittest.TestCase):
         self.assertIn("创建订阅", readme)
         self.assertIn("每天", readme)
 
+    def test_user_docs_explain_smart_episode_judgment_rules(self):
+        documents = [
+            ROOT / "README.md",
+            ROOT / "PRODUCT.md",
+            ROOT / "docs/dockerhub-overview.md",
+        ]
+        required_terms = (
+            "S01E01-S01E10",
+            "S02",
+            "Emby 已有集数",
+            "TMDB 完结",
+            "无法解析季集",
+            "不自动解锁",
+        )
+        for path in documents:
+            with self.subTest(path=path.name):
+                text = path.read_text(encoding="utf-8")
+                for term in required_terms:
+                    self.assertIn(term, text)
+
 
 if __name__ == "__main__":
     unittest.main()

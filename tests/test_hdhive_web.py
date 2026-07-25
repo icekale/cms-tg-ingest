@@ -7,6 +7,7 @@ from unittest.mock import patch
 import bridge
 from app.clients.hdhive import HdhiveAccount
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
+from app.series_rules import parse_episode_filter
 from app.task_store import TaskStore
 from app.web import WebApp
 
@@ -45,6 +46,7 @@ class FakeHdhiveService:
         )
         self.check_calls = []
         self.confirm_calls = []
+        self.filter_calls = []
 
     def list(self, chat_id=None):
         return self.store.list_subscriptions(chat_id)
@@ -66,6 +68,11 @@ class FakeHdhiveService:
         self.confirm_calls.append(item_id)
         return SimpleNamespace(enqueued=1, pending_confirmation=0, failed=0)
 
+    def set_episode_filter(self, subscription_id, value):
+        parse_episode_filter(value)
+        self.filter_calls.append((subscription_id, value))
+        return self.store.update_episode_filter(subscription_id, value)
+
 
 class HdhiveWebTests(unittest.TestCase):
     def make_app(self):
@@ -77,7 +84,7 @@ class HdhiveWebTests(unittest.TestCase):
             "tv-slug-1",
             "攻壳机动队",
             "255358",
-            source_url="https://hdhive.com/tv/tv-slug-1",
+            source_url="https://hdhive.com/tv/tv-slug-1?password=legacy-secret",
         )
         item = store.upsert_item(
             subscription.id,
@@ -137,6 +144,8 @@ class HdhiveWebTests(unittest.TestCase):
         self.assertEqual(status, 200)
         for text in ("HDHive 订阅", "测试账号", "88", "攻壳机动队", "TMDB：255358", "01:30", "发现 1", "待确认", "攻壳机动队 S01E02"):
             self.assertIn(text, page)
+        self.assertNotIn("legacy-secret", page)
+        self.assertIn("password=***", page)
 
     def test_hdhive_page_returns_clear_disabled_response_without_service(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -220,6 +229,40 @@ class HdhiveWebTests(unittest.TestCase):
 
         self.assertEqual(status, 400)
         self.assertIn("valid time", payload.decode("utf-8"))
+
+    def test_hdhive_legacy_filter_route_updates_filter(self):
+        directory, app, service, _scheduler, subscription, _item = self.make_app()
+        try:
+            status, headers, _payload = app.handle_request(
+                "POST",
+                f"/hdhive/subscriptions/{subscription.id}/episode-filter",
+                {},
+                b"episode_filter=S02",
+            )
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(status, 303)
+        self.assertEqual(headers["Location"], "/hdhive")
+        self.assertEqual(service.filter_calls, [(subscription.id, "S02")])
+
+    def test_hdhive_legacy_filter_route_rejects_invalid_filter_without_changing_value(self):
+        directory, app, service, _scheduler, subscription, _item = self.make_app()
+        service.store.update_episode_filter(subscription.id, "S02")
+        try:
+            status, _headers, payload = app.handle_request(
+                "POST",
+                f"/hdhive/subscriptions/{subscription.id}/episode-filter",
+                {},
+                b"episode_filter=S01E",
+            )
+            current = service.store.get_subscription(subscription.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(status, 400)
+        self.assertIn("episode", payload.decode("utf-8"))
+        self.assertEqual(current.episode_filter, "S02")
 
 
 if __name__ == "__main__":

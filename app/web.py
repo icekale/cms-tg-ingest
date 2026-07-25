@@ -31,6 +31,8 @@ from .web_api import (
     api_tasks,
     serialize_health,
     serialize_hdhive,
+    serialize_hdhive_subscription,
+    _safe_url,
 )
 
 
@@ -1135,9 +1137,9 @@ def render_hdhive_page(
     unlocked_rows = []
     for subscription in subscriptions:
         title = str(subscription.title or subscription.tmdb_id or subscription.source_value)
-        status_label = {"active": "运行中", "paused": "已暂停", "error": "异常"}.get(subscription.status, subscription.status)
-        status_class = {"active": "status-succeeded", "paused": "status-pending", "error": "status-failed"}.get(subscription.status, "status-pending")
-        source = subscription.source_url or f"TMDB:{subscription.tmdb_id}"
+        status_label = {"active": "运行中", "paused": "已暂停", "error": "异常", "completed": "已完结"}.get(subscription.status, subscription.status)
+        status_class = {"active": "status-succeeded", "paused": "status-pending", "error": "status-failed", "completed": "status-succeeded"}.get(subscription.status, "status-pending")
+        source = _safe_url(subscription.source_url) or f"TMDB:{subscription.tmdb_id}"
         items = service.store.list_items(subscription.id) if service is not None else []
         item_counts = {
             "discovered": len(items),
@@ -1162,6 +1164,7 @@ def render_hdhive_page(
     <div class="task-title">#{subscription.id} {html.escape(title)}</div>
     <div class="task-meta"><span class="badge {status_class}">{html.escape(status_label)}</span><span>{html.escape(source)}</span><span>TMDB：{html.escape(subscription.tmdb_id)}</span><span>最近检查：{html.escape(_hdhive_time_label(subscription.last_checked_at))}</span></div>
     <div class="task-meta"><span>发现 {item_counts["discovered"]}</span><span>已解锁/入队 {item_counts["enqueued"]}</span><span>待确认 {item_counts["pending_confirmation"]}</span><span>失败 {item_counts["failed"]}</span></div>
+    <form method="post" action="/hdhive/subscriptions/{subscription.id}/episode-filter" class="actions"><label>集数过滤 <input name="episode_filter" value="{html.escape(str(subscription.episode_filter or ""))}" placeholder="S01E01-S01E10,S02"></label><button class="button-secondary" type="submit">保存过滤</button></form>
     {f'<div class="task-message error">{html.escape(subscription.last_error)}</div>' if subscription.last_error else ''}
   </div>
   <div class="actions">{"".join(actions)}</div>
@@ -1355,6 +1358,13 @@ class WebApp:
                     except KeyError as exc:
                         return 404, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, str(exc).encode("utf-8")
                     return 303, {"Location": "/hdhive", **auth_headers}, b""
+                if action == "episode-filter":
+                    try:
+                        values = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+                        service.set_episode_filter(subscription_id, values.get("episode_filter", [""])[0])
+                    except (UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+                        return 400, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, str(exc).encode("utf-8")
+                    return 303, {"Location": "/hdhive", **auth_headers}, b""
                 if action == "check":
                     def check_subscription() -> None:
                         try:
@@ -1500,6 +1510,19 @@ class WebApp:
                     status, response_headers, response_body = api_response({"error": str(exc)}, status=404)
                     return status, {**response_headers, **auth_headers}, response_body
                 status, response_headers, response_body = api_response({"ok": True})
+                return status, {**response_headers, **auth_headers}, response_body
+            if action == "episode-filter":
+                try:
+                    values = self._api_body(body, headers)
+                    service.set_episode_filter(subscription_id, str(values.get("episode_filter") or ""))
+                    serialized = serialize_hdhive_subscription(service, subscription_id)
+                except (UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+                    status, response_headers, response_body = api_response({"error": str(exc)}, status=400)
+                    return status, {**response_headers, **auth_headers}, response_body
+                if serialized is None:
+                    status, response_headers, response_body = api_response({"error": "subscription_not_found"}, status=404)
+                    return status, {**response_headers, **auth_headers}, response_body
+                status, response_headers, response_body = api_response({"subscription": serialized})
                 return status, {**response_headers, **auth_headers}, response_body
             if action == "check":
                 Thread(target=service.check, args=(subscription_id,), name=f"hdhive-api-check-{subscription_id}", daemon=True).start()

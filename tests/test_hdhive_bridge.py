@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,7 +8,11 @@ import bridge
 from app.clients.hdhive import HdhiveAccount, HdhiveResource, HdhiveUnlockItem
 from app.hdhive import HdhiveSessionStore, HdhiveWorkflow
 from app.hdhive_subscriptions import HdhiveSubscriptionService
-from app.telegram_ui import hdhive_candidate_keyboard, hdhive_resource_keyboard
+from app.telegram_ui import (
+    format_hdhive_subscriptions,
+    hdhive_candidate_keyboard,
+    hdhive_resource_keyboard,
+)
 
 
 def resource(slug: str, pan_type: str = "115", points: int = 8) -> HdhiveResource:
@@ -43,14 +48,21 @@ class FakeSubscriptionService:
     def __init__(self):
         self.created_urls = []
         self.paused = []
-        self.store = SimpleNamespace(list_items=lambda _subscription_id: [])
+        self.filters = []
+        self.store = SimpleNamespace(
+            list_items=lambda _subscription_id: [],
+            get_subscription=lambda _subscription_id: self.subscription,
+        )
         self.subscription = SimpleNamespace(
             id=1,
             title="攻壳机动队",
             tmdb_id="255358",
+            chat_id="464100862",
             source_url="https://hdhive.com/tv/542a1c1fe6ac4a5aab152369079596b5",
             status="active",
             last_error="",
+            episode_filter="",
+            last_summary_json="{}",
         )
 
     def create_from_url(self, chat_id, url):
@@ -63,6 +75,11 @@ class FakeSubscriptionService:
     def pause(self, subscription_id):
         self.paused.append(subscription_id)
         self.subscription.status = "paused"
+        return self.subscription
+
+    def set_episode_filter(self, subscription_id, value):
+        self.filters.append((subscription_id, value))
+        self.subscription.episode_filter = value
         return self.subscription
 
 
@@ -87,6 +104,117 @@ class FakeProxy:
 
 
 class HdhiveBridgeTests(unittest.TestCase):
+    def test_completed_subscription_renders_status_filter_and_summary(self):
+        subscription = SimpleNamespace(
+            id=1,
+            title="剧集",
+            tmdb_id="1416",
+            source_url="",
+            status="completed",
+            last_error="",
+            episode_filter="S01E01-S01E03",
+            last_summary_json=json.dumps(
+                {"discovered": 3, "enqueued": 1, "filtered": 1, "emby_exists": 1},
+                ensure_ascii=False,
+            ),
+        )
+
+        text = format_hdhive_subscriptions([subscription])
+
+        self.assertIn("已完结", text)
+        self.assertIn("S01E01-S01E03", text)
+        self.assertIn("发现 3", text)
+        self.assertIn("入队 1", text)
+
+    def test_subscription_filter_callback_prompts_for_input(self):
+        telegram = FakeTelegram()
+        service = FakeSubscriptionService()
+
+        bridge.handle_callback_query(
+            {
+                "id": "callback-filter",
+                "from": {"id": "464100862"},
+                "message": {"chat": {"id": "464100862"}},
+                "data": "hsub:filter:1",
+            },
+            telegram,
+            "464100862",
+            object(),
+            hdhive_subscription_service=service,
+        )
+
+        self.assertIn("请发送集数过滤", telegram.messages[-1][1])
+
+    def test_invalid_subscription_filter_input_keeps_pending_state(self):
+        telegram = FakeTelegram()
+        service = FakeSubscriptionService()
+        bridge.handle_callback_query(
+            {
+                "id": "callback-filter",
+                "from": {"id": "464100862"},
+                "message": {"chat": {"id": "464100862"}},
+                "data": "hsub:filter:1",
+            },
+            telegram,
+            "464100862",
+            object(),
+            hdhive_subscription_service=service,
+        )
+
+        bridge.handle_update(
+            {
+                "message": {
+                    "chat": {"id": "464100862"},
+                    "from": {"id": "464100862"},
+                    "text": "S01E",
+                }
+            },
+            object(),
+            telegram,
+            "464100862",
+            object(),
+            poll_status=False,
+            hdhive_subscription_service=service,
+        )
+
+        self.assertIn("格式不正确", telegram.messages[-1][1])
+        self.assertEqual(service.filters, [])
+
+    def test_clear_subscription_filter_consumes_pending_input(self):
+        telegram = FakeTelegram()
+        service = FakeSubscriptionService()
+        bridge.handle_callback_query(
+            {
+                "id": "callback-filter",
+                "from": {"id": "464100862"},
+                "message": {"chat": {"id": "464100862"}},
+                "data": "hsub:filter:1",
+            },
+            telegram,
+            "464100862",
+            object(),
+            hdhive_subscription_service=service,
+        )
+
+        bridge.handle_update(
+            {
+                "message": {
+                    "chat": {"id": "464100862"},
+                    "from": {"id": "464100862"},
+                    "text": "清除",
+                }
+            },
+            object(),
+            telegram,
+            "464100862",
+            object(),
+            poll_status=False,
+            hdhive_subscription_service=service,
+        )
+
+        self.assertEqual(service.filters, [(1, "")])
+        self.assertIn("已清除集数过滤", telegram.messages[-1][1])
+
     def test_chinese_search_command_starts_hdhive_search(self):
         telegram = FakeTelegram()
         workflow = SimpleNamespace(
@@ -182,6 +310,27 @@ class HdhiveBridgeTests(unittest.TestCase):
             self.assertIsInstance(service, HdhiveSubscriptionService)
             self.assertIs(service.proxy, proxy)
             self.assertIs(service.enqueue_links, callback)
+
+    def test_subscription_service_factory_passes_tmdb_and_emby_clients(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = SimpleNamespace(
+                hdhive_enabled=True,
+                task_db_path=str(Path(directory) / "tasks.db"),
+                hdhive_auto_unlock_max_points=20,
+            )
+            tmdb = object()
+            emby = object()
+
+            service = bridge.create_hdhive_subscription_service(
+                config,
+                SimpleNamespace(proxy=object()),
+                lambda _urls, _chat: None,
+                tmdb_resolver=tmdb,
+                emby=emby,
+            )
+
+            self.assertIs(service.tmdb_resolver, tmdb)
+            self.assertIs(service.emby, emby)
 
     def test_direct_hdhive_url_creates_subscription_without_normal_intake(self):
         telegram = FakeTelegram()

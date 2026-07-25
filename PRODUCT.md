@@ -18,6 +18,8 @@ Telegram 侧还可以复用 CMS 已授权的 HDHive 账号完成 TMDB 搜索、�
 
 用户直接发送 `https://hdhive.com/tv/<slug>` 创建订阅，而不是立即解锁。系统每天按 `HDHIVE_SUBSCRIPTION_TIME`（默认 `01:30`，时区由 `HDHIVE_SUBSCRIPTION_TIMEZONE` 控制）检查新集；费用未知或超过阈值时进入待确认，用户点击“确认解锁”后才会继续。订阅由 `HDHIVE_SUBSCRIPTION_AUTO_ENABLED` 控制，可在 Web `/hdhive` 或 Telegram 菜单中暂停、恢复、删除和立即检查。
 
+订阅支持剧集智能判断：用户可以设置 `S01E01-S01E10,S02` 这样的集数过滤，默认跳过 `S00` 特殊集；系统识别多季资源并跳过 Emby 已有集数。TMDB 完结状态和季集数量用于判断订阅是否已完结；无法解析季集、费用未知或超过自动阈值的资源不自动解锁，完结订阅仍可手动恢复。
+
 ## Brand Personality
 
 清爽、可信、少打扰。界面应该像一个安静可靠的家庭媒体库助手：默认克制，只在需要关注时明确提醒，不用花哨效果制造存在感。

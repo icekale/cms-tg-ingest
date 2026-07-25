@@ -101,6 +101,7 @@ from app.hdhive_subscriptions import (
     HdhiveSubscriptionService,
     extract_hdhive_tv_urls,
 )
+from app.series_rules import parse_episode_filter
 
 from app.media.strm import (
     category_for_self_share_row,
@@ -192,6 +193,8 @@ LINK_RE = re.compile(r"https?://(?:www\.)?(?:115cdn|115|anxia)\.com/s/[^\s<>'\"]
 TRAILING_PUNCT = ".,;)。），]】》>"
 LOG = logging.getLogger("cms-tg-ingest")
 LAST_TELEGRAM_TRANSIENT_ERROR_AT: str | None = None
+_HDHIVE_PENDING_FILTERS: dict[str, int] = {}
+_HDHIVE_FILTER_PROMPT = "请发送集数过滤，例如 S01E01-S01E10,S02；发送“清除”恢复全部正常集。"
 ED2K_HELP_EXAMPLE = "ed2k://|file|Example.mkv|10|" + "0123456789ABCDEF" * 2 + "|/"
 HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 分享、磁力或 ED2K 链接\n- 磁力/ED2K 会进入 115 云下载，再复用 CMS 整理和分享 STRM 流程\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- /搜索：通过 TMDB 匹配 HDHive 影片/剧集，筛选网盘并解锁资源（/hdhive_search 仍兼容）\n- /订阅 <HDHive剧集链接>：创建 HDHive 剧集订阅\n- 发送 HDHive 剧集页面也可直接订阅，例如 https://hdhive.com/tv/xxxxxxxx\n- /status 查看最近任务\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd\n""" + ED2K_HELP_EXAMPLE
 MENU_BUTTONS = {
@@ -347,6 +350,8 @@ def create_hdhive_subscription_service(
     hdhive_workflow: HdhiveWorkflow | None,
     enqueue_links: Any,
     on_item_enqueued: Any | None = None,
+    tmdb_resolver: Any | None = None,
+    emby: EmbyClient | None = None,
 ) -> HdhiveSubscriptionService | None:
     if not bool(getattr(config, "hdhive_enabled", False)) or hdhive_workflow is None:
         return None
@@ -356,6 +361,8 @@ def create_hdhive_subscription_service(
         enqueue_links=enqueue_links,
         auto_unlock_max_points=int(getattr(config, "hdhive_auto_unlock_max_points", 20)),
         on_item_enqueued=on_item_enqueued,
+        tmdb_resolver=tmdb_resolver,
+        emby=emby,
     )
 
 
@@ -1679,7 +1686,7 @@ def parse_hdhive_callback(data: str) -> tuple[str, str, str] | None:
 
 def parse_hdhive_subscription_callback(data: str) -> tuple[str, int] | None:
     parts = str(data or "").split(":")
-    if len(parts) != 3 or parts[0] != "hsub" or parts[1] not in {"pause", "resume", "delete", "check", "confirm"}:
+    if len(parts) != 3 or parts[0] != "hsub" or parts[1] not in {"pause", "resume", "delete", "check", "confirm", "filter"}:
         return None
     try:
         return parts[1], int(parts[2])
@@ -1743,6 +1750,19 @@ def format_hdhive_subscription_view(
     )
 
 
+def _owned_hdhive_subscription(
+    service: HdhiveSubscriptionService,
+    subscription_id: int,
+    chat_id: int | str,
+) -> Any | None:
+    subscription = service.store.get_subscription(subscription_id)
+    if subscription is None or str(getattr(subscription, "chat_id", "")) != str(chat_id):
+        return None
+    if str(getattr(subscription, "status", "")).lower() == "deleted":
+        return None
+    return subscription
+
+
 def handle_hdhive_subscription_callback(
     data: str,
     callback_id: str,
@@ -1759,6 +1779,13 @@ def handle_hdhive_subscription_callback(
         telegram.answer_callback_query(callback_id, "HDHive 订阅未启用", show_alert=True)
         return True
     try:
+        if action == "filter":
+            if _owned_hdhive_subscription(service, target_id, chat_id) is None:
+                raise HdhiveSelectionError("订阅不存在或无权操作")
+            _HDHIVE_PENDING_FILTERS[str(chat_id)] = target_id
+            telegram.answer_callback_query(callback_id, "请发送集数过滤", show_alert=False)
+            telegram.send_message(chat_id, _HDHIVE_FILTER_PROMPT)
+            return True
         if action == "pause":
             service.pause(target_id)
             message = "订阅已暂停。"
@@ -1786,6 +1813,40 @@ def handle_hdhive_subscription_callback(
     except Exception as exc:
         telegram.answer_callback_query(callback_id, "操作失败", show_alert=True)
         telegram.send_message(chat_id, f"HDHive 订阅操作失败：{str(exc)[:160]}")
+    return True
+
+
+def handle_hdhive_filter_input(
+    text: str,
+    chat_id: int | str,
+    telegram: TelegramClient,
+    service: HdhiveSubscriptionService | None,
+    scheduler: HdhiveSubscriptionScheduler | None,
+) -> bool:
+    if service is None:
+        return False
+    key = str(chat_id)
+    subscription_id = _HDHIVE_PENDING_FILTERS.get(key)
+    if subscription_id is None:
+        return False
+    value = "" if str(text or "").strip().lower() in {"清除", "clear"} else str(text or "").strip()
+    try:
+        if _owned_hdhive_subscription(service, subscription_id, chat_id) is None:
+            _HDHIVE_PENDING_FILTERS.pop(key, None)
+            telegram.send_message(chat_id, "订阅不存在或无权操作，请重新打开订阅列表。")
+            return True
+        parse_episode_filter(value)
+        service.set_episode_filter(subscription_id, value)
+    except ValueError:
+        telegram.send_message(chat_id, f"集数过滤格式不正确。\n{_HDHIVE_FILTER_PROMPT}")
+        return True
+    except Exception as exc:
+        telegram.send_message(chat_id, f"集数过滤设置失败：{str(exc)[:160]}")
+        return True
+    _HDHIVE_PENDING_FILTERS.pop(key, None)
+    text_value = "已清除集数过滤。" if not value else f"已设置集数过滤：{value}"
+    view_text, keyboard = format_hdhive_subscription_view(service, scheduler, chat_id)
+    telegram.send_message(chat_id, f"{text_value}\n\n{view_text}", reply_markup=keyboard)
     return True
 
 
@@ -3039,6 +3100,14 @@ def handle_update(
         )
         telegram.send_message(chat_id, text, reply_markup=keyboard)
         return
+    if handle_hdhive_filter_input(
+        text,
+        chat_id,
+        telegram,
+        hdhive_subscription_service,
+        hdhive_subscription_scheduler,
+    ):
+        return
     if command == "/status":
         if task_engine_enabled and task_store is not None:
             tasks = task_store.list_recent_tasks(limit=8)
@@ -3542,6 +3611,8 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         hdhive_workflow,
         enqueue_hdhive_links,
         on_item_enqueued=notify_hdhive_item,
+        tmdb_resolver=tmdb_resolver,
+        emby=emby,
     )
     if hdhive_subscription_service is not None and Path(
         getattr(config, "hdhive_token_config_path", "")

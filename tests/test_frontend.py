@@ -35,8 +35,11 @@ class FrontendTests(unittest.TestCase):
         for control in ("pause", "resume", "delete", "check"):
             self.assertIn(control, hdhive)
         self.assertIn("hdhiveSubscriptionAction", api)
+        self.assertIn("hdhiveSubscriptionFilter", api)
         self.assertIn("hdhiveItemConfirm", api)
         for control in ("confirm", "run", "settings"):
+            self.assertIn(control, hdhive)
+        for control in ("episode_filter", "已完结", "emby_skip_unavailable", "设置集数过滤"):
             self.assertIn(control, hdhive)
 
 

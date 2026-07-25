@@ -190,6 +190,11 @@ class HdhiveSubscriptionService:
     def list(self, chat_id: str | None = None) -> list[HdhiveSubscription]:
         return self.store.list_subscriptions(chat_id)
 
+    def set_episode_filter(self, subscription_id: int, value: str) -> HdhiveSubscription:
+        normalized = str(value or "").strip()
+        parse_episode_filter(normalized)
+        return self.store.update_episode_filter(subscription_id, normalized)
+
     def pause(self, subscription_id: int) -> HdhiveSubscription:
         return self.store.set_status(subscription_id, "paused")
 
@@ -417,6 +422,7 @@ class HdhiveSubscriptionService:
         expected = self._expected_episode_keys(tmdb_details, episode_filter)
         terminal: set[Any] = set()
         blocked: set[Any] = set()
+        current_item_ids = set(resource_item_ids.values())
         unparsed_count = 0
         for item in self.store.list_items(subscription.id):
             item_key = self._stored_episode_key(item)
@@ -424,7 +430,11 @@ class HdhiveSubscriptionService:
                 if item.status == "unparsed":
                     unparsed_count += 1
                 continue
-            if item.status in {"enqueued", "emby_exists", "filtered"}:
+            if item.status in {"enqueued", "emby_exists"}:
+                terminal.add(item_key)
+            elif item.status == "filtered" and item.id in current_item_ids:
+                # A filter only proves an episode was intentionally skipped while
+                # the corresponding HDHive resource was present in this check.
                 terminal.add(item_key)
             if item.status in {"pending_confirmation", "failed", "unlocking", "unparsed"}:
                 blocked.add(item_key)

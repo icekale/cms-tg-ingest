@@ -508,6 +508,33 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(item.status, "enqueued")
         self.assertEqual(proxy.unlock_calls, [["s1e2"], ["s1e1"]])
 
+    def test_stale_filtered_item_does_not_complete_ended_series(self):
+        tmdb = FakeTmdbResolver(
+            {
+                "ok": True,
+                "status": "Ended",
+                "seasons": [{"season_number": 1, "episode_count": 1}],
+            }
+        )
+        emby = FakeEmby({"S09E09"})
+        directory, store, subscription, proxy, service, _intake_calls = self.make_service(
+            [resource("s1e1", episode_key="s1e1")],
+            tmdb_resolver=tmdb,
+            emby=emby,
+        )
+        try:
+            store.update_episode_filter(subscription.id, "S01E02")
+            service.check(subscription.id)
+            proxy.resource_items = []
+            store.update_episode_filter(subscription.id, "")
+            result = service.check(subscription.id)
+            current = store.get_subscription(subscription.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.subscription_status, "active")
+        self.assertEqual(current.status, "active")
+
 
 class HdhiveSubscriptionSchedulerTests(unittest.TestCase):
     def test_scheduler_enqueues_one_best_episode_and_keeps_high_cost_episode_pending(self):

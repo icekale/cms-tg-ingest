@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -14,19 +15,60 @@ from .quality import scan_task_quality
 from .task_store import TaskStore
 
 
+_SENSITIVE_QUERY_KEYS = {
+    "password",
+    "passwd",
+    "pwd",
+    "code",
+    "token",
+    "access_token",
+    "refresh_token",
+    "cookie",
+    "share_password",
+    "share_pwd",
+    "hdhive_token",
+    "api_key",
+    "apikey",
+    "authorization",
+    "auth_token",
+    "bearer_token",
+    "session_token",
+    "csrf_token",
+    "p115_cookie",
+}
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(password|passwd|pwd|token|access_token|refresh_token|cookie|share[-_]?password|share[-_]?pwd|hdhive[-_]?token|api[-_]?key|authorization|auth_token|bearer_token|session_token|csrf_token|p115_cookie)\s*([:=])\s*([^\s&;,]+)"
+)
+
+
+def _safe_error(value: Any) -> str:
+    return _SENSITIVE_ASSIGNMENT_RE.sub(r"\1\2***", str(value or ""))
+
+
 def _safe_url(value: str) -> str:
     """Keep links useful to the UI without returning share passwords or tokens."""
     parsed = urlsplit(str(value or ""))
     if not parsed.scheme or not parsed.netloc:
         return ""
+    try:
+        hostname = parsed.hostname or ""
+        port = parsed.port
+    except ValueError:
+        hostname = ""
+        port = None
+    if not hostname:
+        return ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    safe_netloc = hostname + (f":{port}" if port is not None else "")
     query = []
     for key, item in parse_qsl(parsed.query, keep_blank_values=True):
-        if key.lower() in {"password", "passwd", "pwd", "code", "token", "access_token", "cookie"}:
+        if key.lower() in _SENSITIVE_QUERY_KEYS:
             query.append((key, "***"))
         else:
             query.append((key, item))
     encoded_query = "&".join(f"{quote(key)}={quote(item, safe='*')}" for key, item in query)
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, encoded_query, ""))
+    return urlunsplit((parsed.scheme, safe_netloc, parsed.path, encoded_query, ""))
 
 
 def _enum_value(value: Any) -> Any:
@@ -35,7 +77,25 @@ def _enum_value(value: Any) -> Any:
 
 def _safe_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
-    sensitive_keys = {"cookie", "p115_cookie", "access_token", "token", "receive_code", "password", "own_share_url"}
+    sensitive_keys = {
+        "cookie",
+        "p115_cookie",
+        "access_token",
+        "refresh_token",
+        "hdhive_token",
+        "token",
+        "receive_code",
+        "password",
+        "share_password",
+        "share_pwd",
+        "api_key",
+        "apikey",
+        "auth_token",
+        "bearer_token",
+        "session_token",
+        "csrf_token",
+        "own_share_url",
+    }
     for key, value in metadata.items():
         if str(key).lower() in sensitive_keys:
             continue
@@ -114,9 +174,20 @@ def serialize_hdhive(service: Any | None, scheduler: Any | None = None) -> dict[
         item_rows = []
         for item in service.store.list_items(subscription.id):
             if is_dataclass(item):
-                item_rows.append(asdict(item))
+                item_row = asdict(item)
+                item_row["last_error"] = _safe_error(item_row.get("last_error"))
+                item_rows.append(item_row)
         row = asdict(subscription) if is_dataclass(subscription) else {"id": subscription.id}
+        row.pop("source_url", None)
+        row.pop("chat_id", None)
+        row["last_error"] = _safe_error(row.get("last_error"))
         row["items"] = item_rows
+        try:
+            summary = json.loads(str(row.get("last_summary_json") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            summary = {}
+        row["last_summary"] = summary if isinstance(summary, dict) else {}
+        row["completed"] = str(row.get("status") or "").lower() == "completed"
         subscriptions.append(row)
     account = None
     account_getter = getattr(getattr(service, "proxy", None), "account", None)
@@ -133,14 +204,24 @@ def serialize_hdhive(service: Any | None, scheduler: Any | None = None) -> dict[
                 "is_forever_vip": bool(getattr(value, "is_forever_vip", False)),
             }
         except Exception as exc:
-            account = {"error": str(exc)[:160]}
+            account = {"error": _safe_error(str(exc)[:160])}
     schedule = {}
     if scheduler is not None:
         try:
             schedule = dict(scheduler.status_snapshot())
         except Exception as exc:
-            schedule = {"error": str(exc)[:160]}
+            schedule = {"error": _safe_error(str(exc)[:160])}
     return {"enabled": True, "subscriptions": subscriptions, "account": account, "schedule": schedule}
+
+
+def serialize_hdhive_subscription(service: Any | None, subscription_id: int) -> dict[str, Any] | None:
+    if service is None:
+        return None
+    payload = serialize_hdhive(service)
+    return next(
+        (row for row in payload.get("subscriptions", []) if int(row.get("id") or 0) == int(subscription_id)),
+        None,
+    )
 
 
 def api_response(payload: Any, *, status: int = 200) -> tuple[int, dict[str, str], bytes]:

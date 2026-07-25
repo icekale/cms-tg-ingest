@@ -36,7 +36,7 @@ Do not change the normal 115 intake, CMS organize, STRM mode, cleanup, or TaskRu
 - Create: `app/series_rules.py`
 - Create: `tests/test_series_rules.py`
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
 
 ```python
 import unittest
@@ -77,13 +77,13 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run the focused test and verify it fails for the missing module.**
+- [x] **Step 2: Run the focused test and verify it fails for the missing module.**
 
 Run: `python -m pytest -q tests/test_series_rules.py`
 
 Expected: collection fails with `ModuleNotFoundError: No module named 'app.series_rules'`.
 
-- [ ] **Step 3: Implement the minimal pure rule module.**
+- [x] **Step 3: Implement the minimal pure rule module.**
 
 Define an ordered frozen `EpisodeKey(season: int, episode: int)` with a `normalized` property returning `S{season:02d}E{episode:02d}`. Define `EpisodeFilter` with exact keys, season numbers, and same-season inclusive ranges. Implement:
 
@@ -106,13 +106,13 @@ def completion_state(tmdb_status: str, expected: set[EpisodeKey], terminal: set[
 
 `parse_episode_key` accepts only a bounded `S<season>E<episode>` token with positive season/episode values, plus `S00E..` for explicit special handling. Empty filters match normal episodes only; explicit `S00` matches special episodes. `completion_state` returns `completed` only for TMDB `ended`/`canceled`, a non-empty expected set, no blocked expected keys, and full terminal coverage; otherwise it returns `active`.
 
-- [ ] **Step 4: Run the focused tests and the existing classifier tests.**
+- [x] **Step 4: Run the focused tests and the existing classifier tests.**
 
 Run: `python -m pytest -q tests/test_series_rules.py tests/test_openai_fallback.py`
 
 Expected: all tests pass and existing title/TMDB matching behavior remains unchanged.
 
-- [ ] **Step 5: Commit the rule module.**
+- [x] **Step 5: Commit the rule module.**
 
 ```bash
 git add app/series_rules.py tests/test_series_rules.py
@@ -125,7 +125,7 @@ git commit -m "feat: add episode filtering rules"
 - Modify: `app/media/classify.py`
 - Create: `tests/test_tmdb_resolver.py`
 
-- [ ] **Step 1: Write the failing normalization test.**
+- [x] **Step 1: Write the failing normalization test.**
 
 ```python
 import unittest
@@ -162,23 +162,23 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run the test and verify the new fields are absent.**
+- [x] **Step 2: Run the test and verify the new fields are absent.**
 
 Run: `python -m pytest -q tests/test_tmdb_resolver.py`
 
 Expected: FAIL with a missing `status` key.
 
-- [ ] **Step 3: Add normalized TV metadata without changing movie output.**
+- [x] **Step 3: Add normalized TV metadata without changing movie output.**
 
 Extend `TmdbApiResolver._normalize_details` only for `media_type == "tv"`. Copy `status`, `number_of_seasons`, `number_of_episodes`, and a list of dictionaries containing `season_number`, `episode_count`, and `air_date` when present. Convert numeric fields to `int` only when valid and omit malformed season entries. Keep the current fallback behavior and existing category fields.
 
-- [ ] **Step 4: Run TMDB and existing classification tests.**
+- [x] **Step 4: Run TMDB and existing classification tests.**
 
 Run: `python -m pytest -q tests/test_tmdb_resolver.py tests/test_openai_fallback.py tests/test_bridge_task_engine.py`
 
 Expected: PASS with no change to current CMS-first category behavior.
 
-- [ ] **Step 5: Commit the TMDB slice.**
+- [x] **Step 5: Commit the TMDB slice.**
 
 ```bash
 git add app/media/classify.py tests/test_tmdb_resolver.py
@@ -191,7 +191,7 @@ git commit -m "feat: expose TMDB TV completion metadata"
 - Modify: `app/clients/emby.py`
 - Modify: `tests/test_emby_client.py`
 
-- [ ] **Step 1: Write failing client tests.**
+- [x] **Step 1: Write failing client tests.**
 
 Add a response-driven fake HTTP client and assert these behaviors:
 
@@ -212,13 +212,13 @@ def test_existing_episode_keys_are_loaded_from_tmdb_series(self):
 
 Also test that an item without both season and episode indexes is ignored and that a non-2xx/HTTP error propagates to the caller instead of returning an empty set.
 
-- [ ] **Step 2: Run the focused tests and verify the methods are missing.**
+- [x] **Step 2: Run the focused tests and verify the methods are missing.**
 
 Run: `python -m pytest -q tests/test_emby_client.py -k episode`
 
 Expected: FAIL with `AttributeError` for `existing_episode_keys_by_tmdb`.
 
-- [ ] **Step 3: Implement the three narrow Emby methods.**
+- [x] **Step 3: Implement the three narrow Emby methods.**
 
 Add:
 
@@ -235,13 +235,13 @@ def existing_episode_keys_by_tmdb(self, tmdb_id: str) -> set[str]:
 
 Use `/Users/{user_id}/Items` with `AnyProviderIdEquals=tmdb.<id>`, `IncludeItemTypes=Series`, and a small limit; then `/Shows/{series_id}/Episodes` with the current user ID and `Fields=ParentIndexNumber,IndexNumber`. URL-quote the Series ID. Reuse `item_tmdb_id` for exact provider matching and `parse_episode_key` only for formatting valid positive integer indexes. Do not catch HTTP failures in the client; the subscription service will record the unavailable reason.
 
-- [ ] **Step 4: Run Emby tests and all HTTP client tests.**
+- [x] **Step 4: Run Emby tests and all HTTP client tests.**
 
 Run: `python -m pytest -q tests/test_emby_client.py tests/test_http_clients.py`
 
 Expected: PASS, including API-key redaction tests.
 
-- [ ] **Step 5: Commit the Emby slice.**
+- [x] **Step 5: Commit the Emby slice.**
 
 ```bash
 git add app/clients/emby.py tests/test_emby_client.py
@@ -254,7 +254,7 @@ git commit -m "feat: query existing Emby TV episodes"
 - Modify: `app/hdhive_subscription_store.py`
 - Modify: `tests/test_hdhive_subscription_store.py`
 
-- [ ] **Step 1: Write migration and state tests.**
+- [x] **Step 1: Write migration and state tests.**
 
 Add tests that create a database with the pre-feature schema, reopen it through `HdhiveSubscriptionStore`, and assert `episode_filter` and `last_summary_json` default safely. Add tests for:
 
@@ -273,13 +273,13 @@ self.assertEqual(store.get_item(item.id).skip_reason, "Emby 已存在")
 
 Verify `completed` is accepted by `set_status`, deleted subscriptions remain filtered from normal lists, and old records still reopen.
 
-- [ ] **Step 2: Run the storage tests and verify the new attributes/methods fail.**
+- [x] **Step 2: Run the storage tests and verify the new attributes/methods fail.**
 
 Run: `python -m pytest -q tests/test_hdhive_subscription_store.py`
 
 Expected: FAIL because the old dataclasses and schema do not expose the new fields or methods.
 
-- [ ] **Step 3: Add additive SQLite migration and store APIs.**
+- [x] **Step 3: Add additive SQLite migration and store APIs.**
 
 Extend the frozen dataclasses with `episode_filter`, `last_summary_json`, `normalized_episode_key`, and `skip_reason`. In `_init_db`, add an `_ensure_columns` pass that executes only missing `ALTER TABLE` statements. Extend `upsert_item` with an optional `normalized_episode_key` keyword and preserve existing status unless a new discovery update explicitly resets a prior `filtered` or `emby_exists` row.
 
@@ -301,13 +301,13 @@ def reset_item_for_check(self, item_id: int, expected_status: str) -> HdhiveSubs
 
 Allow only `filtered`, `emby_exists`, and `unparsed` in `mark_item_skipped`; reject arbitrary status values. `reset_item_for_check` changes only a matching skip status back to `discovered`, allowing a changed filter or removed Emby episode to be reconsidered. Store summaries as compact JSON and accept `completed` in `set_status`.
 
-- [ ] **Step 4: Run storage tests and the existing doctor tests.**
+- [x] **Step 4: Run storage tests and the existing doctor tests.**
 
 Run: `python -m pytest -q tests/test_hdhive_subscription_store.py tests/test_doctor.py`
 
 Expected: PASS with the old schema migration path covered.
 
-- [ ] **Step 5: Commit the storage slice.**
+- [x] **Step 5: Commit the storage slice.**
 
 ```bash
 git add app/hdhive_subscription_store.py tests/test_hdhive_subscription_store.py
@@ -320,7 +320,7 @@ git commit -m "feat: persist HDHive smart judgment state"
 - Modify: `app/hdhive_subscriptions.py`
 - Modify: `tests/test_hdhive_subscriptions.py`
 
-- [ ] **Step 1: Write failing service tests with real store state.**
+- [x] **Step 1: Write failing service tests with real store state.**
 
 Add fakes for a TMDB resolver and Emby client, then cover these cases:
 
@@ -350,17 +350,17 @@ def test_ended_series_becomes_completed_only_after_expected_episodes_are_termina
 
 Also test Emby unavailable (no skip and an explicit summary reason), TMDB unknown (never completed), high-cost confirmation blocking completion, unparsed episodes blocking completion, and a later filter change resetting `filtered` items.
 
-- [ ] **Step 2: Run the service tests and verify they fail before integration.**
+- [x] **Step 2: Run the service tests and verify they fail before integration.**
 
 Run: `python -m pytest -q tests/test_hdhive_subscriptions.py -k 'smart or episode or completed'`
 
 Expected: FAIL because the service does not accept the new dependencies, result fields, or skip logic.
 
-- [ ] **Step 3: Extend the service constructor and normalize each resource once.**
+- [x] **Step 3: Extend the service constructor and normalize each resource once.**
 
 Add optional `tmdb_resolver` and `emby` dependencies to `HdhiveSubscriptionService`. Normalize every resource with `episode_key(resource)` followed by `parse_episode_key`; use the normalized string for grouping and pass it to `upsert_item`. A missing key is stored as `unparsed` and is never sent to `_unlock_one`.
 
-- [ ] **Step 4: Apply filters, Emby skips, and best-resource selection in order.**
+- [x] **Step 4: Apply filters, Emby skips, and best-resource selection in order.**
 
 Inside `check`, parse `subscription.episode_filter` before contacting HDHive. For each normalized episode:
 
@@ -372,19 +372,19 @@ Inside `check`, parse `subscription.episode_filter` before contacting HDHive. Fo
 
 Catch only Emby query exceptions around the optional lookup, set `emby_skip_unavailable` in the summary, and continue without pretending the episode exists. Keep HDHive/115 exceptions on the current per-subscription error path.
 
-- [ ] **Step 5: Add completion calculation and structured result data.**
+- [x] **Step 5: Add completion calculation and structured result data.**
 
 Resolve TMDB TV details once when a resolver is enabled. Build expected keys from `seasons[].season_number` and `episode_count`; remove keys excluded by an explicit filter. Treat `enqueued`, `emby_exists`, and `filtered` as terminal; treat missing expected keys, `pending_confirmation`, `failed`, `unlocking`, and `unparsed` as blocking. Call `completion_state` and update the subscription to `completed` only when it returns `completed`; otherwise leave it `active` unless the existing call failed.
 
 Extend `SubscriptionCheckResult` with a `summary: dict[str, Any]` and `subscription_status: str`, while preserving the existing integer fields. Save the summary with `record_check` and include counts for `enqueued`, `pending_confirmation`, `failed`, `emby_exists`, `filtered`, `unparsed`, `blocked`, `expected`, `tmdb_status`, and `emby_skip_unavailable`.
 
-- [ ] **Step 6: Run all HDHive service tests and the bridge integration tests.**
+- [x] **Step 6: Run all HDHive service tests and the bridge integration tests.**
 
 Run: `python -m pytest -q tests/test_hdhive_subscriptions.py tests/test_hdhive_bridge.py tests/test_task_bridge.py`
 
 Expected: PASS, including the existing cost threshold and unlock deduplication tests.
 
-- [ ] **Step 7: Commit the service slice.**
+- [x] **Step 7: Commit the service slice.**
 
 ```bash
 git add app/hdhive_subscriptions.py tests/test_hdhive_subscriptions.py
@@ -398,7 +398,7 @@ git commit -m "feat: add HDHive smart episode judgment"
 - Modify: `app/telegram_ui.py`
 - Modify: `tests/test_hdhive_bridge.py`
 
-- [ ] **Step 1: Write failing callback and notification tests.**
+- [x] **Step 1: Write failing callback and notification tests.**
 
 Cover the `hsub:filter:<id>` callback, invalid filter input, clearing a filter with an empty message, and `completed` rendering:
 
@@ -412,17 +412,17 @@ def test_completed_subscription_renders_status_and_filter(self):
     self.assertIn("S01E01-S01E03", text)
 ```
 
-- [ ] **Step 2: Run the focused tests and verify the new callback is unhandled.**
+- [x] **Step 2: Run the focused tests and verify the new callback is unhandled.**
 
 Run: `python -m pytest -q tests/test_hdhive_bridge.py -k 'filter or completed'`
 
 Expected: FAIL because the callback parser and pending-filter state do not exist.
 
-- [ ] **Step 3: Pass existing clients into the subscription service.**
+- [x] **Step 3: Pass existing clients into the subscription service.**
 
 At the existing service construction in `bridge.py`, pass the configured TMDB resolver and Emby client. Keep them optional so current deployments without either credential continue to work. Do not create a second client or a second polling thread.
 
-- [ ] **Step 4: Add a bounded Telegram filter-input state.**
+- [x] **Step 4: Add a bounded Telegram filter-input state.**
 
 Extend the existing HDHive session/input state with one pending subscription ID per allowed chat. Add callback data `hsub:filter:<subscription_id>` and a button labeled `设置集数过滤`. On callback, verify ownership through `subscription.chat_id`, store the pending ID, and send:
 
@@ -432,24 +432,24 @@ Extend the existing HDHive session/input state with one pending subscription ID 
 
 Before normal HDHive search/link handling, consume a pending filter message for the same chat. Validate with `parse_episode_filter`; on error send the examples and keep the pending state. On success call `update_episode_filter`, clear the pending state, and render the subscription list. This state is memory-only and safe to lose on restart because the stored filter remains unchanged.
 
-- [ ] **Step 5: Update TG formatting and callback handling.**
+- [x] **Step 5: Update TG formatting and callback handling.**
 
 Add `completed` labels, filter text, and the latest summary counters to `format_hdhive_subscriptions`. Make the toggle button for a completed subscription say `恢复` and route to the existing resume action. Include skip/completion details in the existing `on_item_enqueued`/check notification without printing full share URLs.
 
-- [ ] **Step 6: Run Telegram and bridge tests.**
+- [x] **Step 6: Run Telegram and bridge tests.**
 
 Run: `python -m pytest -q tests/test_hdhive_bridge.py tests/test_telegram_client.py tests/test_task_bridge.py`
 
 Expected: PASS with current `/订阅` and `/搜索` behavior unchanged.
 
-- [ ] **Step 7: Commit the Telegram/wiring slice.**
+- [x] **Step 7: Commit the Telegram/wiring slice.**
 
 ```bash
 git add bridge.py app/telegram_ui.py tests/test_hdhive_bridge.py
 git commit -m "feat: add Telegram HDHive episode controls"
 ```
 
-### Task 7: Add Legacy Web And Vue UI Controls
+### Task 7: Make Vue UI Primary While Preserving Legacy Web Compatibility
 
 **Files:**
 - Modify: `app/web.py`
@@ -459,23 +459,23 @@ git commit -m "feat: add Telegram HDHive episode controls"
 - Modify: `tests/test_hdhive_web.py`
 - Modify: `tests/test_frontend.py`
 
-- [ ] **Step 1: Write failing Web/API tests.**
+- [x] **Step 1: Write failing Web/API tests.**
 
 Add tests for `POST /api/v1/hdhive/subscriptions/<id>/episode-filter` with JSON `{"episode_filter":"S02"}`, invalid input returning HTTP 400 without changing the old filter, and the serialized payload containing `episode_filter`, `last_summary_json`, `completed`, and item skip reasons. Add a legacy form POST test for `/hdhive/subscriptions/<id>/episode-filter`.
 
-- [ ] **Step 2: Run the focused Web tests and verify the endpoint is missing.**
+- [x] **Step 2: Run the focused Web tests and verify the endpoint is missing.**
 
 Run: `python -m pytest -q tests/test_hdhive_web.py -k filter`
 
 Expected: FAIL with HTTP 404 or missing service method.
 
-- [ ] **Step 3: Implement backend actions and serialization.**
+- [x] **Step 3: Implement shared backend actions and serialization.**
 
-Add `HdhiveSubscriptionService.set_episode_filter(subscription_id, value)` that validates before calling the store. Add both the legacy form route and the JSON API route; return a safe serialized subscription. Extend `serialize_hdhive` with the typed subscription/item fields and a computed summary object, without exposing URLs, tokens, cookies, or API keys. Keep existing pause/resume/delete/check/confirm routes untouched.
+Add `HdhiveSubscriptionService.set_episode_filter(subscription_id, value)` that validates before calling the store. Keep the legacy form route for backward compatibility and add the JSON API route used by the Vue UI; return a safe serialized subscription. Extend `serialize_hdhive` with the typed subscription/item fields and a computed summary object, without exposing URLs, tokens, cookies, or API keys. Keep existing pause/resume/delete/check/confirm routes untouched.
 
-- [ ] **Step 4: Add Vue controls and status display.**
+- [x] **Step 4: Add the new Vue controls and status display.**
 
-Add to `frontend/src/api.js`:
+The new Vue UI is the primary surface. Add to `frontend/src/api.js`:
 
 ```javascript
 hdhiveSubscriptionFilter: (id, episode_filter) => request(`hdhive/subscriptions/${id}/episode-filter`, {
@@ -486,13 +486,13 @@ hdhiveSubscriptionFilter: (id, episode_filter) => request(`hdhive/subscriptions/
 
 In `Hdhive.vue`, render each subscription’s status, filter, `last_summary_json`, and skip counts. Add a compact text input with a save button, show `已完结` as a tag, and preserve pause/resume/check/delete and unlock confirmation. Display `emby_skip_unavailable` as a warning rather than silently treating all episodes as new.
 
-- [ ] **Step 5: Build the frontend and run Web/API tests.**
+- [x] **Step 5: Build the frontend and run Web/API tests.**
 
 Run: `npm --prefix frontend run build && python -m pytest -q tests/test_hdhive_web.py tests/test_web_api.py tests/test_frontend.py`
 
 Expected: Vite build succeeds and all legacy/new routes pass.
 
-- [ ] **Step 6: Commit the Web/Vue slice.**
+- [x] **Step 6: Commit the Web/Vue slice.**
 
 ```bash
 git add app/web.py app/web_api.py frontend/src/api.js frontend/src/views/Hdhive.vue tests/test_hdhive_web.py tests/test_frontend.py
