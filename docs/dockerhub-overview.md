@@ -34,6 +34,50 @@ docker compose up -d
 docker pull icekale/cms-tg-ingest:0.2.19
 ```
 
+### 完整 Docker Compose
+
+下面的配置可以直接使用 Docker Hub 镜像，不需要本地构建。先准备 `.env`（可从仓库的 `.env.example` 复制并填写），再保存为 `docker-compose.yml`：
+
+```yaml
+services:
+  cms-tg-ingest:
+    image: icekale/cms-tg-ingest:0.2.19
+    container_name: cms-tg-ingest
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/data
+      # STRM 源目录和媒体库目录，必须与 .env 中的路径一致。
+      - /mnt/user/Unraid/strm:/mnt/user/Unraid/strm:rw
+      # CMS 导出的 115 Cookie。
+      - /mnt/user/appdata/cloud-media-sync/config/115-cookies.txt:/config/115-cookies.txt:ro
+      # CMS 在线数据库，用于识别整理后的目录。
+      - /mnt/user/appdata/cloud-media-sync/config/cms-online.db:/cms/cms-online.db:ro
+      # CMS 配置目录，用于读取并跟随 OAuth 刷新后的 HDHive 授权文件。
+      - /mnt/user/appdata/cloud-media-sync/config:/config/cms-config:ro
+    healthcheck:
+      test: ["CMD", "python", "/app/doctor.py", "--quiet"]
+      interval: 5m
+      timeout: 20s
+      retries: 2
+      start_period: 30s
+```
+
+启动和查看日志：
+
+```sh
+mkdir -p data
+docker compose pull
+docker compose up -d
+docker compose ps
+docker compose logs -f cms-tg-ingest
+```
+
+Unraid 使用时建议把端口改为 `8788:8787`，访问 `http://<unraid-ip>:8788/app/`。如果 STRM、Cookie 或 CMS 数据库路径不同，请同步修改 `volumes` 和 `.env` 中的路径；不要把 `.env` 或 Cookie 提交到 GitHub/Docker Hub。
+
 本地 compose 默认使用 `8787:8787`。Unraid 推荐映射 `8788:8787`，访问 `http://<unraid-ip>:8788/` 会默认进入 Vue 管理台（实际页面为 `/app/`）；旧版概览保留在 `/legacy`。镜像支持 `linux/amd64` 和 `linux/arm64`。
 
 ## Telegram 使用
