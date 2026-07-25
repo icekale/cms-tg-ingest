@@ -3544,6 +3544,15 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         )
         task_runner.start()
         LOG.info("Task engine worker started interval_seconds=%s", config.task_worker_interval_seconds)
+        if config.status_repair_enabled and self_share_config.enabled and p115:
+            start_self_share_maintenance_loop(
+                store,
+                cms,
+                self_share_config,
+                move_config,
+                interval_seconds=max(1, int(config.status_repair_interval_seconds)),
+                limit=max(1, int(config.status_repair_limit)),
+            )
     if config.backup_enabled:
         backup_scheduler = create_backup_scheduler(config, task_store)
         backup_thread = start_backup_loop(backup_scheduler, stop_event)

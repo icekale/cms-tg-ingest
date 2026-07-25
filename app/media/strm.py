@@ -674,11 +674,32 @@ def reconcile_self_share_move(store: Any, move_config: MoveConfig, row: dict[str
     source_value = str(row.get("source_path") or "").strip()
     dest_value = str(row.get("dest_path") or "").strip()
     if not source_value or not dest_value:
+        category = category_for_self_share_row(row)
+        source = safe_resolve(Path(source_value)) if source_value else None
+        dest = safe_resolve(Path(dest_value)) if dest_value else None
+        store.update_move(
+            int(row["id"]),
+            "error",
+            source_path=str(source) if source else None,
+            dest_path=str(dest) if dest else None,
+            category_final=category,
+            error="STRM 移动记录缺少完整持久化路径",
+        )
         return "invalid"
 
     source = safe_resolve(Path(source_value))
     dest = safe_resolve(Path(dest_value))
     category = category_for_self_share_row(row)
+    if not is_under_any_root(source, move_config.source_roots):
+        store.update_move(
+            int(row["id"]),
+            "error",
+            source_path=str(source),
+            dest_path=str(dest),
+            category_final=category,
+            error="源目录不在允许范围内",
+        )
+        return "invalid"
     if not is_under_any_root(dest, list(move_config.library_roots.values())):
         store.update_move(
             int(row["id"]),
@@ -714,6 +735,17 @@ def reconcile_self_share_move(store: Any, move_config: MoveConfig, row: dict[str
         return "moved"
 
     if source_exists and dest_exists:
+        issue = validate_self_share_strm_destination(dest, row)
+        if issue:
+            store.update_move(
+                int(row["id"]),
+                "error",
+                source_path=str(source),
+                dest_path=str(dest),
+                category_final=category,
+                error=issue,
+            )
+            return "invalid"
         updated = merge_self_share_strm_folder(
             MovePlan("conflict", "目标目录已存在，恢复中合并", source, dest, category),
             store,
@@ -867,7 +899,7 @@ def repair_stranded_self_share_moves(store: Any, move_config: MoveConfig, limit:
     repaired = 0
     for row in store.stranded_self_share_move_candidates(limit=max(1, int(limit))):
         if str(row.get("move_status") or "").lower() == "moving":
-            if str(row.get("source_path") or "").strip() and str(row.get("dest_path") or "").strip():
+            if str(row.get("source_path") or "").strip() or str(row.get("dest_path") or "").strip():
                 result = reconcile_self_share_move(store, move_config, row)
                 if result in {"moved", "replayed", "merged"}:
                     repaired += 1
