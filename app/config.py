@@ -57,6 +57,20 @@ def positive_int_env(name: str, default: int) -> int:
     return value
 
 
+def parse_review_checkpoints(value: str, grace_seconds: int) -> tuple[int, ...]:
+    try:
+        checkpoints = tuple(int(part.strip()) for part in str(value or "").split(",") if part.strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS must be comma-separated positive integers") from exc
+    if not checkpoints or any(checkpoint <= 0 for checkpoint in checkpoints):
+        raise ValueError("SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS must contain positive integers")
+    if any(left >= right for left, right in zip(checkpoints, checkpoints[1:])):
+        raise ValueError("SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS must be strictly increasing")
+    if checkpoints[-1] != int(grace_seconds):
+        raise ValueError("SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS must end at SELF_SHARE_REVIEW_GRACE_SECONDS")
+    return checkpoints
+
+
 @dataclass
 class Config:
     tg_bot_token: str
@@ -108,6 +122,9 @@ class Config:
     self_share_invalid_cleanup_enabled: bool = False
     self_share_invalid_check_interval_seconds: int = 21600
     self_share_invalid_check_limit: int = 3
+    self_share_review_grace_seconds: int = 86400
+    self_share_review_checkpoints_seconds: tuple[int, ...] = (600, 3600, 21600, 86400)
+    self_share_review_list_cache_seconds: int = 300
     status_repair_enabled: bool = True
     status_repair_interval_seconds: int = 300
     status_repair_limit: int = 50
@@ -157,6 +174,11 @@ class Config:
             strm_default_mode = "direct"
         else:
             strm_default_mode = "shared"
+        self_share_review_grace_seconds = positive_int_env("SELF_SHARE_REVIEW_GRACE_SECONDS", 86400)
+        self_share_review_checkpoints_seconds = parse_review_checkpoints(
+            os.environ.get("SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS", "600,3600,21600,86400"),
+            self_share_review_grace_seconds,
+        )
         return cls(
             tg_bot_token=os.environ["TG_BOT_TOKEN"],
             tg_allowed_chat_id=os.environ["TG_ALLOWED_CHAT_ID"],
@@ -215,6 +237,9 @@ class Config:
             self_share_invalid_cleanup_enabled=parse_bool_env(os.environ.get("SELF_SHARE_INVALID_CLEANUP_ENABLED"), False),
             self_share_invalid_check_interval_seconds=max(60, int(os.environ.get("SELF_SHARE_INVALID_CHECK_INTERVAL_SECONDS", "21600"))),
             self_share_invalid_check_limit=max(1, int(os.environ.get("SELF_SHARE_INVALID_CHECK_LIMIT", "3"))),
+            self_share_review_grace_seconds=self_share_review_grace_seconds,
+            self_share_review_checkpoints_seconds=self_share_review_checkpoints_seconds,
+            self_share_review_list_cache_seconds=positive_int_env("SELF_SHARE_REVIEW_LIST_CACHE_SECONDS", 300),
             status_repair_enabled=parse_bool_env(os.environ.get("STATUS_REPAIR_ENABLED"), True),
             status_repair_interval_seconds=int(os.environ.get("STATUS_REPAIR_INTERVAL_SECONDS", "300")),
             status_repair_limit=int(os.environ.get("STATUS_REPAIR_LIMIT", "50")),
@@ -287,6 +312,9 @@ class SelfShareConfig:
     auto_organize_retry_seconds: int = 90
     cloud_poll_seconds: int = 30
     cloud_timeout_seconds: int = 86400
+    review_grace_seconds: int = 86400
+    review_checkpoints_seconds: tuple[int, ...] = (600, 3600, 21600, 86400)
+    review_list_cache_seconds: int = 300
     parent_cid_category_map: dict[str, str] | None = None
     organized_scan_parent_ids: set[str] | None = None
     cms_state_db_path: Path = Path("/cms/cms-online.db")
@@ -316,6 +344,9 @@ class SelfShareConfig:
             auto_organize_retry_seconds=max(0, int(config.self_share_auto_organize_retry_seconds)),
             cloud_poll_seconds=max(30, int(config.self_share_cloud_poll_seconds)),
             cloud_timeout_seconds=max(300, int(config.self_share_cloud_timeout_seconds)),
+            review_grace_seconds=max(1, int(config.self_share_review_grace_seconds)),
+            review_checkpoints_seconds=tuple(int(value) for value in config.self_share_review_checkpoints_seconds),
+            review_list_cache_seconds=max(1, int(config.self_share_review_list_cache_seconds)),
             parent_cid_category_map=parse_parent_cid_category_map(config.cms_parent_cid_category_map),
             organized_scan_parent_ids=organized_scan_parent_ids,
             cms_state_db_path=Path(config.cms_state_db_path).expanduser(),
