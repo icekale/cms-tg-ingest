@@ -32,3 +32,29 @@
 - Confirmed stage-level workflow exception handling remains unchanged; this task only supervises infrastructure failures outside `workflow.run_stage`.
 - Confirmed no retry, 115, or HDHive behavior was changed.
 - Runtime-state writes are deliberately best-effort: a database outage may temporarily prevent status persistence, but it no longer terminates the worker. The next successful write refreshes the truthful state.
+
+## Reviewer follow-up: heartbeat atomicity and Web warning
+
+### Changed files
+
+- `app/task_store.py`
+- `app/task_runner.py`
+- `app/web.py`
+- `tests/test_task_runner.py`
+- `tests/test_web_admin.py`
+
+### TDD and verification
+
+1. RED: `python3 -m unittest tests.test_task_runner.TaskRunnerTests.test_heartbeat_does_not_overwrite_concurrent_runner_error tests.test_web_admin.WebAdminTests.test_health_page_marks_fresh_runner_error_as_warning -v`
+   - Failed as expected: the heartbeat restored stale `running` over an interleaved `error`, and the fresh error state rendered as `is-healthy` / `任务引擎运行正常`.
+2. GREEN: the same two-test command passed after the fixes.
+3. COVERAGE: `python3 -m unittest tests.test_task_runner tests.test_task_health tests.test_web_api tests.test_web_admin -v`
+   - Passed: 131 tests, exit 0. `tests.test_web` does not exist; `tests.test_web_admin` is the repository's Web health-page test module.
+4. Patch hygiene: `git diff --check`
+   - Passed: exit 0 with no whitespace errors.
+
+### Self-review
+
+- `refresh_runtime_state_timestamp()` issues one `UPDATE` for an existing runtime-state key and never reads or writes its value, so an `error` value cannot be replaced by stale heartbeat data.
+- The heartbeat retains its best-effort behavior: a missing runtime-state row returns `False`, and database errors are still caught by `_record_heartbeat`.
+- The health page treats only explicit `runner_state=error` as the new warning case; existing disabled, stale-heartbeat, cooldown, and task-problem behavior remains unchanged.

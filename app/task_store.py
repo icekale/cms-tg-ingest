@@ -169,6 +169,15 @@ class TaskStore:
                 (str(key), str(value), timestamp),
             )
 
+    def refresh_runtime_state_timestamp(self, key: str, updated_at: float | None = None) -> bool:
+        timestamp = time.time() if updated_at is None else float(updated_at)
+        with self._lock, self._connection() as conn:
+            cursor = conn.execute(
+                "UPDATE runtime_state SET updated_at = ? WHERE key = ?",
+                (timestamp, str(key)),
+            )
+        return cursor.rowcount > 0
+
     def get_runtime_state(self, key: str) -> dict[str, Any] | None:
         with self._lock, self._connection() as conn:
             row = conn.execute("SELECT value, updated_at FROM runtime_state WHERE key = ?", (str(key),)).fetchone()

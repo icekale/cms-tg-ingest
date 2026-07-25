@@ -233,8 +233,7 @@ class TaskRunner:
         if now - self._last_heartbeat_at < _HEARTBEAT_INTERVAL_SECONDS:
             return
         try:
-            state = self.store.get_runtime_state("task_runner")
-            if state and self._safe_runtime_state("task_runner", state["value"], updated_at=now):
+            if self.store.refresh_runtime_state_timestamp("task_runner", updated_at=now):
                 self._last_heartbeat_at = now
         except Exception:
             LOG.debug("Failed to record TaskRunner heartbeat", exc_info=True)

@@ -84,6 +84,36 @@ class TimeAdvancingCountingWorkflow:
 
 
 class TaskRunnerTests(unittest.TestCase):
+    def test_heartbeat_does_not_overwrite_concurrent_runner_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real_store = TaskStore(Path(tmp) / "tasks.db")
+            real_store.set_runtime_state("task_runner", "running", updated_at=1.0)
+
+            class ErrorInterleavingStore:
+                def __init__(self, delegate):
+                    self.delegate = delegate
+
+                def __getattr__(self, name):
+                    return getattr(self.delegate, name)
+
+                def get_runtime_state(self, key):
+                    state = self.delegate.get_runtime_state(key)
+                    if key == "task_runner":
+                        self.delegate.set_runtime_state("task_runner", "error", updated_at=99.0)
+                    return state
+
+                def refresh_runtime_state_timestamp(self, key, updated_at=None):
+                    self.delegate.set_runtime_state("task_runner", "error", updated_at=99.0)
+                    return self.delegate.refresh_runtime_state_timestamp(key, updated_at=updated_at)
+
+            runner = TaskRunner(ErrorInterleavingStore(real_store), FakeWorkflow([]), now=lambda: 100.0)
+
+            runner._record_heartbeat()
+
+            state = real_store.get_runtime_state("task_runner")
+            self.assertEqual(state["value"], "error")
+            self.assertEqual(state["updated_at"], 100.0)
+
     def test_run_forever_survives_store_error_and_reports_recovery(self):
         with tempfile.TemporaryDirectory() as tmp:
             real_store = TaskStore(Path(tmp) / "tasks.db")

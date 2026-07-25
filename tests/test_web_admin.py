@@ -1504,6 +1504,19 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("最近任务 100+ 个", markup)
             self.assertNotIn("本地任务 100 个", markup)
 
+    def test_health_page_marks_fresh_runner_error_as_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            store.set_runtime_state("task_runner", "error", updated_at=100.0)
+
+            with patch("app.web.time.time", return_value=100.0):
+                markup = render_health_page(store)
+
+            self.assertIn('class="health-status is-warning"', markup)
+            self.assertIn("任务引擎状态异常", markup)
+            self.assertIn("TaskRunner心跳: error", markup)
+            self.assertNotIn("任务引擎运行正常", markup)
+
     def test_health_endpoint_reports_disabled_task_engine(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

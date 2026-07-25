@@ -1006,10 +1006,13 @@ def render_health_page(store: TaskStore, *, task_engine_enabled: bool = True) ->
     summary = build_task_health(store, enabled=task_engine_enabled, limit=recent_limit, now=now)
     report = format_task_health(summary, now=now)
     cooldown_active = summary.p115_cooldown_until > now
-    warning = not summary.enabled or cooldown_active or summary.problem_count > 0 or summary.runner_heartbeat_stale
+    runner_error = summary.runner_state == "error"
+    warning = not summary.enabled or runner_error or cooldown_active or summary.problem_count > 0 or summary.runner_heartbeat_stale
     health_class = "is-warning" if warning else "is-healthy"
     if not summary.enabled:
         health_title = "任务引擎已停用"
+    elif runner_error:
+        health_title = "任务引擎状态异常"
     elif summary.runner_heartbeat_stale:
         health_title = "任务引擎心跳异常"
     else:
