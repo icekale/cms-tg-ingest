@@ -288,8 +288,8 @@ def execute_strm_move(plan: MovePlan, store: Any, row: dict[str, Any]) -> dict[s
     journaled = _journal_strm_move(plan, store, row)
     if not _moving_status_confirmed(journaled):
         return journaled or row
-    plan.dest_path.parent.mkdir(parents=True, exist_ok=True)
     try:
+        plan.dest_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(plan.source_path), str(plan.dest_path))
     except Exception as exc:
         return store.update_move(

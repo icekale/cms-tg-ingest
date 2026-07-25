@@ -1602,6 +1602,62 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertEqual([status for status, _fields in calls], ["moving"])
             self.assertEqual(updated["move_status"], "error")
 
+    def test_execute_strm_move_records_error_when_destination_mkdir_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            dest = root / "library" / "Movie"
+            source.mkdir(parents=True)
+
+            class FakeStore:
+                def __init__(self):
+                    self.statuses = []
+
+                def update_move(self, row_id, status, **fields):
+                    self.statuses.append((status, fields))
+                    return {
+                        "id": row_id,
+                        "move_status": status,
+                        "move_error": fields.get("error"),
+                    }
+
+            store = FakeStore()
+            plan = bridge.MovePlan("pending", "ready", source, dest, "华语电影")
+            with patch("app.media.strm.Path.mkdir", side_effect=OSError("mkdir failed")), patch(
+                "app.media.strm.shutil.move"
+            ) as move:
+                updated = bridge.execute_strm_move(plan, store, {"id": 1})
+
+            self.assertEqual([status for status, _fields in store.statuses], ["moving", "error"])
+            self.assertEqual(updated["move_status"], "error")
+            self.assertEqual(updated["move_error"], "mkdir failed")
+            move.assert_not_called()
+
+    def test_merge_self_share_folder_does_not_touch_filesystem_when_moving_is_not_confirmed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            dest = root / "library" / "Movie"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            (source / "movie.strm").write_text("https://115.com/s/share_1212_movie.mkv", encoding="utf-8")
+
+            class UnconfirmedStore:
+                def update_move(self, row_id, status, **fields):
+                    return {"id": row_id, "move_status": "error", "move_error": "journal rejected"}
+
+            plan = bridge.MovePlan("conflict", "ready", source, dest, "华语电影")
+            with patch("app.media.strm.Path.mkdir") as mkdir, patch("app.media.strm.shutil.copy2") as copy2, patch(
+                "app.media.strm.shutil.rmtree"
+            ) as rmtree, patch("os.replace") as replace:
+                updated = bridge.merge_self_share_strm_folder(plan, UnconfirmedStore(), {"id": 1})
+
+            self.assertEqual(updated["move_status"], "error")
+            mkdir.assert_not_called()
+            copy2.assert_not_called()
+            rmtree.assert_not_called()
+            replace.assert_not_called()
+
     def test_merge_self_share_folder_journals_moving_and_atomically_replaces_each_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
