@@ -486,6 +486,9 @@ class P115WebClient:
         seen_file_ids: set[str] = set()
         first_snap: dict[str, Any] | None = None
 
+        if page_offset >= 5000:
+            raise RuntimeError("115 share root exceeds 5000 entries")
+
         while True:
             request_limit = min(page_size, 5000 - page_offset)
             snap = self.share_snap(

@@ -430,6 +430,16 @@ class CmsPlaybackProbeTests(unittest.TestCase):
         self.assertEqual(sum(limit for _offset, limit in http.snap_requests), 5000)
         self.assertLessEqual(max(offset + limit for offset, limit in http.snap_requests), 5000)
 
+    def test_share_root_items_rejects_initial_offset_at_safety_boundary(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                raise AssertionError("share snap must not be requested beyond the safety boundary")
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        with self.assertRaisesRegex(RuntimeError, "^115 share root exceeds 5000 entries$"):
+            client.share_root_items("abc", "1234", offset=5000)
+
     def test_receive_share_to_cid_rejects_root_at_safe_entry_limit_before_post(self):
         class FakeHttp:
             def __init__(self):
