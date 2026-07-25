@@ -435,15 +435,24 @@ class P115WebClient:
         self._ensure_state(resp, "115 search failed")
         return iter_items(resp.get("data") or resp)
 
-    def share_snap(self, share_code: str, receive_code: str, cid: str = "0", limit: int = 100) -> dict[str, Any]:
+    def share_snap(
+        self,
+        share_code: str,
+        receive_code: str,
+        cid: str = "0",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        page_size = max(1, min(int(limit), 100))
+        page_offset = max(0, int(offset))
         resp = self._request(
             "https://webapi.115.com/share/snap",
             params={
                 "share_code": share_code,
                 "receive_code": receive_code,
                 "cid": cid,
-                "offset": 0,
-                "limit": limit,
+                "offset": page_offset,
+                "limit": page_size,
             },
         )
         try:
@@ -458,6 +467,45 @@ class P115WebClient:
         if share_state and share_state not in {"0", "1", "true"}:
             raise P115ShareUnavailableError(f"115 分享状态不可用: {share_state}")
         return resp
+
+    def share_root_items(
+        self,
+        share_code: str,
+        receive_code: str,
+        cid: str = "0",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        page_size = max(1, min(int(limit), 100))
+        page_offset = max(0, int(offset))
+        items: list[dict[str, Any]] = []
+        seen_file_ids: set[str] = set()
+        first_snap: dict[str, Any] | None = None
+
+        while True:
+            snap = self.share_snap(
+                share_code,
+                receive_code,
+                cid=cid,
+                limit=page_size,
+                offset=page_offset,
+            )
+            if first_snap is None:
+                first_snap = snap
+            data = snap.get("data") if isinstance(snap.get("data"), dict) else snap
+            page = iter_items(data)
+            for item in page:
+                file_id = p115_file_id(item)
+                if file_id and file_id not in seen_file_ids:
+                    seen_file_ids.add(file_id)
+                    items.append(item)
+            if len(page) < page_size:
+                break
+            page_offset += len(page)
+            if page_offset >= 5000:
+                raise RuntimeError("115 share root exceeds 5000 entries")
+
+        return items, first_snap or {}
 
     def inspect_share(self, share_code: str, receive_code: str) -> dict[str, Any]:
         snap = self.share_snap(share_code, receive_code, cid="0", limit=1)
@@ -505,11 +553,9 @@ class P115WebClient:
         return states
 
     def receive_share_to_cid(self, share_code: str, receive_code: str, target_cid: str) -> dict[str, Any]:
-        snap = self.share_snap(share_code, receive_code, cid="0", limit=100)
+        items, snap = self.share_root_items(share_code, receive_code, cid="0", limit=100)
         data = snap.get("data") if isinstance(snap.get("data"), dict) else {}
-        items = iter_items(data.get("list") or data)
-        file_ids = [str(item.get("fid") or item.get("cid") or item.get("file_id") or "").strip() for item in items]
-        file_ids = [file_id for file_id in file_ids if file_id]
+        file_ids = [p115_file_id(item) for item in items]
         if not file_ids:
             raise RuntimeError("115 share snap did not return file ids")
         resp = self._request(

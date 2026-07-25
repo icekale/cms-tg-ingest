@@ -314,6 +314,92 @@ class CmsPlaybackProbeTests(unittest.TestCase):
         self.assertEqual(http.calls[1][2]["file_id"], "fid-1")
         self.assertEqual(http.calls[1][2]["cid"], "pending-cid")
 
+    def test_receive_share_to_cid_paginates_all_root_items_before_receiving(self):
+        class FakeHttp:
+            def __init__(self):
+                self.snap_offsets = []
+                self.received_file_ids = None
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                if url.endswith("/share/snap"):
+                    offset = int(params["offset"])
+                    self.snap_offsets.append(offset)
+                    items = [{"fid": f"fid-{index}"} for index in range(101)]
+                    return {
+                        "state": True,
+                        "data": {
+                            "shareinfo": {"share_title": "大型分享"},
+                            "list": items[offset : offset + 100],
+                        },
+                    }
+                if url.endswith("/share/receive"):
+                    self.received_file_ids = data["file_id"].split(",")
+                    return {"state": True, "data": {"receive_title": "大型分享"}}
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        result = client.receive_share_to_cid("abc", "1234", "pending-cid")
+
+        self.assertEqual(http.snap_offsets, [0, 100])
+        self.assertEqual(len(result["file_ids"]), 101)
+        self.assertEqual(len(set(result["file_ids"])), 101)
+        self.assertEqual(http.received_file_ids, result["file_ids"])
+
+    def test_receive_share_to_cid_deduplicates_root_file_ids_across_pages(self):
+        class FakeHttp:
+            def __init__(self):
+                self.received_file_ids = None
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                if url.endswith("/share/snap"):
+                    offset = int(params["offset"])
+                    page = [{"fid": f"fid-{index}"} for index in range(100)]
+                    if offset == 100:
+                        page = [{"fid": "fid-99"}, {"fid": "fid-100"}]
+                    return {"state": True, "data": {"list": page}}
+                if url.endswith("/share/receive"):
+                    self.received_file_ids = data["file_id"].split(",")
+                    return {"state": True, "data": {}}
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        result = client.receive_share_to_cid("abc", "1234", "pending-cid")
+
+        self.assertEqual(result["file_ids"], [f"fid-{index}" for index in range(101)])
+        self.assertEqual(http.received_file_ids, result["file_ids"])
+
+    def test_receive_share_to_cid_rejects_root_at_safe_entry_limit_before_post(self):
+        class FakeHttp:
+            def __init__(self):
+                self.snap_offsets = []
+                self.receive_called = False
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                if url.endswith("/share/snap"):
+                    offset = int(params["offset"])
+                    self.snap_offsets.append(offset)
+                    return {
+                        "state": True,
+                        "data": {"list": [{"fid": f"fid-{index}"} for index in range(offset, offset + 100)]},
+                    }
+                if url.endswith("/share/receive"):
+                    self.receive_called = True
+                    raise AssertionError("receive must not be called")
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        with self.assertRaisesRegex(RuntimeError, "^115 share root exceeds 5000 entries$"):
+            client.receive_share_to_cid("abc", "1234", "pending-cid")
+
+        self.assertEqual(http.snap_offsets, list(range(0, 5000, 100)))
+        self.assertFalse(http.receive_called)
+
     def test_115_risk_control_response_raises_specific_error(self):
         class FakeHttp:
             def request(self, url, method="GET", data=None, headers=None, params=None):
