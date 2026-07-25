@@ -8,6 +8,7 @@ import time
 import unittest
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.clients import cms as cms_client
@@ -1941,6 +1942,69 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertTrue(source.exists())
             self.assertEqual((dest / "episode.strm").read_text(encoding="utf-8"), marker)
 
+    def test_merge_rejects_wrong_destination_tmdb_when_required_episode_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Show-[tmdb=73375]"
+            dest = root / "library" / "Show-[tmdb=99999]"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            marker = "http://cms/s/ownshare_1212_episode.mkv"
+            (source / "episode.strm").write_text(marker, encoding="utf-8")
+            store = bridge.SubmissionStore(root / "db.sqlite")
+            row = store.upsert_submission(
+                bridge.ShareKey("abc", "1212"),
+                "https://115cdn.com/s/abc?password=1212",
+                "submitted",
+                title="Show (2020)",
+            )
+            row = store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_code="ownshare",
+                own_share_receive_code="1212",
+                own_share_file_name=source.name,
+            ) or row
+            row = store.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": "Show", "tmdb_id": "73375", "category": "外国电视", "type": "tv"},
+                "confident",
+            ) or row
+            config = bridge.MoveConfig(
+                source_roots=[root / "share"],
+                library_roots={"外国电视": root / "library"},
+            )
+            plan = bridge.MovePlan("conflict", "ready", source, dest, "外国电视")
+
+            updated = bridge.merge_self_share_strm_folder(
+                plan,
+                store,
+                row,
+                config,
+                required_relative_path="episode.strm",
+            )
+
+            self.assertEqual(updated["move_status"], "error")
+            self.assertIn("任务 TMDB 73375", updated["move_error"])
+            self.assertIn("文件夹 TMDB 99999", updated["move_error"])
+            self.assertTrue(source.exists())
+            self.assertFalse((dest / "episode.strm").exists())
+
+    def test_required_missing_episode_rejects_destination_without_confirmable_tmdb(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "library" / "Show"
+            destination.mkdir(parents=True)
+            row = {
+                "workflow_mode": "self_share_sync",
+                "own_share_code": "ownshare",
+                "own_share_receive_code": "1212",
+                "recognition_json": json.dumps({"tmdb_id": "73375"}),
+            }
+
+            issue = bridge.validate_self_share_strm_destination(destination, row, "episode.strm")
+
+            self.assertIn("TMDB 无法确认", issue)
+
     def test_cleanup_pending_self_share_sources_requires_task_runner_review(self):
         class FakeP115:
             def __init__(self):
@@ -2451,7 +2515,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertFalse((source / "canonical.strm").exists())
 
     def test_repair_rejects_non_directory_source_names_before_manifest_restore(self):
-        for source_name_case in ("absolute", "..", ".", "foo/../Movie"):
+        for source_name_case in ("absolute", "..", ".", "foo/bar", "foo/../Movie"):
             with self.subTest(source_name=source_name_case), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 share_root = root / "share"
@@ -2716,48 +2780,81 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertTrue((outside / "movie.strm").exists())
 
     def test_restore_missing_rejects_non_directory_source_name_before_manifest_restore(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            share_root = root / "share"
-            source = share_root / "Movie"
-            library_root = root / "library"
-            dest = library_root / "Movie"
-            source.mkdir(parents=True)
-            dest.mkdir(parents=True)
-            row = {
-                "id": 1,
-                "workflow_mode": "self_share_sync",
-                "dest_path": str(dest),
-                "category_final": "欧美电影",
-                "own_share_file_name": "foo/../Movie",
-                "own_share_code": "restore_name",
-                "own_share_receive_code": "1212",
-                "workflow_phase": "restore_share_sync_submitted",
-                "canonical_manifest_json": json.dumps(
-                    {
-                        "root_name": "Movie",
-                        "entries": [{"alias_path": "alias", "canonical_path": "canonical"}],
-                    }
-                ),
-            }
-            self_share_config = bridge.SelfShareConfig(enabled=True, strm_root=share_root)
-            move_config = bridge.MoveConfig(
-                source_roots=[share_root],
-                library_roots={"欧美电影": library_root},
-            )
-
-            with patch("app.media.strm.restore_canonical_strm_paths") as restore:
-                status, metadata = bridge.restore_missing_self_share_library_folder(
-                    None,
-                    None,
-                    row,
-                    self_share_config,
-                    move_config,
+        for source_name_case in ("absolute", "..", ".", "foo/bar", "foo/../Movie"):
+            with self.subTest(source_name=source_name_case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                share_root = root / "share"
+                source = share_root / "Movie"
+                library_root = root / "library"
+                dest = library_root / "Movie"
+                source.mkdir(parents=True)
+                dest.mkdir(parents=True)
+                source_name = str(source) if source_name_case == "absolute" else source_name_case
+                row = {
+                    "id": 1,
+                    "workflow_mode": "self_share_sync",
+                    "dest_path": str(dest),
+                    "category_final": "欧美电影",
+                    "own_share_file_name": source_name,
+                    "own_share_code": "restore_name",
+                    "own_share_receive_code": "1212",
+                    "workflow_phase": "restore_share_sync_submitted",
+                    "canonical_manifest_json": json.dumps(
+                        {
+                            "root_name": "Movie",
+                            "entries": [{"alias_path": "alias", "canonical_path": "canonical"}],
+                        }
+                    ),
+                }
+                self_share_config = bridge.SelfShareConfig(enabled=True, strm_root=share_root)
+                move_config = bridge.MoveConfig(
+                    source_roots=[share_root],
+                    library_roots={"欧美电影": library_root},
                 )
 
-            self.assertEqual(status, "skipped")
-            self.assertEqual(metadata["restore_reason"], "自有分享源目录名称无效")
-            restore.assert_not_called()
+                with patch("app.media.strm.restore_canonical_strm_paths") as restore:
+                    status, metadata = bridge.restore_missing_self_share_library_folder(
+                        None,
+                        None,
+                        row,
+                        self_share_config,
+                        move_config,
+                    )
+
+                self.assertEqual(status, "skipped")
+                self.assertEqual(metadata["restore_reason"], "自有分享源目录名称无效")
+                restore.assert_not_called()
+
+    def test_prepare_direct_file_share_rejects_non_directory_source_names(self):
+        for source_name_case in ("absolute", "..", ".", "foo/bar"):
+            with self.subTest(source_name=source_name_case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                share_root = root / "share"
+                available = share_root / "available"
+                available.mkdir(parents=True)
+                source_file = available / "episode.strm"
+                source_file.write_text("http://cms/s/direct_prepare_1212_episode", encoding="utf-8")
+                workflow = bridge.BridgeSelfShareTaskWorkflow.__new__(bridge.BridgeSelfShareTaskWorkflow)
+                workflow.self_share_config = bridge.SelfShareConfig(enabled=True, strm_root=share_root)
+                task = SimpleNamespace(
+                    metadata={
+                        "direct_file_share_file_id": "file-1",
+                        "direct_file_share_relative_path": "episode.strm",
+                    }
+                )
+                row = {
+                    "own_share_file_name": str(root / "outside" / "Movie")
+                    if source_name_case == "absolute"
+                    else source_name_case,
+                    "own_share_code": "direct_prepare",
+                    "own_share_receive_code": "1212",
+                }
+
+                prepared = workflow._prepare_direct_file_share_strm(task, row)
+
+                self.assertIsNone(prepared)
+                self.assertTrue(source_file.exists())
+
 
     def test_restore_alias_share_strm_uses_canonical_library_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3035,12 +3132,17 @@ class P115FailureHandlingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             share_root = root / "share"
+            share_root.mkdir()
+            (share_root / "root.strm").write_text("http://cms/s/unsafe_1212_root", encoding="utf-8")
+            nested = share_root / "foo" / "bar"
+            nested.mkdir(parents=True)
+            (nested / "nested.strm").write_text("http://cms/s/unsafe_1212_nested", encoding="utf-8")
             outside = root / "outside" / "Movie"
             outside.mkdir(parents=True)
             (outside / "movie.strm").write_text("http://cms/s/unsafe_1212_movie", encoding="utf-8")
             config = bridge.SelfShareConfig(enabled=True, strm_root=share_root)
 
-            for folder_name in (str(outside), "../outside/Movie"):
+            for folder_name in (".", "foo/bar", str(outside), "../outside/Movie"):
                 with self.subTest(folder_name=folder_name):
                     found = bridge.find_self_share_strm_source_dir(
                         config,

@@ -342,9 +342,15 @@ def validate_self_share_strm_file(path: Path, expected_marker: str) -> str:
     return ""
 
 
-def _validate_self_share_strm_directory_tmdb(destination: Path, row: dict[str, Any]) -> str:
+def _validate_self_share_strm_directory_tmdb(
+    destination: Path,
+    row: dict[str, Any],
+    require_tmdb: bool = False,
+) -> str:
     expected_tmdb = expected_task_tmdb_id(parse_recognition_json(row), row)
     folder_tmdb = extract_tmdb_id_from_name(destination.name)
+    if require_tmdb and (not expected_tmdb or not folder_tmdb):
+        return "目标目录 TMDB 无法确认，阻止移动 STRM"
     if expected_tmdb and folder_tmdb and expected_tmdb != folder_tmdb:
         return f"任务 TMDB {expected_tmdb} 与文件夹 TMDB {folder_tmdb} 不一致，阻止移动 STRM"
     return ""
@@ -360,7 +366,11 @@ def validate_self_share_strm_destination(
     destination = safe_resolve(destination)
     if not destination.exists() or not destination.is_dir():
         return "目标 STRM 目录不存在"
-    directory_issue = _validate_self_share_strm_directory_tmdb(destination, row)
+    directory_issue = _validate_self_share_strm_directory_tmdb(
+        destination,
+        row,
+        require_tmdb=bool(required_relative_path),
+    )
     if directory_issue:
         return directory_issue
     own_share_code = str(row.get("own_share_code") or "").strip()
@@ -666,8 +676,10 @@ def merge_self_share_strm_folder(
                     target = safe_resolve(dest / relative)
                     if not is_relative_to(target, dest):
                         issue = "单集 STRM 相对路径无效"
-                    elif target.exists():
+                    else:
                         issue = validate_self_share_strm_destination(dest, row, required_relative_path)
+                        if not target.exists() and issue == f"目标自有分享 STRM 不存在：{relative}":
+                            issue = ""
             else:
                 issue = validate_self_share_strm_destination(dest, row)
             if issue:
@@ -862,11 +874,12 @@ def find_self_share_strm_source_dir(
 ) -> Path | None:
     trusted_root = safe_resolve(config.strm_root)
     move_config = MoveConfig(source_roots=[trusted_root], library_roots={}, stable_seconds=0)
-    folder_name = str(row.get("share_alias_name") or row.get("own_share_file_name") or "").strip()
-    if folder_name:
-        folder = Path(folder_name)
-        if folder.is_absolute() or ".." in folder.parts:
+    folder_value = str(row.get("share_alias_name") or row.get("own_share_file_name") or "").strip()
+    if folder_value:
+        folder_name = _single_relative_directory_name(folder_value)
+        if not folder_name:
             return None
+        folder = Path(folder_name)
         candidate = safe_resolve(trusted_root / folder)
         if not is_relative_to(candidate, trusted_root):
             return None

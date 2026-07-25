@@ -45,6 +45,7 @@ from app.media.strm import (
     plan_strm_move,
     restore_canonical_strm_paths,
     restore_missing_self_share_library_folder,
+    _single_relative_directory_name,
     validate_self_share_strm_destination,
     validate_self_share_strm_source,
 )
@@ -1484,10 +1485,10 @@ class BridgeSelfShareTaskWorkflow:
         if not relative_path or not folder_name or not own_share_code:
             return None
         trusted_root = safe_resolve(self.self_share_config.strm_root)
-        folder = Path(folder_name)
-        if folder.is_absolute() or ".." in folder.parts:
+        folder_name = _single_relative_directory_name(folder_name)
+        if not folder_name:
             return None
-        source_root = safe_resolve(trusted_root / folder)
+        source_root = safe_resolve(trusted_root / folder_name)
         relative = Path(relative_path)
         target = safe_resolve(source_root / relative)
         if not is_relative_to(source_root, trusted_root) or not is_relative_to(target, trusted_root):
