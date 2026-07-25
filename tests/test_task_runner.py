@@ -507,11 +507,11 @@ class TaskRunnerTests(unittest.TestCase):
                 super().__init__(db_path)
                 self.raced = False
 
-            def record_event(self, task_id, stage, status, message, **kwargs):
-                if kwargs.get("expected_claimed_by") and not self.raced:
+            def complete_claimed_stage(self, task_id, **kwargs):
+                if not self.raced:
                     self.raced = True
                     self.reprocess_task(task_id, message="用户从头重跑", next_run_at=0)
-                return super().record_event(task_id, stage, status, message, **kwargs)
+                return super().complete_claimed_stage(task_id, **kwargs)
 
         with tempfile.TemporaryDirectory() as tmp:
             store = RaceStore(Path(tmp) / "tasks.db")

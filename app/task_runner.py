@@ -422,23 +422,26 @@ class TaskRunner:
                 p115_metadata["p115_stage_request_count"],
             )
         if result.outcome == StageOutcome.COMPLETE:
-            committed = self._record_claimed_event(
-                task,
-                task.current_stage,
-                TaskStatus.SUCCEEDED,
-                result.message,
-                metadata_patch=_without_defer_metadata(result.metadata | timing_metadata | p115_metadata | observability_metadata),
+            committed = self.store.complete_claimed_stage(
+                task.id,
+                expected_stage=task.current_stage,
+                expected_claimed_by=self.worker_id,
+                expected_claimed_at=task.claimed_at,
+                expected_updated_at=task.updated_at,
+                success_message=result.message,
+                success_metadata=_without_defer_metadata(
+                    result.metadata | timing_metadata | p115_metadata | observability_metadata
+                ),
                 metadata_delete_keys=_DEFER_METADATA_KEYS,
-                clear_claim=True,
+                next_stage=next_stage_after_success(
+                    task.current_stage,
+                    effective_task_strm_mode(task),
+                ),
+                next_run_at=now,
             )
             if committed is None:
+                LOG.warning("Discarded stale task result task_id=%s", task.id)
                 return
-            next_stage = next_stage_after_success(
-                task.current_stage,
-                effective_task_strm_mode(task),
-            )
-            if next_stage:
-                self.store.enqueue_task(task.id, next_stage, message="等待执行", next_run_at=now)
             return
         if result.outcome == StageOutcome.DEFER:
             defer_count = _defer_count(task.metadata, task.current_stage.value, result.message)

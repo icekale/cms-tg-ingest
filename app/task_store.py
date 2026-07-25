@@ -867,6 +867,70 @@ class TaskStore:
             )
         return int(cursor.rowcount or 0)
 
+    @staticmethod
+    def _claim_matches(
+        row: sqlite3.Row,
+        expected_stage: TaskStage,
+        expected_claimed_by: str,
+        expected_claimed_at: float,
+        expected_updated_at: float,
+    ) -> bool:
+        return (
+            row["current_stage"] == expected_stage.value
+            and row["status"] == TaskStatus.RUNNING.value
+            and str(row["claimed_by"] or "") == str(expected_claimed_by)
+            and float(row["claimed_at"] or 0) == float(expected_claimed_at)
+            and float(row["updated_at"] or 0) == float(expected_updated_at)
+        )
+
+    def complete_claimed_stage(
+        self,
+        task_id: int,
+        *,
+        expected_stage: TaskStage,
+        expected_claimed_by: str,
+        expected_claimed_at: float,
+        expected_updated_at: float,
+        success_message: str,
+        success_metadata: dict[str, Any],
+        next_stage: TaskStage | None,
+        next_run_at: float,
+        metadata_delete_keys: tuple[str, ...] = (),
+    ) -> TaskSnapshot | None:
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is None or not self._claim_matches(
+                row,
+                expected_stage,
+                expected_claimed_by,
+                expected_claimed_at,
+                expected_updated_at,
+            ):
+                return None
+            now = time.time()
+            metadata = self._merge_metadata(row["metadata_json"], success_metadata, metadata_delete_keys)
+            conn.execute(
+                "INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at) "
+                "VALUES (?, ?, ?, ?, '', '', ?)",
+                (task_id, expected_stage.value, TaskStatus.SUCCEEDED.value, success_message, now),
+            )
+            target_stage = next_stage or expected_stage
+            target_status = TaskStatus.PENDING if next_stage else TaskStatus.SUCCEEDED
+            if next_stage:
+                conn.execute(
+                    "INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at) "
+                    "VALUES (?, ?, ?, '等待执行', '', '', ?)",
+                    (task_id, next_stage.value, TaskStatus.PENDING.value, now),
+                )
+            conn.execute(
+                "UPDATE tasks SET current_stage = ?, status = ?, error_type = '', error_summary = '', "
+                "metadata_json = ?, next_run_at = ?, claimed_by = '', claimed_at = 0, updated_at = ? WHERE id = ?",
+                (target_stage.value, target_status.value, metadata, next_run_at, now, task_id),
+            )
+            result = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return self._snapshot(result) if result else None
+
     def record_event(
         self,
         task_id: int,
@@ -901,16 +965,27 @@ class TaskStore:
                 if any(value is not None for value in (expected_stage, expected_status, expected_claimed_by, expected_claimed_at, expected_updated_at)):
                     return None
                 raise KeyError(f"task not found: {task_id}")
-            if expected_stage is not None and current["current_stage"] != expected_stage.value:
-                return None
-            if expected_status is not None and current["status"] != expected_status.value:
-                return None
-            if expected_claimed_by is not None and str(current["claimed_by"] or "") != str(expected_claimed_by):
-                return None
-            if expected_claimed_at is not None and float(current["claimed_at"] or 0) != float(expected_claimed_at):
-                return None
-            if expected_updated_at is not None and float(current["updated_at"] or 0) != float(expected_updated_at):
-                return None
+            claim_expectations = (expected_stage, expected_claimed_by, expected_claimed_at, expected_updated_at)
+            if expected_status == TaskStatus.RUNNING and all(value is not None for value in claim_expectations):
+                if not self._claim_matches(
+                    current,
+                    expected_stage,
+                    expected_claimed_by,
+                    expected_claimed_at,
+                    expected_updated_at,
+                ):
+                    return None
+            else:
+                if expected_stage is not None and current["current_stage"] != expected_stage.value:
+                    return None
+                if expected_status is not None and current["status"] != expected_status.value:
+                    return None
+                if expected_claimed_by is not None and str(current["claimed_by"] or "") != str(expected_claimed_by):
+                    return None
+                if expected_claimed_at is not None and float(current["claimed_at"] or 0) != float(expected_claimed_at):
+                    return None
+                if expected_updated_at is not None and float(current["updated_at"] or 0) != float(expected_updated_at):
+                    return None
             merged_metadata = self._merge_metadata(
                 current["metadata_json"],
                 metadata_patch,

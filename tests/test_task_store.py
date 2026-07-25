@@ -138,6 +138,57 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["message"], "CMS submitted")
 
+    def test_complete_claimed_stage_atomically_publishes_next_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("atomic", "1212", "https://115cdn.com/s/atomic")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            claimed = store.claim_next_runnable("worker-a", now=10)
+
+            updated = store.complete_claimed_stage(
+                claimed.id,
+                expected_stage=claimed.current_stage,
+                expected_claimed_by="worker-a",
+                expected_claimed_at=claimed.claimed_at,
+                expected_updated_at=claimed.updated_at,
+                success_message="整理完成",
+                success_metadata={"organized": True},
+                next_stage=TaskStage.RECOGNIZING,
+                next_run_at=10,
+            )
+
+            self.assertEqual(updated.current_stage, TaskStage.RECOGNIZING)
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.claimed_by, "")
+            events = store.list_events(task.id)
+            self.assertEqual([(event["stage"], event["status"]) for event in events[-2:]], [
+                (TaskStage.ORGANIZING.value, TaskStatus.SUCCEEDED.value),
+                (TaskStage.RECOGNIZING.value, TaskStatus.PENDING.value),
+            ])
+
+    def test_complete_claimed_stage_rejects_stale_claim_without_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("atomic-stale", "1212", "https://115cdn.com/s/atomic-stale")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            claimed = store.claim_next_runnable("worker-a", now=10)
+            events_before = store.list_events(task.id)
+
+            updated = store.complete_claimed_stage(
+                claimed.id,
+                expected_stage=claimed.current_stage,
+                expected_claimed_by="worker-a",
+                expected_claimed_at=claimed.claimed_at,
+                expected_updated_at=claimed.updated_at + 1,
+                success_message="整理完成",
+                success_metadata={"organized": True},
+                next_stage=TaskStage.RECOGNIZING,
+                next_run_at=10,
+            )
+
+            self.assertIsNone(updated)
+            self.assertEqual(store.list_events(task.id), events_before)
+
     def test_repeated_running_event_updates_task_without_growing_timeline(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
