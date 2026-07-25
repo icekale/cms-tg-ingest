@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import http.client
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -16,13 +17,16 @@ _TRANSIENT_NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, http.client.Re
 
 def _redact_url(url: str) -> str:
     parsed = urllib.parse.urlsplit(str(url))
+    path = parsed.path
+    if parsed.netloc.lower() == "api.telegram.org":
+        path = re.sub(r"^/bot[^/]+(?=/|$)", "/bot<redacted>", path, count=1)
     query = []
     for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
         if key.lower() in {"api_key", "apikey", "token", "access_token", "authorization"}:
             value = "<redacted>"
         query.append((key, value))
     return urllib.parse.urlunsplit(
-        (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query), parsed.fragment)
+        (parsed.scheme, parsed.netloc, path, urllib.parse.urlencode(query), parsed.fragment)
     )
 
 

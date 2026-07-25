@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.24 - 2026-07-25
+
+- Telegram `answerCallbackQuery` 遇到瞬时 HTTPS EOF 时自动重试一次；确认请求失败不会再把已完成的 HDHive 订阅检查误报为失败。
+- Telegram Bot API 错误中的 Bot token 统一脱敏，避免错误消息或日志泄露凭据。
+
 ## 0.2.23 - 2026-07-25
 
 - 兼容 HDHive 代理返回的 `OPENAPI_REAUTH_REQUIRED`，仍先交由 CMS 使用有效 OAuth 刷新令牌，再重试原请求。

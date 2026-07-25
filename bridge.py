@@ -1325,13 +1325,17 @@ class OpenAIClassifier:
         return json.loads(text)
 
 
+def _redact_telegram_error(exc: Exception) -> str:
+    return re.sub(r"(https?://api\.telegram\.org/bot)[^/\s]+", r"\1<redacted>", str(exc))
+
+
 class TelegramClient:
     def __init__(self, token: str, http: HttpJson | None = None, timeout: int = 60):
         self.base_url = f"https://api.telegram.org/bot{token}"
         self.http = http or HttpJson(timeout)
 
     @staticmethod
-    def _is_transient_get_updates_error(exc: Exception) -> bool:
+    def _is_transient_telegram_error(exc: Exception) -> bool:
         text = str(exc).lower()
         if "cannot reach" not in text:
             return False
@@ -1346,6 +1350,10 @@ class TelegramClient:
                 "network unreachable",
             )
         )
+
+    @staticmethod
+    def _is_transient_get_updates_error(exc: Exception) -> bool:
+        return TelegramClient._is_transient_telegram_error(exc)
 
     def get_updates(self, offset: int | None, timeout: int) -> list[dict]:
         global LAST_TELEGRAM_TRANSIENT_ERROR_AT
@@ -1400,11 +1408,35 @@ class TelegramClient:
         )
 
     def answer_callback_query(self, callback_query_id: str, text: str = "", show_alert: bool = False) -> None:
-        self.http.request(
-            self.base_url + "/answerCallbackQuery",
-            method="POST",
-            payload={"callback_query_id": callback_query_id, "text": text, "show_alert": show_alert},
-        )
+        url = self.base_url + "/answerCallbackQuery"
+        payload = {"callback_query_id": callback_query_id, "text": text, "show_alert": show_alert}
+        for attempt in range(2):
+            try:
+                self.http.request(url, method="POST", payload=payload)
+                return
+            except Exception as exc:
+                if attempt == 0 and self._is_transient_telegram_error(exc):
+                    LOG.warning(
+                        "Telegram answerCallbackQuery transient error, retrying once: %s",
+                        _redact_telegram_error(exc),
+                    )
+                    time.sleep(0.2)
+                    continue
+                # Callback acknowledgement is UI-only; never turn a completed operation into a failure.
+                LOG.warning("Telegram answerCallbackQuery failed; continuing: %s", _redact_telegram_error(exc))
+                return
+
+
+def safe_answer_callback_query(
+    telegram: TelegramClient, callback_query_id: str, text: str = "", show_alert: bool = False
+) -> None:
+    try:
+        telegram.answer_callback_query(callback_query_id, text, show_alert=show_alert)
+    except Exception as exc:
+        # Keep test doubles and alternate Telegram clients from changing business results.
+        LOG.warning("Telegram callback acknowledgement failed; continuing: %s", _redact_telegram_error(exc))
+
+
 def send_menu_message(telegram: TelegramClient, chat_id: int | str, text: str) -> None:
     try:
         telegram.send_message(chat_id, text, reply_markup=menu_keyboard())
@@ -1799,14 +1831,14 @@ def handle_hdhive_subscription_callback(
         return False
     action, target_id = parsed
     if service is None:
-        telegram.answer_callback_query(callback_id, "HDHive 订阅未启用", show_alert=True)
+        safe_answer_callback_query(telegram, callback_id, "HDHive 订阅未启用", show_alert=True)
         return True
     try:
         if action == "filter":
             if _owned_hdhive_subscription(service, target_id, chat_id) is None:
                 raise HdhiveSelectionError("订阅不存在或无权操作")
             _HDHIVE_PENDING_FILTERS[str(chat_id)] = target_id
-            telegram.answer_callback_query(callback_id, "请发送集数过滤", show_alert=False)
+            safe_answer_callback_query(telegram, callback_id, "请发送集数过滤", show_alert=False)
             telegram.send_message(chat_id, _HDHIVE_FILTER_PROMPT)
             return True
         if action == "pause":
@@ -1830,12 +1862,12 @@ def handle_hdhive_subscription_callback(
                 f"已处理确认资源：入队 {result.enqueued} 个，"
                 f"待确认 {result.pending_confirmation} 个，失败 {result.failed} 个。"
             )
-        telegram.answer_callback_query(callback_id, "操作完成", show_alert=False)
+        safe_answer_callback_query(telegram, callback_id, "操作完成", show_alert=False)
         text, keyboard = format_hdhive_subscription_view(service, scheduler, chat_id)
         telegram.send_message(chat_id, f"{message}\n\n{text}", reply_markup=keyboard)
     except Exception as exc:
-        telegram.answer_callback_query(callback_id, "操作失败", show_alert=True)
-        telegram.send_message(chat_id, f"HDHive 订阅操作失败：{str(exc)[:160]}")
+        safe_answer_callback_query(telegram, callback_id, "操作失败", show_alert=True)
+        telegram.send_message(chat_id, f"HDHive 订阅操作失败：{_redact_telegram_error(exc)[:160]}")
     return True
 
 

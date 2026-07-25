@@ -104,6 +104,32 @@ class FakeProxy:
 
 
 class HdhiveBridgeTests(unittest.TestCase):
+    def test_subscription_check_ack_failure_does_not_change_business_result(self):
+        class AckFailTelegram(FakeTelegram):
+            def answer_callback_query(self, callback_id, text="", show_alert=False):
+                raise RuntimeError("Cannot reach Telegram")
+
+        telegram = AckFailTelegram()
+        service = FakeSubscriptionService()
+        service.check = lambda _subscription_id: SimpleNamespace(
+            discovered=1,
+            enqueued=1,
+            pending_confirmation=0,
+            failed=0,
+        )
+
+        handled = bridge.handle_hdhive_subscription_callback(
+            "hsub:check:1",
+            "callback-check",
+            "464100862",
+            telegram,
+            service,
+            None,
+        )
+
+        self.assertTrue(handled)
+        self.assertIn("检查完成：发现 1 个资源", telegram.messages[-1][1])
+
     def test_completed_subscription_renders_status_filter_and_summary(self):
         subscription = SimpleNamespace(
             id=1,
