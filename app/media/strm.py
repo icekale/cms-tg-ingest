@@ -999,6 +999,8 @@ def repair_stranded_self_share_moves(store: Any, move_config: MoveConfig, limit:
             source = safe_resolve(Path(source_root) / source_name)
             if not is_under_any_root(source, move_config.source_roots):
                 continue
+            if is_under_any_root(source, list(move_config.library_roots.values())):
+                continue
             restore_canonical_strm_paths(source, row)
             plan = plan_strm_move(source, category, move_config, destination_name=canonical_name)
             if plan.status in {"pending", "conflict"}:

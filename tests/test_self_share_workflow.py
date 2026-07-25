@@ -2312,6 +2312,48 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertTrue(alias.exists())
             self.assertFalse((outside / "canonical.strm").exists())
 
+    def test_repair_skips_canonical_manifest_rename_for_source_inside_library_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            library_root = root / "library"
+            source = library_root / "Movie"
+            source.mkdir(parents=True)
+            alias = source / "alias.strm"
+            alias.write_text("http://cms/s/reconcile_library_manifest_1212_movie", encoding="utf-8")
+            store = bridge.SubmissionStore(root / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("share-reconcile-library-manifest", "pass001"),
+                "https://115cdn.com/s/reconcile-library-manifest",
+                "submitted",
+                title="Movie",
+            )
+            row = store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_name=source.name,
+                own_share_code="reconcile_library_manifest",
+                canonical_manifest_json=json.dumps(
+                    {
+                        "root_name": source.name,
+                        "entries": [{"alias_path": "alias", "canonical_path": "canonical"}],
+                    }
+                ),
+            ) or row
+            store.update_category(int(row["id"]), "欧美电影", "selected")
+            store.update_move(int(row["id"]), "skipped", category_final="欧美电影")
+            config = bridge.MoveConfig(
+                source_roots=[library_root],
+                library_roots={"欧美电影": library_root},
+            )
+
+            with patch("app.media.strm.Path.replace") as replace:
+                repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
+
+            self.assertEqual(repaired, 0)
+            replace.assert_not_called()
+            self.assertTrue(alias.exists())
+            self.assertFalse((source / "canonical.strm").exists())
+
     def test_repair_stranded_self_share_folder_moves_it_to_library(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
