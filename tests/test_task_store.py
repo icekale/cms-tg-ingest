@@ -56,6 +56,31 @@ class TaskStoreTests(unittest.TestCase):
             backfilled = store.upsert_task("legacy", "", "https://115cdn.com/s/legacy", strm_mode="direct")
             self.assertEqual(backfilled.metadata["strm_mode"], "direct")
 
+    def test_explicit_mode_does_not_backfill_active_legacy_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("legacy-active", "", "https://115cdn.com/s/legacy-active")
+            with store._connection() as conn:
+                conn.execute("UPDATE tasks SET metadata_json = '{}' WHERE id = ?", (task.id,))
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            claimed = store.claim_next_runnable("worker-a", now=10)
+
+            duplicate = store.upsert_task(
+                "legacy-active",
+                "",
+                "https://115cdn.com/s/legacy-active",
+                strm_mode="direct",
+            )
+
+            self.assertEqual(duplicate.metadata, claimed.metadata)
+            self.assertEqual(duplicate.updated_at, claimed.updated_at)
+            self.assertEqual(duplicate.claimed_by, claimed.claimed_by)
+            self.assertEqual(duplicate.claimed_at, claimed.claimed_at)
+            self.assertEqual(duplicate.current_stage, claimed.current_stage)
+            self.assertEqual(duplicate.status, claimed.status)
+            self.assertEqual(duplicate.retry_count, claimed.retry_count)
+            self.assertEqual(duplicate.next_run_at, claimed.next_run_at)
+
     def test_upsert_cloud_task_is_idempotent_by_source_key(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

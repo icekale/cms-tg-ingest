@@ -411,7 +411,10 @@ class TaskStore:
                         {"strm_mode": effective_mode},
                     )
                     conn.execute(
-                        "UPDATE tasks SET metadata_json = ? WHERE share_code = ? AND receive_code = ?",
+                        """
+                        UPDATE tasks SET metadata_json = ?
+                        WHERE share_code = ? AND receive_code = ? AND claimed_by = ''
+                        """,
                         (merged_metadata, share_code, receive_code),
                     )
             row = conn.execute(
