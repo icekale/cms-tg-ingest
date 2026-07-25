@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.19 - 2026-07-25
+
+- HDHive 订阅支持多季识别、集数过滤、跳过 Emby 已有集数和 TMDB 完结判断。
+- HDHive 订阅 Web/TG 状态补充智能判断结果、跳过原因和可恢复的完结状态。
+
 ## Unreleased
 
 - 新增 `/订阅 <HDHive剧集链接>` 命令，明确创建 HDHive 剧集订阅。

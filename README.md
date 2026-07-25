@@ -350,8 +350,8 @@ python3 -m unittest discover -s tests -q
 发布版本通过 GitHub Actions 构建并推送 GHCR 和 Docker Hub：
 
 ```sh
-git tag v0.2.18
-git push origin v0.2.18
+git tag v0.2.19
+git push origin v0.2.19
 ```
 
 如果 fork 后要发布自己的 Docker Hub 镜像，在 GitHub Secrets 中配置：
@@ -362,7 +362,7 @@ git push origin v0.2.18
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.2.18
+docker pull icekale/cms-tg-ingest:0.2.19
 docker pull icekale/cms-tg-ingest:latest
 ```
 
