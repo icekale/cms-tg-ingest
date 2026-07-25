@@ -835,7 +835,6 @@ def _apply_task_action(store: TaskStore, task: Any, action: str) -> bool:
                 target_stage=target_stage,
                 target_event_message="手动重试已入队",
                 initial_event_message="手动触发重试",
-                increment_retry=True,
             )
     return False
 

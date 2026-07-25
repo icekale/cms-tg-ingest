@@ -10,6 +10,7 @@ from app.clients.p115 import P115RiskControlError
 from app.models import TaskStage, TaskStatus
 from app.task_runner import StageResult, TaskRunner
 from app.task_store import TaskStore
+from app.web import WebApp
 
 
 class FakeWorkflow:
@@ -943,7 +944,16 @@ class TaskRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
             task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
-            store.enqueue_task(task.id, TaskStage.STRM_READY, next_run_at=1.0)
+            store.record_event(
+                task.id,
+                TaskStage.STRM_READY,
+                TaskStatus.FAILED,
+                "STRM missing",
+                error_summary="未找到 STRM",
+            )
+            app = WebApp(store, web_token="")
+            app.handle_request("POST", f"/task/{task.id}/retry", {}, b"")
+            self.assertEqual(store.find_task(task.id).retry_count, 0)
             runner = TaskRunner(
                 store,
                 FakeWorkflow([StageResult.failed("STRM missing", error_type="strm_missing")]),
@@ -958,6 +968,7 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.status, TaskStatus.FAILED)
             self.assertEqual(updated.error_type, "strm_missing")
             self.assertEqual(updated.error_summary, "STRM missing")
+            self.assertEqual(updated.retry_count, 1)
             self.assertEqual(updated.claimed_by, "")
 
 

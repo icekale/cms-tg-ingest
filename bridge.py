@@ -2750,7 +2750,6 @@ def handle_task_action_callback(
             target_stage,
             TaskStatus.PENDING,
             "TG 按钮触发重试",
-            increment_retry=True,
             metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": target_stage.value},
             clear_claim=True,
         )

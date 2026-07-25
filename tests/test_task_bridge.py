@@ -136,6 +136,32 @@ class TaskBridgeTests(unittest.TestCase):
             self.assertEqual(task.error_summary, "CMS 提交失败")
             self.assertEqual(store.list_events(task.id)[0]["error_detail"], "HTTP 500")
 
+    def test_replaying_same_failure_event_does_not_duplicate_event_or_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            row = {"share_code": "abc", "receive_code": "", "url": "https://115cdn.com/s/abc"}
+
+            first = record_failure(
+                store,
+                row,
+                TaskStage.CMS_SUBMITTED,
+                "CMS 提交失败",
+                error_type="cms_submit_failed",
+                error_detail="HTTP 500",
+            )
+            second = record_failure(
+                store,
+                row,
+                TaskStage.CMS_SUBMITTED,
+                "CMS 提交失败",
+                error_type="cms_submit_failed",
+                error_detail="HTTP 500",
+            )
+
+            self.assertEqual(first.retry_count, 1)
+            self.assertEqual(second.retry_count, 1)
+            self.assertEqual(len(store.list_events(first.id)), 1)
+
     def test_none_task_store_is_noop(self):
         self.assertIsNone(ensure_task_for_link(None, "abc", "", "https://115cdn.com/s/abc"))
         self.assertIsNone(record_submission_event(None, {}, TaskStage.RECEIVED, TaskStatus.PENDING, "noop"))

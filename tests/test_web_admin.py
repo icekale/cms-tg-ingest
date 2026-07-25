@@ -903,7 +903,7 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(updated.current_stage, TaskStage.STRM_READY)
             self.assertEqual(updated.claimed_by, "")
             self.assertEqual(updated.next_run_at, 0)
-            self.assertEqual(updated.retry_count, 1)
+            self.assertEqual(updated.retry_count, 0)
             self.assertTrue(any(event["message"] == "手动触发重试" for event in events))
             self.assertTrue(any(event["message"] == "手动重试已入队" for event in events))
             self.assertIsNotNone(claimed)
@@ -931,7 +931,7 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual([response[0] for response in responses], [303, 303])
             self.assertEqual(updated.status, TaskStatus.PENDING)
             self.assertEqual(updated.current_stage, TaskStage.STRM_READY)
-            self.assertEqual(updated.retry_count, 1)
+            self.assertEqual(updated.retry_count, 0)
             self.assertEqual(sum(event["message"] == "手动触发重试" for event in events), 1)
             self.assertEqual(sum(event["message"] == "手动重试已入队" for event in events), 1)
 

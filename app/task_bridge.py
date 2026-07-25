@@ -82,8 +82,17 @@ def _runtime_metadata(row: dict[str, Any], extra: dict[str, Any]) -> dict[str, A
     return metadata
 
 
-def _last_event_matches(store: TaskStore, task_id: int, stage: TaskStage, status: TaskStatus, message: str, error_summary: str) -> bool:
-    events = store.list_events(task_id)
+def _last_event_matches(
+    store: TaskStore,
+    task: TaskSnapshot,
+    stage: TaskStage,
+    status: TaskStatus,
+    message: str,
+    error_type: str,
+    error_detail: str,
+    error_summary: str,
+) -> bool:
+    events = store.list_events(task.id)
     if not events:
         return False
     last = events[-1]
@@ -91,8 +100,9 @@ def _last_event_matches(store: TaskStore, task_id: int, stage: TaskStage, status
         last.get("stage") == stage.value
         and last.get("status") == status.value
         and last.get("message") == message
-        and _text(last.get("error_type")) == ""
-        and error_summary == ""
+        and _text(last.get("error_type")) == error_type
+        and _text(last.get("error_detail")) == error_detail
+        and _text(task.error_summary) == error_summary
     )
 
 
@@ -135,9 +145,11 @@ def record_submission_event(
     if strm_mode is None:
         strm_mode = _legacy_strm_mode(row.get("workflow_mode"))
     task = task_store.upsert_task(share_code, receive_code, url, strm_mode=strm_mode)
+    error_type = _text(metadata.get("error_type"))
     error_summary = _text(metadata.get("error_summary"))
-    if _last_event_matches(task_store, task.id, stage, status, message, error_summary):
-        return task_store.find_task(task.id)
+    error_detail = _text(metadata.get("error_detail"))
+    if _last_event_matches(task_store, task, stage, status, message, error_type, error_detail, error_summary):
+        return task
     meta = _metadata(row, metadata)
     return task_store.record_event(
         task.id,
@@ -147,9 +159,9 @@ def record_submission_event(
         title=meta["title"] or None,
         tmdb_id=meta["tmdb_id"] or None,
         category=meta["category"] or None,
-        error_type=_text(metadata.get("error_type")),
+        error_type=error_type,
         error_summary=error_summary,
-        error_detail=_text(metadata.get("error_detail")),
+        error_detail=error_detail,
         increment_retry=bool(metadata.get("increment_retry", False)),
         submission_id=int(row["id"]) if row.get("id") not in (None, "") else None,
         metadata_patch=_runtime_metadata(row, metadata),

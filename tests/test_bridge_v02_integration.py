@@ -1352,7 +1352,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             claimed = task_store.claim_next_runnable("worker", now=0)
             self.assertEqual(updated.status, TaskStatus.PENDING)
             self.assertEqual(updated.current_stage, TaskStage.STRM_READY)
-            self.assertEqual(updated.retry_count, 1)
+            self.assertEqual(updated.retry_count, 0)
             self.assertEqual(claimed.id, task.id)
             self.assertEqual(telegram.answers[-1][1], "已重新入队")
             self.assertIn("已重新入队", telegram.messages[-1][1])
