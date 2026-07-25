@@ -895,8 +895,28 @@ def _cleanup_own_share_source(store: Any, row: dict[str, Any], cleanup_client: A
     return updated, "115转存源已删除；自有分享保留。"
 
 
+def _invalidate_persisted_self_share_move(store: Any, row: dict[str, Any]) -> None:
+    source_value = str(row.get("source_path") or "").strip()
+    dest_value = str(row.get("dest_path") or "").strip()
+    store.update_move(
+        int(row["id"]),
+        "error",
+        source_path=str(safe_resolve(Path(source_value))) if source_value else None,
+        dest_path=str(safe_resolve(Path(dest_value))) if dest_value else None,
+        category_final=category_for_self_share_row(row),
+        error="STRM 移动记录状态或持久化路径无效",
+    )
+
+
 def repair_stranded_self_share_moves(store: Any, move_config: MoveConfig, limit: int = 50) -> int:
     repaired = 0
+    invalid_candidates = getattr(store, "invalid_self_share_move_candidates", None)
+    if invalid_candidates:
+        for row in invalid_candidates(limit=max(1, int(limit))):
+            if str(row.get("move_status") or "").lower() == "moving":
+                reconcile_self_share_move(store, move_config, row)
+            else:
+                _invalidate_persisted_self_share_move(store, row)
     for row in store.stranded_self_share_move_candidates(limit=max(1, int(limit))):
         if str(row.get("move_status") or "").lower() == "moving":
             if str(row.get("source_path") or "").strip() or str(row.get("dest_path") or "").strip():
@@ -911,6 +931,8 @@ def repair_stranded_self_share_moves(store: Any, move_config: MoveConfig, limit:
             continue
         for source_root in move_config.source_roots:
             source = safe_resolve(Path(source_root) / source_name)
+            if not is_under_any_root(source, move_config.source_roots):
+                continue
             restore_canonical_strm_paths(source, row)
             plan = plan_strm_move(source, category, move_config, destination_name=canonical_name)
             if plan.status in {"pending", "conflict"}:
@@ -952,10 +974,14 @@ def restore_missing_self_share_library_folder(
     source_name = str(row.get("share_alias_name") or row.get("own_share_file_name") or "").strip()
     if not category or not canonical_name or not source_name:
         return "skipped", metadata
-    source = safe_resolve(self_share_config.strm_root / source_name)
+    trusted_strm_root = safe_resolve(self_share_config.strm_root)
+    source = safe_resolve(trusted_strm_root / source_name)
+    if not is_relative_to(source, trusted_strm_root):
+        metadata["restore_reason"] = "源目录不在自有分享 STRM 根目录内"
+        return "skipped", metadata
     restore_canonical_strm_paths(source, row)
     restore_move_config = MoveConfig(
-        source_roots=[self_share_config.strm_root],
+        source_roots=[trusted_strm_root],
         library_roots=move_config.library_roots,
         conflict_policy=move_config.conflict_policy,
         stable_seconds=move_config.stable_seconds,

@@ -2145,6 +2145,86 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertTrue(source.exists())
             self.assertFalse(dest.exists())
 
+    def test_repair_rejects_nonmoving_persisted_path_without_legacy_discovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            dest = root / "library" / "Movie"
+            source.mkdir(parents=True)
+            (source / "movie.strm").write_text("http://cms/s/reconcile_nonmoving_1212_movie", encoding="utf-8")
+            store = bridge.SubmissionStore(root / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("share-reconcile-nonmoving", "pass001"),
+                "https://115cdn.com/s/reconcile-nonmoving",
+                "submitted",
+                title=source.name,
+            )
+            row = store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_name=source.name,
+                own_share_code="reconcile_nonmoving",
+            ) or row
+            store.update_category(int(row["id"]), "欧美电影", "selected")
+            row = store.update_move(
+                int(row["id"]),
+                "skipped",
+                source_path=str(source),
+                category_final="欧美电影",
+                error="旧状态",
+            ) or row
+            config = bridge.MoveConfig(source_roots=[root / "share"], library_roots={"欧美电影": root / "library"})
+
+            candidates = store.stranded_self_share_move_candidates(limit=10)
+            repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
+
+            updated = store.find_by_id(int(row["id"]))
+            self.assertEqual(candidates, [])
+            self.assertEqual(repaired, 0)
+            self.assertEqual(updated["move_status"], "error")
+            self.assertEqual(updated["move_error"], "STRM 移动记录状态或持久化路径无效")
+            self.assertTrue(source.exists())
+            self.assertFalse(dest.exists())
+
+    def test_repair_skips_canonical_manifest_rename_for_source_outside_whitelist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            outside = root / "outside" / "Movie"
+            outside.mkdir(parents=True)
+            alias = outside / "alias.strm"
+            alias.write_text("http://cms/s/reconcile_manifest_1212_movie", encoding="utf-8")
+            store = bridge.SubmissionStore(root / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("share-reconcile-manifest", "pass001"),
+                "https://115cdn.com/s/reconcile-manifest",
+                "submitted",
+                title="Movie",
+            )
+            row = store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_name=str(outside),
+                own_share_code="reconcile_manifest",
+                canonical_manifest_json=json.dumps(
+                    {
+                        "root_name": "Movie",
+                        "entries": [{"alias_path": "alias", "canonical_path": "canonical"}],
+                    }
+                ),
+            ) or row
+            store.update_category(int(row["id"]), "欧美电影", "selected")
+            store.update_move(int(row["id"]), "skipped", category_final="欧美电影")
+            config = bridge.MoveConfig(source_roots=[share_root], library_roots={"欧美电影": root / "library"})
+
+            with patch("app.media.strm.Path.replace") as replace:
+                repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
+
+            self.assertEqual(repaired, 0)
+            replace.assert_not_called()
+            self.assertTrue(alias.exists())
+            self.assertFalse((outside / "canonical.strm").exists())
+
     def test_repair_stranded_self_share_folder_moves_it_to_library(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2168,8 +2248,6 @@ class SelfShareWorkflowTests(unittest.TestCase):
             store.update_move(
                 int(row["id"]),
                 "skipped",
-                source_path="/missing/old",
-                dest_path="/missing/old",
                 category_final="外国电视",
                 error="CMS/Emby 已入库，无需人工分类",
             )
@@ -2211,8 +2289,6 @@ class SelfShareWorkflowTests(unittest.TestCase):
             store.update_move(
                 int(row["id"]),
                 "conflict",
-                source_path=str(source),
-                dest_path=str(dest),
                 category_final="华语电影",
                 error="目标目录已存在，按策略跳过",
             )

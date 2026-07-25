@@ -970,15 +970,39 @@ class SubmissionStore:
                 """
                 SELECT * FROM submissions
                 WHERE workflow_mode = 'self_share_sync'
+                  AND lower(COALESCE(move_status, '')) <> 'moved'
                   AND (
-                      COALESCE(own_share_file_name, '') <> ''
-                      OR (
+                      (
                           lower(COALESCE(move_status, '')) = 'moving'
                           AND COALESCE(source_path, '') <> ''
                           AND COALESCE(dest_path, '') <> ''
                       )
+                      OR (
+                          COALESCE(own_share_file_name, '') <> ''
+                          AND COALESCE(source_path, '') = ''
+                          AND COALESCE(dest_path, '') = ''
+                      )
                   )
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def invalid_self_share_move_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM submissions
+                WHERE workflow_mode = 'self_share_sync'
                   AND lower(COALESCE(move_status, '')) <> 'moved'
+                  AND (COALESCE(source_path, '') <> '' OR COALESCE(dest_path, '') <> '')
+                  AND NOT (
+                      lower(COALESCE(move_status, '')) = 'moving'
+                      AND COALESCE(source_path, '') <> ''
+                      AND COALESCE(dest_path, '') <> ''
+                  )
                 ORDER BY updated_at DESC, id DESC
                 LIMIT ?
                 """,
