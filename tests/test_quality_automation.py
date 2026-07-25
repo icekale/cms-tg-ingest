@@ -606,12 +606,13 @@ class QualityRepairExecutionTests(unittest.TestCase):
                 summary = service.run_once("invalid-run")
 
             plans = {plan.task_id: plan for plan in summary.plans}
-            self.assertEqual(plans[invalid.id].execution_status, "queued")
+            self.assertEqual(plans[invalid.id].execution_status, "skipped")
+            self.assertEqual(plans[invalid.id].reason, "invalid_share_manual")
             self.assertEqual(plans[unknown.id].execution_status, "skipped")
             self.assertEqual(plans[unknown.id].reason, "unknown_share_status")
             self.assertEqual(plans[risk.id].execution_status, "skipped")
             self.assertEqual(plans[risk.id].reason, "risk_control")
-            self.assertEqual([call[0] for call in adapter.calls], ["invalid_share"])
+            self.assertEqual([call[0] for call in adapter.calls], [])
 
     def test_cleanup_requires_all_positive_gates_and_preserves_files_on_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -629,6 +630,7 @@ class QualityRepairExecutionTests(unittest.TestCase):
                 own_share_receive_code="1212",
                 emby_status="confirmed",
                 emby_match_count=1,
+                share_review_status="passed",
             )
 
             blocked = service.cleanup_if_safe(task, "cleanup-blocked")
@@ -667,6 +669,33 @@ class QualityRepairExecutionTests(unittest.TestCase):
 
             self.assertEqual(result.status, "blocked_cleanup")
             self.assertEqual(result.reason, "emby_not_confirmed_unique")
+            self.assertEqual(adapter.calls, [])
+
+    def test_cleanup_requires_async_share_review_to_have_passed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = FakeQualityRepairAdapter()
+            service, library = self.make_service(tmp, adapter)
+            destination = library / "review-pending"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/s/own_1212_movie.mkv", encoding="utf-8")
+            task = self.add_task(
+                service.store,
+                "review-pending",
+                destination,
+                own_share_available=True,
+                own_share_receive_code="1212",
+                emby_status="confirmed",
+                emby_match_count=1,
+                share_review_status="pending",
+            )
+            service.store.patch_metadata(task.id, {"quality_success_event": True})
+            service.store.record_event(task.id, TaskStage.EMBY_CONFIRMED, TaskStatus.SUCCEEDED, "Emby confirmed")
+            current = service.store.find_task(task.id)
+
+            result = service.cleanup_if_safe(current, "review-pending")
+
+            self.assertEqual(result.status, "blocked_cleanup")
+            self.assertEqual(result.reason, "share_review_not_passed")
             self.assertEqual(adapter.calls, [])
 
     def test_two_quality_owners_cannot_execute_same_task(self):

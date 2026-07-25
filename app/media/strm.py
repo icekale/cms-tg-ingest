@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import time
 from pathlib import Path
@@ -16,6 +17,8 @@ from app.media.classify import (
     normalize_text,
     parse_recognition_json,
 )
+
+LOG = logging.getLogger("cms-tg-ingest")
 
 MISSING_SELF_SHARE_SOURCE_REASONS = {"STRM 源目录不存在", "源目录不包含 STRM 文件", "未找到 STRM 源目录"}
 
@@ -867,11 +870,8 @@ def restore_missing_self_share_library_folders(
 
 
 def cleanup_pending_self_share_sources(store: Any, cleanup_client: Any | None, limit: int = 50) -> int:
+    """Keep the legacy repair loop from deleting sources without TaskRunner review metadata."""
     if not cleanup_client or not hasattr(store, "pending_self_share_cleanup_candidates"):
         return 0
-    cleaned = 0
-    for row in store.pending_self_share_cleanup_candidates(limit=max(1, int(limit))):
-        updated, _line = _cleanup_own_share_source(store, row, cleanup_client)
-        if str(updated.get("cleanup_status") or "").lower() == "deleted":
-            cleaned += 1
-    return cleaned
+    LOG.info("Skipped legacy self-share cleanup; TaskRunner review is required before deleting sources")
+    return 0

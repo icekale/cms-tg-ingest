@@ -51,6 +51,12 @@ def _runtime_metadata(row: dict[str, Any], extra: dict[str, Any]) -> dict[str, A
         "share_sync_status",
         "share_validation_status",
         "share_validation_error",
+        "share_created_at",
+        "share_review_status",
+        "share_review_checks",
+        "share_review_last_at",
+        "share_review_next_at",
+        "share_review_error",
         "source_path",
         "dest_path",
         "category_final",
@@ -222,6 +228,15 @@ def sync_task_from_submission(
         )
     if share_sync_status in {"submitted", "restore_submitted"}:
         return record_submission_event(task_store, row, TaskStage.SHARE_SYNC_SUBMITTED, TaskStatus.RUNNING, message)
+    if share_validation_status == "invalid":
+        return record_submission_event(
+            task_store,
+            row,
+            TaskStage.SHARE_VALIDATED,
+            TaskStatus.NEEDS_ACTION,
+            message,
+            error_summary=_text(row.get("share_validation_error")) or "115 自有分享不可用",
+        )
     if share_validation_status in {"valid", "warning"}:
         return record_submission_event(task_store, row, TaskStage.SHARE_VALIDATED, TaskStatus.SUCCEEDED, message)
     if own_share_code:

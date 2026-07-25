@@ -35,16 +35,51 @@ def probe_invalid_self_shares(
 ) -> InvalidShareProbeSummary:
     checked_count = 0
     cleaned_count = 0
-    for row in store.self_share_probe_candidates(limit=max(1, int(limit))):
+    rows = store.self_share_probe_candidates(limit=max(1, int(limit)))
+    states: dict[str, dict[str, Any]] | None = None
+    if hasattr(p115, "list_own_share_states"):
+        try:
+            states = p115.list_own_share_states(limit=100)
+        except P115RiskControlError:
+            LOG.warning("Stopped invalid-share probe after 115 risk control during batch share listing")
+            return InvalidShareProbeSummary(0, 0, risk_controlled=True)
+        except RuntimeError as exc:
+            LOG.warning("Deferred invalid-share probe after batch share listing error: %s", exc)
+            return InvalidShareProbeSummary(0, 0)
+
+    for row in rows:
         checked_count += 1
         row_id = int(row["id"])
+        share_code = str(row.get("own_share_code") or "").strip()
         try:
-            p115.share_snap(
-                str(row.get("own_share_code") or ""),
-                str(row.get("own_share_receive_code") or "1212"),
-                cid="0",
-                limit=1,
-            )
+            if states is not None and share_code in states:
+                status = states[share_code]
+                share_state = str(status.get("share_state") or "").strip().lower()
+                have_vio_file = str(status.get("have_vio_file") or "").strip().lower() in {"1", "true", "yes"}
+                if not have_vio_file and share_state in {"0", "1", "true"}:
+                    store.update_share_probe(row_id)
+                    continue
+                if not have_vio_file and not share_state:
+                    store.update_share_probe(row_id)
+                    continue
+                if have_vio_file:
+                    raise P115ShareUnavailableError("115 分享标记 have_vio_file")
+                raise P115ShareUnavailableError(f"115 分享状态不可用: {share_state}")
+
+            # The list endpoint is capped and can omit an older share. One precise
+            # fallback keeps the probe bounded without scanning or retrying pages.
+            if states is not None and hasattr(p115, "inspect_share"):
+                p115.inspect_share(
+                    share_code,
+                    str(row.get("own_share_receive_code") or "1212"),
+                )
+            elif hasattr(p115, "share_snap"):
+                p115.share_snap(
+                    share_code,
+                    str(row.get("own_share_receive_code") or "1212"),
+                    cid="0",
+                    limit=1,
+                )
         except P115RiskControlError:
             store.update_share_probe(row_id)
             LOG.warning("Stopped invalid-share probe after 115 risk control row_id=%s", row_id)

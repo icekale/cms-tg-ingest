@@ -47,6 +47,20 @@ class GenericErrorP115:
         raise RuntimeError("115 service unavailable")
 
 
+class BatchInvalidShareP115:
+    def __init__(self):
+        self.list_calls = 0
+        self.deleted = []
+
+    def list_own_share_states(self, limit=100):
+        self.list_calls += 1
+        return {"owncode": {"share_state": "6", "have_vio_file": False}}
+
+    def delete_file(self, file_id):
+        self.deleted.append(file_id)
+        return {"state": True}
+
+
 class InvalidShareCleanupTests(unittest.TestCase):
     def _row_with_share_strm(self, root):
         store = bridge.SubmissionStore(Path(root) / "submissions.db")
@@ -197,3 +211,25 @@ class InvalidShareCleanupTests(unittest.TestCase):
             self.assertEqual(p115.calls, 1)
             self.assertFalse(destination.exists())
             self.assertEqual(store.find_by_id(int(row["id"]))["move_status"], "invalid_share_cleaned")
+
+    def test_uses_one_batched_share_list_request_for_invalid_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, row, destination, move_config = self._row_with_share_strm(tmp)
+            p115 = BatchInvalidShareP115()
+
+            summary = probe_invalid_self_shares(
+                store,
+                TaskStore(Path(tmp) / "tasks.db"),
+                p115,
+                FakeEmby(),
+                FakeTelegram(),
+                "chat-id",
+                move_config,
+                limit=3,
+            )
+
+            self.assertEqual(summary.checked_count, 1)
+            self.assertEqual(summary.cleaned_count, 1)
+            self.assertEqual(p115.list_calls, 1)
+            self.assertEqual(p115.deleted, [])
+            self.assertFalse(destination.exists())

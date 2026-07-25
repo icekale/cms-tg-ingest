@@ -281,6 +281,8 @@ class CloudWorkflowTests(unittest.TestCase):
                 cloud_poll_seconds=30,
                 cloud_timeout_seconds=3600,
                 auto_organize_retry_seconds=30,
+                review_grace_seconds=1,
+                review_checkpoints_seconds=(1,),
             )
             move_config = MoveConfig(
                 source_roots=[share_root],
@@ -306,6 +308,7 @@ class CloudWorkflowTests(unittest.TestCase):
             task = task_store.upsert_cloud_task("ed2k:hash:10", ED2K, title="Example.mkv")
             task_store.enqueue_task(task.id, TaskStage.CLOUD_DOWNLOADING, next_run_at=0)
             clock = [time.time()]
+            workflow._now = lambda: clock[0]
             runner = TaskRunner(
                 task_store,
                 workflow,

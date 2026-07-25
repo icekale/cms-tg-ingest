@@ -882,7 +882,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
 
 
-    def test_prepare_deletes_115_source_immediately_after_own_share_created(self):
+    def test_prepare_does_not_delete_115_source_before_task_runner_review(self):
         events = []
 
         class FakeStore:
@@ -931,11 +931,11 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
         row, _source_path = workflow.prepare(dict(store.row), {"title": "高地战", "tmdb_id": "79553"}, "高地战 (2011) {tmdb-79553}")
 
-        self.assertEqual(events, ["organize", "share:fid-final", "delete:fid-final", "sync:dummyown"])
-        self.assertEqual(row["cleanup_status"], "deleted")
-        self.assertEqual(store.cleanup["file_id"], "fid-final")
+        self.assertEqual(events, ["organize", "share:fid-final", "sync:dummyown"])
+        self.assertIsNone(store.cleanup)
+        self.assertNotEqual(row.get("cleanup_status"), "deleted")
 
-    def test_prepare_deletes_receive_residue_immediately_after_own_share_created(self):
+    def test_prepare_does_not_scan_or_delete_receive_residue_before_task_runner_review(self):
         events = []
 
         class FakeStore:
@@ -986,18 +986,8 @@ class SelfShareWorkflowTests(unittest.TestCase):
             "The.Banker.2020.1080p.BluRay.REMUX.AVC.DTS-HD.MA.TrueHD.7.1-FGT.mkv",
         )
 
-        self.assertEqual(
-            events,
-            [
-                "organize",
-                "share:fid-final",
-                "find_residue:recent:1781962277.0",
-                "delete:fid-recent",
-                "delete:fid-final",
-                "sync:dummyown",
-            ],
-        )
-        self.assertEqual(row["cleanup_status"], "deleted")
+        self.assertEqual(events, ["organize", "share:fid-final", "sync:dummyown"])
+        self.assertNotEqual(row.get("cleanup_status"), "deleted")
 
     def test_prepare_sets_category_from_organized_folder_parent_cid(self):
         class FakeStore:
@@ -1208,7 +1198,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
         self.assertEqual(recognition["category"], "外国电视")
         self.assertEqual(store.recognition[2], "openai_confident")
 
-    def test_emby_confirmation_deletes_own_share_source_after_strm_is_moved(self):
+    def test_legacy_emby_confirmation_does_not_delete_own_share_source(self):
         class FakeStore:
             def __init__(self):
                 self.cleanup = None
@@ -1244,10 +1234,10 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
         bridge.send_emby_confirmed(telegram, 464100862, store, row, item, emby=None, cleanup_client=p115)
 
-        self.assertEqual(p115.deleted, ["fid-final"])
+        self.assertEqual(p115.deleted, [])
         self.assertEqual(p115.cancelled, [])
-        self.assertEqual(store.cleanup["status"], "deleted")
-        self.assertIn("115转存源已删除", telegram.messages[0])
+        self.assertIsNone(store.cleanup)
+        self.assertNotIn("115转存源已删除", telegram.messages[0])
 
     def test_cleanup_waits_until_own_share_is_created(self):
         class FakeStore:
@@ -1520,7 +1510,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertIn("文件夹 TMDB 1356587", updated["move_error"])
             self.assertFalse((dest / "movie.strm").exists())
 
-    def test_cleanup_pending_self_share_sources_after_move_and_emby_confirmed(self):
+    def test_cleanup_pending_self_share_sources_requires_task_runner_review(self):
         class FakeP115:
             def __init__(self):
                 self.deleted = []
@@ -1549,9 +1539,9 @@ class SelfShareWorkflowTests(unittest.TestCase):
             cleaned = bridge.cleanup_pending_self_share_sources(store, p115, limit=10)
             updated = store.find_by_id(int(row["id"]))
 
-            self.assertEqual(cleaned, 1)
-            self.assertEqual(p115.deleted, ["fid-final"])
-            self.assertEqual(updated["cleanup_status"], "deleted")
+            self.assertEqual(cleaned, 0)
+            self.assertEqual(p115.deleted, [])
+            self.assertEqual(updated["cleanup_status"], "pending")
 
     def test_repair_stranded_self_share_folder_moves_it_to_library(self):
         with tempfile.TemporaryDirectory() as tmp:

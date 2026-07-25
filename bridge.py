@@ -233,6 +233,12 @@ class _QualityRepairAdapter:
         return bool(row)
 
     def cleanup(self, task: Any, run_id: str) -> bool:
+        if (
+            task.current_stage != TaskStage.CLEANED
+            or task.status != TaskStatus.SUCCEEDED
+            or str(task.metadata.get("share_review_status") or "").strip().lower() != "passed"
+        ):
+            return False
         submission_id = task.metadata.get("submission_id") or task.submission_id
         if submission_id in (None, ""):
             return False
@@ -1017,7 +1023,11 @@ class SubmissionStore:
                   AND lower(COALESCE(emby_status, '')) = 'confirmed'
                   AND COALESCE(dest_path, '') <> ''
                   AND COALESCE(own_share_code, '') <> ''
-                ORDER BY COALESCE(share_probe_at, 0) ASC, id ASC
+                ORDER BY
+                    CASE WHEN COALESCE(share_probe_at, 0) = 0 THEN 0 ELSE 1 END ASC,
+                    created_at DESC,
+                    share_probe_at ASC,
+                    id DESC
                 LIMIT ?
                 """,
                 (max(1, int(limit)),),
