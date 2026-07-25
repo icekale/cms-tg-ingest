@@ -18,17 +18,9 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 - 支持 Emby 刷新、入库确认和媒体库名称反馈。
 - 支持 HDHive 搜索、网盘筛选、单条/批量解锁和剧集订阅。
 
-## 快速开始
+## 5 分钟部署
 
-```sh
-git clone https://github.com/icekale/cms-tg-ingest.git
-cd cms-tg-ingest
-cp .env.example .env
-# 填写 Telegram、CMS、115、STRM 和 Emby 配置
-docker compose up -d
-```
-
-固定版本部署：
+固定版本镜像：
 
 ```sh
 docker pull icekale/cms-tg-ingest:0.2.19
@@ -36,7 +28,7 @@ docker pull icekale/cms-tg-ingest:0.2.19
 
 ### 完整 Docker Compose
 
-下面的配置可以直接使用 Docker Hub 镜像，不需要本地构建。先准备 `.env`（可从仓库的 `.env.example` 复制并填写），再保存为 `docker-compose.yml`：
+下面的配置可以直接使用 Docker Hub 镜像，不需要本地构建。将其保存为 `docker-compose.yml`，并在同一目录创建 `.env`：
 
 ```yaml
 services:
@@ -66,6 +58,28 @@ services:
       start_period: 30s
 ```
 
+`.env` 至少填写以下内容；完整变量和注释见 [GitHub `.env.example`](https://github.com/icekale/cms-tg-ingest/blob/main/.env.example)：
+
+```env
+TG_BOT_TOKEN=从BotFather获取的Token
+TG_ALLOWED_CHAT_ID=你的Telegram用户或聊天ID
+CMS_BASE_URL=http://192.168.1.10:9527
+CMS_USERNAME=你的CMS用户名
+CMS_PASSWORD=你的CMS密码
+P115_COOKIE_PATH=/config/115-cookies.txt
+SELF_SHARE_RECEIVE_CID=待整理目录CID
+SELF_SHARE_STRM_ROOT=/mnt/user/Unraid/strm/share
+STRM_LIBRARY_MAP=华语电影=/mnt/user/Unraid/strm/转存/Movie/电影/华语电影,欧美电影=/mnt/user/Unraid/strm/转存/Movie/电影/欧美电影
+STRM_DEFAULT_MODE=shared
+TASK_ENGINE_ENABLED=true
+WEB_ENABLED=true
+WEB_TOKEN=
+EMBY_BASE_URL=http://192.168.1.10:8096
+EMBY_API_KEY=你的Emby_API_Key
+```
+
+`TG_BOT_TOKEN` 和密码只放在 `.env`，不要写进 Compose、Dockerfile 或公开 issue。`TG_ALLOWED_CHAT_ID` 用于限制只有指定 Telegram 用户可以操作 Bot。
+
 启动和查看日志：
 
 ```sh
@@ -75,6 +89,17 @@ docker compose up -d
 docker compose ps
 docker compose logs -f cms-tg-ingest
 ```
+
+首次部署检查：
+
+```sh
+docker compose config
+docker compose ps
+docker compose exec cms-tg-ingest python /app/doctor.py
+curl http://127.0.0.1:8787/api/v1/health
+```
+
+容器显示 `healthy`、健康接口中的 `runner_heartbeat_stale` 为 `false`，并且 Bot 能回复 `/help`，才算部署完成。
 
 Unraid 使用时建议把端口改为 `8788:8787`，访问 `http://<unraid-ip>:8788/app/`。如果 STRM、Cookie 或 CMS 数据库路径不同，请同步修改 `volumes` 和 `.env` 中的路径；不要把 `.env` 或 Cookie 提交到 GitHub/Docker Hub。
 
@@ -122,6 +147,33 @@ https://hdhive.com/tv/<slug>
 订阅不会立即解锁。程序每天按 `01:30`（`Asia/Shanghai`）检查新增资源；费用未知或超过阈值时等待 `确认解锁`。Web 管理页为 `/hdhive`，可以查看 OAuth 状态、下次检查时间和订阅统计。
 
 订阅支持智能判断：集数过滤示例为 `S01E01-S01E10,S02`，默认跳过 `S00` 特殊集；多季资源按季集编号识别，Emby 已有集数会跳过。程序根据 TMDB 完结状态和季集数量标记已完结订阅；无法解析季集、费用未知或超过自动阈值的资源不自动解锁，完结订阅可手动恢复。
+
+## 更新、回滚和排障
+
+固定版本更新：
+
+```sh
+# 先备份 ./data、.env 和挂载配置
+docker compose pull
+docker compose up -d --no-build
+docker compose ps
+```
+
+回滚时将 Compose 的镜像改回上一版本，例如 `icekale/cms-tg-ingest:0.2.18`，然后执行：
+
+```sh
+docker compose pull
+docker compose up -d --no-build
+```
+
+常见问题：
+
+- Bot 无回复：检查 `TG_BOT_TOKEN`、`TG_ALLOWED_CHAT_ID` 和容器日志。
+- Web 无法访问：确认宿主机端口；Unraid 默认使用 `8788:8787`。
+- 容器不健康：检查 `/data`、STRM、115 Cookie、CMS 数据库和 CMS 配置目录挂载。
+- HDHive 授权失效：在 CMS `转存下载 -> 影巢账号` 重新授权，并保留 `/config/cms-config` 挂载。
+- 直链/共享模式不符：检查 `STRM_DEFAULT_MODE`；任务进入后续阶段后模式会锁定。
+- 任务变慢：先看 `/health` 的 115 冷却和阶段等待原因，不要连续重试。
 
 ## 前提与安全
 

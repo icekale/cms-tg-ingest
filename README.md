@@ -31,12 +31,12 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用项目的 compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.2.19`。
 4. 拉取固定版本并启动：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.2.18
-docker compose up -d
+docker compose pull
+docker compose up -d --no-build
 ```
 
 当前项目的 Unraid 示例使用 `8788:8787`，所以 Web 地址通常是：
@@ -45,7 +45,7 @@ docker compose up -d
 http://<unraid-ip>:8788/
 ```
 
-### Docker Compose 本地部署
+### Docker Compose 本地构建
 
 ```sh
 git clone https://github.com/icekale/cms-tg-ingest.git
@@ -55,6 +55,8 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+上面的仓库 Compose 用于本地构建；如果只想使用 Docker Hub 镜像，请使用上一节链接中的完整 Compose，不要同时保留 `build: .`。
+
 本地 compose 默认映射 `8787:8787`，访问：
 
 ```text
@@ -62,6 +64,15 @@ http://<host-ip>:8787/
 ```
 
 生产环境建议固定版本号，不要盲目使用 `latest`。镜像支持 `linux/amd64` 和 `linux/arm64`。
+
+### Docker Hub 直接部署
+
+不需要本地构建时，直接使用 Docker Hub 的完整 Compose 配置：
+
+- [Docker Hub 完整 Compose 配置](https://hub.docker.com/r/icekale/cms-tg-ingest)
+- [GitHub `.env.example`](https://github.com/icekale/cms-tg-ingest/blob/main/.env.example)
+
+Compose 中的 `env_file: .env` 会加载 Bot、CMS、115、Emby 和 HDHive 配置。Unraid 建议将 `.env` 放在 `/mnt/user/appdata/cms-tg-ingest/.env`，并把宿主机端口映射为 `8788:8787`。
 
 ## 使用前提
 
@@ -102,6 +113,18 @@ EMBY_API_KEY=你的 Emby API Key
 ```
 
 敏感信息只放在 `.env` 或挂载文件中，不要提交到 GitHub、Docker Hub、截图或 issue。
+
+### 首次启动检查
+
+```sh
+docker compose config
+docker compose up -d
+docker compose ps
+docker compose exec cms-tg-ingest python /app/doctor.py
+curl http://<host-ip>:8787/api/v1/health
+```
+
+Unraid 将上面的端口替换为 `8788`。只有容器显示 `healthy`、健康接口返回 `runner_heartbeat_stale=false` 且 Bot 能收到 `/help` 回复，才算首次部署完成。
 
 ## Telegram 怎么用
 
@@ -310,8 +333,9 @@ STRM_STABLE_SECONDS=30
 更新固定版本：
 
 ```sh
+# 先备份 /data 中的 submissions.db、tasks.db 和 .env
 docker compose pull
-docker compose up -d
+docker compose up -d --no-build
 ```
 
 查看日志和健康状态：
@@ -337,6 +361,17 @@ docker pull icekale/cms-tg-ingest:0.2.11
 # 将 compose 的 image 改为 0.2.11
 docker compose up -d
 ```
+
+### 常见问题
+
+| 现象 | 优先检查 |
+| --- | --- |
+| Bot 没有回复 | `.env` 中的 `TG_BOT_TOKEN`、`TG_ALLOWED_CHAT_ID`，以及 `docker compose logs --tail=200 cms-tg-ingest` |
+| Web 显示 Forbidden | 局域网免鉴权时留空 `WEB_TOKEN`；配置了 Token 时使用 `/app/?token=...` 首次登录 |
+| 容器不健康 | `/data`、STRM 目录、115 Cookie、`cms-online.db` 是否按 Compose 正确挂载，先运行 `doctor.py` |
+| HDHive 显示授权失效 | 在 CMS `转存下载 -> 影巢账号` 重新授权，并确认整个 CMS 配置目录已挂载到 `/config/cms-config` |
+| 生成了直链 STRM | 检查 `STRM_DEFAULT_MODE=shared`；任务进入建分享或 STRM 阶段后模式会锁定 |
+| 任务变慢 | 查看 `/health` 的 115 冷却、CMS 整理、分享 STRM 和 Emby 等待原因，不要连续点击重试 |
 
 ## 开发与发布
 
