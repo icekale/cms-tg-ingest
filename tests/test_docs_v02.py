@@ -12,6 +12,9 @@ class V02DocsTests(unittest.TestCase):
         self.assertIn("Web 管理页", readme)
         self.assertIn("WEB_PORT", readme)
         self.assertIn("TASK_DB_PATH", readme)
+        self.assertIn("SELF_SHARE_REVIEW_GRACE_SECONDS", readme)
+        self.assertIn("SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS", readme)
+        self.assertIn("SELF_SHARE_REVIEW_LIST_CACHE_SECONDS", readme)
 
     def test_env_example_contains_v02_settings(self):
         env = (ROOT / ".env.example").read_text(encoding="utf-8")
@@ -45,9 +48,9 @@ class V02DocsTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("在 `TASK_ENGINE_ENABLED=true` 的 TaskRunner 路径中", readme)
-        self.assertIn("自己的永久分享状态验证通过后立即删除 115 转存源", readme)
+        self.assertIn("默认 24 小时观察期结束", readme)
         self.assertIn("后续 STRM 只使用自己的分享链接生成", readme)
-        self.assertIn("旧 SubmissionStore + 轮询路径是兼容回滚路径", readme)
+        self.assertIn("旧 SubmissionStore + 轮询路径仅保留兼容处理，不会自动删除源文件", readme)
         self.assertNotIn("只会在 STRM 已移动且 Emby 确认入库后删除", readme)
 
     def test_readme_leads_with_current_product_workflow(self):
@@ -65,9 +68,9 @@ class V02DocsTests(unittest.TestCase):
         env = (ROOT / ".env.example").read_text(encoding="utf-8")
 
         self.assertIn("TASK_ENGINE_ENABLED=true", env)
-        self.assertIn("Task engine path deletes the 115 source immediately after your own permanent share is created", env)
-        self.assertIn("legacy SubmissionStore path keeps compatibility behavior", env)
-        self.assertNotIn("Task engine path cleans only after own share, STRM move/library, and Emby confirmation", env)
+        self.assertIn("source cleanup is delayed", env)
+        self.assertIn("legacy SubmissionStore path does not automatically delete sources", env)
+        self.assertNotIn("deletes the 115 source immediately", env)
 
     def test_docs_describe_115_pressure_guards(self):
         env = (ROOT / ".env.example").read_text(encoding="utf-8")

@@ -86,6 +86,38 @@ class TaskBridgeTests(unittest.TestCase):
             self.assertEqual(task.current_stage, TaskStage.SHARE_VALIDATED)
             self.assertEqual(task.status, TaskStatus.SUCCEEDED)
 
+    def test_record_submission_event_preserves_share_review_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            row = {
+                "share_code": "abc",
+                "receive_code": "",
+                "url": "https://115cdn.com/s/abc",
+                "title": "示例电影",
+                "own_share_code": "own",
+                "own_share_file_name": "示例电影",
+                "share_validation_status": "valid",
+            }
+
+            task = record_submission_event(
+                store,
+                row,
+                TaskStage.SHARE_VALIDATED,
+                TaskStatus.RUNNING,
+                "等待 115 异步审核",
+                share_created_at=100.0,
+                share_review_status="pending",
+                share_review_checks=[600],
+                share_review_last_at=700.0,
+                share_review_next_at=3700.0,
+                share_review_error="",
+            )
+
+            self.assertEqual(task.metadata["share_created_at"], 100.0)
+            self.assertEqual(task.metadata["share_review_status"], "pending")
+            self.assertEqual(task.metadata["share_review_checks"], [600])
+            self.assertEqual(task.metadata["share_review_next_at"], 3700.0)
+
     def test_record_failure_works_with_link_key_dict(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

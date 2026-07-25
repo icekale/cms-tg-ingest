@@ -337,6 +337,7 @@ class P115WebClient:
         timeout: int = 60,
         min_interval_seconds: float = 0.0,
         cache_ttl_seconds: float = 3.0,
+        share_list_cache_ttl_seconds: float = 300.0,
         clock: Any | None = None,
         sleeper: Any | None = None,
     ):
@@ -344,11 +345,13 @@ class P115WebClient:
         self.http = http or FormHttp(timeout)
         self.min_interval_seconds = max(0.0, float(min_interval_seconds or 0.0))
         self.cache_ttl_seconds = max(0.0, float(cache_ttl_seconds or 0.0))
+        self.share_list_cache_ttl_seconds = max(0.0, float(share_list_cache_ttl_seconds or 0.0))
         self.clock = clock or time.monotonic
         self.sleeper = sleeper or time.sleep
         self._last_request_at: float | None = None
         self._request_lock = threading.Lock()
         self._get_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._share_list_cache: tuple[float, dict[str, dict[str, Any]]] | None = None
         self.request_count = 0
         if not self.cookie:
             raise RuntimeError("115 cookie is empty")
@@ -402,6 +405,7 @@ class P115WebClient:
             else:
                 # Any mutating request can invalidate a previously cached listing or share snapshot.
                 self._get_cache.clear()
+                self._share_list_cache = None
             self._rate_limit()
             self.request_count += 1
             request_headers = self._headers()
@@ -467,6 +471,38 @@ class P115WebClient:
             "share_state": share_state,
             "have_vio_file": have_vio_file,
         }
+
+    def list_own_share_states(self, limit: int = 100) -> dict[str, dict[str, Any]]:
+        now = float(self.clock())
+        if self._share_list_cache is not None:
+            expires_at, cached = self._share_list_cache
+            if now < expires_at:
+                return deepcopy(cached)
+        resp = self._request(
+            "https://webapi.115.com/share/slist",
+            params={
+                "limit": max(1, min(int(limit), 100)),
+                "offset": 0,
+                "order": "create_time",
+                "asc": 0,
+                "show_cancel_share": 1,
+            },
+        )
+        self._ensure_state(resp, "115 share list failed")
+        data = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+        states: dict[str, dict[str, Any]] = {}
+        for item in iter_items(data):
+            share_code = str(item.get("share_code") or item.get("sharecode") or "").strip()
+            if not share_code:
+                continue
+            raw_vio = item.get("have_vio_file", item.get("is_collect", 0))
+            states[share_code] = {
+                "share_state": str(item.get("share_state") or item.get("state") or "").strip().lower(),
+                "have_vio_file": str(raw_vio).strip().lower() in {"1", "true", "yes"},
+                "create_time": item.get("create_time") or item.get("share_time") or 0,
+            }
+        self._share_list_cache = (now + self.share_list_cache_ttl_seconds, deepcopy(states))
+        return states
 
     def receive_share_to_cid(self, share_code: str, receive_code: str, target_cid: str) -> dict[str, Any]:
         snap = self.share_snap(share_code, receive_code, cid="0", limit=100)
@@ -717,7 +753,7 @@ class P115WebClient:
         resp = self._request(
             "https://webapi.115.com/share/send",
             method="POST",
-            data={"file_ids": str(file_id), "ignore_warn": 1},
+            data={"file_ids": str(file_id), "ignore_warn": 0},
         )
         self._ensure_state(resp, "115 create share failed")
         data = resp.get("data") if isinstance(resp.get("data"), dict) else {}

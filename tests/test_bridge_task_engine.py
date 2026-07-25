@@ -46,6 +46,7 @@ class FakeP115:
         self.find_organized_calls = []
         self.renamed = []
         self.share_statuses = []
+        self.share_list_states = {}
         self.files_by_parent = {}
 
     def receive_share_to_cid(self, share_code, receive_code, receive_cid):
@@ -73,6 +74,11 @@ class FakeP115:
         if self.share_statuses:
             return self.share_statuses.pop(0)
         return {"available": True, "share_state": "0", "have_vio_file": False}
+
+    def list_own_share_states(self, limit=100):
+        if self.share_list_states:
+            return dict(self.share_list_states)
+        return {"owncode": {"share_state": "1", "have_vio_file": False, "create_time": 0}}
 
     def list_files(self, parent_id, limit=100):
         return list(self.files_by_parent.get(str(parent_id), []))
@@ -1219,7 +1225,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertTrue(result.metadata["direct_file_share_fallback"])
             self.assertFalse(stored["share_alias_name"])
 
-    def test_share_validation_upgrades_violation_warning_to_neutral_video_names(self):
+    def test_share_validation_violation_keeps_existing_neutral_alias_without_rebuilding(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
             row = self._self_share_row(title="T-特洛伊-2004-[tmdb=652]", category="欧美电影", tmdb_id="652")
@@ -1257,17 +1263,14 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
 
             result = workflow.run_stage(task)
             stored = self.submissions.find_by_id(int(row["id"]))
-            manifest = json.loads(stored["canonical_manifest_json"])
-
-            self.assertEqual(result.outcome, StageOutcome.DEFER)
-            self.assertEqual(stored["share_alias_level"], 2)
-            self.assertEqual(self.p115.renamed[-1][0], "episode-id")
-            self.assertIn("S03E02", self.p115.renamed[-1][1])
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(stored["share_alias_level"], 1)
+            self.assertEqual(self.p115.renamed, [])
             self.assertEqual(stored["own_share_code"], "owncode")
-            self.assertEqual(manifest["entries"][0]["canonical_path"], "Season 03/Troy.S03E02.2160p.mkv")
-            self.assertTrue(manifest["entries"][0]["alias_path"].endswith(".mkv"))
+            self.assertEqual(stored["share_validation_status"], "invalid")
+            self.assertEqual(result.metadata["share_review_status"], "invalid")
 
-    def test_level_two_violation_warning_is_accepted_as_risk_when_share_is_available(self):
+    def test_level_two_violation_warning_stops_without_rebuilding_or_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:
             cleanup = FakeCleanupClient()
             workflow = self._workflow(tmp, cleanup_client=cleanup)
@@ -1292,10 +1295,205 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             result = workflow.run_stage(task)
             stored = self.submissions.find_by_id(int(row["id"]))
 
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(stored["share_validation_status"], "invalid")
+            self.assertEqual(cleanup.deleted, [])
+            self.assertNotEqual(stored["cleanup_status"], "deleted")
+
+    def test_share_validation_keeps_source_until_review_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = FakeCleanupClient()
+            workflow = self._workflow(tmp, cleanup_client=cleanup)
+            row = self._self_share_row()
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.SHARE_VALIDATED,
+                {"submission_id": row["id"], "share_created_at": 100.0},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
-            self.assertEqual(stored["share_validation_status"], "warning")
+            self.assertEqual(cleanup.deleted, [])
+            self.assertEqual(result.metadata["share_review_status"], "pending")
+            self.assertNotEqual(stored["cleanup_status"], "deleted")
+
+    def test_share_validation_violation_stops_without_renaming_or_deleting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = FakeCleanupClient()
+            workflow = self._workflow(tmp, cleanup_client=cleanup)
+            row = self._self_share_row()
+            self.p115.share_statuses = [
+                {"available": True, "share_state": "0", "have_vio_file": True},
+            ]
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.SHARE_VALIDATED,
+                {"submission_id": row["id"], "share_created_at": 100.0},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(cleanup.deleted, [])
+            self.assertEqual(self.p115.renamed, [])
+
+    def test_cleaned_stage_waits_for_review_checkpoints_before_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = FakeCleanupClient()
+            config = bridge.SelfShareConfig(
+                enabled=True,
+                strm_root=Path(tmp) / "share-strm",
+                cms_cid="0",
+                cms_local_path="/media/share",
+                review_grace_seconds=10,
+                review_checkpoints_seconds=(5, 10),
+                review_list_cache_seconds=300,
+            )
+            workflow = self._workflow(tmp, cleanup_client=cleanup, self_share_config=config)
+            row = self._self_share_row()
+            dest = Path(tmp) / "library" / "dest"
+            self._write_strm(dest)
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path="/share/source",
+                dest_path=str(dest),
+                category_final="华语电影",
+            ) or row
+            row = self.submissions.update_emby(int(row["id"]), "confirmed") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.CLEANED,
+                {"submission_id": row["id"], "share_created_at": 100.0},
+                row["id"],
+            )
+            workflow._now = lambda: 100.0
+
+            before_first = workflow.run_stage(task)
+            self.tasks.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.RUNNING,
+                before_first.message,
+                metadata_patch=before_first.metadata,
+                submission_id=row["id"],
+            )
+            self.tasks.enqueue_task(task.id, TaskStage.CLEANED, next_run_at=105.0)
+            task = self.tasks.claim_next_runnable("worker-1", now=105.0)
+            workflow._now = lambda: 105.0
+            after_first = workflow.run_stage(task)
+            self.tasks.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.RUNNING,
+                after_first.message,
+                metadata_patch=after_first.metadata,
+                submission_id=row["id"],
+            )
+            self.tasks.enqueue_task(task.id, TaskStage.CLEANED, next_run_at=110.0)
+            task = self.tasks.claim_next_runnable("worker-2", now=110.0)
+            workflow._now = lambda: 110.0
+            after_final = workflow.run_stage(task)
+
+            self.assertEqual(before_first.outcome, StageOutcome.DEFER)
+            self.assertEqual(after_first.outcome, StageOutcome.DEFER)
+            self.assertEqual(after_final.outcome, StageOutcome.COMPLETE)
             self.assertEqual(cleanup.deleted, ["folder-id"])
-            self.assertEqual(stored["cleanup_status"], "deleted")
+
+    def test_cleaned_stage_keeps_source_when_async_review_marks_share_invalid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = FakeCleanupClient()
+            config = bridge.SelfShareConfig(
+                enabled=True,
+                strm_root=Path(tmp) / "share-strm",
+                cms_cid="0",
+                cms_local_path="/media/share",
+                review_grace_seconds=1,
+                review_checkpoints_seconds=(1,),
+                review_list_cache_seconds=300,
+            )
+            workflow = self._workflow(tmp, cleanup_client=cleanup, self_share_config=config)
+            row = self._self_share_row()
+            dest = Path(tmp) / "library" / "dest"
+            self._write_strm(dest)
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path="/share/source",
+                dest_path=str(dest),
+                category_final="华语电影",
+            ) or row
+            row = self.submissions.update_emby(int(row["id"]), "confirmed") or row
+            self.p115.share_list_states = {
+                "owncode": {"share_state": "6", "have_vio_file": False},
+            }
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.CLEANED,
+                {"submission_id": row["id"], "share_created_at": 100.0},
+                row["id"],
+            )
+            workflow._now = lambda: 101.0
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(cleanup.deleted, [])
+            self.assertEqual(stored["share_validation_status"], "invalid")
+            self.assertEqual(result.metadata["share_review_status"], "invalid")
+
+    def test_cleaned_stage_defers_unknown_review_without_deleting_source(self):
+        class UnavailableListP115(FakeP115):
+            def list_own_share_states(self, limit=100):
+                raise RuntimeError("115 service unavailable")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = FakeCleanupClient()
+            config = bridge.SelfShareConfig(
+                enabled=True,
+                strm_root=Path(tmp) / "share-strm",
+                cms_cid="0",
+                cms_local_path="/media/share",
+                review_grace_seconds=1,
+                review_checkpoints_seconds=(1,),
+                review_list_cache_seconds=300,
+            )
+            workflow = self._workflow(tmp, cleanup_client=cleanup, self_share_config=config)
+            workflow.p115 = UnavailableListP115()
+            row = self._self_share_row()
+            dest = Path(tmp) / "library" / "dest"
+            self._write_strm(dest)
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path="/share/source",
+                dest_path=str(dest),
+                category_final="华语电影",
+            ) or row
+            row = self.submissions.update_emby(int(row["id"]), "confirmed") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.CLEANED,
+                {"submission_id": row["id"], "share_created_at": 100.0},
+                row["id"],
+            )
+            workflow._now = lambda: 101.0
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIn("暂时无法确认", result.message)
+            self.assertEqual(cleanup.deleted, [])
 
     def test_own_share_stage_waits_for_validation_before_deleting_115_source(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1324,16 +1522,24 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(stored["own_share_code"], "owncode")
             self.assertNotEqual(stored["cleanup_status"], "deleted")
 
+            self.tasks.record_event(
+                task.id,
+                TaskStage.OWN_SHARE_CREATED,
+                TaskStatus.RUNNING,
+                result.message,
+                metadata_patch=result.metadata,
+                submission_id=row["id"],
+            )
             self.tasks.enqueue_task(task.id, TaskStage.SHARE_VALIDATED, next_run_at=1.0)
             validation_task = self.tasks.claim_next_runnable("worker-2", now=1.0)
             validated = workflow.run_stage(validation_task)
             stored = self.submissions.find_by_id(int(row["id"]))
 
             self.assertEqual(validated.outcome, StageOutcome.COMPLETE)
-            self.assertEqual(cleanup.deleted, ["folder-id"])
-            self.assertEqual(stored["cleanup_status"], "deleted")
-            self.assertEqual(self.cms.auto_organize_calls, 1)
-            self.assertTrue(validated.metadata["cleanup_sync_requested"])
+            self.assertEqual(cleanup.deleted, [])
+            self.assertNotEqual(stored["cleanup_status"], "deleted")
+            self.assertEqual(self.cms.auto_organize_calls, 0)
+            self.assertEqual(validated.metadata["share_review_status"], "pending")
 
     def test_strm_ready_restores_canonical_name_and_does_not_move_when_playback_probe_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2475,6 +2681,8 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cleanup = FakeCleanupClient()
             workflow = self._workflow(tmp, cleanup_client=cleanup)
+            workflow.self_share_config.review_grace_seconds = 1
+            workflow.self_share_config.review_checkpoints_seconds = (1,)
             row = self._self_share_row()
             dest = Path(tmp) / "library" / "dest"
             self._write_strm(dest)
@@ -2485,7 +2693,14 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 dest_path=str(dest),
                 category_final="华语电影",
             ) or row
-            task = self._claim_task("abc", "1234", TaskStage.CLEANED, {"submission_id": row["id"]}, row["id"])
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.CLEANED,
+                {"submission_id": row["id"], "share_created_at": 100.0},
+                row["id"],
+            )
+            workflow._now = lambda: 101.0
 
             not_confirmed = workflow.run_stage(task)
             row = self.submissions.update_emby(int(row["id"]), "confirmed") or row
@@ -2557,6 +2772,8 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cleanup = FakeCleanupClient()
             workflow = self._workflow(tmp, cleanup_client=cleanup)
+            workflow.self_share_config.review_grace_seconds = 1
+            workflow.self_share_config.review_checkpoints_seconds = (1,)
             row = self._self_share_row()
             dest = Path(tmp) / "library" / "dest"
             self._write_strm(dest)
@@ -2568,7 +2785,14 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 category_final="华语电影",
             ) or row
             row = self.submissions.update_emby(int(row["id"]), "confirmed") or row
-            task = self._claim_task("abc", "1234", TaskStage.CLEANED, {"submission_id": row["id"]}, row["id"])
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.CLEANED,
+                {"submission_id": row["id"], "share_created_at": 100.0},
+                row["id"],
+            )
+            workflow._now = lambda: 101.0
 
             result = workflow.run_stage(task)
             stored = self.submissions.find_by_id(int(row["id"]))

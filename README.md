@@ -14,7 +14,8 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 - **CMS 优先**：整理、改名、TMDB 匹配和分类由 CMS 完成，外挂不会用低准确率模型覆盖 CMS 结果。
 - **两种 STRM 模式**：shared 模式继续“只入库自有分享 STRM”，使用自己的 115 分享链接生成 STRM 并保留分享；`direct` 使用 CMS 普通同步生成的直链 STRM，不创建自有分享，也不清理源文件。
 - **共享别名保护**：创建分享时使用中性别名，入库时恢复 CMS 的标准目录和文件名，降低 115 名称风控影响。
-- **自动清理源文件**：自有永久分享验证通过后，可以删除 115 转存源，但不会取消永久分享。
+- **异步审核防损失**：自有永久分享先经过即时验证，再按 10 分钟、1 小时、6 小时、24 小时检查点观察 115 异步审核；全部通过后才删除转存源，不取消永久分享。
+- **违规保留源文件**：确认分享不可用或命中风险标记时进入人工处理，不自动改名、重建或重复分享，避免误删源文件和触发风控。
 - **Emby 结果确认**：刷新后检查媒体是否入库，并返回命中的媒体库名称。
 - **任务可追踪**：TaskStore 记录接收、整理、识别、建分享、STRM、移动、Emby、清理等阶段。
 - **低频和风控保护**：低频 115 调用，限制扫描预算和重试频率；检测到风控后进入冷却，不连续轰击 115。
@@ -99,6 +100,9 @@ STRM_DEFAULT_MODE=shared
 P115_COOKIE_PATH=/config/115-cookies.txt
 SELF_SHARE_RECEIVE_CID=你的待整理目录 CID
 SELF_SHARE_STRM_ROOT=/mnt/user/Unraid/strm/share
+SELF_SHARE_REVIEW_GRACE_SECONDS=86400
+SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS=600,3600,21600,86400
+SELF_SHARE_REVIEW_LIST_CACHE_SECONDS=300
 STRM_LIBRARY_MAP=华语电影=/mnt/user/Unraid/strm/转存/Movie/电影/华语电影,欧美电影=/mnt/user/Unraid/strm/转存/Movie/电影/欧美电影
 
 TASK_ENGINE_ENABLED=true
@@ -249,16 +253,16 @@ API 位于 `/api/v1/overview`、`/api/v1/tasks`、`/api/v1/health`、`/api/v1/qu
 2. 115 分享进入接收目录，磁力/ED2K 进入云下载；随后按任务 STRM 模式执行 shared 或 direct 流程。
 3. 外挂等待 CMS 完成整理、改名、TMDB 匹配和分类。
 4. 外挂保存 CMS 的标准目录和分类，创建自己的中性名称永久分享。
-5. 自有分享状态验证通过后，删除 115 转存源，但不取消自有永久分享。
+5. 自有分享即时验证通过后进入异步审核观察期；检查点全部通过后，删除 115 转存源，但不取消自有永久分享。
 6. 调用 CMS 分享同步，使用自己的分享链接生成 STRM。
 7. 校验 STRM 使用自己的分享码，并实际探测播放端点。
 8. 按 CMS 分类把 STRM 文件夹移动或合并到媒体库。
 9. 调用 Emby 刷新并确认入库，返回命中的媒体库名称。
 10. 任务完成后保留自己的永久分享，清理已确认的转存残留。
 
-**重要安全门槛**：只有在自有分享、STRM marker、媒体库路径、Emby 入库和 TaskStore 成功事件均满足条件时，程序才会执行安全清理；风控、未知状态、路径不明确或验证失败都会保留源文件。
+**重要安全门槛**：只有在自有分享、STRM marker、媒体库路径、Emby 入库、TaskStore 成功事件和 115 异步审核检查点均满足条件时，程序才会执行安全清理；风控、未知状态、路径不明确或验证失败都会保留源文件。
 
-在 `TASK_ENGINE_ENABLED=true` 的 TaskRunner 路径中，自己的永久分享状态验证通过后立即删除 115 转存源；后续 STRM 只使用自己的分享链接生成。旧 SubmissionStore + 轮询路径是兼容回滚路径，不提供同等清理顺序保证。
+在 `TASK_ENGINE_ENABLED=true` 的 TaskRunner 路径中，自己的永久分享状态验证通过后仍会继续生成分享 STRM、移动和 Emby 入库，但源文件会保留到默认 24 小时观察期结束；后续 STRM 只使用自己的分享链接生成。旧 SubmissionStore + 轮询路径仅保留兼容处理，不会自动删除源文件；需要自动清理时请启用 TaskRunner。
 
 ## TaskStore 和 Web 管理
 
@@ -445,7 +449,7 @@ docker pull icekale/cms-tg-ingest:latest
 - HDHive 当前使用 CMS 已授权的单个账号，不要把 OAuth 配置文件复制到公共目录。
 - 生产环境固定版本号，不建议盲目使用 `latest`。
 - 批量操作前先用一个小体量资源测试完整链路。
-- `SELF_SHARE_CLEANUP_AFTER_EMBY=true` 的安全清理依赖 TaskStore authoritative runner；旧回滚路径不提供同等清理顺序保证。
+- `SELF_SHARE_CLEANUP_AFTER_EMBY=true` 的安全清理依赖 TaskStore authoritative runner，并默认等待 24 小时异步审核观察期；旧回滚路径不会自动删除源文件。
 
 ## 相关链接
 

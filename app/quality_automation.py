@@ -378,7 +378,8 @@ class QualityAutomation:
                 if invalid_status != "invalid":
                     plans.append(self._skip_plan(task, "unknown_share_status", task_issues))
                     continue
-                action = "invalid_share"
+                plans.append(self._skip_plan(task, "invalid_share_manual", task_issues))
+                continue
             elif any(code in {"direct_strm", "unexpected_strm"} for code in issue_codes):
                 action = "reprocess"
             elif any(code in {"missing_dest", "missing_strm"} for code in issue_codes):
@@ -564,6 +565,8 @@ class QualityAutomation:
                 return QualityCleanupResult("blocked_cleanup", "share_strm_unreadable")
             if "/d/" in content or marker not in content:
                 return QualityCleanupResult("blocked_cleanup", "share_strm_not_current")
+        if str(metadata.get("share_review_status") or "").strip().lower() != "passed":
+            return QualityCleanupResult("blocked_cleanup", "share_review_not_passed")
         handler = getattr(self.repair_adapter, "cleanup", None) if self.repair_adapter is not None else None
         if not callable(handler):
             return QualityCleanupResult("blocked_cleanup", "cleanup_adapter_missing")

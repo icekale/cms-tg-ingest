@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
-import re
 import shutil
 import time
 from dataclasses import dataclass
@@ -19,9 +18,6 @@ from app.clients.p115 import (
     category_for_115_parent_id,
     is_p115_risk_control_message,
     normalize_cloud_status,
-    p115_file_id,
-    p115_file_name,
-    p115_is_folder,
     validate_cloud_output,
 )
 from app.config import MovePlan, SelfShareConfig, default_library_roots, is_relative_to, safe_resolve
@@ -58,7 +54,6 @@ from app.task_runner import StageResult
 
 LOG = logging.getLogger("cms-tg-ingest")
 OPENAI_CATEGORY_LABELS = ["华语电影", "欧美电影", "亚洲电影", "动漫电影", "国产电视", "外国电视", "番剧", "纪录片"]
-VIDEO_SUFFIXES = {".mkv", ".mp4", ".ts", ".iso", ".avi", ".mov", ".wmv", ".m2ts"}
 
 
 @dataclass(frozen=True)
@@ -297,15 +292,6 @@ class SelfShareWorkflow:
                 own_share_receive_code=share.get("receive_code"),
                 own_share_url=share.get("share_url"),
             ) or row
-        if self.config.cleanup_after_emby and str(row.get("cleanup_status") or "").lower() not in {"deleted", "pending"}:
-            cleanup_self_share_source_residue(
-                self.p115,
-                row,
-                recognition,
-                share_name,
-                self.config.source_cleanup_parent_ids,
-            )
-            row, _line = cleanup_own_share_source(self.store, row, self.p115)
         if row.get("share_sync_status") != "submitted":
             self.cms.add_share115_sync_task(
                 str(row.get("own_share_code") or ""),
@@ -933,6 +919,11 @@ class BridgeSelfShareTaskWorkflow:
             created = True
         message = "已创建自有 115 分享" if created else "已存在自有 115 分享"
         metadata = self._own_share_metadata(row)
+        share_created_at = self._positive_timestamp(task.metadata.get("share_created_at"))
+        if created:
+            share_created_at = self._now()
+        if share_created_at:
+            metadata["share_created_at"] = share_created_at
         if direct_file_share:
             metadata.update(
                 {
@@ -947,9 +938,6 @@ class BridgeSelfShareTaskWorkflow:
         row = self._submission_row(task)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
-        if int(row.get("share_alias_level") or 0) >= 2 and str(row.get("share_validation_status") or "") == "aliasing_files":
-            row = self._complete_level_two_alias(task, row)
-            return StageResult.defer("已完成文件别名并重建分享，等待 115 状态稳定", 5, self._own_share_metadata(row))
         own_code = str(row.get("own_share_code") or "").strip()
         own_pwd = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
         if not own_code:
@@ -957,103 +945,43 @@ class BridgeSelfShareTaskWorkflow:
         try:
             status = self.p115.inspect_share(own_code, own_pwd)
         except P115ShareUnavailableError as exc:
-            if int(row.get("share_alias_level") or 0) < 2:
-                upgraded = self._prepare_level_two_alias(task, row)
-                return StageResult.defer("分享被 115 拒绝，已升级文件别名并重建分享", 5, self._own_share_metadata(upgraded))
             row = self.store.update_self_share(
                 int(row["id"]),
                 share_validation_status="invalid",
                 share_validation_error=str(exc)[:200],
             ) or row
-            return StageResult.needs_action("中性文件名分享仍被 115 拒绝，已保留现有 STRM", self._own_share_metadata(row))
-        have_vio_file = bool(status.get("have_vio_file"))
-        if have_vio_file and int(row.get("share_alias_level") or 0) < 2:
-            upgraded = self._prepare_level_two_alias(task, row)
-            return StageResult.defer("分享含风险标记，已升级文件别名并重建分享", 5, self._own_share_metadata(upgraded))
-        validation_status = "warning" if have_vio_file else "valid"
+            metadata = self._own_share_metadata(row)
+            metadata.update(self._share_review_metadata(task, row, "invalid", error=str(exc)))
+            return StageResult.needs_action("自有分享已被 115 判定为不可用，源文件已保留，停止自动改名和重建", metadata)
+        except RuntimeError as exc:
+            metadata = self._own_share_metadata(row)
+            metadata.update(self._share_review_metadata(task, row, "unknown", error=str(exc)))
+            return StageResult.defer("115 分享状态暂时无法确认，源文件暂不清理", 60, metadata)
+        have_vio_file = self._as_bool_flag(status.get("have_vio_file"))
+        share_state = str(status.get("share_state") or "").strip().lower()
+        if have_vio_file or (share_state and share_state not in {"0", "1", "true"}):
+            reason = "115 标记 have_vio_file" if have_vio_file else f"115 分享状态不可用：{share_state or '未知'}"
+            row = self.store.update_self_share(
+                int(row["id"]),
+                share_validation_status="invalid",
+                share_validation_error=reason,
+            ) or row
+            metadata = self._own_share_metadata(row)
+            metadata.update(self._share_review_metadata(task, row, "invalid", error=reason))
+            return StageResult.needs_action("自有分享存在 115 风险标记或不可用状态，源文件已保留，停止自动改名和重建", metadata)
+        if not share_state:
+            metadata = self._own_share_metadata(row)
+            metadata.update(self._share_review_metadata(task, row, "unknown", error="115 未返回明确分享状态"))
+            return StageResult.defer("115 未返回明确分享状态，源文件暂不清理", 60, metadata)
         row = self.store.update_self_share(
             int(row["id"]),
             workflow_phase="share_validated",
-            share_validation_status=validation_status,
-            share_validation_error="" if not have_vio_file else "115 标记 have_vio_file，实际播放仍需验证",
-        ) or row
-        if self.cleanup_client:
-            row, cleanup_line = cleanup_own_share_source(self.store, row, self.cleanup_client)
-            if str(row.get("cleanup_status") or "").lower() == "error":
-                return StageResult.failed(
-                    str(row.get("cleanup_error") or cleanup_line or "115 转存源删除失败"),
-                    error_type="cleanup_failed",
-                    metadata=self._own_share_metadata(row),
-                )
-        metadata = self._own_share_metadata(row)
-        metadata["share_have_vio_file"] = have_vio_file
-        if str(row.get("cleanup_status") or "").lower() == "deleted" and not task.metadata.get("cleanup_sync_requested"):
-            self.cms.run_auto_organize()
-            metadata["cleanup_sync_requested"] = True
-        message = "自有分享验证通过" if not have_vio_file else "自有分享当前有效，存在 115 风险标记"
-        return StageResult.complete(message, metadata)
-
-    def _prepare_level_two_alias(self, task, row: dict[str, Any]) -> dict[str, Any]:
-        manifest = self._canonical_manifest(row)
-        if not manifest.get("entries"):
-            entries = []
-            queue: list[tuple[str, Path]] = [(str(row.get("own_share_file_id") or ""), Path())]
-            list_calls = 0
-            file_index = 0
-            while queue:
-                parent_id, relative_parent = queue.pop(0)
-                list_calls += 1
-                if list_calls > 25:
-                    raise RuntimeError("115 分享目录层级过多，停止文件别名扫描")
-                for item in sorted(self.p115.list_files(parent_id, limit=500), key=p115_file_name):
-                    item_id = p115_file_id(item)
-                    name = p115_file_name(item)
-                    if not item_id or not name:
-                        continue
-                    canonical_path = relative_parent / name
-                    if p115_is_folder(item):
-                        queue.append((item_id, canonical_path))
-                        continue
-                    if Path(name).suffix.lower() not in VIDEO_SUFFIXES:
-                        continue
-                    file_index += 1
-                    episode = re.search(r"(?i)(S\d{1,2}E\d{1,3})", name)
-                    episode_part = f"-{episode.group(1).upper()}" if episode else ""
-                    alias_name = f"asset-{task.id}-{file_index:03d}{episode_part}{Path(name).suffix.lower()}"
-                    entries.append(
-                        {
-                            "file_id": item_id,
-                            "canonical_path": canonical_path.as_posix(),
-                            "alias_path": (relative_parent / alias_name).as_posix(),
-                        }
-                    )
-            manifest["entries"] = entries
-        row = self.store.update_self_share(
-            int(row["id"]),
-            canonical_manifest_json=json.dumps(manifest, ensure_ascii=False, sort_keys=True),
-            share_alias_level=2,
-            share_validation_status="aliasing_files",
-        ) or row
-        return self._complete_level_two_alias(task, row)
-
-    def _complete_level_two_alias(self, task, row: dict[str, Any]) -> dict[str, Any]:
-        manifest = self._canonical_manifest(row)
-        for entry in manifest.get("entries") or []:
-            file_id = str(entry.get("file_id") or "").strip()
-            alias_name = Path(str(entry.get("alias_path") or "")).name
-            if file_id and alias_name:
-                self.p115.rename_file(file_id, alias_name)
-        share = self.p115.create_long_share(str(row.get("own_share_file_id") or ""))
-        return self.store.update_self_share(
-            int(row["id"]),
-            workflow_phase="own_share_created",
-            own_share_code=share.get("share_code"),
-            own_share_receive_code=share.get("receive_code"),
-            own_share_url=share.get("share_url"),
-            share_sync_status="",
-            share_validation_status="pending",
+            share_validation_status="valid",
             share_validation_error="",
         ) or row
+        metadata = self._own_share_metadata(row)
+        metadata.update(self._share_review_metadata(task, row, "pending", error=""))
+        return StageResult.complete("自有分享即时验证通过，进入 115 异步审核观察期；源文件暂不清理", metadata)
 
     @staticmethod
     def _canonical_manifest(row: dict[str, Any]) -> dict[str, Any]:
@@ -1314,17 +1242,212 @@ class BridgeSelfShareTaskWorkflow:
                 return self._restore_missing_moved_destination(task, row, metadata, terminal=True)
         if str(row.get("cleanup_status") or "").lower() == "deleted":
             return StageResult.complete("115 转存源已删除，自有分享保留", self._cleanup_metadata(row))
+        review_status, review_metadata, review_message, review_delay = self._advance_share_review(task, row)
+        if review_status == "invalid":
+            updated = self.store.update_self_share(
+                int(row["id"]),
+                share_validation_status="invalid",
+                share_validation_error=str(review_metadata.get("share_review_error") or review_message),
+            ) or row
+            metadata = self._cleanup_metadata(updated)
+            metadata.update(review_metadata)
+            return StageResult.needs_action(
+                "自有分享在异步审核中已变为不可用，源文件已保留，停止自动改名和重建",
+                metadata,
+            )
+        if review_status != "passed":
+            metadata = self._cleanup_metadata(row)
+            metadata.update(review_metadata)
+            return StageResult.defer(review_message, review_delay, metadata)
         updated, line = cleanup_own_share_source(self.store, row, self.cleanup_client)
         cleanup_status = str(updated.get("cleanup_status") or "").lower()
         if cleanup_status == "deleted":
-            return StageResult.complete(line or "115 转存源已删除，自有分享保留", self._cleanup_metadata(updated))
+            metadata = self._cleanup_metadata(updated)
+            metadata.update(review_metadata)
+            return StageResult.complete(line or "115 转存源已删除，自有分享保留", metadata)
         if cleanup_status == "error":
+            metadata = self._cleanup_metadata(updated)
+            metadata.update(review_metadata)
             return StageResult.failed(
                 str(updated.get("cleanup_error") or line or "115 转存源删除失败"),
                 error_type="cleanup_failed",
-                metadata=self._cleanup_metadata(updated),
+                metadata=metadata,
             )
-        return StageResult.needs_action(line or "等待 115 转存源清理", self._cleanup_metadata(updated))
+        metadata = self._cleanup_metadata(updated)
+        metadata.update(review_metadata)
+        return StageResult.needs_action(line or "等待 115 转存源清理", metadata)
+
+    @staticmethod
+    def _positive_timestamp(value: Any) -> float:
+        try:
+            timestamp = float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return timestamp if timestamp > 0 else 0.0
+
+    @staticmethod
+    def _review_checkpoints(value: Any) -> list[int]:
+        if not isinstance(value, (list, tuple)):
+            return []
+        checkpoints: list[int] = []
+        for item in value:
+            try:
+                checkpoint = int(item)
+            except (TypeError, ValueError):
+                continue
+            if checkpoint > 0 and checkpoint not in checkpoints:
+                checkpoints.append(checkpoint)
+        return checkpoints
+
+    @staticmethod
+    def _as_bool_flag(value: Any) -> bool:
+        return str(value or "").strip().lower() in {"1", "true", "yes"}
+
+    def _share_review_metadata(
+        self,
+        task,
+        row: dict[str, Any],
+        status: str,
+        *,
+        error: str | None = None,
+        checks: list[int] | None = None,
+        last_at: float | None = None,
+        next_at: float | None = None,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {}
+        created_at = self._positive_timestamp(task.metadata.get("share_created_at"))
+        if created_at:
+            metadata["share_created_at"] = created_at
+        existing_checks = self._review_checkpoints(task.metadata.get("share_review_checks"))
+        metadata["share_review_status"] = status
+        metadata["share_review_checks"] = checks if checks is not None else existing_checks
+        metadata["share_review_last_at"] = (
+            last_at if last_at is not None else task.metadata.get("share_review_last_at") or 0
+        )
+        metadata["share_review_next_at"] = (
+            next_at if next_at is not None else task.metadata.get("share_review_next_at") or 0
+        )
+        metadata["share_review_error"] = (
+            str(task.metadata.get("share_review_error") or "") if error is None else str(error)
+        )
+        return metadata
+
+    def _read_share_review_state(self, own_code: str, own_pwd: str) -> dict[str, Any]:
+        if hasattr(self.p115, "list_own_share_states"):
+            states = self.p115.list_own_share_states(limit=100)
+            if isinstance(states, dict) and own_code in states:
+                return dict(states[own_code])
+        return self.p115.inspect_share(own_code, own_pwd)
+
+    def _advance_share_review(self, task, row: dict[str, Any]) -> tuple[str, dict[str, Any], str, float]:
+        created_at = self._positive_timestamp(task.metadata.get("share_created_at"))
+        if not created_at:
+            metadata = self._share_review_metadata(
+                task,
+                row,
+                "unknown",
+                error="缺少自有分享创建时间，拒绝自动清理历史源文件",
+            )
+            return "invalid", metadata, "缺少自有分享创建时间，拒绝自动清理历史源文件", 0
+
+        configured = tuple(int(value) for value in self.self_share_config.review_checkpoints_seconds if int(value) > 0)
+        if not configured:
+            configured = (max(1, int(self.self_share_config.review_grace_seconds)),)
+        checks = self._review_checkpoints(task.metadata.get("share_review_checks"))
+        checks = [checkpoint for checkpoint in configured if checkpoint in checks]
+        next_checkpoint = next((checkpoint for checkpoint in configured if checkpoint not in checks), None)
+        now = self._now()
+        if next_checkpoint is None:
+            metadata = self._share_review_metadata(
+                task,
+                row,
+                "passed",
+                checks=checks,
+                last_at=self._positive_timestamp(task.metadata.get("share_review_last_at")),
+                next_at=0,
+                error="",
+            )
+            return "passed", metadata, "115 异步审核观察期已通过", 0
+
+        checkpoint_at = created_at + next_checkpoint
+        if now < checkpoint_at:
+            delay = max(1.0, checkpoint_at - now)
+            metadata = self._share_review_metadata(
+                task,
+                row,
+                "pending",
+                checks=checks,
+                next_at=checkpoint_at,
+                error="",
+            )
+            remaining = max(1, int(delay))
+            return "pending", metadata, f"等待 115 异步审核检查点（还需约 {remaining} 秒），源文件暂不清理", delay
+
+        own_code = str(row.get("own_share_code") or "").strip()
+        own_pwd = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+        try:
+            status = self._read_share_review_state(own_code, own_pwd)
+        except P115ShareUnavailableError as exc:
+            metadata = self._share_review_metadata(task, row, "invalid", error=str(exc), checks=checks, next_at=0)
+            return "invalid", metadata, str(exc), 0
+        except RuntimeError as exc:
+            retry_after = max(60, min(300, int(self.self_share_config.review_list_cache_seconds)))
+            metadata = self._share_review_metadata(
+                task,
+                row,
+                "unknown",
+                error=str(exc),
+                checks=checks,
+                next_at=now + retry_after,
+            )
+            return "unknown", metadata, "115 分享状态暂时无法确认，等待风控冷却或网络恢复，源文件暂不清理", retry_after
+
+        share_state = str(status.get("share_state") or "").strip().lower()
+        have_vio_file = self._as_bool_flag(status.get("have_vio_file"))
+        if status.get("available") is False:
+            metadata = self._share_review_metadata(task, row, "invalid", error="115 分享不可用", checks=checks, next_at=0)
+            return "invalid", metadata, "115 分享不可用", 0
+        if have_vio_file or (share_state and share_state not in {"0", "1", "true"}):
+            reason = "115 标记 have_vio_file" if have_vio_file else f"115 分享状态不可用：{share_state or '未知'}"
+            metadata = self._share_review_metadata(task, row, "invalid", error=reason, checks=checks, next_at=0)
+            return "invalid", metadata, reason, 0
+        if not share_state:
+            retry_after = max(60, min(300, int(self.self_share_config.review_list_cache_seconds)))
+            metadata = self._share_review_metadata(
+                task,
+                row,
+                "unknown",
+                error="115 未返回明确分享状态",
+                checks=checks,
+                next_at=now + retry_after,
+            )
+            return "unknown", metadata, "115 未返回明确分享状态，源文件暂不清理", retry_after
+
+        checks = [*checks, next_checkpoint]
+        next_remaining = next((checkpoint for checkpoint in configured if checkpoint not in checks), None)
+        if next_remaining is None:
+            metadata = self._share_review_metadata(
+                task,
+                row,
+                "passed",
+                checks=checks,
+                last_at=now,
+                next_at=0,
+                error="",
+            )
+            return "passed", metadata, "115 异步审核观察期已通过", 0
+        next_at = created_at + next_remaining
+        metadata = self._share_review_metadata(
+            task,
+            row,
+            "pending",
+            checks=checks,
+            last_at=now,
+            next_at=next_at,
+            error="",
+        )
+        delay = max(1.0, next_at - now)
+        return "pending", metadata, f"115 异步审核检查通过，等待下一个检查点（还需约 {int(delay)} 秒）", delay
 
     def _recognition_from_row(self, row: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -1813,9 +1936,7 @@ def send_emby_confirmed(
         library_line,
     ]
     if cleanup_client:
-        updated, cleanup_line = cleanup_own_share_source(store, updated, cleanup_client)
-        if cleanup_line:
-            lines.append(cleanup_line)
+        lines.append("115 转存源未自动清理：旧兼容路径不执行异步审核后的删除，请启用 TaskRunner")
     if debug_details or not library_name:
         lines.extend(
             [

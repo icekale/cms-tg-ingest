@@ -236,6 +236,53 @@ class CmsPlaybackProbeTests(unittest.TestCase):
         self.assertEqual(http.calls[1][2]["share_duration"], -1)
         self.assertNotIn("action", http.calls[1][2])
 
+    def test_create_long_share_does_not_ignore_115_warning(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, method, dict(data or {})))
+                if url.endswith("/share/send"):
+                    return {"state": True, "data": {"share_code": "dummytest", "receive_code": "1212"}}
+                if url.endswith("/share/updateshare"):
+                    return {"state": True}
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        bridge.P115WebClient("UID=1", http=http, timeout=3).create_long_share("folder-id")
+
+        self.assertEqual(http.calls[0][2]["ignore_warn"], 0)
+
+    def test_list_own_share_states_returns_state_and_violation_flags_with_cache(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = 0
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls += 1
+                assert url == "https://webapi.115.com/share/slist"
+                return {
+                    "state": True,
+                    "data": {
+                        "list": [
+                            {"share_code": "share-a", "share_state": 1, "have_vio_file": 0, "create_time": 10},
+                            {"share_code": "share-b", "share_state": 6, "have_vio_file": 1, "create_time": 11},
+                        ]
+                    },
+                }
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3, share_list_cache_ttl_seconds=300)
+
+        first = client.list_own_share_states()
+        second = client.list_own_share_states()
+
+        self.assertEqual(first["share-a"], {"share_state": "1", "have_vio_file": False, "create_time": 10})
+        self.assertEqual(first["share-b"], {"share_state": "6", "have_vio_file": True, "create_time": 11})
+        self.assertEqual(first, second)
+        self.assertEqual(http.calls, 1)
+
     def test_receive_share_to_cid_gets_snap_file_ids_then_receives_to_target_cid(self):
         class FakeHttp:
             def __init__(self):
@@ -835,7 +882,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
 
 
-    def test_prepare_deletes_115_source_immediately_after_own_share_created(self):
+    def test_prepare_does_not_delete_115_source_before_task_runner_review(self):
         events = []
 
         class FakeStore:
@@ -884,11 +931,11 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
         row, _source_path = workflow.prepare(dict(store.row), {"title": "高地战", "tmdb_id": "79553"}, "高地战 (2011) {tmdb-79553}")
 
-        self.assertEqual(events, ["organize", "share:fid-final", "delete:fid-final", "sync:dummyown"])
-        self.assertEqual(row["cleanup_status"], "deleted")
-        self.assertEqual(store.cleanup["file_id"], "fid-final")
+        self.assertEqual(events, ["organize", "share:fid-final", "sync:dummyown"])
+        self.assertIsNone(store.cleanup)
+        self.assertNotEqual(row.get("cleanup_status"), "deleted")
 
-    def test_prepare_deletes_receive_residue_immediately_after_own_share_created(self):
+    def test_prepare_does_not_scan_or_delete_receive_residue_before_task_runner_review(self):
         events = []
 
         class FakeStore:
@@ -939,18 +986,8 @@ class SelfShareWorkflowTests(unittest.TestCase):
             "The.Banker.2020.1080p.BluRay.REMUX.AVC.DTS-HD.MA.TrueHD.7.1-FGT.mkv",
         )
 
-        self.assertEqual(
-            events,
-            [
-                "organize",
-                "share:fid-final",
-                "find_residue:recent:1781962277.0",
-                "delete:fid-recent",
-                "delete:fid-final",
-                "sync:dummyown",
-            ],
-        )
-        self.assertEqual(row["cleanup_status"], "deleted")
+        self.assertEqual(events, ["organize", "share:fid-final", "sync:dummyown"])
+        self.assertNotEqual(row.get("cleanup_status"), "deleted")
 
     def test_prepare_sets_category_from_organized_folder_parent_cid(self):
         class FakeStore:
@@ -1161,7 +1198,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
         self.assertEqual(recognition["category"], "外国电视")
         self.assertEqual(store.recognition[2], "openai_confident")
 
-    def test_emby_confirmation_deletes_own_share_source_after_strm_is_moved(self):
+    def test_legacy_emby_confirmation_does_not_delete_own_share_source(self):
         class FakeStore:
             def __init__(self):
                 self.cleanup = None
@@ -1197,10 +1234,10 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
         bridge.send_emby_confirmed(telegram, 464100862, store, row, item, emby=None, cleanup_client=p115)
 
-        self.assertEqual(p115.deleted, ["fid-final"])
+        self.assertEqual(p115.deleted, [])
         self.assertEqual(p115.cancelled, [])
-        self.assertEqual(store.cleanup["status"], "deleted")
-        self.assertIn("115转存源已删除", telegram.messages[0])
+        self.assertIsNone(store.cleanup)
+        self.assertNotIn("115转存源已删除", telegram.messages[0])
 
     def test_cleanup_waits_until_own_share_is_created(self):
         class FakeStore:
@@ -1473,7 +1510,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertIn("文件夹 TMDB 1356587", updated["move_error"])
             self.assertFalse((dest / "movie.strm").exists())
 
-    def test_cleanup_pending_self_share_sources_after_move_and_emby_confirmed(self):
+    def test_cleanup_pending_self_share_sources_requires_task_runner_review(self):
         class FakeP115:
             def __init__(self):
                 self.deleted = []
@@ -1502,9 +1539,9 @@ class SelfShareWorkflowTests(unittest.TestCase):
             cleaned = bridge.cleanup_pending_self_share_sources(store, p115, limit=10)
             updated = store.find_by_id(int(row["id"]))
 
-            self.assertEqual(cleaned, 1)
-            self.assertEqual(p115.deleted, ["fid-final"])
-            self.assertEqual(updated["cleanup_status"], "deleted")
+            self.assertEqual(cleaned, 0)
+            self.assertEqual(p115.deleted, [])
+            self.assertEqual(updated["cleanup_status"], "pending")
 
     def test_repair_stranded_self_share_folder_moves_it_to_library(self):
         with tempfile.TemporaryDirectory() as tmp:
