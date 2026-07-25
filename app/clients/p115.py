@@ -449,6 +449,8 @@ class P115WebClient:
     ) -> dict[str, Any]:
         page_size = max(1, min(int(limit), 100))
         page_offset = max(0, int(offset))
+        if page_offset >= 5000:
+            raise RuntimeError("115 share root exceeds 5000 entries")
         resp = self._request(
             "https://webapi.115.com/share/snap",
             params={
