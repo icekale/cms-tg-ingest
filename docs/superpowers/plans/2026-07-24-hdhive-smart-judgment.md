@@ -507,27 +507,27 @@ git commit -m "feat: expose HDHive smart judgment in Web UI"
 - Modify: `docs/dockerhub-overview.md`
 - Modify: `tests/test_hdhive_subscription_docs.py`
 
-- [ ] **Step 1: Write documentation assertions.**
+- [x] **Step 1: Write documentation assertions.**
 
 Add tests that require the docs to explain `S01E01-S01E10`, `S02`, Emby existing-episode skipping, TMDB completion detection, and the rule that unparsed/high-cost episodes are not automatically unlocked.
 
-- [ ] **Step 2: Run documentation tests and confirm the new text is absent.**
+- [x] **Step 2: Run documentation tests and confirm the new text is absent.**
 
 Run: `python -m pytest -q tests/test_hdhive_subscription_docs.py`
 
 Expected: FAIL for the missing smart judgment terms.
 
-- [ ] **Step 3: Update the Chinese user documentation.**
+- [x] **Step 3: Update the Chinese user documentation.**
 
 Document the default behavior, filter examples, `completed`/resume semantics, Emby failure fallback, and the recommended safe rollout: pause an existing subscription, run a manual check, inspect summaries, then resume. Do not add secrets or real account identifiers.
 
-- [ ] **Step 4: Run documentation and release checks.**
+- [x] **Step 4: Run documentation and release checks.**
 
 Run: `python -m pytest -q tests/test_hdhive_subscription_docs.py tests/test_secret_hygiene.py tests/test_dockerfile.py`
 
 Expected: PASS with no secret-hygiene findings.
 
-- [ ] **Step 5: Run the complete regression suite and local build checks.**
+- [x] **Step 5: Run the complete regression suite and local build checks.**
 
 Run:
 
@@ -540,7 +540,7 @@ docker build -t cms-tg-ingest:smart-judgment .
 
 Expected: all Python tests pass, Python compilation succeeds, the Vue build succeeds, and the Docker image builds without embedding secrets.
 
-- [ ] **Step 6: Commit documentation and final local verification.**
+- [x] **Step 6: Commit documentation and final local verification.**
 
 ```bash
 git add README.md PRODUCT.md docs/dockerhub-overview.md tests/test_hdhive_subscription_docs.py
@@ -552,10 +552,10 @@ Expected: clean worktree except for explicitly unrelated user changes; do not re
 
 ## Final Verification Checklist
 
-- [ ] Existing HDHive subscription tests remain green.
-- [ ] No extra 115 scan or concurrency was introduced.
-- [ ] Emby API keys and HDHive tokens are absent from URLs, logs, API payloads, and rendered pages.
-- [ ] Old subscription databases migrate in place and retain existing unlocked/enqueued items.
-- [ ] Filtered and Emby-existing episodes never call HDHive unlock.
-- [ ] Unknown TMDB/Emby states do not produce false `completed` status.
-- [ ] Completed subscriptions can be resumed without deleting existing TaskStore tasks or media files.
+- [x] Existing HDHive subscription tests remain green.
+- [x] No extra 115 scan or concurrency was introduced.
+- [x] Emby API keys and HDHive tokens are absent from URLs, logs, API payloads, and rendered pages.
+- [x] Old subscription databases migrate in place and retain existing unlocked/enqueued items.
+- [x] Filtered and Emby-existing episodes never call HDHive unlock.
+- [x] Unknown TMDB/Emby states do not produce false `completed` status.
+- [x] Completed subscriptions can be resumed without deleting existing TaskStore tasks or media files.
