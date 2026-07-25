@@ -962,6 +962,7 @@ class TaskStore:
         error_summary: str = "",
         error_detail: str = "",
         increment_retry: bool = False,
+        deduplicate: bool = False,
         submission_id: int | None = None,
         metadata_patch: dict[str, Any] | None = None,
         metadata_delete_keys: tuple[str, ...] | None = None,
@@ -1018,6 +1019,18 @@ class TaskStore:
                 """,
                 (task_id,),
             ).fetchone()
+            duplicate_event = bool(
+                deduplicate
+                and last_event
+                and last_event["stage"] == stage.value
+                and last_event["status"] == status.value
+                and last_event["message"] == message
+                and last_event["error_type"] == error_type
+                and last_event["error_detail"] == error_detail
+                and str(current["error_summary"] or "") == str(error_summary or "")
+            )
+            if duplicate_event:
+                return self._snapshot(current)
             duplicate_running_event = bool(
                 status == TaskStatus.RUNNING
                 and last_event
@@ -1309,7 +1322,6 @@ class TaskStore:
             TaskStage.RECEIVED,
             TaskStatus.PENDING,
             message,
-            increment_retry=True,
             metadata_patch={
                 "retry_from_stage": task.current_stage.value,
                 "retry_stage": TaskStage.RECEIVED.value,

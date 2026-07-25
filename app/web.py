@@ -816,7 +816,6 @@ def _apply_task_action(store: TaskStore, task: Any, action: str) -> bool:
             task,
             target_stage=TaskStage.RECEIVED,
             target_event_message="Web 触发从头重跑",
-            increment_retry=True,
             metadata_patch={
                 "retry_from_stage": task.current_stage.value,
                 "retry_stage": TaskStage.RECEIVED.value,
@@ -980,7 +979,6 @@ def fix_quality_issues(store: TaskStore) -> int:
                 task,
                 target_stage=TaskStage.RECEIVED,
                 target_event_message="Web 巡检自动修复：从头重跑",
-                increment_retry=True,
                 metadata_patch={
                     "retry_from_stage": task.current_stage.value,
                     "retry_stage": TaskStage.RECEIVED.value,

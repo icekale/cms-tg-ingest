@@ -864,6 +864,7 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.status, TaskStatus.FAILED)
             self.assertEqual(updated.error_type, "stage_exception")
             self.assertIn("boom", updated.error_summary)
+            self.assertEqual(updated.retry_count, 0)
             self.assertEqual(updated.claimed_by, "")
             self.assertIn("Task stage failed task_id=1 stage=strm_ready", logs.output[0])
 

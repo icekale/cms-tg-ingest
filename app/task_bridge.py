@@ -82,30 +82,6 @@ def _runtime_metadata(row: dict[str, Any], extra: dict[str, Any]) -> dict[str, A
     return metadata
 
 
-def _last_event_matches(
-    store: TaskStore,
-    task: TaskSnapshot,
-    stage: TaskStage,
-    status: TaskStatus,
-    message: str,
-    error_type: str,
-    error_detail: str,
-    error_summary: str,
-) -> bool:
-    events = store.list_events(task.id)
-    if not events:
-        return False
-    last = events[-1]
-    return (
-        last.get("stage") == stage.value
-        and last.get("status") == status.value
-        and last.get("message") == message
-        and _text(last.get("error_type")) == error_type
-        and _text(last.get("error_detail")) == error_detail
-        and _text(task.error_summary) == error_summary
-    )
-
-
 def ensure_task_for_link(
     task_store: TaskStore | None,
     share_code: str,
@@ -148,8 +124,6 @@ def record_submission_event(
     error_type = _text(metadata.get("error_type"))
     error_summary = _text(metadata.get("error_summary"))
     error_detail = _text(metadata.get("error_detail"))
-    if _last_event_matches(task_store, task, stage, status, message, error_type, error_detail, error_summary):
-        return task
     meta = _metadata(row, metadata)
     return task_store.record_event(
         task.id,
@@ -162,7 +136,7 @@ def record_submission_event(
         error_type=error_type,
         error_summary=error_summary,
         error_detail=error_detail,
-        increment_retry=bool(metadata.get("increment_retry", False)),
+        deduplicate=True,
         submission_id=int(row["id"]) if row.get("id") not in (None, "") else None,
         metadata_patch=_runtime_metadata(row, metadata),
     )
@@ -185,7 +159,6 @@ def record_failure(
         error_type=error_type,
         error_summary=error_summary,
         error_detail=error_detail,
-        increment_retry=True,
     )
 
 

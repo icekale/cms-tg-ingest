@@ -528,6 +528,11 @@ class FakeCmsSubmit:
         return {"code": 200}
 
 
+class FailingCmsSubmit(FakeCmsSubmit):
+    def add_share_down(self, link):
+        raise RuntimeError("CMS unavailable")
+
+
 class FakeP115Receive:
     def __init__(self):
         self.received = []
@@ -589,6 +594,29 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(len(tasks), 1)
             self.assertEqual(len(cms.submitted), 1)
             self.assertIn("cms_submitted", [event["stage"] for event in task_store.list_events(tasks[0].id)])
+
+    def test_cms_submit_exception_records_failure_without_retry_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("https://115cdn.com/s/abc"),
+                FailingCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+            )
+
+            task = task_store.find_task_by_share_key("abc", "")
+            events = task_store.list_events(task.id)
+            self.assertEqual(task.status, TaskStatus.FAILED)
+            self.assertEqual(task.error_type, "cms_submit_failed")
+            self.assertEqual(task.retry_count, 0)
+            self.assertEqual([event["stage"] for event in events], ["received", "cms_submitted"])
 
     def test_handle_update_without_task_store_preserves_existing_behavior(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1399,7 +1427,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(updated.current_stage, TaskStage.RECEIVED)
             self.assertEqual(updated.next_run_at, 0)
             self.assertEqual(updated.claimed_by, "")
-            self.assertEqual(updated.retry_count, 1)
+            self.assertEqual(updated.retry_count, 0)
             self.assertEqual(updated.metadata["retry_from_stage"], TaskStage.CLEANED.value)
             self.assertEqual(updated.metadata["retry_stage"], TaskStage.RECEIVED.value)
             self.assertTrue(updated.metadata["force_reprocess"])

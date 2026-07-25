@@ -1,6 +1,9 @@
+from concurrent.futures import ThreadPoolExecutor
 import tempfile
 import unittest
 from pathlib import Path
+from threading import Barrier
+from unittest.mock import patch
 
 from app.models import TaskStage, TaskStatus
 from app.task_bridge import ensure_task_for_link, record_failure, record_submission_event, sync_task_from_submission
@@ -135,6 +138,7 @@ class TaskBridgeTests(unittest.TestCase):
             self.assertEqual(task.error_type, "cms_submit_failed")
             self.assertEqual(task.error_summary, "CMS 提交失败")
             self.assertEqual(store.list_events(task.id)[0]["error_detail"], "HTTP 500")
+            self.assertEqual(task.retry_count, 0)
 
     def test_replaying_same_failure_event_does_not_duplicate_event_or_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -158,9 +162,36 @@ class TaskBridgeTests(unittest.TestCase):
                 error_detail="HTTP 500",
             )
 
-            self.assertEqual(first.retry_count, 1)
-            self.assertEqual(second.retry_count, 1)
+            self.assertEqual(first.retry_count, 0)
+            self.assertEqual(second.retry_count, 0)
             self.assertEqual(len(store.list_events(first.id)), 1)
+
+    def test_concurrent_failure_events_are_deduplicated_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "tasks.db"
+            stores = [TaskStore(db_path), TaskStore(db_path)]
+            barrier = Barrier(2)
+            original_record_event = TaskStore.record_event
+
+            def synchronized_record_event(store, *args, **kwargs):
+                barrier.wait(timeout=5)
+                return original_record_event(store, *args, **kwargs)
+
+            row = {"share_code": "abc", "receive_code": "", "url": "https://115cdn.com/s/abc"}
+            with patch.object(TaskStore, "record_event", new=synchronized_record_event):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    results = list(executor.map(lambda store: record_failure(
+                        store,
+                        row,
+                        TaskStage.CMS_SUBMITTED,
+                        "CMS 提交失败",
+                        error_type="cms_submit_failed",
+                        error_detail="HTTP 500",
+                    ), stores))
+
+            task = stores[0].find_task(results[0].id)
+            self.assertEqual(task.retry_count, 0)
+            self.assertEqual(len(stores[0].list_events(task.id)), 1)
 
     def test_none_task_store_is_noop(self):
         self.assertIsNone(ensure_task_for_link(None, "abc", "", "https://115cdn.com/s/abc"))

@@ -316,7 +316,6 @@ class TaskRunner:
                 error_type="stage_exception",
                 error_summary=str(exc) or exc.__class__.__name__,
                 error_detail=repr(exc),
-                increment_retry=True,
                 clear_claim=True,
             )
             return True

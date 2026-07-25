@@ -949,7 +949,7 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual([response[0] for response in responses], [303, 303])
             self.assertEqual(updated.status, TaskStatus.PENDING)
             self.assertEqual(updated.current_stage, TaskStage.RECEIVED)
-            self.assertEqual(updated.retry_count, 1)
+            self.assertEqual(updated.retry_count, 0)
             self.assertEqual(sum(event["message"] == "Web 触发从头重跑" for event in events), 1)
             self.assertTrue(updated.metadata["force_reprocess"])
 
@@ -988,7 +988,7 @@ class WebAdminTests(unittest.TestCase):
                 TaskStage.CLEANED,
                 ("Web 巡检自动修复：从头重跑",),
                 TaskStage.RECEIVED,
-                1,
+                0,
                 "direct_strm",
             ),
         )
@@ -1073,7 +1073,7 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(updated.current_stage, TaskStage.RECEIVED)
             self.assertEqual(updated.next_run_at, 0)
             self.assertEqual(updated.claimed_by, "")
-            self.assertEqual(updated.retry_count, 1)
+            self.assertEqual(updated.retry_count, 0)
             self.assertEqual(updated.metadata["retry_from_stage"], TaskStage.CLEANED.value)
             self.assertEqual(updated.metadata["retry_stage"], TaskStage.RECEIVED.value)
             self.assertTrue(updated.metadata["force_reprocess"])
@@ -1289,7 +1289,7 @@ class WebAdminTests(unittest.TestCase):
                 self.assertEqual(second_status, 303)
                 self.assertEqual(updated.current_stage, TaskStage.RECEIVED)
                 self.assertEqual(updated.status, TaskStatus.PENDING)
-                self.assertEqual(updated.retry_count, 1)
+                self.assertEqual(updated.retry_count, 0)
                 self.assertEqual(sum(event["message"] == "Web 巡检自动修复：从头重跑" for event in events), 1)
 
     def test_quality_page_scheduled_active_tasks_remain_noop(self):
