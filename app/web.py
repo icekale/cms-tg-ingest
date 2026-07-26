@@ -10,6 +10,7 @@ from threading import Thread
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
+from . import __version__
 from .config import SelfShareConfig
 from .models import RetryAction, TaskStage, TaskStatus
 from .quality import QualityIssue, format_task_quality_report, scan_task_quality
@@ -26,6 +27,7 @@ from .task_engine import decide_retry, stage_display_name
 from .task_health import build_task_health, format_task_health
 from .task_store import REPROCESS_METADATA_DELETE_KEYS, TaskStore, build_reprocess_metadata
 from .self_share_settings import resolve_own_share_receive_code
+from .strm_mode import STRM_MODE_LABELS
 from .web_api import (
     api_response,
     api_task_detail,
@@ -305,6 +307,7 @@ code {{ background: #eef2f7; padding: 2px 5px; border-radius: 6px; }}
 <main class="shell">
 {body}
 </main>
+<footer class="shell subtle">cms-tg-ingest {html.escape(__version__)}</footer>
 </body>
 </html>"""
 
@@ -1570,6 +1573,19 @@ class WebApp:
                 "tasks": api_tasks(self.store, limit=20),
                 "health": serialize_health(self.store, enabled=self.task_engine_enabled),
                 "strm_default_mode": self.store.get_default_strm_mode(),
+                "own_share_receive_code": self._own_share_receive_code_payload(),
+            }
+            status, response_headers, response_body = api_response(payload)
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "GET" and path == "/api/v1/settings":
+            payload = {
+                "app_name": "cms-tg-ingest",
+                "version": __version__,
+                "strm_default_mode": self.store.get_default_strm_mode(),
+                "strm_modes": [
+                    {"value": value, "label": STRM_MODE_LABELS[value]}
+                    for value in ("shared", "direct", "source_shared")
+                ],
                 "own_share_receive_code": self._own_share_receive_code_payload(),
             }
             status, response_headers, response_body = api_response(payload)

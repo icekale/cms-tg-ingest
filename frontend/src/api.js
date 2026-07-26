@@ -10,6 +10,7 @@ async function request(path, options = {}) {
 
 export const api = {
   overview: () => request('overview'),
+  settings: () => request('settings'),
   tasks: () => request('tasks'),
   task: (id) => request(`tasks/${id}`),
   health: () => request('health'),

@@ -30,6 +30,10 @@ class P115ShareUnavailableError(RuntimeError):
     """Raised when 115 confirms that a share no longer exists or is invalid."""
 
 
+class P115SharePendingError(RuntimeError):
+    """Raised when 115 accepts share creation but has not issued a share code."""
+
+
 def is_p115_risk_control_message(value: str) -> bool:
     text = str(value or "")
     return any(
@@ -1093,8 +1097,11 @@ class P115WebClient:
         share_code = str(resp.get("share_code") or data.get("share_code") or "").strip()
         receive_code = str(resp.get("receive_code") or data.get("receive_code") or "").strip()
         share_url = str(resp.get("share_url") or data.get("share_url") or "").strip()
+        if not share_code and share_url:
+            match = re.search(r"/s/([A-Za-z0-9]+)", share_url)
+            share_code = match.group(1) if match else ""
         if not share_code:
-            raise RuntimeError("115 create share did not return share_code")
+            raise P115SharePendingError("115 create share did not return share_code")
         actual_receive_code = str(preferred_receive_code or receive_code or "1212").strip() or "1212"
         update = self._request(
             "https://webapi.115.com/share/updateshare",

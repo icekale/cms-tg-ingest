@@ -459,6 +459,47 @@ class CmsPlaybackProbeTests(unittest.TestCase):
 
         self.assertEqual(http.calls[0][2]["ignore_warn"], 0)
 
+    def test_create_long_share_reports_success_without_share_code_as_pending(self):
+        from app.clients.p115 import P115SharePendingError
+
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                if url.endswith("/share/send"):
+                    return {"state": True, "data": {"share_state": "processing"}}
+                raise AssertionError(url)
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        with self.assertRaises(P115SharePendingError):
+            client.create_long_share("folder-id")
+
+    def test_create_long_share_extracts_share_code_from_processing_share_url(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, data))
+                if url.endswith("/share/send"):
+                    return {
+                        "state": True,
+                        "data": {
+                            "share_state": "processing",
+                            "share_url": "https://115cdn.com/s/swso9jn3wul?password=1212&#",
+                        },
+                    }
+                if url.endswith("/share/updateshare"):
+                    return {"state": True, "data": {}}
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        result = client.create_long_share("folder-id", preferred_receive_code="1212")
+
+        self.assertEqual(result["share_code"], "swso9jn3wul")
+        self.assertEqual(http.calls[1][1]["share_code"], "swso9jn3wul")
+
     def test_list_own_share_states_returns_state_and_violation_flags_with_cache(self):
         class FakeHttp:
             def __init__(self):

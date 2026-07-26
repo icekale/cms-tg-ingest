@@ -12,6 +12,7 @@ from app.clients.cms import CmsClient, CmsSharePlaybackUnavailableError
 from app.cms_cloud_index import CmsCloudDataIndex
 from app.clients.p115 import (
     P115RiskControlError,
+    P115SharePendingError,
     P115ShareUnavailableError,
     P115WebClient,
     category_for_115_parent_id,
@@ -1362,6 +1363,12 @@ class BridgeSelfShareTaskWorkflow:
             receive_code = resolve_own_share_receive_code(self.task_store, self.self_share_config).value
             try:
                 share = self.p115.create_long_share(file_id, preferred_receive_code=receive_code)
+            except P115SharePendingError:
+                return StageResult.defer(
+                    "等待 115 完成分享创建",
+                    1800,
+                    self._own_share_metadata(row) | {"share_create_status": "pending"},
+                )
             except RuntimeError as exc:
                 direct_file_id, direct_relative_path = self._direct_file_share_details(task)
                 if not direct_file_id or not self._is_gone_share_source_error(exc):

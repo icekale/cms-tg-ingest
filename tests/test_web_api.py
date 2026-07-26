@@ -187,6 +187,22 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(frontend_status, 404)
         self.assertIn(b"Frontend asset not found", frontend_body)
 
+    def test_settings_api_exposes_three_strm_modes_and_program_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            app = WebApp(store)
+
+            status, _headers, body = app.handle_request("GET", "/api/v1/settings", {}, b"")
+            payload = json.loads(body)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["app_name"], "cms-tg-ingest")
+        self.assertRegex(payload["version"], r"^\d+\.\d+\.\d+$")
+        self.assertEqual(
+            [item["value"] for item in payload["strm_modes"]],
+            ["shared", "direct", "source_shared"],
+        )
+
     def test_own_share_receive_code_api_masks_reads_and_supports_clear(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

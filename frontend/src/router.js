@@ -5,6 +5,7 @@ import TaskDetail from './views/TaskDetail.vue'
 import Quality from './views/Quality.vue'
 import Health from './views/Health.vue'
 import Hdhive from './views/Hdhive.vue'
+import Settings from './views/Settings.vue'
 
 export default createRouter({
   history: createWebHistory('/app/'),
@@ -16,5 +17,6 @@ export default createRouter({
     { path: '/quality', component: Quality },
     { path: '/health', component: Health },
     { path: '/hdhive', component: Hdhive },
+    { path: '/settings', component: Settings },
   ],
 })

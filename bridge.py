@@ -173,7 +173,7 @@ from app.telegram_ui import (
 from app.task_runner import StageResult, TaskRunner
 from app.task_store import TaskStore
 from app.web import start_web_server
-from app.workflows.direct import DirectTaskWorkflow, ModeRoutingWorkflow
+from app.workflows.direct import DirectTaskWorkflow, ModeRoutingWorkflow, SourceShareTaskWorkflow
 from app.workflows.self_share import (
     BridgeSelfShareTaskWorkflow,
     SelfShareWorkflow,
@@ -3591,6 +3591,14 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
             move_config=move_config,
             emby=emby,
         )
+        source_share_workflow = SourceShareTaskWorkflow(
+            cms=cms,
+            store=store,
+            move_config=move_config,
+            self_share_config=self_share_config,
+            emby=emby,
+            tmdb_resolver=tmdb_resolver,
+        )
         shared_workflow = None
         if self_share_config.enabled and p115:
             shared_workflow = BridgeSelfShareTaskWorkflow(
@@ -3612,6 +3620,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         task_workflow = ModeRoutingWorkflow(
             direct_workflow,
             shared_workflow,
+            source_share_workflow,
             default_mode=task_store.get_default_strm_mode(),
         )
         task_runner = TaskRunner(

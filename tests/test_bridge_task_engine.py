@@ -5,7 +5,7 @@ import time
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import bridge
 from app.clients import cms as cms_client
@@ -1344,6 +1344,34 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.p115.created_shares, ["folder-id"])
             self.assertEqual(self.cms.share_sync_calls, [("owncode", "ownpwd", "0", "/media/share")])
             self.assertEqual(self.cms.plain_share_down_calls, [])
+
+    def test_own_share_stage_defers_when_115_is_still_creating_share(self):
+        from app.clients.p115 import P115SharePendingError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="S-双喜-2025-[tmdb=123456]",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+            workflow.p115.create_long_share = Mock(side_effect=P115SharePendingError("processing"))
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(result.delay_seconds, 1800)
+            self.assertIn("等待 115 完成分享创建", result.message)
+            self.assertEqual(result.metadata["share_create_status"], "pending")
 
     def test_share_sync_stage_waits_for_another_task_to_finish_cms_share_sync(self):
         with tempfile.TemporaryDirectory() as tmp:

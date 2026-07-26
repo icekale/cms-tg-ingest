@@ -10,6 +10,11 @@ const task = ref(null)
 const busyAction = ref('')
 const terminalStatuses = ['succeeded', 'failed', 'needs_action']
 const downstreamStages = ['moved', 'emby_confirmed', 'cleaned']
+const modeOptions = [
+  { label: '自有分享 STRM', value: 'shared' },
+  { label: '直链 STRM', value: 'direct' },
+  { label: '原始分享 STRM', value: 'source_shared' },
+]
 
 async function load() {
   try { task.value = await api.task(route.params.id) } catch (err) { message.error(err.message) }
@@ -43,7 +48,7 @@ onMounted(load)
   <div v-if="task" class="page-title"><div><h1>{{ task.title }}</h1><p>#{{ task.id }} · {{ task.stage }}</p></div><n-tag>{{ task.status }}</n-tag></div>
   <n-card v-if="task" title="任务详情">
     <n-descriptions bordered :column="2">
-      <n-descriptions-item label="STRM 模式"><n-select style="width: 130px" :value="task.strm_mode" :options="[{label: '共享 STRM', value: 'shared'}, {label: '直链 STRM', value: 'direct'}]" @update:value="changeMode" /></n-descriptions-item>
+      <n-descriptions-item label="STRM 模式"><n-select style="width: 170px" :value="task.strm_mode" :options="modeOptions" @update:value="changeMode" /></n-descriptions-item>
       <n-descriptions-item label="分类">{{ task.category || '-' }}</n-descriptions-item>
       <n-descriptions-item label="为什么慢">{{ task.why_slow || '-' }}</n-descriptions-item>
       <n-descriptions-item label="阶段耗时">{{ task.stage_elapsed || '-' }}</n-descriptions-item>

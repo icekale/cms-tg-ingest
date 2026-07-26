@@ -7,6 +7,7 @@ import { api } from '../api'
 const data = ref(null)
 const error = ref('')
 const message = useMessage()
+const modeLabels = { shared: '自有分享', direct: '直链', source_shared: '原始分享' }
 async function load() { try { data.value = await api.overview(); error.value = '' } catch (err) { error.value = err.message } }
 async function clearHistory() {
   try {
@@ -26,7 +27,7 @@ onMounted(load)
       <n-card><n-statistic label="活跃任务" :value="data.health.pending_count + data.health.running_count" /></n-card>
       <n-card><n-statistic label="需处理" :value="data.health.problem_count" /></n-card>
       <n-card><n-statistic label="锁等待" :value="data.health.lock_wait_count" /></n-card>
-      <n-card><n-statistic label="默认 STRM" :value="data.strm_default_mode === 'shared' ? '共享' : '直链'" /></n-card>
+      <n-card><n-statistic label="默认 STRM" :value="modeLabels[data.strm_default_mode] || data.strm_default_mode" /></n-card>
     </div>
     <n-card title="当前队列" class="section-card">
       <n-space vertical>

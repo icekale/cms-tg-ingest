@@ -6,8 +6,12 @@ from typing import Any
 from .models import TaskStage, _SUCCESS_FLOW
 
 
-STRM_MODES = frozenset({"shared", "direct"})
-STRM_MODE_LABELS = {"shared": "共享 STRM", "direct": "直链 STRM"}
+STRM_MODES = frozenset({"shared", "direct", "source_shared"})
+STRM_MODE_LABELS = {
+    "shared": "自有分享 STRM",
+    "direct": "直链 STRM",
+    "source_shared": "原始分享 STRM",
+}
 
 _LOCKED_STAGES = frozenset(
     {
@@ -27,6 +31,14 @@ _DIRECT_SUCCESS_FLOW = {
     TaskStage.RECEIVED: TaskStage.ORGANIZING,
     TaskStage.CLOUD_DOWNLOADING: TaskStage.ORGANIZING,
     TaskStage.ORGANIZING: TaskStage.RECOGNIZING,
+    TaskStage.RECOGNIZING: TaskStage.STRM_READY,
+    TaskStage.STRM_READY: TaskStage.MOVED,
+    TaskStage.MOVED: TaskStage.EMBY_CONFIRMED,
+}
+
+_SOURCE_SHARED_SUCCESS_FLOW = {
+    TaskStage.RECEIVED: TaskStage.SHARE_SYNC_SUBMITTED,
+    TaskStage.SHARE_SYNC_SUBMITTED: TaskStage.RECOGNIZING,
     TaskStage.RECOGNIZING: TaskStage.STRM_READY,
     TaskStage.STRM_READY: TaskStage.MOVED,
     TaskStage.MOVED: TaskStage.EMBY_CONFIRMED,
@@ -80,4 +92,6 @@ def next_stage_for_mode(stage: TaskStage | str, strm_mode: str = "shared") -> Ta
     normalized_mode = normalize_strm_mode(strm_mode)
     if normalized_mode == "direct":
         return _DIRECT_SUCCESS_FLOW.get(target_stage)
+    if normalized_mode == "source_shared":
+        return _SOURCE_SHARED_SUCCESS_FLOW.get(target_stage)
     return _SUCCESS_FLOW.get(target_stage)

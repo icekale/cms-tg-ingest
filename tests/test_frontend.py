@@ -13,7 +13,7 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("naive-ui", package["dependencies"])
         self.assertIn("build", package["scripts"])
         router = (ROOT / "frontend/src/router.js").read_text(encoding="utf-8")
-        for route in ("/overview", "/tasks", "/quality", "/health", "/hdhive"):
+        for route in ("/overview", "/tasks", "/quality", "/health", "/hdhive", "/settings"):
             self.assertIn(route, router)
         self.assertIn("base: '/app/'", (ROOT / "frontend/vite.config.js").read_text(encoding="utf-8"))
 
@@ -23,17 +23,18 @@ class FrontendTests(unittest.TestCase):
         quality = (ROOT / "frontend/src/views/Quality.vue").read_text(encoding="utf-8")
         hdhive = (ROOT / "frontend/src/views/Hdhive.vue").read_text(encoding="utf-8")
         overview = (ROOT / "frontend/src/views/Overview.vue").read_text(encoding="utf-8")
+        settings = (ROOT / "frontend/src/views/Settings.vue").read_text(encoding="utf-8")
+        shell = (ROOT / "frontend/src/App.vue").read_text(encoding="utf-8")
 
         self.assertIn("taskAction", api)
         for action in ("retry", "emby", "restore", "reprocess"):
             self.assertIn(action, task_detail)
         self.assertIn("clearHistory", api)
         self.assertIn("clearHistory", overview)
-        tasks = (ROOT / "frontend/src/views/Tasks.vue").read_text(encoding="utf-8")
         self.assertIn("setOwnShareReceiveCode", api)
         self.assertIn("clearOwnShareReceiveCode", api)
-        self.assertIn("分享访问码", tasks)
-        self.assertIn('type="password"', tasks)
+        self.assertIn("分享访问码", settings)
+        self.assertIn('type="password"', settings)
         for control in ("fix", "run", "settings", "reset"):
             self.assertIn(control, api)
             self.assertIn(control, quality)
@@ -46,6 +47,11 @@ class FrontendTests(unittest.TestCase):
             self.assertIn(control, hdhive)
         for control in ("episode_filter", "已完结", "emby_skip_unavailable", "设置集数过滤"):
             self.assertIn(control, hdhive)
+        for mode in ("shared", "direct", "source_shared"):
+            self.assertIn(mode, settings)
+        self.assertIn("设置", shell)
+        self.assertIn("cms-tg-ingest", shell)
+        self.assertIn("version", shell)
 
 
 if __name__ == "__main__":

@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from app.config import MoveConfig, is_relative_to, is_under_any_root, safe_resolve
+from app.config import MoveConfig, SelfShareConfig, is_relative_to, is_under_any_root, safe_resolve
 from app.media.classify import (
+    apply_tmdb_hint_resolution,
+    apply_tmdb_search_resolution,
     extract_tmdb_id_from_name,
     item_tmdb_id,
     media_type_for_category,
@@ -17,8 +19,10 @@ from app.media.strm import (
     find_recent_direct_library_strm_source_dir,
     find_strm_source_dir,
     is_directory_stable,
+    iter_strm_files,
     plan_strm_move,
     validate_direct_strm_source,
+    validate_self_share_strm_file,
 )
 from app.models import TaskSnapshot, TaskStage
 from app.strm_mode import effective_task_strm_mode
@@ -612,23 +616,246 @@ class DirectTaskWorkflow:
         )
 
 
+class SourceShareTaskWorkflow(DirectTaskWorkflow):
+    """Generate STRM directly from the incoming 115 share without receiving it."""
+
+    def __init__(
+        self,
+        cms: Any,
+        store: Any,
+        move_config: MoveConfig,
+        self_share_config: SelfShareConfig,
+        *,
+        emby: Any | None = None,
+        tmdb_resolver: Any | None = None,
+        now: Callable[[], float] | None = None,
+        emby_retry_seconds: int = 15,
+    ):
+        share_root = safe_resolve(
+            Path(getattr(self_share_config, "strm_root", "/mnt/user/Unraid/strm/share"))
+        )
+        source_roots = [share_root]
+        source_roots.extend(
+            root for root in move_config.source_roots if safe_resolve(root) != share_root
+        )
+        super().__init__(
+            cms,
+            store,
+            MoveConfig(
+                source_roots=source_roots,
+                library_roots=move_config.library_roots,
+                conflict_policy=move_config.conflict_policy,
+                stable_seconds=move_config.stable_seconds,
+            ),
+            emby=emby,
+            now=now,
+            emby_retry_seconds=emby_retry_seconds,
+        )
+        self.self_share_config = self_share_config
+        self.tmdb_resolver = tmdb_resolver
+
+    def run_stage(self, task: TaskSnapshot) -> StageResult:
+        if effective_task_strm_mode(task) != "source_shared":
+            return StageResult.failed(
+                "原始分享任务模式不匹配",
+                error_type="strm_mode_mismatch",
+                metadata={"strm_mode": effective_task_strm_mode(task)},
+            )
+        if task.current_stage == TaskStage.RECEIVED:
+            return self._stage_received(task)
+        if task.current_stage == TaskStage.SHARE_SYNC_SUBMITTED:
+            return self._stage_share_sync_submitted(task)
+        if task.current_stage == TaskStage.RECOGNIZING:
+            return self._stage_recognizing(task)
+        if task.current_stage == TaskStage.STRM_READY:
+            return self._stage_strm_ready(task)
+        if task.current_stage == TaskStage.MOVED:
+            return self._stage_moved(task)
+        if task.current_stage == TaskStage.EMBY_CONFIRMED:
+            return self._stage_emby_confirmed(task)
+        return StageResult.failed("原始分享工作流不支持此阶段", error_type="unsupported_stage")
+
+    def _submission_metadata(self, row: dict[str, Any], **extra: Any) -> dict[str, Any]:
+        metadata = {
+            "submission_id": int(row["id"]),
+            "strm_mode": "source_shared",
+            "source_share": True,
+        }
+        metadata.update({key: value for key, value in extra.items() if value is not None})
+        return metadata
+
+    def _stage_received(self, task: TaskSnapshot) -> StageResult:
+        row = self._submission_row(task)
+        if row is None:
+            row = self.store.upsert_submission(
+                _ShareKey(task.share_code, task.receive_code),
+                task.url,
+                "received",
+                title=task.title or task.share_code,
+            )
+        row = self.store.update_self_share(
+            int(row["id"]),
+            workflow_mode="source_share_sync",
+            workflow_phase="source_share_received",
+            own_share_code=task.share_code,
+            own_share_receive_code=task.receive_code,
+            own_share_url=task.url,
+        ) or row
+        return StageResult.complete("已接收原始 115 分享链接", self._submission_metadata(row))
+
+    @staticmethod
+    def _share_marker(task: TaskSnapshot) -> str:
+        return f"/s/{task.share_code}_{task.receive_code}_"
+
+    def _find_source_share_dir(self, task: TaskSnapshot, row: dict[str, Any]) -> Path | None:
+        persisted = str(row.get("source_path") or task.metadata.get("source_path") or "").strip()
+        if persisted:
+            source = safe_resolve(Path(persisted))
+            if self._allowed_source(source) and source.is_dir():
+                return source
+        root = safe_resolve(self.self_share_config.strm_root)
+        if not root.is_dir():
+            return None
+        marker = self._share_marker(task)
+        try:
+            strm_files = root.rglob("*.strm")
+            for path in strm_files:
+                try:
+                    content = path.read_text(encoding="utf-8", errors="replace").strip()
+                except OSError:
+                    continue
+                if marker not in content:
+                    continue
+                relative = path.relative_to(root)
+                source = safe_resolve(root / relative.parts[0])
+                if source.is_dir():
+                    return source
+        except OSError:
+            return None
+        return None
+
+    def _stage_share_sync_submitted(self, task: TaskSnapshot) -> StageResult:
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        if str(row.get("share_sync_status") or "") != "submitted":
+            self.cms.add_share115_sync_task(
+                task.share_code,
+                task.receive_code,
+                self.self_share_config.cms_cid,
+                self.self_share_config.cms_local_path,
+            )
+            row = self.store.update_self_share(
+                int(row["id"]),
+                workflow_phase="source_share_sync_submitted",
+                share_sync_status="submitted",
+            ) or row
+        source = self._find_source_share_dir(task, row)
+        if source:
+            row = self.store.update_self_share(
+                int(row["id"]),
+                own_share_file_name=source.name,
+            ) or row
+            row = self.store.update_move(int(row["id"]), "pending", source_path=str(source)) or row
+        return StageResult.complete(
+            "已提交 CMS 原始分享同步",
+            self._submission_metadata(row, source_path=str(source) if source else ""),
+        )
+
+    def _stage_recognizing(self, task: TaskSnapshot) -> StageResult:
+        row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        source = self._find_source_share_dir(task, row)
+        if not source:
+            return StageResult.defer("等待原始分享 STRM 源目录生成", 15, self._submission_metadata(row))
+        share_name = source.name
+        recognition = self._recognition(row)
+        tmdb_id = extract_tmdb_id_from_name(share_name)
+        if tmdb_id:
+            recognition["tmdb_id"] = tmdb_id
+        recognition, should_prompt = apply_tmdb_hint_resolution(recognition, share_name, self.tmdb_resolver)
+        if should_prompt:
+            recognition, should_prompt = apply_tmdb_search_resolution(recognition, share_name, self.tmdb_resolver)
+        category = str(recognition.get("category") or "").strip()
+        if not category:
+            return StageResult.needs_action(
+                "无法识别原始分享 STRM 分类",
+                self._submission_metadata(row, source_path=str(source), recognition=recognition),
+            )
+        recognition["category"] = category
+        if not recognition.get("type"):
+            recognition["type"] = media_type_for_category(category)
+        recognition["share_name"] = share_name
+        row = self.store.update_status(int(row["id"]), "source_share_ready", title=share_name) or row
+        row = self.store.update_self_share(int(row["id"]), own_share_file_name=share_name) or row
+        row = self.store.update_recognition(int(row["id"]), recognition, "tmdb_resolved") or row
+        row = self.store.update_move(
+            int(row["id"]),
+            "pending",
+            source_path=str(source),
+            category_final=category,
+        ) or row
+        return StageResult.complete(
+            "已识别原始分享 STRM 分类",
+            self._submission_metadata(
+                row,
+                source_path=str(source),
+                recognition=recognition,
+                category=category,
+                tmdb_id=str(recognition.get("tmdb_id") or ""),
+            ),
+        )
+
+    def _find_source(self, task: TaskSnapshot, row: dict[str, Any], recognition: dict[str, Any]) -> Path | None:
+        return self._find_source_share_dir(task, row)
+
+    def _source_issue(self, source: Path, recognition: dict[str, Any], row: dict[str, Any]) -> str:
+        if not self._allowed_source(source):
+            return "源目录不在允许范围内"
+        expected_tmdb = str(recognition.get("tmdb_id") or row.get("tmdb_id") or "").strip()
+        folder_tmdb = extract_tmdb_id_from_name(source.name)
+        if expected_tmdb and folder_tmdb and expected_tmdb != folder_tmdb:
+            return f"任务 TMDB {expected_tmdb} 与文件夹 TMDB {folder_tmdb} 不一致，阻止移动 STRM"
+        marker = f"/s/{str(row.get('own_share_code') or '')}_{str(row.get('own_share_receive_code') or '')}_"
+        files = sorted(iter_strm_files(source))
+        if not files:
+            return "源目录不包含 STRM 文件"
+        for path in files:
+            issue = validate_self_share_strm_file(path, marker)
+            if issue:
+                return issue
+        return ""
+
+
 class ModeRoutingWorkflow(BridgeSelfShareTaskWorkflow):
-    def __init__(self, direct: DirectTaskWorkflow, shared: Any | None, default_mode: str = "shared"):
+    def __init__(
+        self,
+        direct: DirectTaskWorkflow,
+        shared: Any | None,
+        source_shared: SourceShareTaskWorkflow | None = None,
+        default_mode: str = "shared",
+    ):
         self.direct = direct
         self.shared = shared
+        self.source_shared = source_shared
         self.default_mode = default_mode
 
     def run_stage(self, task: TaskSnapshot) -> StageResult:
         mode = effective_task_strm_mode(task, default_mode=self.default_mode)
         if mode == "direct":
             return self.direct.run_stage(task)
+        if mode == "source_shared":
+            if self.source_shared is None:
+                return StageResult.failed("原始分享 STRM 工作流未配置", error_type="source_share_unavailable")
+            return self.source_shared.run_stage(task)
         if self.shared is None:
             return StageResult.failed("共享 STRM 工作流需要 P115", error_type="p115_required")
         return self.shared.run_stage(task)
 
     def __getattr__(self, name: str) -> Any:
         # Keep integrations that inspect the historical shared workflow surface working.
-        for workflow in (self.shared, self.direct):
+        for workflow in (self.shared, self.source_shared, self.direct):
             if workflow is not None and hasattr(workflow, name):
                 return getattr(workflow, name)
         raise AttributeError(name)

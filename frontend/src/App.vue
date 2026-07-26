@@ -1,19 +1,26 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { NLayoutFooter } from 'naive-ui'
 import { RouterView, useRoute, useRouter } from 'vue-router'
+import { api } from './api'
 
 const route = useRoute()
 const router = useRouter()
 const collapsed = ref(false)
+const program = ref({ app_name: 'cms-tg-ingest', version: '' })
 const menuOptions = [
   { label: '运行概览', key: '/overview' },
   { label: '当前任务', key: '/tasks' },
   { label: '质量巡检', key: '/quality' },
   { label: '本地健康', key: '/health' },
   { label: 'HDHive 订阅', key: '/hdhive' },
+  { label: '设置', key: '/settings' },
 ]
 const activeKey = computed(() => route.path.startsWith('/tasks/') ? '/tasks' : route.path)
 function navigate(key) { router.push(key) }
+onMounted(async () => {
+  try { program.value = await api.settings() } catch (_) { /* Footer stays useful while the API is unavailable. */ }
+})
 </script>
 
 <template>
@@ -28,9 +35,12 @@ function navigate(key) { router.push(key) }
         <n-layout-sider bordered collapse-mode="width" :collapsed-width="64" :width="220" :collapsed="collapsed" show-trigger @collapse="collapsed = true" @expand="collapsed = false">
           <n-menu :value="activeKey" :options="menuOptions" @update:value="navigate" />
         </n-layout-sider>
-        <n-layout-content class="content-wrap">
-          <div class="content-inner"><router-view /></div>
-        </n-layout-content>
+        <n-layout class="main-column">
+          <n-layout-content class="content-wrap">
+            <div class="content-inner"><router-view /></div>
+          </n-layout-content>
+          <n-layout-footer class="app-footer">{{ program.app_name }}<span v-if="program.version"> {{ program.version }}</span></n-layout-footer>
+        </n-layout>
       </n-layout>
       </n-layout>
     </n-message-provider>

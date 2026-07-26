@@ -22,8 +22,12 @@ from app.task_store import TaskStore
 class StrmModeTests(unittest.TestCase):
     def test_normalize_strm_mode_accepts_case_and_rejects_unknown_values(self):
         self.assertEqual(normalize_strm_mode(" DIRECT "), "direct")
+        self.assertEqual(normalize_strm_mode(" SOURCE_SHARED "), "source_shared")
         self.assertEqual(normalize_strm_mode(""), "shared")
-        self.assertEqual(STRM_MODE_LABELS, {"shared": "共享 STRM", "direct": "直链 STRM"})
+        self.assertEqual(
+            STRM_MODE_LABELS,
+            {"shared": "自有分享 STRM", "direct": "直链 STRM", "source_shared": "原始分享 STRM"},
+        )
         with self.assertRaises(ValueError):
             normalize_strm_mode("self_share_sync")
 
@@ -58,6 +62,14 @@ class StrmModeTests(unittest.TestCase):
         self.assertEqual(next_stage_for_mode(TaskStage.STRM_READY, "direct"), TaskStage.MOVED)
         self.assertEqual(next_stage_for_mode(TaskStage.MOVED, "direct"), TaskStage.EMBY_CONFIRMED)
         self.assertIsNone(next_stage_for_mode(TaskStage.EMBY_CONFIRMED, "direct"))
+
+    def test_source_shared_mode_skips_receive_organize_own_share_and_cleanup(self):
+        self.assertEqual(next_stage_for_mode(TaskStage.RECEIVED, "source_shared"), TaskStage.SHARE_SYNC_SUBMITTED)
+        self.assertEqual(next_stage_for_mode(TaskStage.SHARE_SYNC_SUBMITTED, "source_shared"), TaskStage.RECOGNIZING)
+        self.assertEqual(next_stage_for_mode(TaskStage.RECOGNIZING, "source_shared"), TaskStage.STRM_READY)
+        self.assertEqual(next_stage_for_mode(TaskStage.STRM_READY, "source_shared"), TaskStage.MOVED)
+        self.assertEqual(next_stage_for_mode(TaskStage.MOVED, "source_shared"), TaskStage.EMBY_CONFIRMED)
+        self.assertIsNone(next_stage_for_mode(TaskStage.EMBY_CONFIRMED, "source_shared"))
 
     def test_mode_is_locked_from_share_alias_prepared_onward(self):
         locked = (
