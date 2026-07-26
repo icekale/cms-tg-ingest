@@ -218,6 +218,42 @@ class TmdbHintResolutionTests(unittest.TestCase):
     def test_tmdb_movie_maps_hindi_to_user_western_bucket(self):
         self.assertEqual(bridge.infer_region_category("movie", "调音师", "hi"), "欧美电影")
 
+    def test_confident_cms_recognition_without_source_marker_is_not_overridden(self):
+        class FakeTmdb:
+            enabled = True
+
+            def __init__(self):
+                self.calls = []
+
+            def lookup(self, tmdb_id, media_type, share_name):
+                self.calls.append((tmdb_id, media_type, share_name))
+                return {
+                    "ok": True,
+                    "title": "错误覆盖标题",
+                    "type": media_type,
+                    "category": "欧美电影",
+                    "tmdb_id": tmdb_id,
+                }
+
+        recognition = {
+            "ok": True,
+            "title": "CMS 识别标题",
+            "type": "movie",
+            "category": "亚洲电影",
+            "tmdb_id": "952936",
+        }
+
+        tmdb = FakeTmdb()
+        resolved, should_prompt = bridge.apply_tmdb_hint_resolution(
+            recognition,
+            "普通电影.2026.1080p.mkv",
+            tmdb,
+        )
+
+        self.assertIs(resolved, recognition)
+        self.assertFalse(should_prompt)
+        self.assertEqual(tmdb.calls, [])
+
     def test_tmdb_hint_resolves_korean_movie_as_asian_movie(self):
         class FakeTmdb:
             enabled = True
@@ -487,7 +523,7 @@ class TmdbHintResolutionTests(unittest.TestCase):
         self.assertEqual(selected["file_id"], "target")
         self.assertEqual(resolved["type"], "tv")
 
-    def test_tmdb_hint_does_not_guess_when_title_matches_neither_namespace(self):
+    def test_tmdb_hint_trusts_explicit_id_when_title_is_obfuscated(self):
         class FakeTmdb:
             enabled = True
             def lookup(self, tmdb_id, media_type, share_name):
@@ -499,8 +535,47 @@ class TmdbHintResolutionTests(unittest.TestCase):
             FakeTmdb(),
         )
 
-        self.assertTrue(should_prompt)
-        self.assertEqual(resolved["tmdb_id"], "")
+        self.assertFalse(should_prompt)
+        self.assertEqual(resolved["tmdb_id"], "255522")
+        self.assertEqual(resolved["category"], "欧美电影")
+
+    def test_tmdb_hint_from_name_overrides_stale_recognition_id(self):
+        class FakeTmdb:
+            enabled = True
+
+            def lookup(self, tmdb_id, media_type, share_name):
+                if tmdb_id == "1228710" and media_type == "movie":
+                    return {
+                        "ok": True,
+                        "title": "星球大战：曼达洛人与古古",
+                        "type": "movie",
+                        "tmdb_id": tmdb_id,
+                        "category": "欧美电影",
+                        "source": "tmdb_api",
+                    }
+                return {"ok": False}
+
+        resolved, should_prompt = bridge.apply_tmdb_hint_resolution(
+            {
+                "ok": True,
+                "title": "错误影片",
+                "type": "movie",
+                "category": "欧美电影",
+                "tmdb_id": "952936",
+            },
+            "123 (2026) {tmdb-1228710}",
+            FakeTmdb(),
+        )
+
+        self.assertFalse(should_prompt)
+        self.assertEqual(resolved["tmdb_id"], "1228710")
+        self.assertEqual(resolved["title"], "星球大战：曼达洛人与古古")
+
+    def test_tmdb_hint_name_fallback_does_not_duplicate_year(self):
+        self.assertEqual(
+            bridge.normalize_tmdb_hint_name("123 (2026) {tmdb-1228710}", "1228710"),
+            "123 (2026) [tmdb=1228710]",
+        )
 
 class CmsFirstFallbackTests(unittest.TestCase):
     def test_uncertain_recognition_uses_emby_tmdb_match_before_openai_prompt(self):

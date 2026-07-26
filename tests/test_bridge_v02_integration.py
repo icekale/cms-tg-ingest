@@ -1395,12 +1395,28 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
+            row = submission_store.upsert_submission(
+                bridge.ShareKey("abc", "1234"),
+                "https://115cdn.com/s/abc?password=1234",
+                "received",
+                title="重跑电影",
+            )
+            submission_store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="share_sync_submitted",
+                own_share_file_id="old-folder",
+                own_share_file_name="旧目录-[tmdb=952936]",
+                own_share_code="old-share",
+                own_share_receive_code="1212",
+            )
             task_store.record_event(
                 task.id,
                 TaskStage.CLEANED,
                 TaskStatus.SUCCEEDED,
                 "cleanup complete",
                 title="重跑电影",
+                submission_id=int(row["id"]),
                 metadata_patch={"own_share_code": "ownabc"},
             )
             task_store.enqueue_task(task.id, TaskStage.CLEANED, next_run_at=1.0)
@@ -1441,6 +1457,10 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertIn("TG 按钮触发从头重跑", [event["message"] for event in events])
             self.assertEqual(telegram.answers[-1][1], "已从头重跑")
             self.assertIn("已从头重跑", telegram.messages[-1][1])
+            queued_submission = submission_store.find_by_id(int(row["id"]))
+            self.assertEqual(queued_submission["workflow_phase"], "share_sync_submitted")
+            self.assertEqual(queued_submission["own_share_file_id"], "old-folder")
+            self.assertEqual(queued_submission["own_share_code"], "old-share")
 
     def test_task_emby_and_restore_callbacks_enqueue_target_stages(self):
         with tempfile.TemporaryDirectory() as tmp:

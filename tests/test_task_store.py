@@ -97,6 +97,68 @@ class TaskStoreTests(unittest.TestCase):
             self.assertNotIn("organized_folder", updated.metadata)
             self.assertTrue(updated.metadata["keep_for_retry"])
 
+    def test_reprocess_task_clears_stale_receive_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("reprocess-receive", "", "https://115cdn.com/s/reprocess-receive")
+            task = store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "整理中",
+                metadata_patch={
+                    "received_title": "旧文件 {tmdb-952936}",
+                    "received_file_ids": ["old-id"],
+                    "received_items": [{"file_id": "old-id"}],
+                    "received_items_complete": True,
+                    "received_expected_item_count": 1,
+                    "received_existing_file_ids": [],
+                    "received_snapshot_complete": True,
+                    "tmdb_hint_normalized": True,
+                    "self_share_reprocess_reset": True,
+                    "own_share_file_id": "old-folder",
+                    "own_share_file_name": "旧目录-[tmdb=952936]",
+                    "own_share_code": "old-share",
+                    "own_share_receive_code": "1212",
+                    "share_sync_status": "submitted",
+                    "source_path": "/old/share",
+                    "dest_path": "/old/library",
+                    "emby_status": "confirmed",
+                    "emby_item_id": "old-item",
+                    "emby_path": "/old/library/movie.strm",
+                    "cleanup_status": "deleted",
+                    "keep_for_retry": True,
+                },
+            )
+
+            updated = store.reprocess_task(task.id, message="重新开始", next_run_at=0)
+
+            for key in (
+                "received_title",
+                "received_file_ids",
+                "received_items",
+                "received_items_complete",
+                "received_expected_item_count",
+                "received_existing_file_ids",
+                "received_snapshot_complete",
+                "tmdb_hint_normalized",
+                "self_share_reprocess_reset",
+                "own_share_file_id",
+                "own_share_file_name",
+                "own_share_code",
+                "own_share_receive_code",
+                "share_sync_status",
+                "source_path",
+                "dest_path",
+                "emby_status",
+                "emby_item_id",
+                "emby_path",
+                "cleanup_status",
+            ):
+                self.assertNotIn(key, updated.metadata)
+            self.assertGreater(updated.metadata["reprocess_started_at"], 0)
+            self.assertTrue(updated.metadata["keep_for_retry"])
+
     def test_explicit_mode_does_not_backfill_active_legacy_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

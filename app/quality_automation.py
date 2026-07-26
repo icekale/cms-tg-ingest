@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .config import Config, MoveConfig, is_relative_to, is_under_any_root, safe_resolve
 from .models import TaskSnapshot, TaskStage, TaskStatus
 from .quality import QualityIssue, scan_task_quality
-from .task_store import TaskStore
+from .task_store import REPROCESS_METADATA_DELETE_KEYS, TaskStore, build_reprocess_metadata
 
 
 @dataclass(frozen=True)
@@ -450,8 +450,10 @@ class QualityAutomation:
             "quality_repair_action": plan.action,
             "quality_repair_reason": plan.reason,
         }
+        metadata_delete_keys: tuple[str, ...] = ()
         if plan.action in {"reprocess", "invalid_share"}:
-            metadata["force_reprocess"] = True
+            metadata = build_reprocess_metadata(task, metadata)
+            metadata_delete_keys = REPROCESS_METADATA_DELETE_KEYS
         reserved = self.store.compare_and_set_transition(
             task.id,
             task.current_stage,
@@ -461,6 +463,7 @@ class QualityAutomation:
             target_status=TaskStatus.RUNNING,
             target_event_message=f"自动巡检已排队：{plan.action}",
             metadata_patch=metadata,
+            metadata_delete_keys=metadata_delete_keys,
             next_run_at=time.time(),
             clear_errors=True,
             claim_by=f"quality:{run_id}",

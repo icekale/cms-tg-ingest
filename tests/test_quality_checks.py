@@ -7,6 +7,8 @@ import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
+from app.workflows.self_share import has_explicit_task_tmdb_hint
+
 spec = importlib.util.spec_from_file_location("bridge", Path(__file__).resolve().parents[1] / "bridge.py")
 bridge = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = bridge
@@ -25,6 +27,27 @@ class CategoryAliasTests(unittest.TestCase):
 
 
 class ExpectedTmdbPriorityTests(unittest.TestCase):
+    def test_generated_output_marker_is_not_treated_as_source_tmdb_hint(self):
+        row = {
+            "title": "123 (2026).mkv",
+            "own_share_file_name": "1-123-2026-[tmdb=952936]",
+            "dest_path": "/media/1-123-2026-[tmdb=952936]",
+        }
+        recognition = {"tmdb_id": "1228710", "share_name": "123 (2026).mkv"}
+
+        self.assertFalse(has_explicit_task_tmdb_hint(recognition, row, "123 (2026).mkv"))
+
+    def test_received_source_title_wins_over_rewritten_task_title_and_output_paths(self):
+        row = {
+            "title": "1-123-2026-[tmdb=952936]",
+            "received_title": "123 (2026) {tmdb-1228710}.mkv",
+            "recognition_json": '{"title":"错误影片","tmdb_id":"952936","share_name":"错误影片"}',
+            "own_share_file_name": "1-123-2026-[tmdb=952936]",
+            "dest_path": "/media/1-123-2026-[tmdb=952936]",
+        }
+
+        self.assertEqual(bridge.expected_task_tmdb_id(bridge.parse_recognition_json(row), row), "1228710")
+
     def test_recognition_tmdb_wins_over_wrong_self_share_folder_marker(self):
         row = {
             "title": "Double.Happiness.2025.2160p.NF.WEB-DL.DDP5.1.H.265-HiveWeb.mkv",
@@ -51,6 +74,27 @@ class ExpectedTmdbPriorityTests(unittest.TestCase):
 
         self.assertIn("任务 TMDB 1570664", issue)
         self.assertIn("路径 TMDB 1356454", issue)
+
+
+class SubmissionSourceTitleTests(unittest.TestCase):
+    def test_cms_status_title_does_not_replace_self_share_source_title(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("source-title", "1212"),
+                "https://115cdn.com/s/source-title?password=1212",
+                "received",
+                title="123 (2026) {tmdb-1228710}",
+            )
+            store.update_self_share(int(row["id"]), workflow_mode="self_share_sync")
+
+            updated = store.update_status(
+                int(row["id"]),
+                "organizing",
+                title="错误识别影片 {tmdb-952936}",
+            )
+
+            self.assertEqual(updated["title"], "123 (2026) {tmdb-1228710}")
 
 
 class EmbyQualityMatchTests(unittest.TestCase):

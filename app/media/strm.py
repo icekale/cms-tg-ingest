@@ -11,6 +11,7 @@ from typing import Any, Iterable
 from app.config import MoveConfig, MovePlan, SelfShareConfig, is_relative_to, is_under_any_root, safe_resolve
 from app.media.classify import (
     candidate_tokens,
+    explicit_task_tmdb_id,
     expected_task_tmdb_id,
     extract_tmdb_id_from_name,
     final_category_for_move,
@@ -315,7 +316,13 @@ def validate_self_share_strm_source(source: Path, row: dict[str, Any]) -> str:
     if not source.exists() or not source.is_dir():
         return ""
     expected_tmdb = expected_task_tmdb_id(parse_recognition_json(row), row)
+    explicit_tmdb = explicit_task_tmdb_id(parse_recognition_json(row), row)
     folder_tmdb = extract_tmdb_id_from_name(str(source))
+    if explicit_tmdb and folder_tmdb != explicit_tmdb:
+        alias_name = str(row.get("share_alias_name") or "").strip()
+        is_neutral_alias = bool(alias_name and source.name == alias_name)
+        if not is_neutral_alias or _canonical_manifest_tmdb_id(row) != explicit_tmdb:
+            return f"任务 TMDB {explicit_tmdb} 与文件夹 TMDB {folder_tmdb or '未知'} 不一致，阻止移动 STRM"
     if expected_tmdb and folder_tmdb and expected_tmdb != folder_tmdb:
         return f"任务 TMDB {expected_tmdb} 与文件夹 TMDB {folder_tmdb} 不一致，阻止移动 STRM"
     own_share_code = str(row.get("own_share_code") or "").strip()
@@ -328,6 +335,16 @@ def validate_self_share_strm_source(source: Path, row: dict[str, Any]) -> str:
         if issue:
             return issue
     return ""
+
+
+def _canonical_manifest_tmdb_id(row: dict[str, Any]) -> str:
+    try:
+        manifest = json.loads(row.get("canonical_manifest_json") or "{}")
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(manifest, dict):
+        return ""
+    return str(manifest.get("tmdb_id") or extract_tmdb_id_from_name(str(manifest.get("root_name") or "")) or "").strip()
 
 
 def validate_self_share_strm_file(path: Path, expected_marker: str) -> str:
@@ -348,7 +365,10 @@ def _validate_self_share_strm_directory_tmdb(
     require_tmdb: bool = False,
 ) -> str:
     expected_tmdb = expected_task_tmdb_id(parse_recognition_json(row), row)
+    explicit_tmdb = explicit_task_tmdb_id(parse_recognition_json(row), row)
     folder_tmdb = extract_tmdb_id_from_name(destination.name)
+    if explicit_tmdb and folder_tmdb != explicit_tmdb:
+        return f"任务 TMDB {explicit_tmdb} 与文件夹 TMDB {folder_tmdb or '未知'} 不一致，阻止移动 STRM"
     if require_tmdb and (not expected_tmdb or not folder_tmdb):
         return "目标目录 TMDB 无法确认，阻止移动 STRM"
     if expected_tmdb and folder_tmdb and expected_tmdb != folder_tmdb:
@@ -440,11 +460,7 @@ def find_recent_direct_library_strm_source_dir(
         since = float(row.get("created_at") or row.get("updated_at") or 0) - 60
     except (TypeError, ValueError):
         since = 0
-    explicit_tmdb = ""
-    for value in (row.get("title"), share_name, row.get("url")):
-        explicit_tmdb = extract_tmdb_id_from_name(str(value or ""))
-        if explicit_tmdb:
-            break
+    explicit_tmdb = explicit_task_tmdb_id(recognition, row, share_name)
     expected_tmdb = expected_task_tmdb_id(recognition, row)
     tokens = candidate_tokens(recognition, share_name)
     candidates: dict[Path, tuple[str, float, bool, bool]] = {}
@@ -475,7 +491,7 @@ def find_recent_direct_library_strm_source_dir(
                     continue
                 if not _strm_has_direct_link(strm_path):
                     continue
-                if explicit_tmdb and folder_tmdb and explicit_tmdb != folder_tmdb:
+                if explicit_tmdb and folder_tmdb != explicit_tmdb:
                     continue
                 try:
                     text = strm_path.read_text(encoding="utf-8", errors="replace")
@@ -504,7 +520,7 @@ def find_recent_direct_library_strm_source_dir(
                     continue
                 media_root, category = media
                 folder_tmdb = extract_tmdb_id_from_name(str(media_root))
-                if explicit_tmdb and folder_tmdb and explicit_tmdb != folder_tmdb:
+                if explicit_tmdb and folder_tmdb != explicit_tmdb:
                     continue
                 try:
                     text = strm_path.read_text(encoding="utf-8", errors="replace")

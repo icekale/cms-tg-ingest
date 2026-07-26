@@ -102,6 +102,46 @@ def ensure_task_for_link(
     return task
 
 
+def reset_self_share_submission_for_reprocess(submission_store: Any | None, task: Any) -> bool:
+    """Clear persisted self-share output before a task is executed from RECEIVED."""
+    if submission_store is None or not hasattr(submission_store, "reset_self_share_for_update"):
+        return False
+    metadata = getattr(task, "metadata", {}) or {}
+    submission_id = getattr(task, "submission_id", None) or metadata.get("submission_id")
+    row = None
+    if submission_id not in (None, "") and hasattr(submission_store, "find_by_id"):
+        try:
+            row = submission_store.find_by_id(int(submission_id))
+        except (TypeError, ValueError):
+            row = None
+    if not row and hasattr(submission_store, "find_by_key") and _text(getattr(task, "share_code", "")):
+        try:
+            row = submission_store.find_by_key(task)
+        except (AttributeError, TypeError, ValueError):
+            row = None
+    if not row:
+        return False
+    workflow_mode = _text(row.get("workflow_mode")).lower()
+    self_share_state = workflow_mode == "self_share_sync" or any(
+        _text(row.get(key))
+        for key in (
+            "own_share_file_id",
+            "own_share_file_name",
+            "own_share_code",
+            "own_share_url",
+            "share_sync_status",
+            "share_alias_name",
+            "share_validation_status",
+        )
+    )
+    if not self_share_state:
+        return False
+    try:
+        return bool(submission_store.reset_self_share_for_update(int(row["id"])))
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def record_submission_event(
     task_store: TaskStore | None,
     row: dict[str, Any],

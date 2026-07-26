@@ -322,6 +322,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.cms.plain_share_down_calls, [])
             self.assertEqual(row["workflow_mode"], "self_share_sync")
             self.assertEqual(result.metadata["submission_id"], row["id"])
+            self.assertFalse(result.metadata["tmdb_hint_normalized"])
 
     def test_received_stage_stops_when_115_receive_is_restricted(self):
         class RestrictedP115(FakeP115):
@@ -377,6 +378,30 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["received_file_ids"], ["file-a", "file-b"])
             self.assertEqual(updated["workflow_phase"], "received_to_pending")
 
+    def test_force_reprocess_clears_existing_self_share_output_before_receiving(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            workflow._now = lambda: 2000000000.0
+            row = self._self_share_row()
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECEIVED,
+                {"force_reprocess": True, "submission_id": row["id"]},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            updated = self.submissions.find_by_key(bridge.ShareKey("abc", "1234"))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(self.p115.received, [("abc", "1234", "pending-cid")])
+            self.assertTrue(result.metadata["self_share_reprocess_reset"])
+            self.assertEqual(result.metadata["reprocess_started_at"], 2000000000.0)
+            self.assertEqual(updated["workflow_phase"], "received_to_pending")
+            self.assertIsNone(updated["own_share_file_id"])
+            self.assertIsNone(updated["own_share_code"])
+
     def test_update_run_receives_again_after_completed_self_share(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp, receive_cid="pending-cid")
@@ -421,6 +446,29 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.DEFER)
             self.assertEqual(self.p115.find_organized_calls[0][3], update_started_at - 5)
 
+    def test_reprocess_only_searches_for_organize_results_after_reprocess_started(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            row = self._row()
+            self.submissions.reset_self_share_for_update(int(row["id"]))
+            reprocess_started_at = 2000000000.0
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "force_reprocess": True,
+                    "reprocess_started_at": reprocess_started_at,
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(self.p115.find_organized_calls[0][3], reprocess_started_at - 5)
+
     def test_organizing_stage_defers_when_folder_not_found(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
@@ -433,6 +481,159 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.DEFER)
             self.assertEqual(self.cms.auto_organize_calls, 1)
             self.assertIn("等待 CMS 整理", result.message)
+
+    def test_organizing_stage_normalizes_explicit_tmdb_name_before_cms(self):
+        class ExplicitTmdbResolver:
+            enabled = True
+
+            def lookup(self, tmdb_id, media_type, share_name):
+                if media_type == "movie" and tmdb_id == "1228710":
+                    return {
+                        "ok": True,
+                        "title": "星球大战：曼达洛人与古古",
+                        "type": "movie",
+                        "tmdb_id": tmdb_id,
+                        "language": "en",
+                        "countries": ["US"],
+                        "category": "欧美电影",
+                        "source": "tmdb_api",
+                    }
+                return {"ok": False}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, tmdb_resolver=ExplicitTmdbResolver())
+            raw_name = "123 (2026) {tmdb-1228710}.mkv"
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="received_to_pending",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_title": raw_name,
+                    "received_file_ids": ["file-a"],
+                    "received_items": [
+                        {
+                            "file_id": "file-a",
+                            "file_name": raw_name,
+                            "is_folder": False,
+                            "received_item_verified": True,
+                        },
+                    ],
+                    "received_items_complete": True,
+                    "received_expected_item_count": 1,
+                    "received_existing_file_ids": [],
+                    "received_snapshot_complete": True,
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(
+                self.p115.renamed,
+                [("file-a", "星球大战：曼达洛人与古古 (2026) [tmdb=1228710].mkv")],
+            )
+            self.assertEqual(self.cms.auto_organize_calls, 1)
+            recognition = json.loads(stored["recognition_json"])
+            self.assertEqual(recognition["tmdb_id"], "1228710")
+            self.assertEqual(recognition["category"], "欧美电影")
+
+    def test_organizing_stage_does_not_call_cms_until_explicit_tmdb_item_is_verified(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, tmdb_resolver=FakeTmdbHintResolver())
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="received_to_pending",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_title": "123 (2026) {tmdb-1228710}",
+                    "received_file_ids": ["source-id"],
+                    "received_items_complete": False,
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIn("暂不触发 CMS 整理", result.message)
+            self.assertEqual(self.cms.auto_organize_calls, 0)
+            self.assertEqual(self.p115.renamed, [])
+
+    def test_organizing_stage_recovers_only_new_explicit_tmdb_item_after_delayed_receive(self):
+        class ExplicitTmdbResolver:
+            enabled = True
+
+            def lookup(self, tmdb_id, media_type, share_name):
+                if media_type == "movie" and tmdb_id == "1228710":
+                    return {
+                        "ok": True,
+                        "title": "星球大战：曼达洛人与古古",
+                        "type": "movie",
+                        "tmdb_id": tmdb_id,
+                        "category": "欧美电影",
+                        "source": "tmdb_api",
+                    }
+                return {"ok": False}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, tmdb_resolver=ExplicitTmdbResolver())
+            self.p115.files_by_parent["pending-cid"] = [
+                {
+                    "fid": "old-local-id",
+                    "pid": "pending-cid",
+                    "n": "123 (2026) {tmdb-1228710}.mkv",
+                },
+                {
+                    "fid": "new-local-id",
+                    "pid": "pending-cid",
+                    "n": "123 (2026) {tmdb-1228710}.mkv",
+                },
+            ]
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="received_to_pending",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_title": "123 (2026) {tmdb-1228710}",
+                    "received_items_complete": False,
+                    "received_expected_item_count": 1,
+                    "received_existing_file_ids": ["old-local-id"],
+                    "received_snapshot_complete": True,
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(
+                self.p115.renamed,
+                [("new-local-id", "星球大战：曼达洛人与古古 (2026) [tmdb=1228710].mkv")],
+            )
+            self.assertEqual(self.cms.auto_organize_calls, 1)
 
     def test_organizing_stage_does_not_use_unvalidated_received_file_id(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1435,7 +1636,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             )
             workflow = self._workflow(tmp, cleanup_client=cleanup, self_share_config=config)
             row = self._self_share_row()
-            dest = Path(tmp) / "library" / "dest"
+            dest = Path(tmp) / "library" / row["own_share_file_name"]
             self._write_strm(dest)
             row = self.submissions.update_move(
                 int(row["id"]),
@@ -1499,7 +1700,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             )
             workflow = self._workflow(tmp, cleanup_client=cleanup, self_share_config=config)
             row = self._self_share_row()
-            dest = Path(tmp) / "library" / "dest"
+            dest = Path(tmp) / "library" / row["own_share_file_name"]
             self._write_strm(dest)
             row = self.submissions.update_move(
                 int(row["id"]),
@@ -1548,7 +1749,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             workflow = self._workflow(tmp, cleanup_client=cleanup, self_share_config=config)
             workflow.p115 = UnavailableListP115()
             row = self._self_share_row()
-            dest = Path(tmp) / "library" / "dest"
+            dest = Path(tmp) / "library" / row["own_share_file_name"]
             self._write_strm(dest)
             row = self.submissions.update_move(
                 int(row["id"]),
@@ -2806,7 +3007,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             workflow.self_share_config.review_grace_seconds = 1
             workflow.self_share_config.review_checkpoints_seconds = (1,)
             row = self._self_share_row()
-            dest = Path(tmp) / "library" / "dest"
+            dest = Path(tmp) / "library" / row["own_share_file_name"]
             self._write_strm(dest)
             row = self.submissions.update_move(
                 int(row["id"]),
@@ -2897,7 +3098,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             workflow.self_share_config.review_grace_seconds = 1
             workflow.self_share_config.review_checkpoints_seconds = (1,)
             row = self._self_share_row()
-            dest = Path(tmp) / "library" / "dest"
+            dest = Path(tmp) / "library" / row["own_share_file_name"]
             self._write_strm(dest)
             row = self.submissions.update_move(
                 int(row["id"]),

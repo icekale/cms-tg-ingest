@@ -608,6 +608,29 @@ class P115WebClient:
         file_ids = [p115_share_item_id(item) for item in items]
         if not file_ids:
             raise RuntimeError("115 share snap did not return file ids")
+        info = data.get("shareinfo") if isinstance(data.get("shareinfo"), dict) else {}
+        receive_data = {}
+        title = str(
+            info.get("share_title")
+            or (p115_file_name(items[0]) if items else "")
+            or ""
+        ).strip()
+        has_tmdb_hint = bool(extract_tmdb_id_from_name(title)) or any(
+            extract_tmdb_id_from_name(p115_file_name(item)) for item in items
+        )
+        existing_file_ids: list[str] = []
+        snapshot_complete = False
+        if has_tmdb_hint:
+            # A share snapshot ID is not a local file ID. Capture the target
+            # root before receiving so a later same-name lookup cannot select
+            # an older file already waiting in the pending directory.
+            existing_items = self.list_files(str(target_cid), limit=500)
+            existing_file_ids = [
+                file_id
+                for file_id in (p115_file_id(item) for item in existing_items)
+                if file_id
+            ]
+            snapshot_complete = len(existing_items) < 500
         resp = self._request(
             "https://webapi.115.com/share/receive",
             method="POST",
@@ -619,10 +642,131 @@ class P115WebClient:
             },
         )
         self._ensure_state(resp, "115 receive share failed")
-        info = data.get("shareinfo") if isinstance(data.get("shareinfo"), dict) else {}
         receive_data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
-        title = str(receive_data.get("receive_title") or info.get("share_title") or (items[0].get("n") if items else "") or "").strip()
-        return {"title": title, "file_ids": file_ids, "response": resp}
+        title = str(
+            receive_data.get("receive_title")
+            or info.get("share_title")
+            or (p115_file_name(items[0]) if items else "")
+            or ""
+        ).strip()
+        received_items = self._resolve_received_root_items(
+            items,
+            resp,
+            target_cid,
+            title,
+            excluded_file_ids=set(existing_file_ids),
+            require_new=snapshot_complete,
+        )
+        return {
+            "title": title,
+            # These are the IDs accepted by /share/receive and are retained
+            # only as provenance; they are not trusted as local output IDs.
+            "file_ids": file_ids,
+            "received_items": received_items,
+            "received_items_complete": len(received_items) == len(items),
+            "received_expected_item_count": len(items),
+            "received_existing_file_ids": existing_file_ids,
+            "received_snapshot_complete": snapshot_complete,
+            "response": resp,
+        }
+
+    @staticmethod
+    def _nested_response_dicts(value: Any, depth: int = 0):
+        if depth > 4:
+            return
+        if isinstance(value, dict):
+            yield value
+            for child in value.values():
+                yield from P115WebClient._nested_response_dicts(child, depth + 1)
+        elif isinstance(value, list):
+            for child in value:
+                yield from P115WebClient._nested_response_dicts(child, depth + 1)
+
+    @staticmethod
+    def _normalized_received_item(item: dict[str, Any], target_cid: str) -> dict[str, Any] | None:
+        file_id = p115_file_id(item)
+        file_name = p115_file_name(item)
+        if not file_id or not file_name or file_id == str(target_cid or "").strip():
+            return None
+        parent_id = p115_parent_id(item) or str(target_cid or "").strip()
+        if parent_id and str(target_cid or "").strip() and parent_id != str(target_cid).strip():
+            return None
+        try:
+            update_time = float(item.get("tu") or item.get("t") or item.get("te") or 0)
+        except (TypeError, ValueError):
+            update_time = 0.0
+        return {
+            "file_id": file_id,
+            "file_name": file_name,
+            "is_folder": p115_is_folder(item),
+            "parent_id": parent_id,
+            "_update_time": update_time,
+        }
+
+    def _resolve_received_root_items(
+        self,
+        source_items: list[dict[str, Any]],
+        response: dict[str, Any],
+        target_cid: str,
+        share_title: str,
+        excluded_file_ids: set[str] | None = None,
+        require_new: bool = False,
+    ) -> list[dict[str, Any]]:
+        source_ids = {p115_share_item_id(item) for item in source_items if p115_share_item_id(item)}
+        excluded_ids = source_ids | {str(value).strip() for value in (excluded_file_ids or set()) if str(value).strip()}
+        source_names = [p115_file_name(item) for item in source_items if p115_file_name(item)]
+        candidates: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in self._nested_response_dicts(response):
+            normalized = self._normalized_received_item(item, target_cid)
+            if not normalized or normalized["file_id"] in excluded_ids:
+                continue
+            key = (normalized["file_id"], normalized["file_name"])
+            if key not in seen:
+                seen.add(key)
+                candidates.append(normalized)
+
+        has_tmdb_hint = bool(extract_tmdb_id_from_name(share_title)) or any(
+            extract_tmdb_id_from_name(name) for name in source_names
+        )
+        if has_tmdb_hint and not require_new:
+            # The marker appeared only after the receive response, so there
+            # is no pre-receive baseline with which to prove a local ID is
+            # new. Do not guess from a same-name pending file.
+            return []
+        if not candidates and has_tmdb_hint:
+            try:
+                for item in self.list_files(str(target_cid), limit=500):
+                    normalized = self._normalized_received_item(item, target_cid)
+                    if not normalized or normalized["file_id"] in excluded_ids:
+                        continue
+                    key = (normalized["file_id"], normalized["file_name"])
+                    if key not in seen:
+                        seen.add(key)
+                        candidates.append(normalized)
+            except Exception:
+                LOG.debug("Failed to resolve local 115 receive output items", exc_info=True)
+
+        if not candidates:
+            return []
+        resolved: list[dict[str, Any]] = []
+        remaining = list(candidates)
+        for source_name in source_names:
+            source_norm = normalize_text(source_name)
+            matches = [item for item in remaining if normalize_text(item["file_name"]) == source_norm]
+            if not matches and len(source_items) == 1 and len(remaining) == 1:
+                matches = remaining[:]
+            if not matches:
+                continue
+            matches.sort(key=lambda item: item.get("_update_time") or 0, reverse=True)
+            selected = matches[0]
+            remaining = [item for item in remaining if item is not selected]
+            resolved.append(selected)
+        for item in resolved:
+            item.pop("_update_time", None)
+            if require_new:
+                item["received_item_verified"] = True
+        return resolved
 
     def cloud_download_add(self, url: str, target_cid: str) -> dict[str, str]:
         payload = json.dumps(
