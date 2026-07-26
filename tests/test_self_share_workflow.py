@@ -569,6 +569,100 @@ class CmsPlaybackProbeTests(unittest.TestCase):
         self.assertEqual(result["received_existing_file_ids"], ["old-local-id"])
         self.assertTrue(result["received_snapshot_complete"])
 
+    def test_receive_share_to_cid_defers_when_multiple_new_same_name_items_are_ambiguous(self):
+        class FakeHttp:
+            def __init__(self):
+                self.after_receive = False
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                if url.endswith("/share/snap"):
+                    return {
+                        "state": True,
+                        "data": {
+                            "shareinfo": {"share_title": "123 (2026) {tmdb-1228710}"},
+                            "list": [{"fid": "source-id", "n": "123 (2026) {tmdb-1228710}.mkv"}],
+                        },
+                    }
+                if url.endswith("/files"):
+                    if not self.after_receive:
+                        return {
+                            "state": True,
+                            "data": [{
+                                "fid": "old-local-id",
+                                "pid": "pending-cid",
+                                "n": "123 (2026) {tmdb-1228710}.mkv",
+                            }],
+                        }
+                    return {
+                        "state": True,
+                        "data": [
+                            {
+                                "fid": "old-local-id",
+                                "pid": "pending-cid",
+                                "n": "123 (2026) {tmdb-1228710}.mkv",
+                            },
+                            {
+                                "fid": "new-local-a",
+                                "pid": "pending-cid",
+                                "n": "123 (2026) {tmdb-1228710}.mkv",
+                                "t": "1780000100",
+                            },
+                            {
+                                "fid": "new-local-b",
+                                "pid": "pending-cid",
+                                "n": "123 (2026) {tmdb-1228710}.mkv",
+                                "t": "1780000200",
+                            },
+                        ],
+                    }
+                if url.endswith("/share/receive"):
+                    self.after_receive = True
+                    return {"state": True, "data": {"receive_title": "123 (2026) {tmdb-1228710}"}}
+                raise AssertionError(url)
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        result = client.receive_share_to_cid("abc", "1234", "pending-cid")
+
+        self.assertEqual(result["received_items"], [])
+        self.assertFalse(result["received_items_complete"])
+
+    def test_receive_share_to_cid_serializes_calls_across_client_instances(self):
+        clients = [
+            bridge.P115WebClient("UID=1", http=object(), timeout=3),
+            bridge.P115WebClient("UID=1", http=object(), timeout=3),
+        ]
+        self.assertTrue(hasattr(clients[0], "_receive_share_to_cid"))
+        active = 0
+        maximum_active = 0
+        counter_lock = threading.Lock()
+        first_started = threading.Event()
+
+        def fake_receive(*_args, **_kwargs):
+            nonlocal active, maximum_active
+            with counter_lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+                first_started.set()
+            time.sleep(0.05)
+            with counter_lock:
+                active -= 1
+            return {"title": "", "file_ids": []}
+
+        for client in clients:
+            client._receive_share_to_cid = fake_receive
+        threads = [
+            threading.Thread(target=client.receive_share_to_cid, args=("abc", "1234", "pending-cid"))
+            for client in clients
+        ]
+        threads[0].start()
+        self.assertTrue(first_started.wait(timeout=1))
+        threads[1].start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        self.assertEqual(maximum_active, 1)
+
     def test_receive_share_to_cid_defers_when_only_old_same_name_item_exists(self):
         class FakeHttp:
             def __init__(self):

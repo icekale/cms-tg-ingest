@@ -16,6 +16,7 @@ from app.media.classify import candidate_tokens, extract_tmdb_id_from_name, extr
 LOG = logging.getLogger("cms-tg-ingest")
 CMS_PARENT_CID_CATEGORY_MAP: dict[str, str] = {}
 DEFAULT_ORGANIZED_SCAN_MAX_LIST_CALLS = 8
+_RECEIVE_SHARE_LOCK = threading.Lock()
 PAN115_LIXIAN_SSP_URL = "https://lixian.115.com/lixianssp/"
 PAN115_LIXIAN_WEB_URL = "https://lixian.115.com/lixian/"
 PAN115_ANDROID_USER_AGENT = "Mozilla/5.0 115disk/99.99.99.99 115Browser/99.99.99.99 115wangpan_android/99.99.99.99"
@@ -603,6 +604,12 @@ class P115WebClient:
         return states
 
     def receive_share_to_cid(self, share_code: str, receive_code: str, target_cid: str) -> dict[str, Any]:
+        # Serialize the snapshot/receive/resolve transaction across client
+        # instances so concurrent same-name receives cannot cross-match.
+        with _RECEIVE_SHARE_LOCK:
+            return self._receive_share_to_cid(share_code, receive_code, target_cid)
+
+    def _receive_share_to_cid(self, share_code: str, receive_code: str, target_cid: str) -> dict[str, Any]:
         items, snap = self.share_root_items(share_code, receive_code, cid="0", limit=100)
         data = snap.get("data") if isinstance(snap.get("data"), dict) else {}
         file_ids = [p115_share_item_id(item) for item in items]
@@ -758,6 +765,11 @@ class P115WebClient:
                 matches = remaining[:]
             if not matches:
                 continue
+            if len(matches) > 1:
+                # A timestamp cannot identify which concurrent receive owns
+                # a same-name file. Let the workflow retry after the caller
+                # has made the receive result unambiguous.
+                return []
             matches.sort(key=lambda item: item.get("_update_time") or 0, reverse=True)
             selected = matches[0]
             remaining = [item for item in remaining if item is not selected]

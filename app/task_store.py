@@ -89,6 +89,7 @@ REPROCESS_METADATA_DELETE_KEYS = (
     "cms_delete_settled",
     "quality_cleanup_completed",
     "quality_success_event",
+    "quality_repair_queued",
 )
 
 

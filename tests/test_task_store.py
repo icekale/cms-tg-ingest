@@ -127,6 +127,7 @@ class TaskStoreTests(unittest.TestCase):
                     "emby_item_id": "old-item",
                     "emby_path": "/old/library/movie.strm",
                     "cleanup_status": "deleted",
+                    "quality_repair_queued": True,
                     "keep_for_retry": True,
                 },
             )
@@ -154,6 +155,7 @@ class TaskStoreTests(unittest.TestCase):
                 "emby_item_id",
                 "emby_path",
                 "cleanup_status",
+                "quality_repair_queued",
             ):
                 self.assertNotIn(key, updated.metadata)
             self.assertGreater(updated.metadata["reprocess_started_at"], 0)
