@@ -265,6 +265,33 @@ class HdhiveProxyClientTests(unittest.TestCase):
         self.assertIn("keyword=Example", http.calls[2][0])
         self.assertIn("keyword=Example", http.calls[3][0])
 
+    def test_cms_share_lookup_prefers_non_failed_duplicate(self):
+        config = SimpleNamespace(
+            cms_base_url="https://cms.test",
+            cms_username="user",
+            cms_password="password",
+            http_timeout=5,
+        )
+        http = FakeHttp(
+            [
+                {"code": 200, "data": {"token": "cms-token"}},
+                {
+                    "code": 200,
+                    "data": {
+                        "list": [
+                            {"id": "failed", "share_id": "abc", "share_pwd": "1234", "status": 2},
+                            {"id": "accepted", "share_id": "abc", "share_pwd": "1234", "status": 1},
+                        ]
+                    },
+                },
+            ]
+        )
+        client = CmsClient(config, http=http)
+
+        result = client.get_share_down_by_key(SimpleNamespace(share_code="abc", receive_code="1234"))
+
+        self.assertEqual(result["id"], "accepted")
+
 
 if __name__ == "__main__":
     unittest.main()

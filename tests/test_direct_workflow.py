@@ -1,11 +1,14 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
 from app.config import MoveConfig
+from app.media.classify import media_type_for_category
+from app.media.strm import find_recent_direct_library_strm_source_dir
 from app.models import TaskStage, TaskStatus
-from app.task_runner import StageOutcome
+from app.task_runner import StageOutcome, TaskRunner
 from app.task_store import TaskStore
 from app.workflows.direct import DirectTaskWorkflow
 import bridge
@@ -15,10 +18,21 @@ class CmsFake:
     def __init__(self):
         self.add_calls = []
         self.details = []
+        self.accept_without_task_id = False
+        self.lookup_items = []
+        self.recognitions = []
 
     def add_share_down(self, url):
         self.add_calls.append(url)
+        if self.accept_without_task_id:
+            return {"code": 200, "data": {}, "msg": "success"}
         return {"data": {"id": "cms-1", "name": "示例电影"}}
+
+    def get_share_down_by_key(self, _key):
+        return self.lookup_items.pop(0) if self.lookup_items else {}
+
+    def recognize_media(self, _path):
+        return self.recognitions.pop(0) if self.recognitions else {"code": 500, "data": {}}
 
     def get_share_down_detail(self, task_id):
         return self.details.pop(0) if self.details else {"status": "done", "name": "示例电影"}
@@ -133,6 +147,118 @@ class DirectWorkflowTests(unittest.TestCase):
         self.assertEqual(row["cms_task_id"], "cms-1")
         self.assertEqual(workflow.forbidden_p115.calls, [])
 
+    def test_received_reuses_existing_cms_submission_before_adding_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow, cms, submissions = self._workflow(tmp)
+            cms.lookup_items = [{"id": "cms-existing", "name": "已存在电影", "status": 1}]
+            tasks = TaskStore(Path(tmp) / "tasks.db")
+
+            result = workflow.run_stage(self._task(tasks, TaskStage.RECEIVED))
+            row = submissions.find_by_id(result.metadata["submission_id"])
+
+        self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+        self.assertEqual(result.metadata["cms_task_id"], "cms-existing")
+        self.assertEqual(row["cms_task_id"], "cms-existing")
+        self.assertEqual(cms.add_calls, [])
+
+    def test_received_accepts_cms_200_without_task_id_and_does_not_resubmit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow, cms, submissions = self._workflow(tmp)
+            cms.accept_without_task_id = True
+            tasks = TaskStore(Path(tmp) / "tasks.db")
+            first = self._task(tasks, TaskStage.RECEIVED)
+
+            first_result = workflow.run_stage(first)
+            second = self._task(tasks, TaskStage.RECEIVED, first_result.metadata["submission_id"])
+            second_result = workflow.run_stage(second)
+            row = submissions.find_by_id(first_result.metadata["submission_id"])
+
+        self.assertEqual(first_result.outcome, StageOutcome.COMPLETE)
+        self.assertEqual(first_result.metadata["cms_submission_accepted"], True)
+        self.assertEqual(first_result.metadata["cms_task_id_optional"], True)
+        self.assertEqual(second_result.outcome, StageOutcome.COMPLETE)
+        self.assertEqual(cms.add_calls, ["https://115cdn.com/s/abc?password=1234"])
+        self.assertEqual(row["cms_task_id"], None)
+        self.assertEqual(row["status"], "submitted_no_task_id")
+
+    def test_task_runner_advances_no_id_cms_acceptance_instead_of_marking_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow, cms, _submissions = self._workflow(tmp)
+            cms.accept_without_task_id = True
+            tasks = TaskStore(Path(tmp) / "tasks.db", default_strm_mode="direct")
+            task = tasks.upsert_task(
+                "abc",
+                "1234",
+                "https://115cdn.com/s/abc?password=1234",
+                strm_mode="direct",
+            )
+            tasks.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+            runner = TaskRunner(tasks, workflow, worker_id="worker", now=lambda: 100.0)
+
+            self.assertTrue(runner.run_once())
+            stored = tasks.find_task(task.id)
+
+        self.assertEqual(cms.add_calls, ["https://115cdn.com/s/abc?password=1234"])
+        self.assertEqual(stored.status.value, "pending")
+        self.assertEqual(stored.current_stage, TaskStage.ORGANIZING)
+        self.assertEqual(stored.error_type, "")
+
+    def test_organizing_recovers_category_when_accepted_cms_response_has_no_task_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow, cms, submissions = self._workflow(tmp)
+            tasks = TaskStore(Path(tmp) / "tasks.db")
+            row = self._row(submissions, cms_task_id=None)
+            row = submissions.update_status(int(row["id"]), "submitted_no_task_id") or row
+            cms.recognitions = [
+                {
+                    "code": 200,
+                    "data": {
+                        "title": "示例电影",
+                        "category": "欧美电影",
+                        "tmdb_id": "123",
+                        "type": "movie",
+                    },
+                }
+            ]
+
+            result = workflow.run_stage(
+                self._task(
+                    tasks,
+                    TaskStage.ORGANIZING,
+                    row["id"],
+                    {"cms_submission_accepted": True, "cms_task_id_optional": True},
+                )
+            )
+            stored = submissions.find_by_id(row["id"])
+
+        self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+        self.assertEqual(result.message, "CMS 整理完成（同步响应未提供任务 ID）")
+        self.assertEqual(stored["category_status"], "cms_resolved")
+        self.assertIn("欧美电影", stored["recognition_json"])
+
+    def test_organizing_persists_task_id_when_cms_list_exposes_it_later(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow, cms, submissions = self._workflow(tmp)
+            tasks = TaskStore(Path(tmp) / "tasks.db")
+            row = self._row(submissions, cms_task_id=None)
+            row = submissions.update_status(int(row["id"]), "submitted_no_task_id") or row
+            cms.lookup_items = [{"id": "cms-late", "name": "示例电影"}]
+            cms.details = [{"status": "done", "name": "示例电影"}]
+
+            result = workflow.run_stage(
+                self._task(
+                    tasks,
+                    TaskStage.ORGANIZING,
+                    row["id"],
+                    {"cms_submission_accepted": True, "cms_task_id_optional": True},
+                )
+            )
+            stored = submissions.find_by_id(row["id"])
+
+        self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+        self.assertEqual(stored["cms_task_id"], "cms-late")
+        self.assertEqual(stored["status"], "done")
+
     def test_organizing_defers_until_cms_reaches_terminal_success(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow, cms, submissions = self._workflow(tmp)
@@ -148,6 +274,57 @@ class DirectWorkflowTests(unittest.TestCase):
         self.assertEqual(waiting.message, "等待 CMS 整理完成")
         self.assertEqual(done.outcome, StageOutcome.COMPLETE)
         self.assertEqual(status, "done")
+
+    def test_media_category_mapping_keeps_documentaries_as_movies(self):
+        self.assertEqual(media_type_for_category("纪录片"), "movie")
+        self.assertEqual(media_type_for_category("国产剧"), "tv")
+
+    def test_organizing_treats_cms_numeric_success_as_complete_and_extracts_tmdb(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow, cms, submissions = self._workflow(tmp)
+            tasks = TaskStore(Path(tmp) / "tasks.db")
+            row = self._row(submissions, cms_task_id="cms-1")
+            cms.details = [{"status": 1, "name": "示例电影 (2026) {tmdb-123}"}]
+
+            result = workflow.run_stage(self._task(tasks, TaskStage.ORGANIZING, row["id"]))
+
+        self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+        self.assertEqual(result.metadata["tmdb_id"], "123")
+        self.assertEqual(cms.add_calls, [])
+
+    def test_organizing_treats_cms_numeric_failure_as_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow, cms, submissions = self._workflow(tmp)
+            tasks = TaskStore(Path(tmp) / "tasks.db")
+            row = self._row(submissions, cms_task_id="cms-1")
+            cms.details = [{"status": 2, "remark": "CMS rejected"}]
+
+            result = workflow.run_stage(self._task(tasks, TaskStage.ORGANIZING, row["id"]))
+
+        self.assertEqual(result.outcome, StageOutcome.FAILED)
+        self.assertEqual(result.error_type, "cms_organize_failed")
+        self.assertEqual(result.message, "CMS rejected")
+
+    def test_recent_direct_library_lookup_allows_old_exact_tmdb_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            library = root / "library"
+            media_root = library / "Example-[tmdb=123]"
+            media_root.mkdir(parents=True)
+            strm = media_root / "movie.strm"
+            strm.write_text("https://115.com/d/file-id/movie.mkv", encoding="utf-8")
+            os.utime(strm, (1, 1))
+            config = MoveConfig(source_roots=[], library_roots={"欧美电影": library}, stable_seconds=0)
+            row = {"created_at": 1000, "title": "Example"}
+
+            found = find_recent_direct_library_strm_source_dir(
+                config,
+                row,
+                {"tmdb_id": "123", "title": "Example"},
+                share_name="Example",
+            )
+
+        self.assertEqual(found, (media_root.resolve(), "欧美电影"))
 
     def test_recognizing_uses_saved_cms_category_and_needs_action_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:

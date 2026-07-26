@@ -124,10 +124,18 @@ class CmsClient:
         return {"status": "unknown"}
 
     def get_share_down_by_key(self, key: Any) -> dict:
-        for item in self.list_share_down(page_size=100):
-            if str(item.get("share_id") or "").lower() == key.share_code and str(item.get("share_pwd") or "") == key.receive_code:
+        matches = [
+            item
+            for item in self.list_share_down(page_size=100)
+            if str(item.get("share_id") or "").lower() == key.share_code
+            and str(item.get("share_pwd") or "") == key.receive_code
+        ]
+        if not matches:
+            return {}
+        for item in matches:
+            if str(item.get("status") or "").strip().lower() not in {"2", "failed", "error"}:
                 return item
-        return {}
+        return matches[0]
 
     def recognize_media(self, path: str) -> dict:
         resp = self._authorized("/api/media/file_recognize", payload={"path": path})

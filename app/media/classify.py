@@ -443,9 +443,20 @@ def extract_year_from_name(value: str) -> str:
 
 
 def media_type_for_category(category: str) -> str:
-    if category in {"华语电影", "欧美电影", "亚洲电影", "动漫电影"}:
+    if category in {"华语电影", "欧美电影", "外语电影", "亚洲电影", "动漫电影", "动画电影", "纪录片"}:
         return "movie"
-    if category in {"国产电视", "外国电视", "番剧"}:
+    if category in {
+        "国产电视",
+        "外国电视",
+        "番剧",
+        "国产剧",
+        "欧美剧",
+        "日韩剧",
+        "日番",
+        "国漫",
+        "儿童动画",
+        "综艺",
+    }:
         return "tv"
     return ""
 

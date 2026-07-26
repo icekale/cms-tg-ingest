@@ -471,7 +471,7 @@ def find_recent_direct_library_strm_source_dir(
                     mtime = strm_path.stat().st_mtime
                 except OSError:
                     continue
-                if since and mtime < since:
+                if since and mtime < since and not exact_tmdb_folder:
                     continue
                 if not _strm_has_direct_link(strm_path):
                     continue

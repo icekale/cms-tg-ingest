@@ -28,6 +28,11 @@ from app.workflows.self_share import BridgeSelfShareTaskWorkflow, emby_parent_la
 
 _CMS_FAILURE_MARKERS = ("failed", "error", "失败", "timeout", "超时", "cancel")
 _CMS_SUCCESS_MARKERS = ("done", "finish", "success", "complete", "完成", "成功")
+_CMS_NO_TASK_ID_STATUSES = {"submitted_no_task_id", "accepted_without_task_id"}
+_CMS_ACCEPTED_NUMERIC_STATUSES = {"1"}
+_CMS_FAILED_NUMERIC_STATUSES = {"2"}
+
+
 @dataclass(frozen=True)
 class _ShareKey:
     share_code: str
@@ -60,6 +65,19 @@ def _cms_status(detail: dict[str, Any]) -> str:
     return str(_detail_value(detail, "status", "state", "task_status") or "").strip().lower()
 
 
+def _cms_status_outcome(detail: dict[str, Any]) -> str:
+    status = _cms_status(detail)
+    if status in _CMS_ACCEPTED_NUMERIC_STATUSES:
+        return "success"
+    if status in _CMS_FAILED_NUMERIC_STATUSES:
+        return "failed"
+    if any(marker in status for marker in _CMS_FAILURE_MARKERS):
+        return "failed"
+    if any(marker in status for marker in _CMS_SUCCESS_MARKERS):
+        return "success"
+    return "pending"
+
+
 def _cms_recognition(detail: dict[str, Any], existing: dict[str, Any], title: str) -> dict[str, Any]:
     data = _detail_data(detail)
     tmdb_info = data.get("tmdb_info") if isinstance(data.get("tmdb_info"), dict) else {}
@@ -68,7 +86,11 @@ def _cms_recognition(detail: dict[str, Any], existing: dict[str, Any], title: st
     category = _detail_value(detail, "category", "category_final", "category_choice")
     tmdb_id = _detail_value(detail, "tmdb_id") or tmdb_info.get("tmdb_id") or tmdb_info.get("id")
     media_type = _detail_value(detail, "type") or tmdb_info.get("type") or video_info.get("type")
+    if str(media_type or "").strip().lower() not in {"movie", "tv"}:
+        media_type = ""
     resolved_title = _detail_value(detail, "name", "title", "share_name", "file_name") or title
+    if not tmdb_id:
+        tmdb_id = extract_tmdb_id_from_name(str(resolved_title or ""))
     if category:
         recognition["category"] = str(category).strip()
     if tmdb_id:
@@ -144,34 +166,97 @@ class DirectTaskWorkflow:
         metadata.update({key: value for key, value in extra.items() if value is not None})
         return metadata
 
+    @staticmethod
+    def _accepted_without_task_id(task: TaskSnapshot, row: dict[str, Any]) -> bool:
+        if task.metadata.get("cms_submission_accepted") is True:
+            return True
+        return str(row.get("status") or "").strip().lower() in _CMS_NO_TASK_ID_STATUSES
+
+    @staticmethod
+    def _cms_task_id(detail: dict[str, Any]) -> str:
+        value = _detail_value(detail, "id", "task_id", "taskId")
+        return str(value or "").strip()
+
+    def _lookup_cms_task(self, task: TaskSnapshot) -> dict[str, Any]:
+        lookup = getattr(self.cms, "get_share_down_by_key", None)
+        if not callable(lookup):
+            return {}
+        try:
+            result = lookup(_ShareKey(task.share_code, task.receive_code))
+        except Exception:
+            return {}
+        return result if isinstance(result, dict) else {}
+
     def _stage_received(self, task: TaskSnapshot) -> StageResult:
         row = self._submission_row(task)
+        key = _ShareKey(task.share_code, task.receive_code)
         cms_task_id = str(
             (row or {}).get("cms_task_id") or task.metadata.get("cms_task_id") or ""
         ).strip()
-        if row and not cms_task_id and str(row.get("status") or "").lower() not in {"failed", "error"}:
+        title = str((row or {}).get("title") or task.title or task.share_code).strip()
+        recovered_existing = False
+        if not cms_task_id and not (row and self._accepted_without_task_id(task, row)):
+            existing = self._lookup_cms_task(task)
+            existing_status = _cms_status(existing)
+            if (
+                existing
+                and not any(marker in existing_status for marker in _CMS_FAILURE_MARKERS)
+                and existing_status != "2"
+            ):
+                cms_task_id = self._cms_task_id(existing)
+                title = str(_detail_value(existing, "name", "title", "share_name", "file_name") or title).strip()
+                recovered_existing = bool(cms_task_id)
+        if (
+            row
+            and not cms_task_id
+            and not self._accepted_without_task_id(task, row)
+            and str(row.get("status") or "").lower() not in {"failed", "error"}
+        ):
             return StageResult.failed(
                 "已有 CMS 提交记录但缺少任务 ID",
                 error_type="cms_task_id_missing",
                 metadata=self._submission_metadata(row),
             )
-        title = str((row or {}).get("title") or task.title or task.share_code).strip()
         if not cms_task_id:
+            if row and self._accepted_without_task_id(task, row):
+                return StageResult.complete(
+                    "CMS 已接受（同步响应未提供任务 ID）",
+                    self._submission_metadata(
+                        row,
+                        title=title,
+                        cms_submission_accepted=True,
+                        cms_task_id_optional=True,
+                    ),
+                )
             response = self.cms.add_share_down(task.url)
             cms_task_id, response_title = _extract_cms_task_info(response)
-            if not cms_task_id:
-                return StageResult.failed("CMS 未返回任务 ID", error_type="cms_task_id_missing")
             title = response_title or title
+            if not cms_task_id:
+                row = self.store.upsert_submission(
+                    key,
+                    task.url,
+                    "submitted_no_task_id",
+                    title=title,
+                )
+                return StageResult.complete(
+                    "CMS 已接受（同步响应未提供任务 ID）",
+                    self._submission_metadata(
+                        row,
+                        title=title,
+                        cms_submission_accepted=True,
+                        cms_task_id_optional=True,
+                    ),
+                )
             row = self.store.upsert_submission(
-                _ShareKey(task.share_code, task.receive_code),
+                key,
                 task.url,
                 "submitted",
                 cms_task_id=cms_task_id,
                 title=title,
             )
-        elif not row:
+        elif recovered_existing or not row:
             row = self.store.upsert_submission(
-                _ShareKey(task.share_code, task.receive_code),
+                key,
                 task.url,
                 "submitted",
                 cms_task_id=cms_task_id,
@@ -190,19 +275,69 @@ class DirectTaskWorkflow:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
         cms_task_id = str(row.get("cms_task_id") or task.metadata.get("cms_task_id") or "").strip()
         if not cms_task_id:
-            return StageResult.failed("缺少 CMS 任务 ID", error_type="cms_task_id_missing")
+            if not self._accepted_without_task_id(task, row):
+                return StageResult.failed("缺少 CMS 任务 ID", error_type="cms_task_id_missing")
+            detail = self._lookup_cms_task(task)
+            recovered_task_id = self._cms_task_id(detail)
+            if recovered_task_id:
+                cms_task_id = recovered_task_id
+                title = str(_detail_value(detail, "name", "title", "share_name", "file_name") or row.get("title") or task.title or "").strip()
+                row = self.store.upsert_submission(
+                    _ShareKey(task.share_code, task.receive_code),
+                    task.url,
+                    str(row.get("status") or "submitted"),
+                    cms_task_id=cms_task_id,
+                    title=title,
+                )
+            else:
+                title = str(row.get("title") or task.title or task.share_code).strip()
+                try:
+                    detail = self.cms.recognize_media(title)
+                except Exception:
+                    detail = {}
+                existing = self._recognition(row)
+                recognition = _cms_recognition(detail, existing, title)
+                if recognition.get("category") or recognition.get("tmdb_id"):
+                    updated = self.store.update_recognition(
+                        int(row["id"]),
+                        recognition,
+                        "cms_resolved",
+                    ) or row
+                    return StageResult.complete(
+                        "CMS 整理完成（同步响应未提供任务 ID）",
+                        self._submission_metadata(
+                            updated,
+                            title=title,
+                            cms_submission_accepted=True,
+                            cms_task_id_optional=True,
+                            recognition=recognition,
+                            category=recognition.get("category") or "",
+                            tmdb_id=recognition.get("tmdb_id") or "",
+                        ),
+                    )
+                return StageResult.defer(
+                    "等待 CMS 整理完成（同步响应未提供任务 ID）",
+                    15,
+                    self._submission_metadata(
+                        row,
+                        title=title,
+                        cms_submission_accepted=True,
+                        cms_task_id_optional=True,
+                    ),
+                )
         detail = self.cms.get_share_down_detail(cms_task_id)
         status = _cms_status(detail)
+        outcome = _cms_status_outcome(detail)
         title = str(_detail_value(detail, "name", "title", "share_name", "file_name") or row.get("title") or task.title or "").strip()
         updated = self.store.update_status(int(row["id"]), status or "unknown", title=title) or row
-        if any(marker in status for marker in _CMS_FAILURE_MARKERS):
-            reason = str(_detail_value(detail, "msg", "message", "error", "last_error") or "CMS 整理失败")
+        if outcome == "failed":
+            reason = str(_detail_value(detail, "msg", "message", "error", "last_error", "remark") or "CMS 整理失败")
             return StageResult.failed(
                 reason,
                 error_type="cms_organize_failed",
                 metadata=self._submission_metadata(updated, cms_task_id=cms_task_id, title=title),
             )
-        if not any(marker in status for marker in _CMS_SUCCESS_MARKERS):
+        if outcome != "success":
             return StageResult.defer("等待 CMS 整理完成", 15, self._submission_metadata(updated, cms_task_id=cms_task_id, title=title))
         existing = self._recognition(updated)
         recognition = _cms_recognition(detail, existing, title)
