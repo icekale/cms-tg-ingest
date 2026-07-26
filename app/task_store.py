@@ -1327,7 +1327,13 @@ class TaskStore:
                 "retry_stage": TaskStage.RECEIVED.value,
                 "force_reprocess": True,
             },
-            metadata_delete_keys=("_defer_stage", "_defer_message", "_defer_count"),
+            metadata_delete_keys=(
+                "_defer_stage",
+                "_defer_message",
+                "_defer_count",
+                "organized_scan_cursor",
+                "organized_folder",
+            ),
             next_run_at=next_run_at,
             clear_claim=True,
         )

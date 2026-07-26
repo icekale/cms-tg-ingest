@@ -88,6 +88,166 @@ class P115WebClientTests(unittest.TestCase):
         self.assertEqual(http.calls[0][1], "POST")
         self.assertEqual(http.calls[0][2], {"fid": "fid-1", "file_name": "asset-42-abcd"})
 
+    def test_find_organized_folder_caps_search_and_scan_requests_at_eight(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, dict(params or {})))
+                if url.endswith("/files"):
+                    parent_id = str((params or {}).get("cid") or "")
+                    if parent_id == "exists-root":
+                        return {
+                            "state": True,
+                            "data": [
+                                {"cid": f"child-{index}", "pid": parent_id, "n": f"child-{index}"}
+                                for index in range(20)
+                            ],
+                        }
+                    return {
+                        "state": True,
+                        "data": [{"cid": f"child-{parent_id}", "pid": parent_id, "n": f"child-{parent_id}"}],
+                    }
+                return {"state": True, "data": []}
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        result = client.find_organized_folder(
+            {"title": "测试影片", "tmdb_id": "999999"},
+            "测试影片 2026",
+            scan_parent_ids={"exists-root"},
+            return_scan_state=True,
+        )
+
+        self.assertIsNone(result["folder"])
+        self.assertTrue(result["organized_scan_cursor"])
+        self.assertLessEqual(len(http.calls), 8)
+
+    def test_find_organized_folder_resumes_scan_from_cursor_without_relisting_root(self):
+        class FakeHttp:
+            def __init__(self):
+                self.file_cids = []
+                self.searches = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                params = params or {}
+                if url.endswith("/files"):
+                    parent_id = str(params.get("cid") or "")
+                    self.file_cids.append(parent_id)
+                    if parent_id == "exists-root":
+                        return {
+                            "state": True,
+                            "data": [
+                                {"cid": f"child-{index}", "pid": parent_id, "n": f"child-{index}"}
+                                for index in range(10)
+                            ],
+                        }
+                    if parent_id == "child-9":
+                        return {
+                            "state": True,
+                            "data": [{"cid": "target", "pid": parent_id, "n": "T-目标-2026-[tmdb=999999]"}],
+                        }
+                    return {"state": True, "data": []}
+                self.searches.append(dict(params))
+                return {"state": True, "data": []}
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3, cache_ttl_seconds=0)
+        recognition = {"title": "目标", "tmdb_id": "999999"}
+
+        first = client.find_organized_folder(
+            recognition,
+            "目标 2026",
+            scan_parent_ids={"exists-root"},
+            return_scan_state=True,
+        )
+        self.assertIsNone(first["folder"])
+        self.assertTrue(first["organized_scan_cursor"])
+        first_calls = list(http.file_cids)
+        first_search_count = len(http.searches)
+
+        second = client.find_organized_folder(
+            recognition,
+            "目标 2026",
+            scan_parent_ids={"exists-root"},
+            organized_scan_cursor=first["organized_scan_cursor"],
+            return_scan_state=True,
+        )
+
+        self.assertEqual(second["folder"]["file_id"], "target")
+        self.assertIsNone(second["organized_scan_cursor"])
+        self.assertNotIn("exists-root", http.file_cids[len(first_calls):])
+        self.assertEqual(len(http.searches), first_search_count)
+
+    def test_scan_organized_folders_persists_directory_page_offset(self):
+        class FakeHttp:
+            def __init__(self):
+                self.offsets = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                params = params or {}
+                if url.endswith("/files"):
+                    self.offsets.append(int(params.get("offset") or 0))
+                    if int(params.get("offset") or 0) == 0:
+                        return {
+                            "state": True,
+                            "data": [
+                                {"cid": "child-0", "pid": "exists-root", "n": "child-0"},
+                                {"cid": "child-1", "pid": "exists-root", "n": "child-1"},
+                            ],
+                        }
+                    return {
+                        "state": True,
+                        "data": [{"cid": "target", "pid": "exists-root", "n": "T-目标-2026-[tmdb=999999]"}],
+                    }
+                return {"state": True, "data": []}
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+        recognition = {"title": "目标", "tmdb_id": "999999"}
+
+        first = client.scan_organized_folders(
+            {"exists-root"},
+            limit=2,
+            max_list_calls=1,
+            recognition=recognition,
+            share_name="目标 2026",
+            return_scan_state=True,
+        )
+        second = client.scan_organized_folders(
+            {"exists-root"},
+            limit=2,
+            max_list_calls=1,
+            recognition=recognition,
+            share_name="目标 2026",
+            scan_cursor=first["organized_scan_cursor"],
+            return_scan_state=True,
+        )
+
+        self.assertEqual(first["organized_scan_cursor"]["queue"][0]["offset"], 2)
+        self.assertEqual(second["folders"][0]["cid"], "target")
+        self.assertEqual(http.offsets, [0, 2])
+
+    def test_find_organized_folder_propagates_115_risk_control_from_scan(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                if url.endswith("/files"):
+                    raise bridge.P115RiskControlError("操作过于频繁，请稍后再试")
+                return {"state": True, "data": []}
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        with self.assertRaises(bridge.P115RiskControlError):
+            client.find_organized_folder(
+                {"title": "测试影片", "tmdb_id": "999999"},
+                "测试影片 2026",
+                scan_parent_ids={"exists-root"},
+                return_scan_state=True,
+            )
+
+
 
 class CmsPlaybackProbeTests(unittest.TestCase):
     def _client(self):
@@ -2733,6 +2893,55 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertEqual(repaired, 1)
             self.assertFalse(source.exists())
             self.assertTrue((tv_root / "M-梦魇绝镇-2022-[tmdb=124364]" / "Season 01" / "梦魇绝镇.strm").exists())
+            self.assertEqual(updated["move_status"], "moved")
+
+    def test_repair_stranded_self_share_folder_falls_back_from_empty_alias_to_own_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            movie_root = root / "Movie"
+            alias_name = "asset-313-7030e48e"
+            own_name = "Y-幼女战记-2017-[tmdb=69346]"
+            (share_root / alias_name).mkdir(parents=True)
+            source = share_root / own_name
+            source.mkdir(parents=True)
+            (source / "movie.strm").write_text(
+                "http://cms/s/own_share_1212_movie.mkv",
+                encoding="utf-8",
+            )
+            store = bridge.SubmissionStore(root / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("external-alias-fallback", "pass001"),
+                "https://115cdn.com/s/external-alias-fallback?password=pass001",
+                "submitted",
+                title="幼女战记",
+            )
+            store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                share_alias_name=alias_name,
+                own_share_file_name=own_name,
+                own_share_code="own_share",
+            )
+            store.update_category(int(row["id"]), "外国电视", "selected")
+            store.update_move(
+                int(row["id"]),
+                "skipped",
+                category_final="外国电视",
+                error="等待维护恢复",
+            )
+            config = bridge.MoveConfig(
+                source_roots=[share_root],
+                library_roots={"外国电视": movie_root},
+                stable_seconds=0,
+            )
+
+            repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
+            updated = store.find_by_id(int(row["id"]))
+
+            self.assertEqual(repaired, 1)
+            self.assertFalse(source.exists())
+            self.assertTrue((movie_root / own_name / "movie.strm").exists())
             self.assertEqual(updated["move_status"], "moved")
 
     def test_repair_stranded_self_share_folder_rejects_direct_target(self):

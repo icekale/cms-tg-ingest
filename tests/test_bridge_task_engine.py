@@ -560,6 +560,83 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(recognition["category_status"], "tmdb_search_resolved")
             self.assertEqual(stored["category_status"], "organized_found")
 
+    def test_organizing_stage_persists_and_reuses_organized_scan_cursor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, tmdb_resolver=FakeTmdbResolver())
+            row = self._row()
+            row = self.submissions.update_status(
+                int(row["id"]),
+                "received",
+                title="目标影片 2026",
+            ) or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            cursor = {
+                "version": 1,
+                "root_parent_ids": ["exists-root"],
+                "queue": [{"parent_id": "child-1", "parts": ["Movie"], "depth": 1, "offset": 0}],
+                "seen": ["exists-root", "child-1"],
+            }
+            calls = []
+
+            def find_organized_folder(recognition, title, **kwargs):
+                calls.append(kwargs)
+                return {
+                    "folder": None,
+                    "organized_scan_cursor": {**cursor, "queue": [{"parent_id": "child-2", "parts": [], "depth": 1, "offset": 0}]},
+                    "scan_complete": False,
+                }
+
+            workflow.p115.find_organized_folder = find_organized_folder
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {"submission_id": row["id"], "organized_scan_cursor": cursor},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(result.metadata["organized_scan_cursor"]["queue"][0]["parent_id"], "child-2")
+            self.assertEqual(calls[0]["organized_scan_cursor"], cursor)
+            self.assertTrue(calls[0]["return_scan_state"])
+
+    def test_organizing_stage_keeps_total_115_lookup_budget_across_tmdb_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, tmdb_resolver=FakeTmdbSearchResolver())
+            row = self._row()
+            row = self.submissions.update_status(
+                int(row["id"]),
+                "received",
+                title="Greys.Anatomy.S22.1080p.DSNP.WEB-DL",
+            ) or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            calls = []
+
+            def find_organized_folder(recognition, title, **kwargs):
+                calls.append(kwargs)
+                return {
+                    "folder": None,
+                    "organized_scan_cursor": None,
+                    "scan_complete": True,
+                    "request_count": 8,
+                }
+
+            workflow.p115.find_organized_folder = find_organized_folder
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(len(calls), 1)
+
     def test_organizing_stage_uses_tmdb_search_for_chinese_quality_title(self):
         class MonteCristoResolver(FakeTmdbResolver):
             def search(self, query, media_type):
@@ -2393,7 +2470,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             result = workflow.run_stage(task)
 
             target = episode_dir / "权力的游戏前传：龙族 (2022) - S03E03.strm"
-            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(result.outcome, StageOutcome.FAILED)
             self.assertEqual(target.read_text(encoding="utf-8"), "https://115.com/d/direct/S03E03.mkv")
             self.assertTrue((self.config.strm_root / row["own_share_file_name"] / relative_path).exists())
             self.assertEqual(self.cms.share_sync_calls, [])
@@ -2568,7 +2645,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             task = SimpleNamespace(metadata={})
             metadata = {"dest_path": str(Path(tmp) / "library" / "missing")}
 
-            for restore_status in ("skipped", "error"):
+            for restore_status in ("skipped", "error", "move_failed"):
                 with self.subTest(restore_status=restore_status), patch(
                     "app.workflows.self_share.restore_missing_self_share_library_folder",
                     return_value=(restore_status, {"restore_reason": restore_status}),

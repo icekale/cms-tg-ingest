@@ -15,7 +15,7 @@ from app.media.classify import candidate_tokens, extract_tmdb_id_from_name, extr
 
 LOG = logging.getLogger("cms-tg-ingest")
 CMS_PARENT_CID_CATEGORY_MAP: dict[str, str] = {}
-DEFAULT_ORGANIZED_SCAN_MAX_LIST_CALLS = 80
+DEFAULT_ORGANIZED_SCAN_MAX_LIST_CALLS = 8
 PAN115_LIXIAN_SSP_URL = "https://lixian.115.com/lixianssp/"
 PAN115_LIXIAN_WEB_URL = "https://lixian.115.com/lixian/"
 PAN115_ANDROID_USER_AGENT = "Mozilla/5.0 115disk/99.99.99.99 115Browser/99.99.99.99 115wangpan_android/99.99.99.99"
@@ -171,6 +171,45 @@ def category_for_115_parent_id(parent_id: str, mapping: dict[str, str] | None = 
 
 def p115_file_name(item: dict[str, Any]) -> str:
     return str(item.get("n") or item.get("file_name") or item.get("name") or "").strip()
+
+
+def _organized_scan_cursor(parent_ids: set[str], cursor: dict[str, Any] | None) -> dict[str, Any]:
+    roots = sorted({str(parent_id).strip() for parent_id in parent_ids if str(parent_id).strip()})
+    if not isinstance(cursor, dict) or sorted(str(value) for value in cursor.get("root_parent_ids") or []) != roots:
+        return {
+            "version": 1,
+            "root_parent_ids": roots,
+            "queue": [
+                {"parent_id": parent_id, "parts": [], "depth": 0, "offset": 0}
+                for parent_id in roots
+            ],
+            "seen": roots[:],
+        }
+
+    queue: list[dict[str, Any]] = []
+    for raw in cursor.get("queue") or []:
+        if not isinstance(raw, dict):
+            continue
+        parent_id = str(raw.get("parent_id") or "").strip()
+        if not parent_id:
+            continue
+        parts = raw.get("parts") if isinstance(raw.get("parts"), list) else []
+        try:
+            depth = max(0, int(raw.get("depth") or 0))
+            offset = max(0, int(raw.get("offset") or 0))
+        except (TypeError, ValueError):
+            continue
+        queue.append(
+            {
+                "parent_id": parent_id,
+                "parts": [str(part) for part in parts],
+                "depth": depth,
+                "offset": offset,
+            }
+        )
+    seen = {str(value).strip() for value in cursor.get("seen") or [] if str(value).strip()}
+    seen.update(roots)
+    return {"version": 1, "root_parent_ids": roots, "queue": queue, "seen": sorted(seen)}
 
 
 def p115_is_folder(item: dict[str, Any]) -> bool:
@@ -661,10 +700,10 @@ class P115WebClient:
             raise RuntimeError(f"115 cloud download is not completed: {status['status']}")
         return validate_cloud_output(status, target_cid)
 
-    def list_files(self, parent_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    def list_files(self, parent_id: str, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         resp = self._request(
             "https://webapi.115.com/files",
-            params={"cid": str(parent_id), "limit": limit, "offset": 0, "show_dir": 1, "fc_mix": 1},
+            params={"cid": str(parent_id), "limit": limit, "offset": max(0, int(offset)), "show_dir": 1, "fc_mix": 1},
         )
         self._ensure_state(resp, "115 list files failed")
         return iter_items(resp.get("data") or resp)
@@ -680,49 +719,80 @@ class P115WebClient:
         excluded_parent_ids: set[str] | None = None,
         allowed_parent_ids: set[str] | None = None,
         max_list_calls: int = DEFAULT_ORGANIZED_SCAN_MAX_LIST_CALLS,
-    ) -> list[dict[str, Any]]:
-        root_parent_ids = {str(parent_id) for parent_id in parent_ids if str(parent_id)}
-        queue: list[tuple[str, list[str], int]] = [(parent_id, [], 0) for parent_id in root_parent_ids]
-        seen: set[str] = set()
+        scan_cursor: dict[str, Any] | None = None,
+        return_scan_state: bool = False,
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        root_parent_ids = {str(parent_id).strip() for parent_id in parent_ids if str(parent_id).strip()}
+        try:
+            budget = max(1, min(8, int(max_list_calls)))
+        except (TypeError, ValueError):
+            budget = DEFAULT_ORGANIZED_SCAN_MAX_LIST_CALLS
+        cursor = _organized_scan_cursor(root_parent_ids, scan_cursor)
+        queue = list(cursor["queue"])
+        seen = set(cursor["seen"])
         folders: list[dict[str, Any]] = []
         list_calls = 0
-        while queue:
-            batch: list[tuple[str, list[str], int]] = []
-            while queue:
-                parent_id, parts, depth = queue.pop(0)
-                if parent_id in seen or depth >= max_depth:
+        while queue and list_calls < budget:
+            node = queue.pop(0)
+            parent_id = str(node["parent_id"])
+            parts = list(node.get("parts") or [])
+            depth = int(node.get("depth") or 0)
+            offset = int(node.get("offset") or 0)
+            if depth >= max_depth:
+                continue
+            list_calls += 1
+            page_limit = max(1, min(int(limit), 500))
+            page = self.list_files(parent_id, limit=page_limit, offset=offset)
+            page_folders: list[dict[str, Any]] = []
+            for item in page:
+                if not p115_is_folder(item):
                     continue
-                seen.add(parent_id)
-                batch.append((parent_id, parts, depth))
-            if not batch:
-                break
-            level_folders: list[dict[str, Any]] = []
-            for parent_id, parts, depth in batch:
-                if max_list_calls > 0 and list_calls >= max_list_calls:
-                    folders.extend(level_folders)
-                    return folders
-                list_calls += 1
-                for item in self.list_files(parent_id, limit=limit):
-                    if not p115_is_folder(item):
-                        continue
-                    name = p115_file_name(item)
-                    file_id = p115_file_id(item)
-                    child_parts = parts + [name]
-                    folder = dict(item)
-                    folder["_category"] = infer_category_from_115_path(child_parts, category_names)
-                    level_folders.append(folder)
-                    queue.append((file_id, child_parts, depth + 1))
-            folders.extend(level_folders)
+                name = p115_file_name(item)
+                file_id = p115_file_id(item)
+                if not name or not file_id:
+                    continue
+                child_parts = parts + [name]
+                folder = dict(item)
+                folder["_category"] = infer_category_from_115_path(child_parts, category_names)
+                page_folders.append(folder)
+                if file_id not in seen:
+                    seen.add(file_id)
+                    queue.append(
+                        {"parent_id": file_id, "parts": child_parts, "depth": depth + 1, "offset": 0}
+                    )
+            folders.extend(page_folders)
             if recognition is not None:
                 selected = select_organized_115_folder(
-                    level_folders,
+                    page_folders,
                     recognition,
                     share_name,
                     excluded_parent_ids=excluded_parent_ids,
                     allowed_parent_ids=allowed_parent_ids or root_parent_ids,
                 )
                 if selected:
-                    return level_folders
+                    queue = []
+                    break
+            if len(page) >= page_limit:
+                queue.insert(
+                    0,
+                    {"parent_id": parent_id, "parts": parts, "depth": depth, "offset": offset + len(page)},
+                )
+
+        next_cursor = None
+        if queue:
+            next_cursor = {
+                "version": 1,
+                "root_parent_ids": sorted(root_parent_ids),
+                "queue": queue,
+                "seen": sorted(seen),
+            }
+        if return_scan_state:
+            return {
+                "folders": folders,
+                "organized_scan_cursor": next_cursor,
+                "scan_complete": next_cursor is None,
+                "list_request_count": list_calls,
+            }
         return folders
 
     def find_source_residue_files(
@@ -754,35 +824,69 @@ class P115WebClient:
         min_update_time: float = 0,
         scan_parent_ids: set[str] | None = None,
         category_names: set[str] | None = None,
-    ) -> dict[str, str] | None:
-        search_values = candidate_tokens(recognition, share_name)
+        organized_scan_cursor: dict[str, Any] | None = None,
+        max_requests: int = 8,
+        return_scan_state: bool = False,
+    ) -> dict[str, str] | dict[str, Any] | None:
+        def result(folder: dict[str, str] | None, cursor: dict[str, Any] | None, complete: bool, requests: int):
+            if return_scan_state:
+                return {
+                    "folder": folder,
+                    "organized_scan_cursor": cursor,
+                    "scan_complete": complete,
+                    "request_count": requests,
+                }
+            return folder
+
+        try:
+            request_budget = max(1, min(8, int(max_requests)))
+        except (TypeError, ValueError):
+            request_budget = 8
+        request_count = 0
+        # A persisted queue is more valuable than repeating the same search index queries.
+        has_scan_cursor = isinstance(organized_scan_cursor, dict) and bool(organized_scan_cursor.get("queue"))
+        search_values = [] if has_scan_cursor else candidate_tokens(recognition, share_name)
         tmdb_id = str(recognition.get("tmdb_id") or extract_tmdb_id_from_name(share_name) or "").strip()
-        if tmdb_id:
+        if tmdb_id and not has_scan_cursor:
             search_values.insert(0, tmdb_id)
         seen = set()
         items: list[dict[str, Any]] = []
         for value in search_values:
+            if request_count >= request_budget:
+                break
             value = str(value or "").strip()
             if not value or value in seen:
                 continue
             seen.add(value)
             items.extend(self.search_files(value, limit=20))
+            request_count += 1
             selected = select_organized_115_folder(items, recognition, share_name, excluded_parent_ids=excluded_parent_ids)
             if selected:
-                return selected
-        if scan_parent_ids:
+                return result(selected, None, True, request_count)
+        if scan_parent_ids and request_count < request_budget:
+            scan_request_count_before = self.request_count
             try:
-                scanned = self.scan_organized_folders(
+                scan_state = self.scan_organized_folders(
                     scan_parent_ids,
                     category_names=category_names,
                     recognition=recognition,
                     share_name=share_name,
                     excluded_parent_ids=excluded_parent_ids,
                     allowed_parent_ids=scan_parent_ids,
+                    max_list_calls=request_budget - request_count,
+                    scan_cursor=organized_scan_cursor,
+                    return_scan_state=True,
                 )
+            except P115RiskControlError:
+                raise
             except Exception:
+                request_count += max(0, self.request_count - scan_request_count_before)
                 LOG.debug("115 organized folder scan failed; falling back to search", exc_info=True)
+                if isinstance(organized_scan_cursor, dict) and organized_scan_cursor.get("queue"):
+                    return result(None, organized_scan_cursor, False, request_count)
             else:
+                request_count += int(scan_state.get("list_request_count") or 0)
+                scanned = scan_state.get("folders") or []
                 selected = select_organized_115_folder(
                     scanned,
                     recognition,
@@ -791,20 +895,36 @@ class P115WebClient:
                     allowed_parent_ids=scan_parent_ids,
                 )
                 if selected:
-                    return selected
+                    return result(selected, None, True, request_count)
+                next_cursor = scan_state.get("organized_scan_cursor")
+                if next_cursor:
+                    return result(None, next_cursor, False, request_count)
         # If CMS/TMDB already identified the item, do not guess by year; wait for the exact TMDB folder.
         if tmdb_id:
-            return None
+            return result(None, None, True, request_count)
         year = extract_year_from_name(share_name)
         if year:
             fallback_items: list[dict[str, Any]] = []
             for value in (f"{year} tmdb", year):
+                if request_count >= request_budget:
+                    break
                 if value in seen:
                     continue
                 seen.add(value)
                 fallback_items.extend(self.search_files(value, limit=20))
-            return select_recent_tmdb_115_folder(fallback_items, year, excluded_parent_ids=excluded_parent_ids, min_update_time=min_update_time)
-        return None
+                request_count += 1
+            return result(
+                select_recent_tmdb_115_folder(
+                    fallback_items,
+                    year,
+                    excluded_parent_ids=excluded_parent_ids,
+                    min_update_time=min_update_time,
+                ),
+                None,
+                True,
+                request_count,
+            )
+        return result(None, None, True, request_count)
 
     def create_long_share(self, file_id: str) -> dict[str, str]:
         resp = self._request(

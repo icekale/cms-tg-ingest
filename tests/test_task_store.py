@@ -56,6 +56,47 @@ class TaskStoreTests(unittest.TestCase):
             backfilled = store.upsert_task("legacy", "", "https://115cdn.com/s/legacy", strm_mode="direct")
             self.assertEqual(backfilled.metadata["strm_mode"], "direct")
 
+    def test_organized_scan_cursor_round_trips_in_legacy_metadata_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "tasks.db"
+            store = TaskStore(db_path)
+            task = store.upsert_task("legacy-scan", "", "https://115cdn.com/s/legacy-scan")
+            with store._connection() as conn:
+                conn.execute("UPDATE tasks SET metadata_json = '{}' WHERE id = ?", (task.id,))
+
+            cursor = {
+                "version": 1,
+                "root_parent_ids": ["exists-root"],
+                "queue": [{"parent_id": "child-1", "parts": ["Movie"], "depth": 1, "offset": 0}],
+                "seen": ["exists-root", "child-1"],
+            }
+            reopened = TaskStore(db_path)
+            updated = reopened.patch_metadata(task.id, {"organized_scan_cursor": cursor})
+
+            self.assertEqual(updated.metadata["organized_scan_cursor"], cursor)
+
+    def test_reprocess_task_clears_stale_organized_scan_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("reprocess-scan", "", "https://115cdn.com/s/reprocess-scan")
+            task = store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "扫描中",
+                metadata_patch={
+                    "organized_scan_cursor": {"version": 1, "queue": [{"parent_id": "old"}]},
+                    "organized_folder": {"file_id": "old-folder"},
+                    "keep_for_retry": True,
+                },
+            )
+
+            updated = store.reprocess_task(task.id, message="重新开始", next_run_at=0)
+
+            self.assertNotIn("organized_scan_cursor", updated.metadata)
+            self.assertNotIn("organized_folder", updated.metadata)
+            self.assertTrue(updated.metadata["keep_for_retry"])
+
     def test_explicit_mode_does_not_backfill_active_legacy_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

@@ -482,6 +482,35 @@ class BridgeSelfShareTaskWorkflow:
             return self.store.find_by_id(int(submission_id))
         return self.store.find_by_key(_ShareKey(task.share_code, task.receive_code))
 
+    def _find_organized_folder(self, recognition, title, find_kwargs, scan_cursor, max_requests=8):
+        try:
+            raw = self.p115.find_organized_folder(
+                recognition,
+                title,
+                **find_kwargs,
+                organized_scan_cursor=scan_cursor,
+                max_requests=max(1, int(max_requests)),
+                return_scan_state=True,
+            )
+        except TypeError as exc:
+            # Keep older FakeP115/custom clients usable while the optional state API rolls out.
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            raw = self.p115.find_organized_folder(recognition, title, **find_kwargs)
+            return raw, None, True, 0
+        if isinstance(raw, dict) and "folder" in raw and "scan_complete" in raw:
+            try:
+                request_count = max(0, int(raw.get("request_count") or 0))
+            except (TypeError, ValueError):
+                request_count = 0
+            return (
+                raw.get("folder"),
+                raw.get("organized_scan_cursor"),
+                bool(raw.get("scan_complete")),
+                request_count,
+            )
+        return raw, None, True, 0
+
     def _stage_received(self, task):
         if not self.self_share_config.enabled:
             return StageResult.failed("自分享工作流未启用", error_type="self_share_disabled")
@@ -552,6 +581,9 @@ class BridgeSelfShareTaskWorkflow:
             update_started_at = 0
         if update_started_at:
             min_update_time = max(min_update_time, update_started_at - 5)
+        organized_scan_cursor = task.metadata.get("organized_scan_cursor")
+        if not isinstance(organized_scan_cursor, dict):
+            organized_scan_cursor = None
         find_kwargs = {
             "excluded_parent_ids": excluded_parent_ids,
             "min_update_time": min_update_time,
@@ -565,6 +597,7 @@ class BridgeSelfShareTaskWorkflow:
                     else set(default_library_roots()),
                 }
             )
+        lookup_budget = 8
         direct_strm_removed = 0
         direct_signal = None
         cloud_output_name = str(task.metadata.get("cloud_output_name") or "").strip()
@@ -621,14 +654,28 @@ class BridgeSelfShareTaskWorkflow:
                         if direct_category:
                             folder["category"] = direct_category
         if folder is None:
-            folder = self.p115.find_organized_folder(recognition, title, **find_kwargs)
+            folder, organized_scan_cursor, _scan_complete, lookup_requests = self._find_organized_folder(
+                recognition,
+                title,
+                find_kwargs,
+                organized_scan_cursor,
+                max_requests=lookup_budget,
+            )
+            lookup_budget = max(0, lookup_budget - lookup_requests)
         if folder and is_unverified_received_source(folder, task.metadata, self.receive_cid):
             folder = None
         if not folder:
             tmdb_resolved, tmdb_should_prompt = apply_tmdb_search_resolution(recognition, title, self.tmdb_resolver)
-            if not tmdb_should_prompt and str(tmdb_resolved.get("tmdb_id") or "").strip():
+            if not tmdb_should_prompt and str(tmdb_resolved.get("tmdb_id") or "").strip() and lookup_budget > 0:
                 recognition = dict(tmdb_resolved)
-                folder = self.p115.find_organized_folder(recognition, title, **find_kwargs)
+                folder, organized_scan_cursor, _scan_complete, lookup_requests = self._find_organized_folder(
+                    recognition,
+                    title,
+                    find_kwargs,
+                    organized_scan_cursor,
+                    max_requests=lookup_budget,
+                )
+                lookup_budget = max(0, lookup_budget - lookup_requests)
                 if folder and is_unverified_received_source(folder, task.metadata, self.receive_cid):
                     folder = None
                 category = str(recognition.get("category") or "").strip()
@@ -644,7 +691,11 @@ class BridgeSelfShareTaskWorkflow:
             return StageResult.defer(
                 "等待 CMS 整理完成",
                 self.self_share_config.auto_organize_retry_seconds or 30,
-                {"submission_id": int(row["id"]), "direct_strm_removed": direct_strm_removed},
+                {
+                    "submission_id": int(row["id"]),
+                    "direct_strm_removed": direct_strm_removed,
+                    "organized_scan_cursor": organized_scan_cursor or {},
+                },
             )
         existing_library_category = category_from_existing_library_folder(self.move_config, folder)
         if existing_library_category and not str(folder.get("category") or "").strip():
@@ -667,7 +718,12 @@ class BridgeSelfShareTaskWorkflow:
             row = self.store.update_recognition(int(row["id"]), recognition, "organized_found") or row
         return StageResult.complete(
             "已找到 CMS 整理后的 115 文件夹",
-            {"submission_id": int(row["id"]), "organized_folder": folder, "direct_strm_removed": direct_strm_removed},
+            {
+                "submission_id": int(row["id"]),
+                "organized_folder": folder,
+                "direct_strm_removed": direct_strm_removed,
+                "organized_scan_cursor": {},
+            },
         )
 
     def _stage_recognizing(self, task):
@@ -1714,7 +1770,7 @@ class BridgeSelfShareTaskWorkflow:
                 "任务状态已完成，但目标 STRM 未通过自有分享校验，请检查媒体库目录",
                 metadata,
             )
-        if restore_status not in {"skipped", "error"}:
+        if restore_status not in {"skipped", "error", "move_failed"}:
             return StageResult.defer(
                 "等待已移动 STRM 目标目录恢复",
                 delay,

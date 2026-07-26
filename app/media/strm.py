@@ -1073,32 +1073,43 @@ def repair_stranded_self_share_moves(store: Any, move_config: MoveConfig, limit:
                     repaired += 1
                 continue
         category = category_for_self_share_row(row)
-        source_name = _single_relative_directory_name(
-            str(row.get("share_alias_name") or row.get("own_share_file_name") or "")
-        )
+        candidate_names = []
+        for folder_value in (
+            str(row.get("share_alias_name") or "").strip(),
+            str(row.get("own_share_file_name") or "").strip(),
+        ):
+            folder_name = _single_relative_directory_name(folder_value)
+            if folder_name and folder_name not in candidate_names:
+                candidate_names.append(folder_name)
         canonical_name = canonical_self_share_root_name(row)
-        if not category or not source_name or not canonical_name:
+        if not category or not candidate_names or not canonical_name:
             continue
-        for source_root in move_config.source_roots:
-            source = safe_resolve(Path(source_root) / source_name)
-            if not is_under_any_root(source, move_config.source_roots):
-                continue
-            if is_under_any_root(source, list(move_config.library_roots.values())):
-                continue
-            plan = plan_strm_move(source, category, move_config, destination_name=canonical_name)
-            plan = _validate_self_share_move_plan(plan, move_config)
-            if plan.status in {"pending", "conflict"}:
-                restore_canonical_strm_paths(source, row)
+        for source_name in candidate_names:
+            for source_root in move_config.source_roots:
+                source = safe_resolve(Path(source_root) / source_name)
+                if not is_under_any_root(source, move_config.source_roots):
+                    continue
+                if is_under_any_root(source, list(move_config.library_roots.values())):
+                    continue
+                if not source.is_dir():
+                    continue
                 plan = plan_strm_move(source, category, move_config, destination_name=canonical_name)
                 plan = _validate_self_share_move_plan(plan, move_config)
-            if plan.status in {"pending", "conflict"}:
-                updated = merge_self_share_strm_folder(plan, store, row, move_config)
-                if updated.get("move_status") == "moved":
-                    repaired += 1
-                break
-            if plan.status != "skipped":
-                execute_strm_move(plan, store, row)
-                break
+                if plan.status in {"pending", "conflict"}:
+                    restore_canonical_strm_paths(source, row)
+                    plan = plan_strm_move(source, category, move_config, destination_name=canonical_name)
+                    plan = _validate_self_share_move_plan(plan, move_config)
+                if plan.status in {"pending", "conflict"}:
+                    updated = merge_self_share_strm_folder(plan, store, row, move_config)
+                    if updated.get("move_status") == "moved":
+                        repaired += 1
+                    break
+                if plan.status != "skipped":
+                    execute_strm_move(plan, store, row)
+                    break
+            else:
+                continue
+            break
     return repaired
 
 
