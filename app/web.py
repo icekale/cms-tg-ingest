@@ -23,7 +23,7 @@ from .task_diagnostics import (
 )
 from .task_engine import decide_retry, stage_display_name
 from .task_health import build_task_health, format_task_health
-from .task_store import TaskStore
+from .task_store import REPROCESS_METADATA_DELETE_KEYS, TaskStore, build_reprocess_metadata
 from .web_api import (
     api_response,
     api_task_detail,
@@ -767,6 +767,7 @@ def _apply_web_transition(
     initial_event_stage: TaskStage | None = None,
     increment_retry: bool = False,
     metadata_patch: dict[str, Any] | None = None,
+    metadata_delete_keys: tuple[str, ...] = ("_defer_stage", "_defer_message", "_defer_count"),
 ) -> bool:
     updated = store.compare_and_set_transition(
         task.id,
@@ -780,7 +781,7 @@ def _apply_web_transition(
         initial_event_stage=initial_event_stage,
         increment_retry=increment_retry,
         metadata_patch=metadata_patch,
-        metadata_delete_keys=("_defer_stage", "_defer_message", "_defer_count"),
+        metadata_delete_keys=metadata_delete_keys,
         next_run_at=0,
         clear_errors=True,
         clear_claim=True,
@@ -816,11 +817,8 @@ def _apply_task_action(store: TaskStore, task: Any, action: str) -> bool:
             task,
             target_stage=TaskStage.RECEIVED,
             target_event_message="Web 触发从头重跑",
-            metadata_patch={
-                "retry_from_stage": task.current_stage.value,
-                "retry_stage": TaskStage.RECEIVED.value,
-                "force_reprocess": True,
-            },
+            metadata_patch=build_reprocess_metadata(task),
+            metadata_delete_keys=REPROCESS_METADATA_DELETE_KEYS,
         )
     if action == "retry":
         decision = decide_retry(task)
@@ -979,11 +977,8 @@ def fix_quality_issues(store: TaskStore) -> int:
                 task,
                 target_stage=TaskStage.RECEIVED,
                 target_event_message="Web 巡检自动修复：从头重跑",
-                metadata_patch={
-                    "retry_from_stage": task.current_stage.value,
-                    "retry_stage": TaskStage.RECEIVED.value,
-                    "force_reprocess": True,
-                },
+                metadata_patch=build_reprocess_metadata(task),
+                metadata_delete_keys=REPROCESS_METADATA_DELETE_KEYS,
             ):
                 fixed_task_ids.add(task.id)
     return len(fixed_task_ids)

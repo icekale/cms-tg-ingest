@@ -339,30 +339,59 @@ def tmdb_match_score(tmdb_result: dict[str, Any], share_name: str) -> int:
     return 0
 
 
+def _tmdb_media_type_hint(recognition: dict[str, Any], share_name: str) -> str:
+    recognized_type = str(recognition.get("type") or "").strip().lower()
+    if recognized_type in {"movie", "tv"}:
+        return recognized_type
+    category_type = media_type_for_category(str(recognition.get("category") or "").strip())
+    if category_type:
+        return category_type
+    if re.search(r"(?:^|[ ._\-\[(])S\d{1,2}(?:E\d{1,4})?\b", str(share_name or ""), re.I):
+        return "tv"
+    return "movie"
+
+
 def apply_tmdb_hint_resolution(
     recognition: dict[str, Any],
     share_name: str,
     tmdb_resolver: Any | None,
 ) -> tuple[dict[str, Any], bool]:
-    if not is_recognition_uncertain(recognition):
+    # A TMDB marker in the source name is an explicit identity assertion. It
+    # must take precedence over a stale or incorrect CMS recognition result.
+    name_tmdb_id = extract_tmdb_id_from_name(share_name)
+    uncertain = is_recognition_uncertain(recognition)
+    if not name_tmdb_id and not uncertain:
         return recognition, False
-    tmdb_id = str(recognition.get("tmdb_id") or extract_tmdb_id_from_name(share_name) or "").strip()
-    if not tmdb_id or not tmdb_resolver or not getattr(tmdb_resolver, "enabled", False):
+    tmdb_id = str(name_tmdb_id or recognition.get("tmdb_id") or "").strip()
+    if not tmdb_id:
+        if not uncertain:
+            return recognition, False
         return recognition, True
-    candidates = []
+    if not tmdb_id or not tmdb_resolver or not getattr(tmdb_resolver, "enabled", False):
+        return recognition, uncertain
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+    preferred_type = _tmdb_media_type_hint(recognition, share_name)
     for media_type in ("tv", "movie"):
         try:
             item = tmdb_resolver.lookup(tmdb_id, media_type, share_name)
         except Exception:
             LOG.debug("TMDB resolver failed", exc_info=True)
             item = {"ok": False}
-        score = tmdb_match_score(item, share_name)
-        if score:
-            candidates.append((score, item))
+        if not item.get("ok"):
+            continue
+        returned_id = str(item.get("tmdb_id") or "").strip()
+        if returned_id and returned_id != tmdb_id:
+            LOG.warning("TMDB resolver returned mismatched id requested=%s returned=%s", tmdb_id, returned_id)
+            continue
+        title_score = tmdb_match_score(item, share_name)
+        type_score = 1 if media_type == preferred_type else 0
+        candidates.append((title_score, type_score, item))
     if not candidates:
-        return recognition, True
-    candidates.sort(key=lambda value: value[0], reverse=True)
-    best = candidates[0][1]
+        return recognition, uncertain
+    # Title matching is only a tie-breaker. The numeric TMDB marker remains
+    # authoritative even when the source title is obfuscated or misleading.
+    candidates.sort(key=lambda value: (value[0], value[1], 1 if str(value[2].get("type") or "") == "movie" else 0), reverse=True)
+    best = candidates[0][2]
     media_type = str(best.get("type") or "")
     category = str(best.get("category") or "") or infer_region_category(
         media_type,
@@ -383,6 +412,7 @@ def apply_tmdb_hint_resolution(
             "tmdb_id": tmdb_id,
             "category_status": "tmdb_resolved",
             "openai_source": str(best.get("source") or "tmdb_web"),
+            "tmdb_source": str(best.get("source") or "tmdb_web"),
         }
     )
     return enriched, False
@@ -435,6 +465,47 @@ def apply_tmdb_search_resolution(
 def extract_tmdb_id_from_name(value: str) -> str:
     match = re.search(r"tmdb(?:id)?[=_\-](\d+)", str(value or ""), re.I)
     return match.group(1) if match else ""
+
+
+def normalize_tmdb_hint_name(value: str, tmdb_id: str, title: str = "") -> str:
+    """Build a CMS-friendly name while retaining the useful media suffix."""
+    original = str(value or "").strip()
+    tmdb_id = str(tmdb_id or "").strip()
+    if not original or not tmdb_id:
+        return original
+
+    extension = ""
+    extension_match = re.search(r"(?i)(\.(?:mkv|mp4|ts|iso|avi|mov|wmv|m2ts))$", original)
+    if extension_match:
+        extension = extension_match.group(1)
+        stem = original[: -len(extension)]
+    else:
+        stem = original
+
+    resolved_title = re.sub(r"\s+", " ", str(title or "").strip()).strip()
+    if not resolved_title:
+        resolved_title = re.sub(r"\s+", " ", re.sub(r"[\[{(]?tmdb(?:id)?[=_\-]\d+[\]})]?", "", stem, flags=re.I)).strip(" .-_()[]{}")
+        resolved_title = re.sub(r"\s*[\[(]?((?:19|20)\d{2})[\])]?(?=\s|$)", " ", resolved_title)
+    resolved_title = resolved_title.replace("/", "-").replace("\\", "-").replace("\x00", "")
+    resolved_title = re.sub(r"\s+", " ", resolved_title).strip()
+    resolved_title = re.sub(r"\s*\((?:19|20)\d{2}\)\s*$", "", resolved_title).strip()
+
+    year = extract_year_from_name(stem)
+    season = ""
+    season_match = re.search(r"(?i)(?:^|[ ._\-\[(])(S\d{1,2}(?:E\d{1,4})?)\b", stem)
+    if season_match:
+        season = season_match.group(1).upper()
+    season_folder = re.search(r"(?i)(?:^|[ ._\-\[(])(Season\s+\d{1,2})\b", stem)
+    if season_folder and not season:
+        season = re.sub(r"\s+", " ", season_folder.group(1)).title()
+
+    parts = [resolved_title]
+    if year:
+        parts.append(f"({year})")
+    if season:
+        parts.append(season)
+    parts.append(f"[tmdb={tmdb_id}]")
+    return " ".join(part for part in parts if part).strip() + extension
 
 
 def extract_year_from_name(value: str) -> str:
@@ -531,15 +602,40 @@ def parse_recognition_json(row: dict[str, Any]) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def expected_task_tmdb_id(recognition: dict[str, Any], row: dict[str, Any] | None = None) -> str:
+def explicit_task_tmdb_id(
+    recognition: dict[str, Any],
+    row: dict[str, Any] | None = None,
+    share_name: str = "",
+) -> str:
+    """Return a TMDB marker from source metadata, never generated output paths."""
     row = row or {}
-    explicit = str(recognition.get("tmdb_id") or "").strip()
-    if explicit:
-        return explicit
     for value in (
+        row.get("received_title"),
         row.get("title"),
         recognition.get("share_name"),
+        share_name,
         row.get("url"),
+    ):
+        tmdb_id = extract_tmdb_id_from_name(str(value or ""))
+        if tmdb_id:
+            return tmdb_id
+    return ""
+
+
+def expected_task_tmdb_id(recognition: dict[str, Any], row: dict[str, Any] | None = None) -> str:
+    row = row or {}
+    # Keep the task identity anchored to source metadata.  A generated
+    # self-share or media-library path is an output and may itself be wrong;
+    # it must only be used as a last-resort hint for legacy rows.
+    explicit = explicit_task_tmdb_id(recognition, row)
+    if explicit:
+        return explicit
+
+    recognized_tmdb_id = str(recognition.get("tmdb_id") or "").strip()
+    if recognized_tmdb_id:
+        return recognized_tmdb_id
+
+    for value in (
         row.get("own_share_file_name"),
         row.get("dest_path"),
         row.get("source_path"),

@@ -476,6 +476,263 @@ class CmsPlaybackProbeTests(unittest.TestCase):
         self.assertEqual(http.calls[1][2]["file_id"], "fid-1")
         self.assertEqual(http.calls[1][2]["cid"], "pending-cid")
 
+    def test_receive_share_to_cid_resolves_local_output_id_for_explicit_tmdb_name(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+                self.after_receive = False
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, method, dict(data or {}), dict(params or {})))
+                if url.endswith("/share/snap"):
+                    return {
+                        "state": True,
+                        "data": {
+                            "shareinfo": {"share_title": "123 (2026) {tmdb-1228710}"},
+                            "list": [{"fid": "source-id", "n": "123 (2026) {tmdb-1228710}.mkv"}],
+                        },
+                    }
+                if url.endswith("/share/receive"):
+                    self.after_receive = True
+                    return {"state": True, "data": {"receive_title": "123 (2026) {tmdb-1228710}"}}
+                if url.endswith("/files"):
+                    if not self.after_receive:
+                        return {"state": True, "data": []}
+                    return {
+                        "state": True,
+                        "data": [
+                            {
+                                "fid": "local-id",
+                                "pid": "pending-cid",
+                                "n": "123 (2026) {tmdb-1228710}.mkv",
+                                "t": "1780000000",
+                            }
+                        ],
+                    }
+                raise AssertionError(url)
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        result = client.receive_share_to_cid("abc", "1234", "pending-cid")
+
+        self.assertEqual(result["file_ids"], ["source-id"])
+        self.assertEqual(result["received_items"], [{
+            "file_id": "local-id",
+            "file_name": "123 (2026) {tmdb-1228710}.mkv",
+            "is_folder": False,
+            "parent_id": "pending-cid",
+            "received_item_verified": True,
+        }])
+        self.assertTrue(result["received_items_complete"])
+
+    def test_receive_share_to_cid_does_not_reuse_old_same_name_item(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+                self.after_receive = False
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, method, dict(data or {}), dict(params or {})))
+                if url.endswith("/share/snap"):
+                    return {
+                        "state": True,
+                        "data": {
+                            "shareinfo": {"share_title": "123 (2026) {tmdb-1228710}"},
+                            "list": [{"fid": "source-id", "n": "123 (2026) {tmdb-1228710}.mkv"}],
+                        },
+                    }
+                if url.endswith("/share/receive"):
+                    self.after_receive = True
+                    return {"state": True, "data": {"receive_title": "123 (2026) {tmdb-1228710}"}}
+                if url.endswith("/files"):
+                    old = {
+                        "fid": "old-local-id",
+                        "pid": "pending-cid",
+                        "n": "123 (2026) {tmdb-1228710}.mkv",
+                        "t": "1780000000",
+                    }
+                    new = {
+                        "fid": "new-local-id",
+                        "pid": "pending-cid",
+                        "n": "123 (2026) {tmdb-1228710}.mkv",
+                        "t": "1780000100",
+                    }
+                    return {"state": True, "data": [old, new] if self.after_receive else [old]}
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        result = client.receive_share_to_cid("abc", "1234", "pending-cid")
+
+        self.assertEqual(result["received_items"][0]["file_id"], "new-local-id")
+        self.assertEqual(result["received_existing_file_ids"], ["old-local-id"])
+        self.assertTrue(result["received_snapshot_complete"])
+
+    def test_receive_share_to_cid_defers_when_multiple_new_same_name_items_are_ambiguous(self):
+        class FakeHttp:
+            def __init__(self):
+                self.after_receive = False
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                if url.endswith("/share/snap"):
+                    return {
+                        "state": True,
+                        "data": {
+                            "shareinfo": {"share_title": "123 (2026) {tmdb-1228710}"},
+                            "list": [{"fid": "source-id", "n": "123 (2026) {tmdb-1228710}.mkv"}],
+                        },
+                    }
+                if url.endswith("/files"):
+                    if not self.after_receive:
+                        return {
+                            "state": True,
+                            "data": [{
+                                "fid": "old-local-id",
+                                "pid": "pending-cid",
+                                "n": "123 (2026) {tmdb-1228710}.mkv",
+                            }],
+                        }
+                    return {
+                        "state": True,
+                        "data": [
+                            {
+                                "fid": "old-local-id",
+                                "pid": "pending-cid",
+                                "n": "123 (2026) {tmdb-1228710}.mkv",
+                            },
+                            {
+                                "fid": "new-local-a",
+                                "pid": "pending-cid",
+                                "n": "123 (2026) {tmdb-1228710}.mkv",
+                                "t": "1780000100",
+                            },
+                            {
+                                "fid": "new-local-b",
+                                "pid": "pending-cid",
+                                "n": "123 (2026) {tmdb-1228710}.mkv",
+                                "t": "1780000200",
+                            },
+                        ],
+                    }
+                if url.endswith("/share/receive"):
+                    self.after_receive = True
+                    return {"state": True, "data": {"receive_title": "123 (2026) {tmdb-1228710}"}}
+                raise AssertionError(url)
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        result = client.receive_share_to_cid("abc", "1234", "pending-cid")
+
+        self.assertEqual(result["received_items"], [])
+        self.assertFalse(result["received_items_complete"])
+
+    def test_receive_share_to_cid_serializes_calls_across_client_instances(self):
+        clients = [
+            bridge.P115WebClient("UID=1", http=object(), timeout=3),
+            bridge.P115WebClient("UID=1", http=object(), timeout=3),
+        ]
+        self.assertTrue(hasattr(clients[0], "_receive_share_to_cid"))
+        active = 0
+        maximum_active = 0
+        counter_lock = threading.Lock()
+        first_started = threading.Event()
+
+        def fake_receive(*_args, **_kwargs):
+            nonlocal active, maximum_active
+            with counter_lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+                first_started.set()
+            time.sleep(0.05)
+            with counter_lock:
+                active -= 1
+            return {"title": "", "file_ids": []}
+
+        for client in clients:
+            client._receive_share_to_cid = fake_receive
+        threads = [
+            threading.Thread(target=client.receive_share_to_cid, args=("abc", "1234", "pending-cid"))
+            for client in clients
+        ]
+        threads[0].start()
+        self.assertTrue(first_started.wait(timeout=1))
+        threads[1].start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        self.assertEqual(maximum_active, 1)
+
+    def test_receive_share_to_cid_defers_when_only_old_same_name_item_exists(self):
+        class FakeHttp:
+            def __init__(self):
+                self.after_receive = False
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                if url.endswith("/share/snap"):
+                    return {
+                        "state": True,
+                        "data": {
+                            "shareinfo": {"share_title": "123 (2026) {tmdb-1228710}"},
+                            "list": [{"fid": "source-id", "n": "123 (2026) {tmdb-1228710}.mkv"}],
+                        },
+                    }
+                if url.endswith("/share/receive"):
+                    self.after_receive = True
+                    return {"state": True, "data": {"receive_title": "123 (2026) {tmdb-1228710}"}}
+                if url.endswith("/files"):
+                    return {
+                        "state": True,
+                        "data": [{
+                            "fid": "old-local-id",
+                            "pid": "pending-cid",
+                            "n": "123 (2026) {tmdb-1228710}.mkv",
+                        }],
+                    }
+                raise AssertionError(url)
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        result = client.receive_share_to_cid("abc", "1234", "pending-cid")
+
+        self.assertEqual(result["received_items"], [])
+        self.assertFalse(result["received_items_complete"])
+        self.assertEqual(result["received_existing_file_ids"], ["old-local-id"])
+
+    def test_receive_share_to_cid_does_not_mark_a_full_pending_page_as_complete(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                if url.endswith("/share/snap"):
+                    return {
+                        "state": True,
+                        "data": {
+                            "shareinfo": {"share_title": "123 (2026) {tmdb-1228710}"},
+                            "list": [{"fid": "source-id", "n": "123 (2026) {tmdb-1228710}.mkv"}],
+                        },
+                    }
+                if url.endswith("/share/receive"):
+                    return {"state": True, "data": {"receive_title": "123 (2026) {tmdb-1228710}"}}
+                if url.endswith("/files"):
+                    return {
+                        "state": True,
+                        "data": [
+                            {
+                                "fid": f"old-local-{index}",
+                                "pid": "pending-cid",
+                                "n": f"old-{index}.mkv",
+                            }
+                            for index in range(500)
+                        ],
+                    }
+                raise AssertionError(url)
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        result = client.receive_share_to_cid("abc", "1234", "pending-cid")
+
+        self.assertFalse(result["received_snapshot_complete"])
+        self.assertEqual(result["received_items"], [])
+
     def test_receive_share_to_cid_paginates_all_root_items_before_receiving(self):
         class FakeHttp:
             def __init__(self):
@@ -1242,7 +1499,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
         class FakeCms:
             def run_auto_organize(self):
                 events.append("organize")
-                return {"code": 200}
+
             def add_share115_sync_task(self, share_code, receive_code, cid="0", local_path="/media/share"):
                 events.append(f"sync:{share_code}")
                 return {"code": 200}
@@ -1293,7 +1550,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
         class FakeCms:
             def run_auto_organize(self):
                 events.append("organize")
-                return {"code": 200}
+
             def add_share115_sync_task(self, share_code, receive_code, cid="0", local_path="/media/share"):
                 events.append(f"sync:{share_code}")
                 return {"code": 200}
@@ -1330,6 +1587,189 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
         self.assertEqual(events, ["organize", "share:fid-final", "sync:dummyown"])
         self.assertNotEqual(row.get("cleanup_status"), "deleted")
+
+    def test_prepare_rejects_cms_folder_with_tmdb_id_different_from_source_hint(self):
+        events = []
+
+        class FakeStore:
+            def __init__(self):
+                self.row = {
+                    "id": 8,
+                    "created_at": 1781962277,
+                    "title": "123 (2026) {tmdb-1228710}",
+                }
+
+            def update_self_share(self, row_id, **fields):
+                self.row.update(fields)
+                return dict(self.row)
+
+        class FakeCms:
+            def run_auto_organize(self):
+                events.append("organize")
+
+        class FakeP115:
+            def find_organized_folder(self, recognition, share_name, excluded_parent_ids=None, min_update_time=0):
+                return {"file_id": "wrong-folder", "file_name": "1-123-2026-[tmdb=952936]"}
+
+        store = FakeStore()
+        workflow = bridge.SelfShareWorkflow(
+            bridge.SelfShareConfig(enabled=True, strm_root=Path("/tmp/no-such-root")),
+            FakeCms(),
+            FakeP115(),
+            store,
+        )
+
+        row, source_path = workflow.prepare(
+            dict(store.row),
+            {"ok": True, "title": "错误影片", "tmdb_id": "952936", "category": "欧美电影", "type": "movie"},
+            "错误影片",
+        )
+
+        self.assertIsNone(source_path)
+        self.assertEqual(events, ["organize"])
+        self.assertNotIn("own_share_file_id", row)
+
+    def test_prepare_rejects_unmarked_cms_folder_when_source_has_explicit_tmdb_hint(self):
+        events = []
+
+        class FakeStore:
+            def __init__(self):
+                self.row = {
+                    "id": 8,
+                    "created_at": 1781962277,
+                    "title": "123 (2026) {tmdb-1228710}",
+                }
+
+            def update_self_share(self, row_id, **fields):
+                self.row.update(fields)
+                return dict(self.row)
+
+        class FakeCms:
+            def run_auto_organize(self):
+                events.append("organize")
+
+            def add_share115_sync_task(self, *args, **kwargs):
+                events.append("sync")
+                return {"code": 200}
+
+        class FakeP115:
+            def find_organized_folder(self, recognition, share_name, excluded_parent_ids=None, min_update_time=0):
+                return {"file_id": "unmarked-folder", "file_name": "123 (2026)"}
+
+            def create_long_share(self, file_id):
+                events.append(f"share:{file_id}")
+                return {"share_code": "should-not-exist", "receive_code": "1212"}
+
+        store = FakeStore()
+        workflow = bridge.SelfShareWorkflow(
+            bridge.SelfShareConfig(enabled=True, strm_root=Path("/tmp/no-such-root")),
+            FakeCms(),
+            FakeP115(),
+            store,
+        )
+
+        row, source_path = workflow.prepare(
+            dict(store.row),
+            {"ok": True, "title": "错误影片", "tmdb_id": "952936", "category": "欧美电影", "type": "movie"},
+            "错误影片",
+        )
+
+        self.assertIsNone(source_path)
+        self.assertEqual(events, ["organize"])
+        self.assertNotIn("own_share_file_id", row)
+
+    def test_legacy_prepare_anchors_folder_search_to_explicit_source_tmdb(self):
+        calls = []
+
+        class FakeStore:
+            def __init__(self):
+                self.row = {"id": 8, "created_at": 1781962277, "title": "123 (2026) {tmdb-1228710}"}
+
+            def update_self_share(self, row_id, **fields):
+                self.row.update(fields)
+                return dict(self.row)
+
+        class FakeCms:
+            def run_auto_organize(self):
+                return {"code": 200}
+
+            def add_share115_sync_task(self, *args, **kwargs):
+                return {"code": 200}
+
+        class FakeP115:
+            def find_organized_folder(self, recognition, share_name, excluded_parent_ids=None, min_update_time=0):
+                calls.append(dict(recognition))
+                if recognition.get("tmdb_id") != "1228710":
+                    return None
+                return {"file_id": "correct-folder", "file_name": "1-正确影片-2026-[tmdb=1228710]", "category": "欧美电影"}
+
+            def create_long_share(self, file_id):
+                return {"share_code": "own-share", "receive_code": "1212"}
+
+        store = FakeStore()
+        workflow = bridge.SelfShareWorkflow(
+            bridge.SelfShareConfig(enabled=True, strm_root=Path("/tmp/no-such-root")),
+            FakeCms(),
+            FakeP115(),
+            store,
+        )
+
+        row, _source_path = workflow.prepare(
+            dict(store.row),
+            {"ok": True, "title": "错误影片", "tmdb_id": "952936", "category": "欧美电影", "type": "movie"},
+            "123 (2026) {tmdb-1228710}",
+        )
+
+        self.assertEqual(calls[0]["tmdb_id"], "1228710")
+        self.assertEqual(row["own_share_file_id"], "correct-folder")
+
+    def test_prepare_rejects_existing_self_share_state_with_wrong_tmdb_identity(self):
+        class FakeStore:
+            def __init__(self):
+                self.row = {
+                    "id": 8,
+                    "created_at": 1781962277,
+                    "title": "123 (2026) {tmdb-1228710}",
+                    "workflow_mode": "self_share_sync",
+                    "workflow_phase": "organized_found",
+                    "own_share_file_id": "wrong-folder",
+                    "own_share_file_name": "1-123-2026-[tmdb=952936]",
+                }
+
+            def update_self_share(self, row_id, **fields):
+                self.row.update(fields)
+                return dict(self.row)
+
+        class FakeCms:
+            def add_share115_sync_task(self, *args, **kwargs):
+                raise AssertionError("must not submit a share sync for stale state")
+
+        class FakeP115:
+            def __init__(self):
+                self.created = []
+
+            def create_long_share(self, file_id):
+                self.created.append(file_id)
+                return {"share_code": "should-not-exist", "receive_code": "1212"}
+
+        store = FakeStore()
+        p115 = FakeP115()
+        workflow = bridge.SelfShareWorkflow(
+            bridge.SelfShareConfig(enabled=True, strm_root=Path("/tmp/no-such-root")),
+            FakeCms(),
+            p115,
+            store,
+        )
+
+        row, source_path = workflow.prepare(
+            dict(store.row),
+            {"ok": True, "title": "错误影片", "tmdb_id": "952936", "category": "欧美电影", "type": "movie"},
+            "123 (2026) {tmdb-1228710}",
+        )
+
+        self.assertIsNone(source_path)
+        self.assertEqual(p115.created, [])
+        self.assertEqual(row["own_share_file_id"], "wrong-folder")
 
     def test_prepare_sets_category_from_organized_folder_parent_cid(self):
         class FakeStore:
@@ -2181,6 +2621,40 @@ class SelfShareWorkflowTests(unittest.TestCase):
             issue = bridge.validate_self_share_strm_destination(destination, row, "episode.strm")
 
             self.assertIn("TMDB 无法确认", issue)
+
+    def test_explicit_source_tmdb_rejects_unmarked_strm_source_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "share" / "123 (2026)"
+            source.mkdir(parents=True)
+            (source / "movie.strm").write_text("http://cms/s/ownshare_1212_movie.mkv", encoding="utf-8")
+            row = {
+                "workflow_mode": "self_share_sync",
+                "own_share_code": "ownshare",
+                "own_share_receive_code": "1212",
+                "title": "123 (2026) {tmdb-1228710}",
+            }
+
+            issue = bridge.validate_self_share_strm_source(source, row)
+
+            self.assertIn("任务 TMDB 1228710", issue)
+            self.assertIn("未知", issue)
+
+    def test_explicit_source_tmdb_rejects_unmarked_strm_destination_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "library" / "123 (2026)"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("http://cms/s/ownshare_1212_movie.mkv", encoding="utf-8")
+            row = {
+                "workflow_mode": "self_share_sync",
+                "own_share_code": "ownshare",
+                "own_share_receive_code": "1212",
+                "title": "123 (2026) {tmdb-1228710}",
+            }
+
+            issue = bridge.validate_self_share_strm_destination(destination, row)
+
+            self.assertIn("任务 TMDB 1228710", issue)
+            self.assertIn("未知", issue)
 
     def test_missing_required_episode_rejects_existing_unsafe_destination_strm(self):
         with tempfile.TemporaryDirectory() as tmp:

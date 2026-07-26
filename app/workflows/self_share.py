@@ -18,12 +18,17 @@ from app.clients.p115 import (
     category_for_115_parent_id,
     is_p115_risk_control_message,
     normalize_cloud_status,
+    p115_file_id,
+    p115_file_name,
+    p115_is_folder,
+    p115_parent_id,
     validate_cloud_output,
 )
 from app.config import MovePlan, SelfShareConfig, default_library_roots, is_relative_to, safe_resolve
 from app.media.classify import (
     apply_tmdb_hint_resolution,
     apply_tmdb_search_resolution,
+    explicit_task_tmdb_id,
     expected_task_tmdb_id,
     extract_tmdb_id_from_name,
     final_category_for_move,
@@ -32,6 +37,7 @@ from app.media.classify import (
     map_category_label,
     media_type_for_category,
     normalize_text,
+    normalize_tmdb_hint_name,
     user_movie_category_bucket,
 )
 from app.media.strm import (
@@ -50,6 +56,7 @@ from app.media.strm import (
     validate_self_share_strm_source,
 )
 from app.models import TaskStage, TaskStatus
+from app.task_bridge import reset_self_share_submission_for_reprocess
 from app.strm_mode import effective_task_strm_mode
 from app.task_runner import StageResult
 
@@ -100,6 +107,23 @@ def is_unverified_received_source(folder: dict[str, Any], task_metadata: dict[st
     if file_id and file_id in {str(value) for value in (task_metadata.get("received_file_ids") or []) if str(value)}:
         return True
     return bool(receive_cid and parent_id == str(receive_cid).strip())
+
+
+def has_tmdb_folder_mismatch(folder: dict[str, Any], recognition: dict[str, Any], row: dict[str, Any], share_name: str) -> bool:
+    explicit = explicit_task_tmdb_id(recognition, row, share_name)
+    actual = extract_tmdb_id_from_name(str(folder.get("file_name") or ""))
+    if explicit:
+        # An explicit source marker is an identity assertion. A missing
+        # marker is unsafe too: title-only matching could select an old folder.
+        return actual != explicit
+    expected = expected_task_tmdb_id(recognition, row)
+    if not actual:
+        actual = extract_tmdb_id_from_name(share_name)
+    return bool(expected and actual and expected != actual)
+
+
+def has_explicit_task_tmdb_hint(recognition: dict[str, Any], row: dict[str, Any], share_name: str = "") -> bool:
+    return bool(explicit_task_tmdb_id(recognition, row, share_name))
 
 
 def apply_openai_category_fallback(
@@ -247,8 +271,27 @@ class SelfShareWorkflow:
         if not self.config.enabled:
             return row, None
         row_id = int(row["id"])
+        explicit_tmdb = explicit_task_tmdb_id(recognition, row, share_name)
+        if explicit_tmdb:
+            # The legacy polling path may pass a confident but stale CMS
+            # recognition. Anchor lookup to the source marker first.
+            recognition = dict(recognition)
+            recognition["tmdb_id"] = explicit_tmdb
+            recognition["share_name"] = str(recognition.get("share_name") or share_name)
         if not row.get("workflow_mode"):
             row = self.store.update_self_share(row_id, workflow_mode="self_share_sync", workflow_phase="submitted") or row
+        if row.get("own_share_file_id") and explicit_tmdb:
+            persisted_folder = {
+                "file_id": row.get("own_share_file_id"),
+                "file_name": row.get("own_share_file_name"),
+            }
+            if has_tmdb_folder_mismatch(persisted_folder, recognition, row, share_name):
+                LOG.warning(
+                    "Rejecting persisted self-share state with mismatched TMDB task_id=%s folder=%s",
+                    explicit_tmdb,
+                    row.get("own_share_file_name"),
+                )
+                return row, None
         if not row.get("own_share_file_id"):
             self.cms.run_auto_organize()
             row = self.store.update_self_share(row_id, workflow_phase="auto_organize_submitted") or row
@@ -267,6 +310,13 @@ class SelfShareWorkflow:
                 )
             folder = self.p115.find_organized_folder(recognition, share_name, **find_kwargs)
             if not folder:
+                return row, None
+            if has_tmdb_folder_mismatch(folder, recognition, row, share_name):
+                LOG.warning(
+                    "Rejecting legacy self-share folder with mismatched TMDB task_id=%s folder=%s",
+                    expected_task_tmdb_id(recognition, row),
+                    folder.get("file_name"),
+                )
                 return row, None
             category = str(folder.get("category") or "").strip() or category_for_115_parent_id(
                 str(folder.get("parent_id") or ""),
@@ -469,6 +519,19 @@ class BridgeSelfShareTaskWorkflow:
                 "submission_id": int(row["id"]),
                 "received_title": output.get("file_name") or task.title or task.share_code,
                 "received_file_ids": [output["file_id"]],
+                "received_items": [
+                    {
+                        "file_id": output["file_id"],
+                        "file_name": output.get("file_name") or task.title or task.share_code,
+                        "is_folder": False,
+                        "parent_id": output.get("parent_id") or self.receive_cid,
+                        "received_item_verified": True,
+                    }
+                ],
+                "received_items_complete": True,
+                "received_expected_item_count": 1,
+                "received_existing_file_ids": [],
+                "received_snapshot_complete": True,
                 "cloud_output_file_id": output["file_id"],
                 "cloud_output_parent_id": output["parent_id"],
                 "cloud_output_name": output.get("file_name") or "",
@@ -517,9 +580,38 @@ class BridgeSelfShareTaskWorkflow:
         if not self.receive_cid:
             return StageResult.failed("缺少 115 接收目录 ID", error_type="missing_receive_cid")
 
+        reprocess_started_at = as_float(task.metadata.get("reprocess_started_at"), 0)
+        if task.metadata.get("force_reprocess") and not reprocess_started_at:
+            reprocess_started_at = self._now()
         existing = self.store.find_by_key(_ShareKey(task.share_code, task.receive_code))
+        reprocess_reset = False
+        if task.metadata.get("force_reprocess") and not task.metadata.get("self_share_reprocess_reset") and existing:
+            has_self_share_state = str(existing.get("workflow_mode") or "") == "self_share_sync" or any(
+                str(existing.get(key) or "").strip()
+                for key in (
+                    "own_share_file_id",
+                    "own_share_file_name",
+                    "own_share_code",
+                    "own_share_url",
+                    "share_sync_status",
+                    "share_alias_name",
+                )
+            )
+            if has_self_share_state:
+                if not reset_self_share_submission_for_reprocess(self.store, task):
+                    return StageResult.needs_action(
+                        "无法清理旧的自有分享状态，已停止重跑以避免复用错误目录",
+                        {"submission_id": int(existing["id"])},
+                    )
+                existing = self.store.find_by_id(int(existing["id"])) or existing
+                reprocess_reset = True
         if self._should_reuse_received_self_share_state(existing, task.metadata):
-            return StageResult.complete("已接收 115 分享到待整理", self._received_metadata(existing))
+            metadata = self._received_metadata(existing)
+            if reprocess_reset:
+                metadata["self_share_reprocess_reset"] = True
+            if reprocess_started_at:
+                metadata["reprocess_started_at"] = reprocess_started_at
+            return StageResult.complete("已接收 115 分享到待整理", metadata)
 
         try:
             received = self.p115.receive_share_to_cid(task.share_code, task.receive_code, self.receive_cid)
@@ -546,7 +638,17 @@ class BridgeSelfShareTaskWorkflow:
             "submission_id": int(row["id"]),
             "received_title": title,
             "received_file_ids": received.get("file_ids") or [],
+            "received_items": received.get("received_items") or [],
+            "received_items_complete": bool(received.get("received_items_complete", True)),
+            "received_expected_item_count": int(received.get("received_expected_item_count") or 0),
+            "received_existing_file_ids": received.get("received_existing_file_ids") or [],
+            "received_snapshot_complete": bool(received.get("received_snapshot_complete", False)),
+            "tmdb_hint_normalized": False,
         }
+        if reprocess_reset:
+            metadata["self_share_reprocess_reset"] = True
+        if reprocess_started_at:
+            metadata["reprocess_started_at"] = reprocess_started_at
         if self._is_pending_update_run(task.metadata):
             metadata["update_received_run"] = int(task.metadata.get("update_requested_run") or 0)
         return StageResult.complete(
@@ -554,11 +656,268 @@ class BridgeSelfShareTaskWorkflow:
             metadata,
         )
 
+    @staticmethod
+    def _received_item_candidates(task, row: dict[str, Any]) -> list[dict[str, Any]]:
+        items = task.metadata.get("received_items")
+        if isinstance(items, list):
+            normalized = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                file_id = str(item.get("file_id") or "").strip()
+                file_name = str(item.get("file_name") or "").strip()
+                if file_id and file_name:
+                    normalized.append(dict(item))
+            if normalized:
+                return normalized
+        file_id = str(task.metadata.get("cloud_output_file_id") or "").strip()
+        file_name = str(task.metadata.get("cloud_output_name") or "").strip()
+        if file_id and file_name:
+            return [{"file_id": file_id, "file_name": file_name, "is_folder": False}]
+        return []
+
+    def _hint_source_name(self, task, row: dict[str, Any]) -> str:
+        candidates = [
+            str(item.get("file_name") or "").strip()
+            for item in self._received_item_candidates(task, row)
+            if isinstance(item, dict)
+        ]
+        candidates.extend(
+            str(value or "").strip()
+            for value in (
+                task.metadata.get("cloud_output_name"),
+                task.metadata.get("received_title"),
+                row.get("title"),
+                task.title,
+            )
+        )
+        for candidate in candidates:
+            if extract_tmdb_id_from_name(candidate):
+                return candidate
+        return next((candidate for candidate in candidates if candidate), "")
+
+    def _recover_received_items_for_hint(
+        self,
+        task,
+        hint_id: str,
+        expected_count: int = 1,
+    ) -> list[dict[str, Any]]:
+        if (
+            not hint_id
+            or not self.receive_cid
+            or not hasattr(self.p115, "list_files")
+            or task.metadata.get("received_snapshot_complete") is not True
+        ):
+            return []
+        existing_ids = {
+            str(value).strip()
+            for value in (task.metadata.get("received_existing_file_ids") or [])
+            if str(value).strip()
+        }
+        try:
+            items = self.p115.list_files(self.receive_cid, limit=500)
+        except Exception:
+            LOG.debug("Failed to recover received item for explicit TMDB hint", exc_info=True)
+            return []
+        matches = []
+        for item in items:
+            file_id = p115_file_id(item)
+            file_name = p115_file_name(item)
+            parent_id = p115_parent_id(item)
+            if not file_id or not file_name:
+                continue
+            if file_id in existing_ids:
+                continue
+            if parent_id and parent_id != self.receive_cid:
+                continue
+            if extract_tmdb_id_from_name(file_name) != hint_id:
+                continue
+            matches.append(
+                {
+                    "file_id": file_id,
+                    "file_name": file_name,
+                    "is_folder": p115_is_folder(item),
+                    "parent_id": parent_id or self.receive_cid,
+                    "received_item_verified": True,
+                }
+            )
+        return matches if len(matches) == max(1, int(expected_count or 1)) else []
+
+    def _prepare_received_tmdb_hint(
+        self,
+        task,
+        row: dict[str, Any],
+        recognition: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], str]:
+        """Resolve and normalize explicit TMDB names before invoking CMS."""
+        metadata: dict[str, Any] = {}
+        source_name = self._hint_source_name(task, row)
+        hint_id = extract_tmdb_id_from_name(source_name)
+        if not hint_id:
+            return recognition, metadata, ""
+        if task.metadata.get("tmdb_hint_normalized"):
+            return recognition, metadata, ""
+
+        resolved, should_prompt = apply_tmdb_hint_resolution(recognition, source_name, self.tmdb_resolver)
+        resolved_id = hint_id
+        resolved_valid = (
+            not should_prompt
+            and str(resolved.get("tmdb_id") or "").strip() == hint_id
+            and str(resolved.get("category_status") or "").strip() == "tmdb_resolved"
+        )
+        resolved_title = str(resolved.get("title") or "").strip() if resolved_valid else ""
+        items = self._received_item_candidates(task, row)
+        if items and not all(item.get("received_item_verified") is True for item in items):
+            items = []
+        if not items:
+            try:
+                expected_count = int(task.metadata.get("received_expected_item_count") or 1)
+            except (TypeError, ValueError):
+                expected_count = 1
+            items = self._recover_received_items_for_hint(task, hint_id, expected_count)
+        if not items:
+            metadata.update(
+                {
+                    "tmdb_hint_id": hint_id,
+                    "tmdb_hint_source_name": source_name,
+                    "tmdb_hint_normalized": False,
+                }
+            )
+            return recognition, metadata, "等待确认 115 接收后的本地文件，暂不触发 CMS 整理"
+
+        complete = task.metadata.get("received_items_complete", True)
+        try:
+            expected_count = int(task.metadata.get("received_expected_item_count") or 0)
+        except (TypeError, ValueError):
+            expected_count = 0
+        if complete is False and (not items or not expected_count or len(items) != expected_count):
+            metadata.update(
+                {
+                    "tmdb_hint_id": hint_id,
+                    "tmdb_hint_source_name": source_name,
+                    "tmdb_hint_normalized": False,
+                }
+            )
+            return recognition, metadata, "115 接收项未完整确认，暂不触发 CMS 整理"
+
+        if len(items) == 1:
+            selected = items
+        else:
+            selected = [
+                item
+                for item in items
+                if extract_tmdb_id_from_name(str(item.get("file_name") or "")) == hint_id
+            ]
+            if not selected:
+                selected = [item for item in items if bool(item.get("is_folder"))]
+                if len(selected) != 1:
+                    metadata.update(
+                        {
+                            "tmdb_hint_id": hint_id,
+                            "tmdb_hint_source_name": source_name,
+                            "tmdb_hint_normalized": False,
+                        }
+                    )
+                    return recognition, metadata, "无法安全确定 TMDB 提示对应的 115 根项目，暂不触发 CMS 整理"
+
+        normalized_items = []
+        for item in selected:
+            file_id = str(item.get("file_id") or "").strip()
+            old_name = str(item.get("file_name") or "").strip()
+            desired_name = normalize_tmdb_hint_name(old_name, hint_id, resolved_title)
+            if not file_id or not old_name or not desired_name:
+                continue
+            if desired_name != old_name:
+                self.p115.rename_file(file_id, desired_name)
+            normalized_items.append(
+                {
+                    "file_id": file_id,
+                    "before": old_name,
+                    "after": desired_name,
+                }
+            )
+        if len(normalized_items) != len(selected):
+            metadata.update(
+                {
+                    "tmdb_hint_id": hint_id,
+                    "tmdb_hint_source_name": source_name,
+                    "tmdb_hint_normalized": False,
+                }
+            )
+            return recognition, metadata, "无法安全规范化全部 115 接收项目，暂不触发 CMS 整理"
+
+        enriched = dict(resolved) if resolved_valid else dict(recognition)
+        if not resolved_valid:
+            for key in ("ok", "title", "type", "category", "category_status", "category_suggestion"):
+                enriched.pop(key, None)
+        enriched.update(
+            {
+                "tmdb_id": resolved_id,
+                "share_name": str(enriched.get("share_name") or source_name),
+            }
+        )
+        if resolved_title:
+            enriched["title"] = resolved_title
+        if not enriched.get("category_status"):
+            enriched["category_status"] = "tmdb_hint_pending"
+        metadata.update(
+            {
+                "tmdb_hint_id": hint_id,
+                "tmdb_hint_title": resolved_title,
+                "tmdb_hint_category": str(enriched.get("category") or ""),
+                "tmdb_hint_source_name": source_name,
+                "tmdb_hint_normalized": True,
+                "tmdb_hint_normalized_items": normalized_items,
+            }
+        )
+        if items:
+            metadata.update(
+                {
+                    "received_items": items,
+                    "received_items_complete": True,
+                    "received_expected_item_count": expected_count or len(items),
+                }
+            )
+        if hasattr(self.store, "update_recognition"):
+            row = self.store.update_recognition(
+                int(row["id"]),
+                enriched,
+                str(enriched.get("category_status") or "tmdb_hint_pending"),
+            ) or row
+        if enriched.get("category") and hasattr(self.store, "update_category"):
+            self.store.update_category(int(row["id"]), str(enriched["category"]), "selected")
+        return enriched, metadata, ""
+
     def _stage_organizing(self, task):
         row = self._submission_row(task)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
         workflow_phase = str(row.get("workflow_phase") or "")
+        recognition = self._recognition_from_row(row)
+        title = str(row.get("title") or task.title or task.share_code)
+        hint_metadata: dict[str, Any] = {}
+        hint_block_message = ""
+        hint_normalized_now = False
+        if not row.get("own_share_file_id") and workflow_phase in {
+            "",
+            "received",
+            "received_to_pending",
+            "auto_organize_submitted",
+        }:
+            recognition, hint_metadata, hint_block_message = self._prepare_received_tmdb_hint(
+                task,
+                row,
+                recognition,
+            )
+            hint_normalized_now = bool(hint_metadata.get("tmdb_hint_normalized"))
+            if hint_block_message:
+                return StageResult.defer(
+                    hint_block_message,
+                    self.self_share_config.auto_organize_retry_seconds or 30,
+                    {"submission_id": int(row["id"]), **hint_metadata},
+                )
+            if recognition.get("title"):
+                title = str(recognition.get("title") or title)
         folder = None
         if row.get("own_share_file_id") and row.get("own_share_file_name"):
             folder = {
@@ -566,22 +925,30 @@ class BridgeSelfShareTaskWorkflow:
                 "file_name": row.get("own_share_file_name"),
                 "parent_id": self._organized_parent_id(task, self._recognition_from_row(row)),
             }
-        elif workflow_phase not in {"auto_organize_submitted", "organized_found", "own_share_created", "share_sync_submitted"}:
+        elif hint_normalized_now or workflow_phase not in {
+            "auto_organize_submitted",
+            "organized_found",
+            "own_share_created",
+            "share_sync_submitted",
+        }:
             self.cms.run_auto_organize()
             row = self.store.update_self_share(int(row["id"]), workflow_phase="auto_organize_submitted") or row
-        recognition = self._recognition_from_row(row)
-        title = str(row.get("title") or task.title or task.share_code)
         excluded_parent_ids = set(self.self_share_config.excluded_parent_ids or set())
         if self.receive_cid:
             excluded_parent_ids.add(self.receive_cid)
         min_update_time = float(row.get("created_at") or 0)
+        stage_metadata = dict(task.metadata)
+        stage_metadata.update(hint_metadata)
         try:
-            update_started_at = float(task.metadata.get("update_started_at") or 0)
+            update_started_at = float(stage_metadata.get("update_started_at") or 0)
         except (TypeError, ValueError):
             update_started_at = 0
         if update_started_at:
             min_update_time = max(min_update_time, update_started_at - 5)
-        organized_scan_cursor = task.metadata.get("organized_scan_cursor")
+        reprocess_started_at = as_float(stage_metadata.get("reprocess_started_at"), 0)
+        if reprocess_started_at:
+            min_update_time = max(min_update_time, reprocess_started_at - 5)
+        organized_scan_cursor = stage_metadata.get("organized_scan_cursor")
         if not isinstance(organized_scan_cursor, dict):
             organized_scan_cursor = None
         find_kwargs = {
@@ -600,14 +967,21 @@ class BridgeSelfShareTaskWorkflow:
         lookup_budget = 8
         direct_strm_removed = 0
         direct_signal = None
-        cloud_output_name = str(task.metadata.get("cloud_output_name") or "").strip()
+        cloud_output_name = str(stage_metadata.get("cloud_output_name") or "").strip()
         if self.cms_cloud_index and cloud_output_name:
             indexed_folder = self.cms_cloud_index.folder_for_cloud_output_name(
                 cloud_output_name,
-                started_at=as_float(task.metadata.get("cloud_started_at"), 0),
+                started_at=as_float(stage_metadata.get("cloud_started_at"), 0),
             )
             if indexed_folder:
                 folder = indexed_folder
+        if folder and has_tmdb_folder_mismatch(folder, recognition, row, title):
+            LOG.warning(
+                "Rejecting organized folder with mismatched TMDB task_id=%s folder=%s",
+                expected_task_tmdb_id(recognition, row),
+                folder.get("file_name"),
+            )
+            folder = None
         if folder and self.cms_cloud_index and folder.get("direct_file_id") and not folder.get("direct_relative_path"):
             folder_tmdb = extract_tmdb_id_from_name(str(folder.get("file_name") or ""))
             if folder_tmdb:
@@ -619,40 +993,49 @@ class BridgeSelfShareTaskWorkflow:
                 )
                 if direct_signal:
                     direct_source, _direct_category = direct_signal
-                    direct_folder = self.cms_cloud_index.folder_for_direct_strm(direct_source, folder_tmdb)
-                    if direct_folder and str(direct_folder.get("direct_file_id") or "") == str(folder.get("direct_file_id") or ""):
-                        relative_path = str(direct_folder.get("direct_relative_path") or "").strip()
-                        if relative_path:
-                            folder = dict(folder)
-                            folder["direct_relative_path"] = relative_path
+                    direct_tmdb = extract_tmdb_id_from_name(str(direct_source))
+                    expected_tmdb = expected_task_tmdb_id(recognition, row)
+                    if has_explicit_task_tmdb_hint(recognition, row, title) and expected_tmdb and direct_tmdb and direct_tmdb != expected_tmdb:
+                        direct_signal = None
+                    if direct_signal:
+                        direct_folder = self.cms_cloud_index.folder_for_direct_strm(direct_source, folder_tmdb)
+                        if direct_folder and str(direct_folder.get("direct_file_id") or "") == str(folder.get("direct_file_id") or ""):
+                            relative_path = str(direct_folder.get("direct_relative_path") or "").strip()
+                            if relative_path:
+                                folder = dict(folder)
+                                folder["direct_relative_path"] = relative_path
         if folder is None:
             direct_signal = find_recent_direct_library_strm_source_dir(self.move_config, row, recognition, title)
             if direct_signal:
                 direct_source, direct_category = direct_signal
-                direct_recognition = dict(recognition)
                 direct_tmdb = extract_tmdb_id_from_name(str(direct_source))
-                direct_recognition.update(
-                    {
-                        "ok": True,
-                        "title": direct_source.name,
-                        "share_name": str(direct_recognition.get("share_name") or title),
-                        "category": direct_category or str(direct_recognition.get("category") or ""),
-                        "category_status": "cms_direct_strm_resolved",
-                    }
-                )
-                if direct_tmdb:
-                    direct_recognition["tmdb_id"] = direct_tmdb
-                if direct_category and hasattr(self.store, "update_category"):
-                    row = self.store.update_category(int(row["id"]), direct_category, "selected") or row
-                if hasattr(self.store, "update_recognition"):
-                    row = self.store.update_recognition(int(row["id"]), direct_recognition, "cms_direct_strm_resolved") or row
-                recognition = direct_recognition
-                if self.cms_cloud_index and direct_tmdb:
-                    folder = self.cms_cloud_index.folder_for_direct_strm(direct_source, direct_tmdb)
-                    if folder:
-                        folder = dict(folder)
-                        if direct_category:
-                            folder["category"] = direct_category
+                expected_tmdb = expected_task_tmdb_id(recognition, row)
+                if has_explicit_task_tmdb_hint(recognition, row, title) and expected_tmdb and direct_tmdb and direct_tmdb != expected_tmdb:
+                    direct_signal = None
+                if direct_signal:
+                    direct_recognition = dict(recognition)
+                    direct_recognition.update(
+                        {
+                            "ok": True,
+                            "title": direct_source.name,
+                            "share_name": str(direct_recognition.get("share_name") or title),
+                            "category": direct_category or str(direct_recognition.get("category") or ""),
+                            "category_status": "cms_direct_strm_resolved",
+                        }
+                    )
+                    if direct_tmdb:
+                        direct_recognition["tmdb_id"] = direct_tmdb
+                    if direct_category and hasattr(self.store, "update_category"):
+                        row = self.store.update_category(int(row["id"]), direct_category, "selected") or row
+                    if hasattr(self.store, "update_recognition"):
+                        row = self.store.update_recognition(int(row["id"]), direct_recognition, "cms_direct_strm_resolved") or row
+                    recognition = direct_recognition
+                    if self.cms_cloud_index and direct_tmdb:
+                        folder = self.cms_cloud_index.folder_for_direct_strm(direct_source, direct_tmdb)
+                        if folder:
+                            folder = dict(folder)
+                            if direct_category:
+                                folder["category"] = direct_category
         if folder is None:
             folder, organized_scan_cursor, _scan_complete, lookup_requests = self._find_organized_folder(
                 recognition,
@@ -662,7 +1045,14 @@ class BridgeSelfShareTaskWorkflow:
                 max_requests=lookup_budget,
             )
             lookup_budget = max(0, lookup_budget - lookup_requests)
-        if folder and is_unverified_received_source(folder, task.metadata, self.receive_cid):
+            if folder and has_tmdb_folder_mismatch(folder, recognition, row, title):
+                LOG.warning(
+                    "Rejecting searched organized folder with mismatched TMDB task_id=%s folder=%s",
+                    expected_task_tmdb_id(recognition, row),
+                    folder.get("file_name"),
+                )
+                folder = None
+        if folder and is_unverified_received_source(folder, stage_metadata, self.receive_cid):
             folder = None
         if not folder:
             tmdb_resolved, tmdb_should_prompt = apply_tmdb_search_resolution(recognition, title, self.tmdb_resolver)
@@ -676,7 +1066,9 @@ class BridgeSelfShareTaskWorkflow:
                     max_requests=lookup_budget,
                 )
                 lookup_budget = max(0, lookup_budget - lookup_requests)
-                if folder and is_unverified_received_source(folder, task.metadata, self.receive_cid):
+                if folder and is_unverified_received_source(folder, stage_metadata, self.receive_cid):
+                    folder = None
+                if folder and has_tmdb_folder_mismatch(folder, recognition, row, title):
                     folder = None
                 category = str(recognition.get("category") or "").strip()
                 if category and hasattr(self.store, "update_category"):
@@ -695,6 +1087,7 @@ class BridgeSelfShareTaskWorkflow:
                     "submission_id": int(row["id"]),
                     "direct_strm_removed": direct_strm_removed,
                     "organized_scan_cursor": organized_scan_cursor or {},
+                    **hint_metadata,
                 },
             )
         existing_library_category = category_from_existing_library_folder(self.move_config, folder)
@@ -723,6 +1116,7 @@ class BridgeSelfShareTaskWorkflow:
                 "organized_folder": folder,
                 "direct_strm_removed": direct_strm_removed,
                 "organized_scan_cursor": {},
+                **hint_metadata,
             },
         )
 
@@ -739,6 +1133,16 @@ class BridgeSelfShareTaskWorkflow:
                 "file_name": row.get("own_share_file_name"),
                 "parent_id": parent_id,
             }
+        if has_tmdb_folder_mismatch(
+            folder,
+            recognition,
+            row,
+            str(folder.get("file_name") or task.title or task.share_code),
+        ):
+            return StageResult.needs_action(
+                "CMS 整理目录与源任务 TMDB 不一致或无法确认，已阻止创建自有分享",
+                {"submission_id": int(row["id"]), "own_share_file_id": ""},
+            )
         file_id = str(folder.get("file_id") or "").strip()
         folder_name = str(folder.get("file_name") or row.get("own_share_file_name") or task.title or "").strip()
         share_name = str(row.get("title") or task.title or folder_name or task.share_code).strip()
@@ -893,12 +1297,17 @@ class BridgeSelfShareTaskWorkflow:
         canonical_name = str(row.get("own_share_file_name") or "").strip()
         if not file_id or not canonical_name:
             return StageResult.failed("缺少 CMS 整理后的文件夹", error_type="organized_folder_missing")
+        recognition = self._recognition_from_row(row)
+        if has_tmdb_folder_mismatch({"file_name": canonical_name}, recognition, row, canonical_name):
+            return StageResult.needs_action(
+                "CMS 整理目录与源任务 TMDB 不一致或无法确认，已阻止创建自有分享",
+                {"submission_id": int(row["id"]), "own_share_file_id": ""},
+            )
         alias_name = str(row.get("share_alias_name") or "").strip()
         if alias_name:
             return StageResult.complete("分享目录别名已准备", self._own_share_metadata(row))
         short_id = hashlib.sha1(f"{task.id}:{file_id}".encode("utf-8")).hexdigest()[:8]
         alias_name = f"asset-{task.id}-{short_id}"
-        recognition = self._recognition_from_row(row)
         manifest = {
             "version": 1,
             "root_name": canonical_name,
@@ -940,6 +1349,17 @@ class BridgeSelfShareTaskWorkflow:
         file_id = str(task.metadata.get("own_share_file_id") or row.get("own_share_file_id") or "").strip()
         if not file_id:
             return StageResult.failed("缺少自有分享文件夹 ID", error_type="own_share_file_missing")
+        recognition = self._recognition_from_row(row)
+        if has_tmdb_folder_mismatch(
+            {"file_name": str(row.get("own_share_file_name") or "")},
+            recognition,
+            row,
+            str(row.get("own_share_file_name") or task.title or task.share_code),
+        ):
+            return StageResult.needs_action(
+                "CMS 整理目录与源任务 TMDB 不一致或无法确认，已阻止创建自有分享",
+                self._own_share_metadata(row) | {"own_share_file_id": ""},
+            )
         folder = task.metadata.get("organized_folder")
         if isinstance(folder, dict) and is_unverified_received_source(folder, task.metadata, self.receive_cid):
             return StageResult.needs_action(

@@ -570,14 +570,43 @@ class QualityRepairExecutionTests(unittest.TestCase):
             direct_dest = library / "direct"
             direct_dest.mkdir(parents=True)
             (direct_dest / "movie.strm").write_text("https://cms/d/direct.mkv", encoding="utf-8")
-            direct = self.add_task(service.store, "direct", direct_dest)
+            direct = self.add_task(
+                service.store,
+                "direct",
+                direct_dest,
+                organized_scan_cursor={"queue": [{"parent_id": "old-parent"}]},
+                organized_folder={"file_id": "old-folder"},
+                received_title="旧文件 {tmdb-952936}",
+                received_file_ids=["old-file"],
+                received_items=[{"file_id": "old-file"}],
+                received_items_complete=True,
+                received_expected_item_count=1,
+                received_existing_file_ids=[],
+                received_snapshot_complete=True,
+                tmdb_hint_normalized=True,
+            )
 
             summary = service.run_once("repair-run", datetime(2099, 7, 20, 2, 50, tzinfo=ZoneInfo("Asia/Shanghai")))
 
             self.assertEqual(summary.status, "succeeded")
             self.assertEqual(service.store.find_task(missing.id).current_stage, TaskStage.EMBY_CONFIRMED)
             self.assertEqual(service.store.find_task(direct.id).current_stage, TaskStage.RECEIVED)
-            self.assertEqual(service.store.find_task(direct.id).metadata["force_reprocess"], True)
+            reprocessed = service.store.find_task(direct.id)
+            self.assertEqual(reprocessed.metadata["force_reprocess"], True)
+            self.assertGreater(reprocessed.metadata["reprocess_started_at"], 0)
+            for key in (
+                "organized_scan_cursor",
+                "organized_folder",
+                "received_title",
+                "received_file_ids",
+                "received_items",
+                "received_items_complete",
+                "received_expected_item_count",
+                "received_existing_file_ids",
+                "received_snapshot_complete",
+                "tmdb_hint_normalized",
+            ):
+                self.assertNotIn(key, reprocessed.metadata)
             self.assertEqual(
                 sorted(call[0] for call in adapter.calls),
                 ["reprocess", "restore"],

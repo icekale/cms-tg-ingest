@@ -89,6 +89,7 @@ from app.media.classify import (
     map_category_label,
     media_type_for_category,
     normalized_tmdb_language,
+    normalize_tmdb_hint_name,
     parse_recognition_json,
     tmdb_match_score,
     user_movie_category_bucket,
@@ -137,7 +138,12 @@ from app.media.strm import (
 from app.models import TaskStage, TaskStatus
 from app.quality import format_task_quality_report, scan_task_quality
 from app.quality_automation import QualityAutomation, QualityRunSummary
-from app.task_bridge import ensure_task_for_link, record_failure, record_submission_event, sync_task_from_submission
+from app.task_bridge import (
+    ensure_task_for_link,
+    record_failure,
+    record_submission_event,
+    sync_task_from_submission,
+)
 from app.task_engine import decide_retry, stage_display_name
 from app.task_health import format_taskstore_health
 from app.self_share_health import start_invalid_self_share_probe_loop
@@ -665,7 +671,13 @@ class SubmissionStore:
             conn.execute(
                 """
                 UPDATE submissions
-                SET status = ?, title = COALESCE(?, title), last_error = ?, updated_at = ?
+                SET status = ?,
+                    title = CASE
+                        WHEN workflow_mode = 'self_share_sync' THEN title
+                        ELSE COALESCE(?, title)
+                    END,
+                    last_error = ?,
+                    updated_at = ?
                 WHERE id = ?
                 """,
                 (status, title, last_error, time.time(), row_id),
@@ -2820,7 +2832,11 @@ def handle_task_action_callback(
         telegram.send_message(chat_id, f"已加入 STRM 恢复队列：{format_task_snapshot(updated)}")
         return True
     if action == "task_reprocess":
-        updated = task_store.reprocess_task(task_id, message="TG 按钮触发从头重跑", next_run_at=0)
+        updated = task_store.reprocess_task(
+            task_id,
+            message="TG 按钮触发从头重跑",
+            next_run_at=0,
+        )
         telegram.answer_callback_query(callback_id, "已从头重跑", show_alert=False)
         telegram.send_message(chat_id, f"已从头重跑：{format_task_snapshot(updated)}")
         return True
@@ -3054,8 +3070,11 @@ def _start_status_poll_impl(
                             sync_self_share_task_events(task_store, current_row)
                         else:
                             category = final_category_for_move(current_row, recognition)
-                        if not source_dir:
+                        if not source_dir and not self_share_workflow:
                             source_dir = find_strm_source_dir(move_config, recognition, share_name=str(title or ""))
+                        if not source_dir:
+                            row = current_row
+                            continue
                         active_move_config = move_config_for_workflow_source(
                             move_config,
                             source_dir,
@@ -3416,6 +3435,14 @@ def handle_update(
                     TaskStage.RECEIVED,
                     TaskStatus.RUNNING,
                     "已接收 115 分享到待整理",
+                    received_title=received.get("title") or "",
+                    received_file_ids=received.get("file_ids") or [],
+                    received_items=received.get("received_items") or [],
+                    received_items_complete=bool(received.get("received_items_complete", True)),
+                    received_expected_item_count=int(received.get("received_expected_item_count") or 0),
+                    received_existing_file_ids=received.get("received_existing_file_ids") or [],
+                    received_snapshot_complete=bool(received.get("received_snapshot_complete", False)),
+                    tmdb_hint_normalized=False,
                 )
                 result_lines.append(f"{index}. 已接收：{format_task_label(row)}")
                 LOG.info("Received 115 share without CMS plain submit: share_code=%s cid=%s", key.share_code, self_share_receive_cid)

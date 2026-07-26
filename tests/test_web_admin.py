@@ -1019,8 +1019,28 @@ class WebAdminTests(unittest.TestCase):
     def test_worker_claim_after_eligibility_snapshot_makes_web_action_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            row = submission_store.upsert_submission(
+                bridge.ShareKey("claim-race", ""),
+                "https://115cdn.com/s/claim-race",
+                "completed",
+                title="竞态电影",
+            )
+            submission_store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="share_sync_submitted",
+                own_share_file_id="active-folder",
+                own_share_code="active-share",
+            )
             task = store.upsert_task("claim-race", "", "https://115cdn.com/s/claim-race")
-            store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "done",
+                submission_id=int(row["id"]),
+            )
             events_before = store.list_events(task.id)
             original_find_task = store.find_task
 
@@ -1034,7 +1054,7 @@ class WebAdminTests(unittest.TestCase):
                         )
                 return snapshot
 
-            app = WebApp(store, web_token="")
+            app = WebApp(store, web_token="", submission_store=submission_store)
             with patch.object(store, "find_task", side_effect=find_then_claim):
                 status, headers, body = app.handle_request("POST", f"/task/{task.id}/reprocess", {}, b"")
             updated = store.find_task(task.id)
@@ -1047,20 +1067,53 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(updated.claimed_by, "worker-race")
             self.assertEqual(updated.retry_count, 0)
             self.assertEqual(store.list_events(task.id), events_before)
+            submission = submission_store.find_by_id(int(row["id"]))
+            self.assertEqual(submission["workflow_phase"], "share_sync_submitted")
+            self.assertEqual(submission["own_share_file_id"], "active-folder")
+            self.assertEqual(submission["own_share_code"], "active-share")
 
     def test_reprocess_endpoint_requeues_task_from_received_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
             task = store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            row = submission_store.upsert_submission(
+                bridge.ShareKey("abc", "1234"),
+                "https://115cdn.com/s/abc?password=1234",
+                "received",
+                title="重跑电影",
+            )
+            submission_store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="share_sync_submitted",
+                own_share_file_id="old-folder",
+                own_share_file_name="旧目录-[tmdb=952936]",
+                own_share_code="old-share",
+                own_share_receive_code="1212",
+            )
             store.record_event(
                 task.id,
                 TaskStage.CLEANED,
                 TaskStatus.SUCCEEDED,
                 "cleanup complete",
                 title="重跑电影",
-                metadata_patch={"own_share_code": "ownabc"},
+                submission_id=int(row["id"]),
+                metadata_patch={
+                    "own_share_code": "ownabc",
+                    "organized_scan_cursor": {"queue": [{"parent_id": "old-parent"}]},
+                    "organized_folder": {"file_id": "old-folder"},
+                    "received_title": "旧文件 {tmdb-952936}",
+                    "received_file_ids": ["old-file"],
+                    "received_items": [{"file_id": "old-file"}],
+                    "received_items_complete": True,
+                    "received_expected_item_count": 1,
+                    "received_existing_file_ids": [],
+                    "received_snapshot_complete": True,
+                    "tmdb_hint_normalized": True,
+                },
             )
-            app = WebApp(store, web_token="")
+            app = WebApp(store, web_token="", submission_store=submission_store)
 
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/reprocess", {}, b"")
             updated = store.find_task(task.id)
@@ -1077,11 +1130,29 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(updated.metadata["retry_from_stage"], TaskStage.CLEANED.value)
             self.assertEqual(updated.metadata["retry_stage"], TaskStage.RECEIVED.value)
             self.assertTrue(updated.metadata["force_reprocess"])
+            self.assertGreater(updated.metadata["reprocess_started_at"], 0)
+            for key in (
+                "organized_scan_cursor",
+                "organized_folder",
+                "received_title",
+                "received_file_ids",
+                "received_items",
+                "received_items_complete",
+                "received_expected_item_count",
+                "received_existing_file_ids",
+                "received_snapshot_complete",
+                "tmdb_hint_normalized",
+            ):
+                self.assertNotIn(key, updated.metadata)
             self.assertTrue(any(event["message"] == "Web 触发从头重跑" for event in events))
             self.assertIsNotNone(claimed)
             self.assertEqual(claimed.id, task.id)
             self.assertEqual(claimed.current_stage, TaskStage.RECEIVED)
             self.assertEqual(body, b"")
+            queued_submission = submission_store.find_by_id(int(row["id"]))
+            self.assertEqual(queued_submission["workflow_phase"], "share_sync_submitted")
+            self.assertEqual(queued_submission["own_share_file_id"], "old-folder")
+            self.assertEqual(queued_submission["own_share_code"], "old-share")
 
     def test_emby_endpoint_enqueues_emby_confirmation_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1316,7 +1387,17 @@ class WebAdminTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
             completed = store.upsert_task("completed", "", "https://115cdn.com/s/completed")
-            store.record_event(completed.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            store.record_event(
+                completed.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "done",
+                metadata_patch={
+                    "organized_scan_cursor": {"queue": [{"parent_id": "old-parent"}]},
+                    "organized_folder": {"file_id": "old-folder"},
+                    "received_title": "旧文件 {tmdb-952936}",
+                },
+            )
             pending = store.upsert_task("pending", "", "https://115cdn.com/s/pending")
             issues = [
                 QualityIssue("direct_strm", "发现直链 STRM", "/completed-1.strm", completed.id, "已完成"),
@@ -1337,6 +1418,10 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(status, 303)
             self.assertEqual(store.find_task(completed.id).current_stage, TaskStage.RECEIVED)
             self.assertTrue(store.find_task(completed.id).metadata["force_reprocess"])
+            self.assertGreater(store.find_task(completed.id).metadata["reprocess_started_at"], 0)
+            self.assertNotIn("organized_scan_cursor", store.find_task(completed.id).metadata)
+            self.assertNotIn("organized_folder", store.find_task(completed.id).metadata)
+            self.assertNotIn("received_title", store.find_task(completed.id).metadata)
             self.assertEqual(store.find_task(pending.id), pending_before)
             self.assertEqual(store.list_events(pending.id), pending_events_before)
 
