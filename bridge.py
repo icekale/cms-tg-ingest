@@ -419,6 +419,18 @@ def maybe_start_web_server(
         kwargs["hdhive_scheduler"] = hdhive_scheduler
     try:
         starter_parameters = inspect.signature(starter).parameters
+        supports_self_share_config = "self_share_config" in starter_parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in starter_parameters.values()
+        )
+    except (TypeError, ValueError):
+        supports_self_share_config = True
+    if supports_self_share_config:
+        kwargs["self_share_config"] = SelfShareConfig(
+            own_share_receive_code=str(getattr(config, "self_share_own_share_password", "")),
+            cms_state_db_path=Path(getattr(config, "cms_state_db_path", "/cms/cms-online.db")),
+        )
+    try:
+        starter_parameters = inspect.signature(starter).parameters
         supports_frontend = "frontend_dist_path" in starter_parameters or any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in starter_parameters.values()
         )
@@ -3547,7 +3559,11 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         if self_share_config.enabled
         else None
     )
-    self_share_workflow = SelfShareWorkflow(self_share_config, cms, p115, store) if p115 else None
+    self_share_workflow = (
+        SelfShareWorkflow(self_share_config, cms, p115, store, settings_store=task_store)
+        if p115
+        else None
+    )
     move_config = MoveConfig.from_config(config)
     if self_share_config.enabled:
         roots = [self_share_config.strm_root] + [root for root in move_config.source_roots if safe_resolve(root) != safe_resolve(self_share_config.strm_root)]

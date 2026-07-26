@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.models import TaskStage, TaskStatus
@@ -185,6 +186,56 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["strm_default_mode"], "direct")
         self.assertEqual(frontend_status, 404)
         self.assertIn(b"Frontend asset not found", frontend_body)
+
+    def test_own_share_receive_code_api_masks_reads_and_supports_clear(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            config = SimpleNamespace(
+                cms_state_db_path=Path(tmp) / "missing-cms.db",
+                own_share_receive_code="env7",
+            )
+            app = WebApp(store, self_share_config=config)
+
+            initial_status, _headers, initial_body = app.handle_request("GET", "/api/v1/overview", {}, b"")
+            set_status, _headers, set_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/own-share-receive-code",
+                {"Content-Type": "application/json"},
+                b'{"receive_code":"web9"}',
+            )
+            clear_status, _headers, clear_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/own-share-receive-code",
+                {"Content-Type": "application/json"},
+                b'{"clear":true}',
+            )
+
+        initial = json.loads(initial_body)["own_share_receive_code"]
+        updated = json.loads(set_body)["own_share_receive_code"]
+        cleared = json.loads(clear_body)["own_share_receive_code"]
+        self.assertEqual(initial_status, 200)
+        self.assertEqual(initial, {"configured": True, "masked": "****", "source": "env"})
+        self.assertEqual(set_status, 200)
+        self.assertEqual(updated, {"configured": True, "masked": "****", "source": "web"})
+        self.assertEqual(clear_status, 200)
+        self.assertEqual(cleared, initial)
+        for body in (initial_body, set_body, clear_body):
+            self.assertNotIn("env7", body.decode("utf-8"))
+            self.assertNotIn("web9", body.decode("utf-8"))
+
+    def test_own_share_receive_code_api_rejects_invalid_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = WebApp(TaskStore(Path(tmp) / "tasks.db"))
+
+            status, _headers, body = app.handle_request(
+                "POST",
+                "/api/v1/settings/own-share-receive-code",
+                {"Content-Type": "application/json"},
+                b'{"receive_code":"12-12"}',
+            )
+
+        self.assertEqual(status, 400)
+        self.assertIn("字母和数字", json.loads(body)["error"])
 
     def test_frontend_history_route_falls_back_to_index(self):
         with tempfile.TemporaryDirectory() as tmp:

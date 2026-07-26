@@ -11,7 +11,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 - Telegram 支持裸链接、多链接、任务状态和按钮式运维。
 - CMS 优先完成整理、改名、TMDB 匹配和分类。
 - 支持 `shared` 共享 STRM 和 `direct` 直链 STRM；任务锁定后不允许切换，避免混用。
-- 共享别名保护：创建分享时使用中性别名，入库时恢复 CMS 的标准目录和文件名。
+- 自有分享保留 CMS 的标准目录名，历史 `asset-*` 分享继续兼容，不自动改名。
 - TaskStore 记录每个阶段、等待原因、失败、重试和耗时。
 - 115 调用有频率限制、扫描预算和风控冷却。
 - 支持磁力、ED2K 云下载，随后按 STRM 模式进入对应流程；direct 模式不会创建分享或清理源文件。
@@ -23,7 +23,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 固定版本镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.2.27
+docker pull icekale/cms-tg-ingest:0.2.28
 ```
 
 ### 完整 Docker Compose
@@ -33,7 +33,7 @@ docker pull icekale/cms-tg-ingest:0.2.27
 ```yaml
 services:
   cms-tg-ingest:
-    image: icekale/cms-tg-ingest:0.2.27
+    image: icekale/cms-tg-ingest:0.2.28
     container_name: cms-tg-ingest
     restart: unless-stopped
     env_file:
@@ -69,6 +69,7 @@ CMS_PASSWORD=你的CMS密码
 P115_COOKIE_PATH=/config/115-cookies.txt
 SELF_SHARE_RECEIVE_CID=待整理目录CID
 SELF_SHARE_STRM_ROOT=/mnt/user/Unraid/strm/share
+SELF_SHARE_OWN_SHARE_PASSWORD=1212
 STRM_LIBRARY_MAP=华语电影=/mnt/user/Unraid/strm/转存/Movie/电影/华语电影,欧美电影=/mnt/user/Unraid/strm/转存/Movie/电影/欧美电影
 STRM_DEFAULT_MODE=shared
 TASK_ENGINE_ENABLED=true
@@ -84,6 +85,8 @@ EMBY_API_KEY=你的Emby_API_Key
 ```
 
 `TG_BOT_TOKEN` 和密码只放在 `.env`，不要写进 Compose、Dockerfile 或公开 issue。`TG_ALLOWED_CHAT_ID` 用于限制只有指定 Telegram 用户可以操作 Bot。
+
+自有分享访问码可在 Web“当前任务”页设置。新任务按“Web 设置 -> CMS `share_115_sync` 配置 -> `SELF_SHARE_OWN_SHARE_PASSWORD` -> `1212`”解析；读取接口只显示掩码和来源，已有分享不会被批量修改。
 
 启动和查看日志：
 

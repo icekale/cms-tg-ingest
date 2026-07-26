@@ -29,6 +29,11 @@ class FrontendTests(unittest.TestCase):
             self.assertIn(action, task_detail)
         self.assertIn("clearHistory", api)
         self.assertIn("clearHistory", overview)
+        tasks = (ROOT / "frontend/src/views/Tasks.vue").read_text(encoding="utf-8")
+        self.assertIn("setOwnShareReceiveCode", api)
+        self.assertIn("clearOwnShareReceiveCode", api)
+        self.assertIn("分享访问码", tasks)
+        self.assertIn('type="password"', tasks)
         for control in ("fix", "run", "settings", "reset"):
             self.assertIn(control, api)
             self.assertIn(control, quality)

@@ -536,6 +536,24 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(store.get_runtime_state("task_runner"), {"value": "running", "updated_at": 123.0})
             self.assertIsNone(store.get_runtime_state("missing"))
 
+    def test_own_share_receive_code_override_can_be_set_and_cleared(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            self.assertIsNone(store.get_own_share_receive_code_override())
+            self.assertEqual(store.set_own_share_receive_code_override("a1B2"), "a1B2")
+            self.assertEqual(store.get_own_share_receive_code_override(), "a1B2")
+            store.clear_own_share_receive_code_override()
+            self.assertIsNone(store.get_own_share_receive_code_override())
+
+    def test_own_share_receive_code_override_rejects_non_alphanumeric_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            for value in ("", "12 12", "12-12", "密码"):
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    store.set_own_share_receive_code_override(value)
+
     def test_claim_quality_run_only_claims_a_date_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

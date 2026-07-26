@@ -10,6 +10,7 @@ from threading import Thread
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
+from .config import SelfShareConfig
 from .models import RetryAction, TaskStage, TaskStatus
 from .quality import QualityIssue, format_task_quality_report, scan_task_quality
 from .quality_automation import QualityAutomation
@@ -24,6 +25,7 @@ from .task_diagnostics import (
 from .task_engine import decide_retry, stage_display_name
 from .task_health import build_task_health, format_task_health
 from .task_store import REPROCESS_METADATA_DELETE_KEYS, TaskStore, build_reprocess_metadata
+from .self_share_settings import resolve_own_share_receive_code
 from .web_api import (
     api_response,
     api_task_detail,
@@ -1225,6 +1227,7 @@ class WebApp:
         quality_automation: QualityAutomation | None = None,
         hdhive_service: Any | None = None,
         hdhive_scheduler: Any | None = None,
+        self_share_config: SelfShareConfig | None = None,
         frontend_dist_path: str | Path = "/app/frontend/dist",
     ):
         self.store = store
@@ -1234,7 +1237,12 @@ class WebApp:
         self.quality_automation = quality_automation
         self.hdhive_service = hdhive_service
         self.hdhive_scheduler = hdhive_scheduler
+        self.self_share_config = self_share_config or SelfShareConfig()
         self.frontend_dist_path = Path(frontend_dist_path)
+
+    def _own_share_receive_code_payload(self) -> dict[str, Any]:
+        resolved = resolve_own_share_receive_code(self.store, self.self_share_config)
+        return {"configured": True, "masked": resolved.masked, "source": resolved.source}
 
     def _authorization_source(self, path: str, headers: dict[str, str]) -> str:
         if not self.web_token:
@@ -1562,6 +1570,7 @@ class WebApp:
                 "tasks": api_tasks(self.store, limit=20),
                 "health": serialize_health(self.store, enabled=self.task_engine_enabled),
                 "strm_default_mode": self.store.get_default_strm_mode(),
+                "own_share_receive_code": self._own_share_receive_code_payload(),
             }
             status, response_headers, response_body = api_response(payload)
             return status, {**response_headers, **auth_headers}, response_body
@@ -1604,6 +1613,21 @@ class WebApp:
                 return status, {**response_headers, **auth_headers}, response_body
             status, response_headers, response_body = api_response({"strm_default_mode": mode})
             return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path == "/api/v1/settings/own-share-receive-code":
+            try:
+                values = self._api_body(body, headers)
+                clear = values.get("clear") is True or str(values.get("clear") or "").lower() in {"1", "true", "yes"}
+                if clear:
+                    self.store.clear_own_share_receive_code_override()
+                else:
+                    self.store.set_own_share_receive_code_override(str(values.get("receive_code") or ""))
+            except (UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+                status, response_headers, response_body = api_response({"error": str(exc)}, status=400)
+                return status, {**response_headers, **auth_headers}, response_body
+            status, response_headers, response_body = api_response(
+                {"own_share_receive_code": self._own_share_receive_code_payload()}
+            )
+            return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path.startswith("/api/v1/tasks/") and path.endswith("/strm-mode"):
             raw_id = path.removeprefix("/api/v1/tasks/").removesuffix("/strm-mode")
             try:
@@ -1632,6 +1656,7 @@ def start_web_server(
     quality_automation: QualityAutomation | None = None,
     hdhive_service: Any | None = None,
     hdhive_scheduler: Any | None = None,
+    self_share_config: SelfShareConfig | None = None,
     frontend_dist_path: str | Path = "/app/frontend/dist",
 ) -> ThreadingHTTPServer:
     app = WebApp(
@@ -1642,6 +1667,7 @@ def start_web_server(
         quality_automation=quality_automation,
         hdhive_service=hdhive_service,
         hdhive_scheduler=hdhive_scheduler,
+        self_share_config=self_share_config,
         frontend_dist_path=frontend_dist_path,
     )
 

@@ -114,7 +114,7 @@ class PipelineP115(FakeCloudP115):
         self.renamed.append((str(file_id), str(file_name)))
         return {"state": True}
 
-    def create_long_share(self, file_id):
+    def create_long_share(self, file_id, preferred_receive_code=""):
         self.created_shares.append(str(file_id))
         return {
             "share_code": "owncode",
@@ -320,7 +320,8 @@ class CloudWorkflowTests(unittest.TestCase):
             for _ in range(30):
                 current = task_store.find_task(task.id)
                 if current.current_stage == TaskStage.SHARE_SYNC_SUBMITTED and not cms.alias_name:
-                    cms.alias_name = p115.renamed[-1][1]
+                    row = submissions.find_by_id(current.metadata["submission_id"])
+                    cms.alias_name = row["own_share_file_name"]
                 runner.run_once()
                 current = task_store.find_task(task.id)
                 self.assertIsNotNone(current)
@@ -343,6 +344,7 @@ class CloudWorkflowTests(unittest.TestCase):
             self.assertEqual(final.status, TaskStatus.SUCCEEDED)
             self.assertEqual(cms.plain_share_down_calls, [])
             self.assertEqual(len(cms.share_sync_calls), 1)
+            self.assertEqual(p115.renamed, [])
             self.assertEqual(p115.created_shares, ["organized-folder"])
             self.assertEqual(p115.deleted, ["organized-folder"])
             self.assertEqual(row["cleanup_status"], "deleted")

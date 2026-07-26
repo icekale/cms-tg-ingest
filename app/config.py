@@ -114,6 +114,7 @@ class Config:
     self_share_strm_root: str = "/mnt/user/Unraid/strm/share"
     self_share_cms_local_path: str = "/media/share"
     self_share_cms_cid: str = "0"
+    self_share_own_share_password: str = ""
     self_share_cleanup_after_emby: bool = False
     self_share_source_cleanup_parent_ids: str = ""
     self_share_auto_organize_retry_seconds: int = 15
@@ -229,6 +230,7 @@ class Config:
             self_share_strm_root=os.environ.get("SELF_SHARE_STRM_ROOT", "/mnt/user/Unraid/strm/share"),
             self_share_cms_local_path=os.environ.get("SELF_SHARE_CMS_LOCAL_PATH", "/media/share"),
             self_share_cms_cid=os.environ.get("SELF_SHARE_CMS_CID", "0"),
+            self_share_own_share_password=os.environ.get("SELF_SHARE_OWN_SHARE_PASSWORD", ""),
             self_share_cleanup_after_emby=parse_bool_env(os.environ.get("SELF_SHARE_CLEANUP_AFTER_EMBY"), False),
             self_share_source_cleanup_parent_ids=os.environ.get("SELF_SHARE_SOURCE_CLEANUP_PARENT_IDS", ""),
             self_share_auto_organize_retry_seconds=int(os.environ.get("SELF_SHARE_AUTO_ORGANIZE_RETRY_SECONDS", "15")),
@@ -306,6 +308,7 @@ class SelfShareConfig:
     strm_root: Path = Path("/mnt/user/Unraid/strm/share")
     cms_local_path: str = "/media/share"
     cms_cid: str = "0"
+    own_share_receive_code: str = ""
     excluded_parent_ids: set[str] | None = None
     cleanup_after_emby: bool = False
     source_cleanup_parent_ids: set[str] | None = None
@@ -338,6 +341,7 @@ class SelfShareConfig:
             strm_root=Path(config.self_share_strm_root).expanduser(),
             cms_local_path=config.self_share_cms_local_path,
             cms_cid=config.self_share_cms_cid,
+            own_share_receive_code=config.self_share_own_share_password,
             excluded_parent_ids=excluded,
             cleanup_after_emby=config.self_share_cleanup_after_emby,
             source_cleanup_parent_ids=set(split_env_list(config.self_share_source_cleanup_parent_ids)),

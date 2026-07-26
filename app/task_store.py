@@ -14,6 +14,7 @@ from .strm_mode import is_strm_mode_locked, normalize_strm_mode
 
 
 STRM_DEFAULT_MODE_KEY = "strm_default_mode"
+OWN_SHARE_RECEIVE_CODE_KEY = "own_share_receive_code_override"
 REPROCESS_METADATA_DELETE_KEYS = (
     "_defer_stage",
     "_defer_message",
@@ -289,6 +290,23 @@ class TaskStore:
         normalized = normalize_strm_mode(mode)
         self.set_runtime_state(STRM_DEFAULT_MODE_KEY, normalized)
         return normalized
+
+    def get_own_share_receive_code_override(self) -> str | None:
+        state = self.get_runtime_state(OWN_SHARE_RECEIVE_CODE_KEY)
+        if state is None:
+            return None
+        value = str(state["value"] or "").strip()
+        return value or None
+
+    def set_own_share_receive_code_override(self, receive_code: str) -> str:
+        value = str(receive_code or "").strip()
+        if not value or not value.isascii() or not value.isalnum():
+            raise ValueError("分享访问码只能包含英文字母和数字")
+        self.set_runtime_state(OWN_SHARE_RECEIVE_CODE_KEY, value)
+        return value
+
+    def clear_own_share_receive_code_override(self) -> None:
+        self.delete_runtime_state(OWN_SHARE_RECEIVE_CODE_KEY)
 
     def set_task_strm_mode(self, task_id: int, mode: str) -> TaskSnapshot:
         normalized = normalize_strm_mode(mode)

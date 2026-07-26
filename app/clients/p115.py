@@ -1082,7 +1082,7 @@ class P115WebClient:
             )
         return result(None, None, True, request_count)
 
-    def create_long_share(self, file_id: str) -> dict[str, str]:
+    def create_long_share(self, file_id: str, preferred_receive_code: str = "") -> dict[str, str]:
         resp = self._request(
             "https://webapi.115.com/share/send",
             method="POST",
@@ -1095,18 +1095,31 @@ class P115WebClient:
         share_url = str(resp.get("share_url") or data.get("share_url") or "").strip()
         if not share_code:
             raise RuntimeError("115 create share did not return share_code")
+        actual_receive_code = str(preferred_receive_code or receive_code or "1212").strip() or "1212"
         update = self._request(
             "https://webapi.115.com/share/updateshare",
             method="POST",
             data={
                 "share_code": share_code,
-                "receive_code": receive_code or "1212",
+                "receive_code": actual_receive_code,
                 "share_duration": -1,
                 "auto_fill_recvcode": 1,
             },
         )
         self._ensure_state(update, "115 update share failed")
-        return {"share_code": share_code, "receive_code": receive_code or "1212", "share_url": share_url}
+        update_data = update.get("data") if isinstance(update.get("data"), dict) else {}
+        share_update = update_data.get(share_code) if isinstance(update_data.get(share_code), dict) else {}
+        returned_receive_code = str(
+            update.get("receive_code")
+            or update_data.get("receive_code")
+            or share_update.get("receive_code")
+            or ""
+        ).strip()
+        return {
+            "share_code": share_code,
+            "receive_code": returned_receive_code or actual_receive_code,
+            "share_url": share_url,
+        }
 
     def rename_file(self, file_id: str, file_name: str) -> dict:
         resp = self._request(

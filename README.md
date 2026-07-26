@@ -13,7 +13,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 - **发链接自动入库**：Telegram 接收一条或多条 115 分享、磁力、ED2K 链接，自动去重、排队和处理。
 - **CMS 优先**：整理、改名、TMDB 匹配和分类由 CMS 完成，外挂不会用低准确率模型覆盖 CMS 结果。
 - **两种 STRM 模式**：shared 模式继续“只入库自有分享 STRM”，使用自己的 115 分享链接生成 STRM 并保留分享；`direct` 使用 CMS 普通同步生成的直链 STRM，不创建自有分享，也不清理源文件。
-- **共享别名保护**：创建分享时使用中性别名，入库时恢复 CMS 的标准目录和文件名，降低 115 名称风控影响。
+- **保留 CMS 目录名**：新建分享直接使用 CMS 整理后的规范目录名；历史 `asset-*` 别名任务继续兼容。
 - **异步审核防损失**：自有永久分享先经过即时验证，再按 10 分钟、1 小时、6 小时、24 小时检查点观察 115 异步审核；全部通过后才删除转存源，不取消永久分享。
 - **违规保留源文件**：确认分享不可用或命中风险标记时进入人工处理，不自动改名、重建或重复分享，避免误删源文件和触发风控。
 - **Emby 结果确认**：刷新后检查媒体是否入库，并返回命中的媒体库名称。
@@ -32,7 +32,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.2.27`。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.2.28`。
 4. 拉取固定版本并启动：
 
 ```sh
@@ -100,6 +100,7 @@ STRM_DEFAULT_MODE=shared
 P115_COOKIE_PATH=/config/115-cookies.txt
 SELF_SHARE_RECEIVE_CID=你的待整理目录 CID
 SELF_SHARE_STRM_ROOT=/mnt/user/Unraid/strm/share
+SELF_SHARE_OWN_SHARE_PASSWORD=1212
 SELF_SHARE_REVIEW_GRACE_SECONDS=86400
 SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS=600,3600,21600,86400
 SELF_SHARE_REVIEW_LIST_CACHE_SECONDS=300
@@ -145,6 +146,8 @@ Unraid 将上面的端口替换为 `8788`。只有容器显示 `healthy`、健�
 - `direct`：CMS 普通同步生成直链 STRM，校验后直接移动入库，绝不创建分享或删除 115 源文件。
 
 Web 的 `/app/` 和 `/api/v1/settings/strm-mode` 可修改默认模式；任务进入建分享、STRM 或之后阶段后模式会锁定，避免同一任务半路切换导致直链/分享 STRM 混用。任务级模式优先于默认值。
+
+新建自有分享会保留 CMS 整理后的规范目录名，例如 `H-黑金-2011-[tmdb=77221]`，不再改成 `asset-*`。分享访问码可在 Web“当前任务”页设置；优先级为 Web 设置、CMS `share_115_sync` 的 `SHARE_115_PASSWORD`、`SELF_SHARE_OWN_SHARE_PASSWORD`、默认 `1212`。Web API 只返回掩码和来源，不返回明文；修改仅影响之后新建的分享，已有任务继续使用各自保存的访问码。
 
 ### 普通入库
 
@@ -252,7 +255,7 @@ API 位于 `/api/v1/overview`、`/api/v1/tasks`、`/api/v1/health`、`/api/v1/qu
 1. Telegram 收到 115 分享、磁力或 ED2K 链接。
 2. 115 分享进入接收目录，磁力/ED2K 进入云下载；随后按任务 STRM 模式执行 shared 或 direct 流程。
 3. 外挂等待 CMS 完成整理、改名、TMDB 匹配和分类。
-4. 外挂保存 CMS 的标准目录和分类，创建自己的中性名称永久分享。
+4. 外挂保存 CMS 的标准目录和分类，使用该规范目录创建自己的永久分享。
 5. 自有分享即时验证通过后进入异步审核观察期；检查点全部通过后，删除 115 转存源，但不取消自有永久分享。
 6. 调用 CMS 分享同步，使用自己的分享链接生成 STRM。
 7. 校验 STRM 使用自己的分享码，并实际探测播放端点。
@@ -426,8 +429,8 @@ python3 -m unittest discover -s tests -q
 发布版本通过 GitHub Actions 构建并推送 GHCR 和 Docker Hub：
 
 ```sh
-git tag v0.2.27
-git push origin v0.2.27
+git tag v0.2.28
+git push origin v0.2.28
 ```
 
 如果 fork 后要发布自己的 Docker Hub 镜像，在 GitHub Secrets 中配置：
@@ -438,7 +441,7 @@ git push origin v0.2.27
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.2.27
+docker pull icekale/cms-tg-ingest:0.2.28
 docker pull icekale/cms-tg-ingest:latest
 ```
 

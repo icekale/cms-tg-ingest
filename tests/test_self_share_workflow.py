@@ -398,6 +398,49 @@ class CmsPlaybackProbeTests(unittest.TestCase):
         self.assertEqual(http.calls[1][2]["share_duration"], -1)
         self.assertNotIn("action", http.calls[1][2])
 
+    def test_create_long_share_applies_preferred_receive_code(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, method, dict(data or {})))
+                if url.endswith("/share/send"):
+                    return {
+                        "state": True,
+                        "data": {
+                            "share_code": "preferredtest",
+                            "receive_code": "random",
+                            "share_url": "https://115cdn.com/s/preferredtest",
+                        },
+                    }
+                if url.endswith("/share/updateshare"):
+                    return {"state": True}
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+
+        share = client.create_long_share("345", preferred_receive_code="a1B2")
+
+        self.assertEqual(http.calls[1][2]["receive_code"], "a1B2")
+        self.assertEqual(share["receive_code"], "a1B2")
+
+    def test_create_long_share_uses_receive_code_returned_by_update(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                if url.endswith("/share/send"):
+                    return {"state": True, "data": {"share_code": "updatedtest", "receive_code": "random"}}
+                if url.endswith("/share/updateshare"):
+                    return {"state": True, "data": {"receive_code": "Z9Y8"}}
+                raise AssertionError(url)
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        share = client.create_long_share("345", preferred_receive_code="a1B2")
+
+        self.assertEqual(share["receive_code"], "Z9Y8")
+
     def test_create_long_share_does_not_ignore_115_warning(self):
         class FakeHttp:
             def __init__(self):
@@ -1453,7 +1496,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             def find_organized_folder(self, recognition, share_name, excluded_parent_ids=None, min_update_time=0):
                 self.searches.append((dict(recognition), share_name, set(excluded_parent_ids or [])))
                 return {"file_id": "fid-final", "file_name": "G-高地战-2011-[tmdb=79553]"}
-            def create_long_share(self, file_id):
+            def create_long_share(self, file_id, preferred_receive_code=""):
                 self.created.append(file_id)
                 return {"share_code": "dummyown", "receive_code": "1212", "share_url": "https://115cdn.com/s/dummyown"}
 
@@ -1478,6 +1521,53 @@ class SelfShareWorkflowTests(unittest.TestCase):
         self.assertEqual(row["own_share_file_id"], "fid-final")
         self.assertEqual(row["workflow_phase"], "share_sync_submitted")
         self.assertIsNone(source_path)
+
+    def test_legacy_prepare_uses_task_store_receive_code_override(self):
+        class FakeStore:
+            def __init__(self):
+                self.row = {"id": 8, "created_at": 1}
+
+            def update_self_share(self, row_id, **fields):
+                self.row.update(fields)
+                return dict(self.row)
+
+        class FakeCms:
+            def run_auto_organize(self):
+                return {"code": 200}
+
+            def add_share115_sync_task(self, *args, **kwargs):
+                return {"code": 200}
+
+        class FakeP115:
+            def __init__(self):
+                self.preferred_receive_code = ""
+
+            def find_organized_folder(self, *args, **kwargs):
+                return {"file_id": "fid-final", "file_name": "G-高地战-2011-[tmdb=79553]"}
+
+            def create_long_share(self, file_id, preferred_receive_code=""):
+                self.preferred_receive_code = preferred_receive_code
+                return {
+                    "share_code": "dummyown",
+                    "receive_code": preferred_receive_code,
+                    "share_url": "https://115cdn.com/s/dummyown",
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = bridge.TaskStore(Path(tmp) / "tasks.db")
+            task_store.set_own_share_receive_code_override("web9")
+            p115 = FakeP115()
+            workflow = bridge.SelfShareWorkflow(
+                bridge.SelfShareConfig(enabled=True, cms_state_db_path=Path(tmp) / "missing-cms.db"),
+                FakeCms(),
+                p115,
+                FakeStore(),
+                settings_store=task_store,
+            )
+
+            workflow.prepare({"id": 8, "created_at": 1}, {"title": "高地战", "tmdb_id": "79553"}, "高地战")
+
+        self.assertEqual(p115.preferred_receive_code, "web9")
 
 
 
@@ -1507,7 +1597,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
         class FakeP115:
             def find_organized_folder(self, recognition, share_name, excluded_parent_ids=None, min_update_time=0):
                 return {"file_id": "fid-final", "file_name": "G-高地战-2011-[tmdb=79553]"}
-            def create_long_share(self, file_id):
+            def create_long_share(self, file_id, preferred_receive_code=""):
                 events.append(f"share:{file_id}")
                 return {"share_code": "dummyown", "receive_code": "1212", "share_url": "https://115cdn.com/s/dummyown"}
             def delete_file(self, file_id):
@@ -1558,7 +1648,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
         class FakeP115:
             def find_organized_folder(self, recognition, share_name, excluded_parent_ids=None, min_update_time=0):
                 return {"file_id": "fid-final", "file_name": "Y-银行家-2020-[tmdb=627725]"}
-            def create_long_share(self, file_id):
+            def create_long_share(self, file_id, preferred_receive_code=""):
                 events.append(f"share:{file_id}")
                 return {"share_code": "dummyown", "receive_code": "1212", "share_url": "https://115cdn.com/s/dummyown"}
             def find_source_residue_files(self, recognition, share_name, parent_ids, excluded_file_ids=None, min_update_time=0):
@@ -1656,7 +1746,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             def find_organized_folder(self, recognition, share_name, excluded_parent_ids=None, min_update_time=0):
                 return {"file_id": "unmarked-folder", "file_name": "123 (2026)"}
 
-            def create_long_share(self, file_id):
+            def create_long_share(self, file_id, preferred_receive_code=""):
                 events.append(f"share:{file_id}")
                 return {"share_code": "should-not-exist", "receive_code": "1212"}
 
@@ -1703,7 +1793,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
                     return None
                 return {"file_id": "correct-folder", "file_name": "1-正确影片-2026-[tmdb=1228710]", "category": "欧美电影"}
 
-            def create_long_share(self, file_id):
+            def create_long_share(self, file_id, preferred_receive_code=""):
                 return {"share_code": "own-share", "receive_code": "1212"}
 
         store = FakeStore()
@@ -1748,7 +1838,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             def __init__(self):
                 self.created = []
 
-            def create_long_share(self, file_id):
+            def create_long_share(self, file_id, preferred_receive_code=""):
                 self.created.append(file_id)
                 return {"share_code": "should-not-exist", "receive_code": "1212"}
 
@@ -1793,7 +1883,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
         class FakeP115:
             def find_organized_folder(self, recognition, share_name, excluded_parent_ids=None, min_update_time=0):
                 return {"file_id": "fid-final", "file_name": "S-神奇数字马戏团-2023-[tmdb=261145]", "parent_id": "3254119954860998447"}
-            def create_long_share(self, file_id):
+            def create_long_share(self, file_id, preferred_receive_code=""):
                 return {"share_code": "dummyown", "receive_code": "1212", "share_url": "https://115cdn.com/s/dummyown"}
 
         store = FakeStore()
@@ -1838,7 +1928,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
         class FakeP115:
             def find_organized_folder(self, recognition, share_name, excluded_parent_ids=None, min_update_time=0):
                 return {"file_id": "fid-final", "file_name": "S-神奇数字马戏团-2023-[tmdb=261145]", "parent_id": "3254119954860998447"}
-            def create_long_share(self, file_id):
+            def create_long_share(self, file_id, preferred_receive_code=""):
                 return {"share_code": "dummyown", "receive_code": "1212", "share_url": "https://115cdn.com/s/dummyown"}
 
         store = FakeStore()
@@ -1891,7 +1981,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
         class FakeP115:
             def find_organized_folder(self, recognition, share_name, excluded_parent_ids=None, min_update_time=0):
                 return {"file_id": "fid-final", "file_name": "L-龙之家族-2022-[tmdb=94997]", "parent_id": "3254119954860998447"}
-            def create_long_share(self, file_id):
+            def create_long_share(self, file_id, preferred_receive_code=""):
                 return {"share_code": "dummyown", "receive_code": "1212", "share_url": "https://115cdn.com/s/dummyown"}
 
         store = FakeStore()

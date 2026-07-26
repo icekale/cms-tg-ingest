@@ -58,7 +58,7 @@ class FakeP115:
         self.find_organized_calls.append((dict(recognition), title, excluded_parent_ids, min_update_time, kwargs))
         return self.folder
 
-    def create_long_share(self, file_id):
+    def create_long_share(self, file_id, preferred_receive_code=""):
         self.created_shares.append(file_id)
         suffix = len(self.created_shares)
         return {
@@ -1443,7 +1443,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
             self.assertEqual(self.p115.created_shares, [])
 
-    def test_share_alias_stage_renames_root_and_persists_canonical_manifest(self):
+    def test_share_alias_stage_preserves_cms_folder_name_without_creating_alias(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
             row = self._self_share_row()
@@ -1462,17 +1462,14 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
 
             result = workflow.run_stage(task)
             stored = self.submissions.find_by_id(int(row["id"]))
-            manifest = json.loads(stored["canonical_manifest_json"])
 
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
-            self.assertTrue(stored["share_alias_name"].startswith(f"asset-{task.id}-"))
-            self.assertEqual(self.p115.renamed, [("folder-id", stored["share_alias_name"])])
-            self.assertEqual(manifest["root_name"], "S-双喜-2025-[tmdb=123456]")
-            self.assertEqual(manifest["category"], "华语电影")
-            self.assertEqual(manifest["tmdb_id"], "123456")
-            self.assertEqual(manifest["entries"], [])
+            self.assertEqual(stored["own_share_file_name"], "S-双喜-2025-[tmdb=123456]")
+            self.assertFalse(stored["share_alias_name"])
+            self.assertFalse(stored["canonical_manifest_json"])
+            self.assertEqual(self.p115.renamed, [])
 
-    def test_share_alias_stage_keeps_direct_file_fallback_when_folder_is_gone(self):
+    def test_share_alias_stage_does_not_probe_legacy_rename_fallback(self):
         class FolderGoneP115(FakeP115):
             def rename_file(self, file_id, file_name):
                 raise RuntimeError("分享的文件(夹)已被移动或删除")
@@ -1501,7 +1498,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             stored = self.submissions.find_by_id(int(row["id"]))
 
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
-            self.assertTrue(result.metadata["direct_file_share_fallback"])
+            self.assertNotIn("direct_file_share_fallback", result.metadata)
             self.assertFalse(stored["share_alias_name"])
 
     def test_share_validation_violation_keeps_existing_neutral_alias_without_rebuilding(self):
@@ -2130,7 +2127,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
 
     def test_own_share_stage_falls_back_to_direct_file_when_folder_is_gone(self):
         class FolderGoneP115(FakeP115):
-            def create_long_share(self, file_id):
+            def create_long_share(self, file_id, preferred_receive_code=""):
                 self.created_shares.append(file_id)
                 if file_id == "series-id":
                     raise RuntimeError("目录不存在或已转移")

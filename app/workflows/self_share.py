@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import logging
 import shutil
 import time
@@ -56,6 +55,7 @@ from app.media.strm import (
     validate_self_share_strm_source,
 )
 from app.models import TaskStage, TaskStatus
+from app.self_share_settings import resolve_own_share_receive_code
 from app.task_bridge import reset_self_share_submission_for_reprocess
 from app.strm_mode import effective_task_strm_mode
 from app.task_runner import StageResult
@@ -261,11 +261,19 @@ def find_emby_match(emby: Any, recognition: dict[str, Any], row: dict[str, Any] 
 
 
 class SelfShareWorkflow:
-    def __init__(self, config: SelfShareConfig, cms: CmsClient, p115: P115WebClient, store: Any):
+    def __init__(
+        self,
+        config: SelfShareConfig,
+        cms: CmsClient,
+        p115: P115WebClient,
+        store: Any,
+        settings_store: Any | None = None,
+    ):
         self.config = config
         self.cms = cms
         self.p115 = p115
         self.store = store
+        self.settings_store = settings_store or store
 
     def prepare(self, row: dict[str, Any], recognition: dict[str, Any], share_name: str) -> tuple[dict[str, Any], Path | None]:
         if not self.config.enabled:
@@ -335,7 +343,11 @@ class SelfShareWorkflow:
                 own_share_file_name=folder.get("file_name"),
             ) or row
         if not row.get("own_share_code"):
-            share = self.p115.create_long_share(str(row.get("own_share_file_id") or ""))
+            receive_code = resolve_own_share_receive_code(self.settings_store, self.config).value
+            share = self.p115.create_long_share(
+                str(row.get("own_share_file_id") or ""),
+                preferred_receive_code=receive_code,
+            )
             row = self.store.update_self_share(
                 row_id,
                 workflow_phase="own_share_created",
@@ -1306,41 +1318,13 @@ class BridgeSelfShareTaskWorkflow:
         alias_name = str(row.get("share_alias_name") or "").strip()
         if alias_name:
             return StageResult.complete("分享目录别名已准备", self._own_share_metadata(row))
-        short_id = hashlib.sha1(f"{task.id}:{file_id}".encode("utf-8")).hexdigest()[:8]
-        alias_name = f"asset-{task.id}-{short_id}"
-        manifest = {
-            "version": 1,
-            "root_name": canonical_name,
-            "alias_name": alias_name,
-            "category": final_category_for_move(row, recognition),
-            "tmdb_id": expected_task_tmdb_id(recognition, row),
-            "entries": [],
-        }
-        try:
-            self.p115.rename_file(file_id, alias_name)
-        except RuntimeError as exc:
-            direct_file_id, direct_relative_path = self._direct_file_share_details(task)
-            if not direct_file_id or not self._is_gone_share_source_error(exc):
-                raise
-            metadata = self._own_share_metadata(row)
-            metadata.update(
-                {
-                    "direct_file_share_fallback": True,
-                    "direct_file_share_file_id": direct_file_id,
-                    "direct_file_share_relative_path": direct_relative_path,
-                }
-            )
-            return StageResult.complete("CMS 整理目录已移动，保留单集文件分享兜底", metadata)
         row = self.store.update_self_share(
             int(row["id"]),
             workflow_phase="share_alias_prepared",
-            canonical_manifest_json=json.dumps(manifest, ensure_ascii=False, sort_keys=True),
-            share_alias_name=alias_name,
-            share_alias_level=1,
             share_validation_status="pending",
             share_validation_error="",
         ) or row
-        return StageResult.complete("已准备中性分享目录名", self._own_share_metadata(row))
+        return StageResult.complete("已保留 CMS 整理目录名", self._own_share_metadata(row))
 
     def _stage_own_share_created(self, task):
         row = self._submission_row(task)
@@ -1375,8 +1359,9 @@ class BridgeSelfShareTaskWorkflow:
         direct_file_share = False
         direct_relative_path = ""
         if not row.get("own_share_code"):
+            receive_code = resolve_own_share_receive_code(self.task_store, self.self_share_config).value
             try:
-                share = self.p115.create_long_share(file_id)
+                share = self.p115.create_long_share(file_id, preferred_receive_code=receive_code)
             except RuntimeError as exc:
                 direct_file_id, direct_relative_path = self._direct_file_share_details(task)
                 if not direct_file_id or not self._is_gone_share_source_error(exc):
@@ -1384,7 +1369,7 @@ class BridgeSelfShareTaskWorkflow:
                 if not hasattr(self.store, "replace_self_share_source_file_id"):
                     raise
                 row = self.store.replace_self_share_source_file_id(int(row["id"]), direct_file_id) or row
-                share = self.p115.create_long_share(direct_file_id)
+                share = self.p115.create_long_share(direct_file_id, preferred_receive_code=receive_code)
                 direct_file_share = True
             row = self.store.update_self_share(
                 int(row["id"]),

@@ -60,7 +60,7 @@ class V02DocsTests(unittest.TestCase):
             "115 分享/磁力/ED2K -> 115 接收或云下载 -> CMS 整理分类 -> 自有永久分享 -> 分享 STRM -> Emby 入库 -> 清理转存源",
             readme,
         )
-        self.assertIn("共享别名保护", readme)
+        self.assertIn("保留 CMS 目录名", readme)
         self.assertIn("只入库自有分享 STRM", readme)
         self.assertIn("低频 115 调用", readme)
 
