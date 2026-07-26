@@ -131,6 +131,7 @@ class EmbyClient:
                 "Recursive": "true",
                 "AnyProviderIdEquals": f"tmdb.{tmdb_id}",
                 "IncludeItemTypes": "Series",
+                "Fields": "ProviderIds",
                 "Limit": "10",
             },
         )

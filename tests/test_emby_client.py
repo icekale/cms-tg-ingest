@@ -73,6 +73,7 @@ class EmbyClientTests(unittest.TestCase):
         self.assertIn("/Users/user-1/Items?", first_url)
         self.assertIn("AnyProviderIdEquals=tmdb.1416", first_url)
         self.assertIn("IncludeItemTypes=Series", first_url)
+        self.assertIn("Fields=ProviderIds", first_url)
         self.assertIn("Limit=10", first_url)
 
         second_url = http.calls[1][0]
