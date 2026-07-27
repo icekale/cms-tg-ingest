@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .config import Config, MoveConfig, is_relative_to, is_under_any_root, safe_resolve
 from .models import TaskSnapshot, TaskStage, TaskStatus
 from .quality import QualityIssue, scan_task_quality
-from .quality_rules import QUALITY_RULE_VERSION, QualityRuleEngine, QualityRuleMatch, rule_config
+from .quality_rules import QUALITY_RULE_VERSION, QualityRuleEngine, QualityRuleMatch, quality_attempt_count, rule_config
 from .task_store import REPROCESS_METADATA_DELETE_KEYS, TaskStore, build_reprocess_metadata
 from .task_runner import QUALITY_REPAIR_WAIT_SECONDS
 
@@ -137,11 +137,49 @@ class QualityAutomation:
             return
         if not isinstance(values, dict):
             return
-        for name in self._env_defaults:
-            if name in values:
-                setattr(self.config, name, values[name])
-        self.config.quality_auto_time = self._parse_run_time(str(self.config.quality_auto_time)).strftime("%H:%M")
-        self.config.quality_auto_timezone = str(ZoneInfo(str(self.config.quality_auto_timezone)))
+        defaults = self._env_defaults
+        enabled = self._runtime_bool(values.get("quality_auto_enabled"), bool(defaults["quality_auto_enabled"]))
+        raw_time = values.get("quality_auto_time", defaults["quality_auto_time"])
+        try:
+            parsed_time = self._parse_run_time(str(raw_time))
+        except (TypeError, ValueError):
+            parsed_time = self._parse_run_time(str(defaults["quality_auto_time"]))
+        raw_timezone = values.get("quality_auto_timezone", defaults["quality_auto_timezone"])
+        try:
+            parsed_timezone = ZoneInfo(str(raw_timezone))
+        except (TypeError, ValueError, ZoneInfoNotFoundError):
+            parsed_timezone = ZoneInfo(str(defaults["quality_auto_timezone"]))
+
+        def valid_limit(name: str, maximum: int) -> int:
+            raw = values.get(name, defaults[name])
+            try:
+                if isinstance(raw, bool):
+                    raise ValueError
+                parsed = int(raw)
+            except (OverflowError, TypeError, ValueError):
+                return int(defaults[name])
+            return parsed if 1 <= parsed <= maximum else int(defaults[name])
+
+        self.config.quality_auto_enabled = enabled
+        self.config.quality_auto_time = parsed_time.strftime("%H:%M")
+        self.config.quality_auto_timezone = str(parsed_timezone)
+        self.config.quality_auto_max_tasks = valid_limit("quality_auto_max_tasks", self.MAX_TASKS)
+        self.config.quality_auto_115_check_limit = valid_limit(
+            "quality_auto_115_check_limit", self.MAX_115_CHECK_LIMIT
+        )
+
+    @staticmethod
+    def _runtime_bool(value: object, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value)
+        normalized = str(value or "").strip().lower()
+        if normalized in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "disabled"}:
+            return False
+        return default
 
     def update_settings(
         self,
@@ -484,7 +522,7 @@ class QualityAutomation:
             return QualityRepairPlan(action="skip", reason="terminal_task", execution_status="skipped", **base)
         if not self._safe_metadata(task):
             return QualityRepairPlan(action="skip", reason="unsafe_metadata", execution_status="skipped", **base)
-        state = self.store.quality_state(task.id)
+        state = self.store.quality_state(task.id, now=now)
         manual_status = str(state.get("quality_manual_status") or "open").strip().lower()
         if manual_status in {"snoozed", "ignored"}:
             return QualityRepairPlan(action="skip", reason=f"manual_{manual_status}", execution_status="skipped", **base)
@@ -496,17 +534,19 @@ class QualityAutomation:
             next_eligible = 0
         if next_eligible > now:
             return QualityRepairPlan(action="skip", reason="cooldown", execution_status="skipped", **base)
-        try:
-            attempts = int(state.get("quality_repair_attempts") or 0)
-        except (TypeError, ValueError):
-            attempts = 0
+        if not match.auto_allowed or match.auto_action != "reprocess":
+            if match.rule_id == "repeated_failure":
+                current = self._mark_manual_required(task)
+                if current.updated_at != task.updated_at:
+                    base["planned_updated_at"] = current.updated_at
+                return QualityRepairPlan(action="skip", reason="manual_required", execution_status="skipped", **base)
+            return QualityRepairPlan(action="skip", reason=match.rule_id, execution_status="skipped", **base)
+        attempts = quality_attempt_count(task)
         if attempts >= int(self.rule_config["max_attempts"]):
             current = self._mark_manual_required(task)
             if current.updated_at != task.updated_at:
                 base["planned_updated_at"] = current.updated_at
             return QualityRepairPlan(action="skip", reason="manual_required", execution_status="skipped", **base)
-        if not match.auto_allowed or match.auto_action != "reprocess":
-            return QualityRepairPlan(action="skip", reason=match.rule_id, execution_status="skipped", **base)
         if not self._has_source_evidence(task):
             return QualityRepairPlan(action="skip", reason="missing_source_evidence", execution_status="skipped", **base)
         if self._risk_controlled(task, now):
@@ -628,9 +668,9 @@ class QualityAutomation:
         try:
             if float(state.get("quality_next_eligible_at") or 0) > time.time():
                 return replace(plan, execution_status="skipped", reason="cooldown")
-            attempts = int(state.get("quality_repair_attempts") or 0)
+            attempts = quality_attempt_count(task)
         except (TypeError, ValueError):
-            attempts = 0
+            attempts = max(0, int(task.retry_count or 0))
         if attempts >= int(self.rule_config["max_attempts"]):
             self._mark_manual_required(task)
             return replace(plan, execution_status="skipped", reason="manual_required")
@@ -684,56 +724,91 @@ class QualityAutomation:
         handler_name = plan.action
         handler = getattr(self.repair_adapter, handler_name, None) if self.repair_adapter is not None else None
         if not callable(handler):
-            self.store.record_event(
+            if self._record_owned_repair_event(
                 reserved.id,
                 target_stage,
                 TaskStatus.FAILED,
                 "自动巡检没有可用的修复适配器",
+                owner_run_id=run_id,
+                claimed_at=reserved.claimed_at,
                 error_type="quality_repair_adapter_missing",
                 error_summary="repair adapter missing",
                 clear_claim=True,
                 metadata_patch=self._failure_quality_patch(attempts + 1),
-                )
+            ) is None:
+                return replace(plan, execution_status="skipped", reason="claim_lost")
             return replace(plan, execution_status="failed", reason="repair_adapter_missing")
         try:
             if handler(reserved, str(run_id)) is False:
-                self.store.record_event(
+                if self._record_owned_repair_event(
                     reserved.id,
                     target_stage,
                     TaskStatus.FAILED,
                     "自动巡检修复适配器拒绝执行",
+                    owner_run_id=run_id,
+                    claimed_at=reserved.claimed_at,
                     error_type="quality_repair_rejected",
                     error_summary="repair rejected",
                     clear_claim=True,
                     metadata_patch=self._failure_quality_patch(attempts + 1),
-                )
+                ) is None:
+                    return replace(plan, execution_status="skipped", reason="claim_lost")
                 return replace(plan, execution_status="failed", reason="repair_rejected")
-            self.store.record_event(
+            if self._record_owned_repair_event(
                 reserved.id,
                 target_stage,
                 TaskStatus.PENDING,
                 f"自动巡检修复已入队：{plan.action}",
+                owner_run_id=run_id,
+                claimed_at=reserved.claimed_at,
                 metadata_patch={"quality_repair_queued": True, "quality_last_actor": "quality-auto"},
                 next_run_at=time.time(),
                 clear_claim=True,
-            )
+            ) is None:
+                return replace(plan, execution_status="skipped", reason="claim_lost")
         except Exception as exc:
             try:
-                self.store.record_event(
+                if self._record_owned_repair_event(
                     reserved.id,
                     target_stage,
                     TaskStatus.FAILED,
                     f"自动巡检修复失败：{exc}",
+                    owner_run_id=run_id,
+                    claimed_at=reserved.claimed_at,
                     error_type="quality_repair_failed",
                     error_summary=str(exc),
                     error_detail=repr(exc),
                     clear_claim=True,
                     metadata_patch=self._failure_quality_patch(attempts + 1),
-                )
+                ) is None:
+                    return replace(plan, execution_status="skipped", reason="claim_lost")
             except Exception:
                 pass
             return replace(plan, execution_status="failed", reason="repair_failed")
         return replace(plan, execution_status="queued")
+
+    def _record_owned_repair_event(
+        self,
+        task_id: int,
+        target_stage: TaskStage,
+        status: TaskStatus,
+        message: str,
+        *,
+        owner_run_id: str,
+        claimed_at: float,
+        **kwargs: object,
+    ) -> TaskSnapshot | None:
+        return self.store.record_event(
+            task_id,
+            target_stage,
+            status,
+            message,
+            expected_stage=target_stage,
+            expected_status=TaskStatus.RUNNING,
+            expected_claimed_by=f"quality:{owner_run_id}",
+            expected_claimed_at=claimed_at,
+            **kwargs,
+        )
 
     def _failure_quality_patch(self, attempts: int) -> dict[str, object]:
         patch: dict[str, object] = {

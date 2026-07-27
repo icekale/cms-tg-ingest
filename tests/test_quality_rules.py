@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 
 from app.models import TaskStage, TaskStatus, TaskSnapshot
 from app.quality import QualityIssue
@@ -137,6 +138,39 @@ class QualityRuleEngineTests(unittest.TestCase):
         self.assertEqual(match.rule_id, "repeated_failure")
         self.assertFalse(match.auto_allowed)
         self.assertIn("view", match.manual_actions)
+
+    def test_invalid_new_attempts_fall_back_to_legacy_attempts(self):
+        match = self.engine.evaluate(
+            task(strm_mode="shared", quality_repair_attempts="invalid", quality_attempts="2"),
+            [QualityIssue("direct_strm", "direct", "/library/movie.strm")],
+            config={"allow_auto_reprocess": True, "max_attempts": 2},
+        )
+
+        self.assertEqual(match.rule_id, "repeated_failure")
+        self.assertFalse(match.auto_allowed)
+
+    def test_attempts_fall_back_to_task_retry_count(self):
+        current = replace(task(strm_mode="shared"), retry_count=2)
+        match = self.engine.evaluate(
+            current,
+            [QualityIssue("direct_strm", "direct", "/library/movie.strm")],
+            config={"allow_auto_reprocess": True, "max_attempts": 2},
+        )
+
+        self.assertEqual(match.rule_id, "repeated_failure")
+        self.assertFalse(match.auto_allowed)
+
+    def test_missing_rules_keep_specific_reason_when_attempts_are_exhausted(self):
+        for issue_code, rule_id in (("missing_dest", "missing_destination"), ("missing_strm", "missing_strm")):
+            with self.subTest(issue_code=issue_code):
+                match = self.engine.evaluate(
+                    task(quality_repair_attempts=2),
+                    [QualityIssue(issue_code, "missing", "/library/movie")],
+                    config={"allow_auto_reprocess": True, "max_attempts": 2},
+                )
+
+                self.assertEqual(match.rule_id, rule_id)
+                self.assertFalse(match.auto_allowed)
 
     def test_missing_destination_is_manual(self):
         match = self.engine.evaluate(task(), [QualityIssue("missing_dest", "missing", "/library/movie")])

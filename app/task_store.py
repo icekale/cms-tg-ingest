@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .models import TaskSnapshot, TaskStage, TaskStatus
+from .quality_rules import quality_attempt_count
 from .strm_mode import is_strm_mode_locked, normalize_strm_mode
 
 
@@ -105,7 +106,19 @@ QUALITY_STATE_DEFAULTS: dict[str, Any] = {
     "quality_last_run_id": "",
     "quality_last_actor": "",
     "quality_rule_version": "",
+    "quality_repair_queued": False,
+    "quality_repair_started_at": 0,
+    "quality_repair_deadline_at": 0,
+    "quality_snoozed_until": 0,
 }
+
+_QUALITY_TRUE_VALUES = frozenset({"1", "true", "yes", "on", "enabled"})
+
+
+def _quality_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in _QUALITY_TRUE_VALUES
 
 
 def build_reprocess_metadata(
@@ -976,7 +989,7 @@ class TaskStore:
             rows = conn.execute("SELECT * FROM task_events WHERE task_id = ? ORDER BY id ASC", (task_id,)).fetchall()
         return [dict(row) for row in rows]
 
-    def quality_state(self, task_id: int) -> dict[str, Any]:
+    def quality_state(self, task_id: int, *, now: float | None = None) -> dict[str, Any]:
         """Return normalized quality metadata without writing legacy tasks."""
         task = self.find_task(int(task_id))
         if task is None:
@@ -988,11 +1001,7 @@ class TaskStore:
             if key in metadata and metadata[key] is not None:
                 state[key] = metadata[key]
 
-        if "quality_repair_attempts" not in metadata and "quality_attempts" in metadata:
-            try:
-                state["quality_repair_attempts"] = max(0, int(metadata["quality_attempts"]))
-            except (TypeError, ValueError):
-                pass
+        state["quality_repair_attempts"] = quality_attempt_count(task)
         if "quality_last_attempt_at" not in metadata and metadata.get("quality_repair_started_at") is not None:
             try:
                 state["quality_last_attempt_at"] = float(metadata["quality_repair_started_at"] or 0)
@@ -1006,23 +1015,18 @@ class TaskStore:
                 parsed = [part.strip() for part in issue_codes.split(",") if part.strip()]
             issue_codes = parsed
         state["quality_issue_codes"] = list(issue_codes) if isinstance(issue_codes, (list, tuple)) else []
-        if "quality_repair_queued" in metadata:
-            state["quality_repair_queued"] = bool(metadata.get("quality_repair_queued"))
-        if "quality_repair_started_at" in metadata:
+        state["quality_repair_queued"] = _quality_bool(metadata.get("quality_repair_queued"))
+        for key in ("quality_repair_started_at", "quality_repair_deadline_at", "quality_snoozed_until"):
             try:
-                state["quality_repair_started_at"] = float(metadata.get("quality_repair_started_at") or 0)
+                state[key] = float(metadata.get(key) or 0)
             except (TypeError, ValueError):
-                state["quality_repair_started_at"] = 0
-        if "quality_repair_deadline_at" in metadata:
-            try:
-                state["quality_repair_deadline_at"] = float(metadata.get("quality_repair_deadline_at") or 0)
-            except (TypeError, ValueError):
-                state["quality_repair_deadline_at"] = 0
-        if "quality_snoozed_until" in metadata:
-            try:
-                state["quality_snoozed_until"] = float(metadata.get("quality_snoozed_until") or 0)
-            except (TypeError, ValueError):
-                state["quality_snoozed_until"] = 0
+                state[key] = 0
+        current_time = time.time() if now is None else float(now)
+        if (
+            str(state.get("quality_manual_status") or "").strip().lower() == "snoozed"
+            and state["quality_snoozed_until"] <= current_time
+        ):
+            state["quality_manual_status"] = "open"
         return state
 
     @staticmethod

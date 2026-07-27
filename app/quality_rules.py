@@ -140,18 +140,30 @@ def has_complete_evidence(issues: Iterable[QualityIssue], issue_code: str) -> bo
     return bool(matching) and all(str(issue.detail).strip() for issue in matching)
 
 
+def _parse_attempt_count(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        attempts = int(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    return attempts if attempts >= 0 else None
+
+
+def quality_attempt_count(task: TaskSnapshot) -> int:
+    """Resolve current quality attempts while preserving legacy counters."""
+    for key in ("quality_repair_attempts", "quality_attempts"):
+        attempts = _parse_attempt_count(task.metadata.get(key))
+        if attempts is not None:
+            return attempts
+    return max(0, int(task.retry_count or 0))
+
+
 def attempts_exhausted(task: TaskSnapshot, config: object | None = None) -> bool:
     controls = rule_config(config)
-    attempts = task.retry_count
-    for key in ("quality_repair_attempts", "quality_attempts"):
-        if key not in task.metadata or task.metadata[key] is None:
-            continue
-        try:
-            attempts = int(task.metadata[key] or 0)
-        except (TypeError, ValueError):
-            continue
-        break
-    return attempts >= int(controls["max_attempts"])
+    return quality_attempt_count(task) >= int(controls["max_attempts"])
 
 
 def _match(
@@ -233,19 +245,19 @@ class QualityRuleEngine:
                 manual_actions=_MANUAL_ACTIONS,
                 evidence=(raw_mode or str(exc),),
             )
-        if issue_list and attempts_exhausted(task, controls):
-            return _match(
-                "repeated_failure",
-                "high",
-                "quality attempts have reached the configured limit",
-                issue_codes,
-                manual_actions=_MANUAL_ACTIONS,
-                evidence=(issue.detail for issue in issue_list if issue.detail),
-            )
         mismatch_issues = tuple(
             issue for issue in issue_list if mode_rule_for_issue(mode, issue.code) == "strm_mode_mismatch"
         )
         if mismatch_issues:
+            if attempts_exhausted(task, controls):
+                return _match(
+                    "repeated_failure",
+                    "high",
+                    "quality attempts have reached the configured limit",
+                    issue_codes,
+                    manual_actions=_MANUAL_ACTIONS,
+                    evidence=(issue.detail for issue in issue_list if issue.detail),
+                )
             evidence = tuple(issue.detail for issue in mismatch_issues if str(issue.detail).strip())
             auto_allowed = (
                 bool(controls["allow_auto_reprocess"])
@@ -283,6 +295,15 @@ class QualityRuleEngine:
             )
         if "unexpected_strm" in issue_codes:
             unexpected_issues = tuple(issue for issue in issue_list if issue.code == "unexpected_strm")
+            if attempts_exhausted(task, controls):
+                return _match(
+                    "repeated_failure",
+                    "high",
+                    "quality attempts have reached the configured limit",
+                    issue_codes,
+                    manual_actions=_MANUAL_ACTIONS,
+                    evidence=(issue.detail for issue in issue_list if issue.detail),
+                )
             auto_allowed = (
                 bool(controls["allow_auto_reprocess"])
                 and has_complete_evidence(unexpected_issues, "unexpected_strm")
@@ -298,7 +319,7 @@ class QualityRuleEngine:
                 manual_actions=() if auto_allowed else _MANUAL_ACTIONS,
                 evidence=(issue.detail for issue in unexpected_issues if issue.detail),
             )
-        if "repeated_failure" in issue_codes or (issue_list and attempts_exhausted(task, controls)):
+        if "repeated_failure" in issue_codes:
             return _match(
                 "repeated_failure",
                 "high",

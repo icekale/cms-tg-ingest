@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import FrozenInstanceError
@@ -126,6 +127,43 @@ class QualityAutomationConfigTests(unittest.TestCase):
                 with self.subTest(name=name), patch.dict(os.environ, env, clear=True):
                     with self.assertRaisesRegex(ValueError, rf"{name} must be a positive integer"):
                         Config.from_env()
+
+    def test_corrupt_runtime_overrides_are_ignored_safely(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            store.set_runtime_state(
+                "quality_auto_overrides",
+                json.dumps(
+                    {
+                        "quality_auto_enabled": "false",
+                        "quality_auto_time": "not-a-time",
+                        "quality_auto_timezone": "Not/AZone",
+                        "quality_auto_max_tasks": 0,
+                        "quality_auto_115_check_limit": -1,
+                    }
+                ),
+            )
+            config = Config(
+                tg_bot_token="token",
+                tg_allowed_chat_id="chat",
+                cms_base_url="http://cms",
+                cms_username="user",
+                cms_password="pass",
+                task_db_path=str(Path(tmp) / "tasks.db"),
+                quality_auto_enabled=True,
+                quality_auto_time="02:50",
+                quality_auto_timezone="Asia/Shanghai",
+                quality_auto_max_tasks=50,
+                quality_auto_115_check_limit=3,
+            )
+
+            QualityAutomation(store, config, allowed_roots=[])
+
+            self.assertFalse(config.quality_auto_enabled)
+            self.assertEqual(config.quality_auto_time, "02:50")
+            self.assertEqual(config.quality_auto_timezone, "Asia/Shanghai")
+            self.assertEqual(config.quality_auto_max_tasks, 50)
+            self.assertEqual(config.quality_auto_115_check_limit, 3)
 
 
 class QualityScheduleTests(unittest.TestCase):
@@ -451,6 +489,24 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertIn(plan.reason, {"missing_destination", "manual_required"})
             self.assertEqual(adapter.calls, [])
 
+    def test_expired_snooze_is_open_for_planning_and_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = FakeQualityRepairAdapter()
+            service, library = self.make_service(tmp)
+            service.repair_adapter = adapter
+            destination = library / "expired-snooze"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/d/direct.mkv", encoding="utf-8")
+            task = self.add_task(service.store, "expired-snooze", destination, own_share_receive_code="1212")
+            service.store.mark_quality_snoozed(task.id, time.time() - 1, "tester")
+            current = service.store.find_task(task.id)
+            issue = QualityIssue("direct_strm", "direct", str(destination / "movie.strm"), task.id)
+
+            plan = service._plan([current], [issue])[0]
+
+            self.assertEqual(plan.action, "reprocess")
+            self.assertEqual(service.execute_plan(plan, "expired-snooze-run").execution_status, "queued")
+
     def test_reprocess_requires_complete_source_evidence_and_rule_match(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = FakeQualityRepairAdapter()
@@ -699,6 +755,27 @@ class FakeQualityRepairAdapter:
 
     def cleanup(self, task, run_id):
         self.calls.append(("cleanup", task.id, run_id))
+        return True
+
+
+class ClaimTakingAdapter(FakeQualityRepairAdapter):
+    def __init__(self, store):
+        super().__init__()
+        self.store = store
+
+    def reprocess(self, task, run_id):
+        self.calls.append(("reprocess", task.id, run_id))
+        takeover = self.store.compare_and_set_transition(
+            task.id,
+            task.current_stage,
+            {TaskStatus.RUNNING},
+            require_unclaimed=False,
+            target_stage=task.current_stage,
+            target_status=TaskStatus.RUNNING,
+            target_event_message="claim taken over",
+            claim_by="worker:takeover",
+        )
+        self.assert_taken_over = takeover is not None
         return True
 
 
@@ -954,6 +1031,25 @@ class QualityRepairExecutionTests(unittest.TestCase):
             self.assertEqual(first_result.execution_status, "queued")
             self.assertEqual(second_result.execution_status, "skipped")
             self.assertEqual(second_result.reason, "task_busy")
+
+    def test_completion_does_not_clear_a_claim_taken_over_by_another_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            adapter = ClaimTakingAdapter(store)
+            service, library = self.make_service(tmp, adapter)
+            destination = library / "claim-taken-over"
+            destination.mkdir(parents=True)
+            task = self.add_task(service.store, "claim-taken-over", destination, own_share_receive_code="1212")
+            plan = QualityRepairPlan(task.id, "reprocess", "strm_mode_mismatch", ("direct_strm",))
+
+            result = service.execute_plan(plan, "claim-owner")
+            current = service.store.find_task(task.id)
+
+            self.assertEqual(result.execution_status, "skipped")
+            self.assertEqual(result.reason, "claim_lost")
+            self.assertTrue(adapter.assert_taken_over)
+            self.assertEqual(current.claimed_by, "worker:takeover")
+            self.assertEqual(current.status, TaskStatus.RUNNING)
 
     def test_two_executions_reach_attempt_limit_and_third_is_not_queued(self):
         with tempfile.TemporaryDirectory() as tmp:

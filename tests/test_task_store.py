@@ -1,6 +1,7 @@
 import sqlite3
 import threading
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -34,7 +35,11 @@ class TaskStoreTests(unittest.TestCase):
             updated = store.update_quality_state(
                 task.id,
                 expected_updated_at=task.updated_at,
-                patch={"quality_manual_status": "snoozed", "quality_next_eligible_at": 123.0},
+                patch={
+                    "quality_manual_status": "snoozed",
+                    "quality_next_eligible_at": 123.0,
+                    "quality_snoozed_until": time.time() + 123,
+                },
                 message="质量问题暂缓",
                 actor="tester",
             )
@@ -73,12 +78,62 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(state["quality_repair_deadline_at"], 20.0)
             self.assertEqual(state["quality_repair_attempts"], 1)
 
+    def test_quality_state_uses_legacy_attempts_when_new_value_is_invalid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("quality-invalid-attempts", "", "https://115cdn.com/s/quality-invalid-attempts")
+            store.patch_metadata(
+                task.id,
+                {
+                    "quality_repair_attempts": "not-an-int",
+                    "quality_attempts": "4",
+                },
+            )
+
+            self.assertEqual(store.quality_state(task.id)["quality_repair_attempts"], 4)
+
+    def test_quality_state_falls_back_to_task_retry_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("quality-retry-fallback", "", "https://115cdn.com/s/quality-retry-fallback")
+            retried = store.record_event(
+                task.id,
+                TaskStage.RECEIVED,
+                TaskStatus.FAILED,
+                "retry",
+                increment_retry=True,
+                metadata_patch={"quality_repair_attempts": "invalid", "quality_attempts": "also-invalid"},
+            )
+
+            self.assertEqual(store.quality_state(retried.id)["quality_repair_attempts"], 1)
+
+    def test_quality_state_has_legacy_defaults_and_expires_snooze_without_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("quality-state-schema", "", "https://115cdn.com/s/quality-state-schema")
+            patched = store.patch_metadata(
+                task.id,
+                {
+                    "quality_manual_status": "snoozed",
+                    "quality_snoozed_until": time.time() - 1,
+                    "quality_repair_queued": "false",
+                },
+            )
+
+            state = store.quality_state(task.id)
+
+            self.assertEqual(state["quality_manual_status"], "open")
+            self.assertFalse(state["quality_repair_queued"])
+            self.assertEqual(state["quality_repair_started_at"], 0)
+            self.assertEqual(state["quality_repair_deadline_at"], 0)
+            self.assertEqual(state["quality_snoozed_until"], patched.metadata["quality_snoozed_until"])
+
     def test_quality_manual_state_transitions_are_atomic_and_resume_clears_quality_suppression(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
             task = store.upsert_task("quality-manual", "", "https://115cdn.com/s/quality-manual")
 
-            snoozed = store.mark_quality_snoozed(task.id, 456.0, "alice")
+            snoozed = store.mark_quality_snoozed(task.id, time.time() + 456, "alice")
             self.assertEqual(store.quality_state(snoozed.id)["quality_manual_status"], "snoozed")
             ignored = store.mark_quality_ignored(task.id, "bob")
             self.assertEqual(store.quality_state(ignored.id)["quality_manual_status"], "ignored")
