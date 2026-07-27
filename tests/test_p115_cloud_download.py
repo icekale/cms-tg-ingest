@@ -1,6 +1,7 @@
 import unittest
 
 from app.clients.p115 import (
+    P115CloudOutputPendingError,
     P115WebClient,
     lixian_rsa_encrypt,
     normalize_cloud_status,
@@ -34,6 +35,107 @@ class FakeHttp:
 
 
 class P115CloudDownloadTests(unittest.TestCase):
+    def test_discover_cloud_outputs_returns_all_children_without_moving(self):
+        http = FakeHttp(
+            [
+                {
+                    "state": True,
+                    "data": [
+                        {"fid": "video", "cid": "container", "n": "S01E01.mkv"},
+                        {"fid": "subtitle", "cid": "container", "n": "S01E01.zh.srt"},
+                        {"cid": "season", "pid": "container", "n": "Season 01"},
+                    ],
+                }
+            ]
+        )
+        client = P115WebClient("UID=1", http=http)
+
+        items = client.discover_cloud_download_outputs({"file_id": "container"})
+
+        self.assertEqual(
+            [item["file_id"] for item in items],
+            ["video", "subtitle", "season"],
+        )
+        self.assertEqual(items[0]["parent_id"], "container")
+        self.assertFalse(items[0]["is_folder"])
+        self.assertTrue(items[2]["is_folder"])
+        self.assertFalse(any(call["url"].endswith("/files/move") for call in http.calls))
+
+    def test_discover_cloud_outputs_empty_listing_is_retryable(self):
+        client = P115WebClient("UID=1", http=FakeHttp([{"state": True, "data": []}]))
+
+        with self.assertRaises(P115CloudOutputPendingError):
+            client.discover_cloud_download_outputs({"file_id": "container"})
+
+    def test_discover_cloud_outputs_propagates_listing_error(self):
+        client = P115WebClient(
+            "UID=1",
+            http=FakeHttp([{"state": False, "error": "temporary listing failure"}]),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "temporary listing failure"):
+            client.discover_cloud_download_outputs({"file_id": "container"})
+
+    def test_discover_cloud_outputs_accepts_explicit_file_record(self):
+        client = P115WebClient("UID=1", http=FakeHttp([]))
+
+        items = client.discover_cloud_download_outputs(
+            {"fid": "video", "cid": TARGET_CID, "n": "Example.mkv"}
+        )
+
+        self.assertEqual(
+            items,
+            [
+                {
+                    "file_id": "video",
+                    "file_name": "Example.mkv",
+                    "parent_id": TARGET_CID,
+                    "is_folder": False,
+                }
+            ],
+        )
+
+    def test_ensure_cloud_outputs_moves_only_missing_items_and_preserves_flags(self):
+        http = FakeHttp(
+            [
+                {
+                    "state": True,
+                    "data": [{"fid": "video", "cid": TARGET_CID, "n": "S01E01.mkv"}],
+                },
+                {"state": True},
+                {"state": True},
+            ]
+        )
+        client = P115WebClient("UID=1", http=http)
+        items = [
+            {
+                "file_id": "video",
+                "file_name": "S01E01.mkv",
+                "parent_id": "container",
+                "is_folder": False,
+            },
+            {
+                "file_id": "subtitle",
+                "file_name": "S01E01.zh.srt",
+                "parent_id": "container",
+                "is_folder": False,
+            },
+            {
+                "file_id": "season",
+                "file_name": "Season 01",
+                "parent_id": "container",
+                "is_folder": True,
+            },
+        ]
+
+        moved = client.ensure_cloud_outputs_in_target(items, TARGET_CID)
+
+        self.assertEqual([item["file_id"] for item in moved], ["video", "subtitle", "season"])
+        self.assertTrue(moved[2]["is_folder"])
+        move_calls = [call for call in http.calls if call["url"].endswith("/files/move")]
+        self.assertEqual([call["data"]["fid"] for call in move_calls], ["subtitle", "season"])
+        self.assertEqual(len([call for call in http.calls if call["url"].endswith("/files")]), 1)
+
     def test_lixian_rsa_encrypt_matches_reference_vector(self):
         self.assertEqual(
             lixian_rsa_encrypt(b"{}"),
@@ -141,6 +243,7 @@ class P115CloudDownloadTests(unittest.TestCase):
                     "state": True,
                     "data": [{"cid": "cloud-folder", "fid": "media-file", "n": "Example.mkv"}],
                 },
+                {"state": True, "data": []},
                 {"state": True},
             ]
         )
@@ -150,8 +253,8 @@ class P115CloudDownloadTests(unittest.TestCase):
 
         self.assertEqual(result["file_id"], "media-file")
         self.assertEqual(result["parent_id"], TARGET_CID)
-        self.assertEqual(http.calls[2]["url"], "https://webapi.115.com/files/move")
-        self.assertEqual(http.calls[2]["data"], {"fid": "media-file", "pid": TARGET_CID})
+        self.assertEqual(http.calls[3]["url"], "https://webapi.115.com/files/move")
+        self.assertEqual(http.calls[3]["data"], {"fid": "media-file", "pid": TARGET_CID})
 
 
 if __name__ == "__main__":

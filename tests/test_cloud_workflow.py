@@ -24,6 +24,8 @@ class FakeCloudP115:
         self.add_calls = []
         self.status_calls = []
         self.receive_calls = []
+        self.discover_calls = []
+        self.ensure_calls = []
 
     def cloud_download_add(self, url, target_cid):
         self.add_calls.append((url, target_cid))
@@ -32,6 +34,21 @@ class FakeCloudP115:
     def cloud_download_status(self, identity):
         self.status_calls.append(dict(identity))
         return self.statuses.pop(0)
+
+    def discover_cloud_download_outputs(self, status):
+        self.discover_calls.append(dict(status))
+        return [
+            {
+                "file_id": status["file_id"],
+                "file_name": status.get("file_name") or "Example",
+                "parent_id": status.get("parent_id") or TARGET_CID,
+                "is_folder": bool(status.get("is_folder")),
+            }
+        ]
+
+    def ensure_cloud_outputs_in_target(self, items, target_cid):
+        self.ensure_calls.append((list(items), target_cid))
+        return [{**item, "parent_id": target_cid} for item in items]
 
     def receive_share_to_cid(self, *args):
         self.receive_calls.append(args)
@@ -251,6 +268,16 @@ class CloudWorkflowTests(unittest.TestCase):
 
             result = workflow.run_stage(task)
 
+            self.assertEqual(result.outcome.value, "defer")
+            task = task_store.record_event(
+                task.id,
+                TaskStage.CLOUD_DOWNLOADING,
+                TaskStatus.RUNNING,
+                result.message,
+                metadata_patch=result.metadata,
+            )
+            result = workflow.run_stage(task)
+
             self.assertEqual(result.outcome.value, "complete")
             self.assertEqual(p115.status_calls, [{"info_hash": "hash", "task_id": "task-1"}])
             self.assertEqual(result.metadata["cloud_output_parent_id"], TARGET_CID)
@@ -286,12 +313,23 @@ class CloudWorkflowTests(unittest.TestCase):
 
             second = workflow.run_stage(task)
 
-            self.assertEqual(second.outcome.value, "complete")
+            self.assertEqual(second.outcome.value, "defer")
+            self.assertEqual(len(p115.add_calls), 1)
+            task = task_store.record_event(
+                task.id,
+                TaskStage.CLOUD_DOWNLOADING,
+                TaskStatus.RUNNING,
+                second.message,
+                metadata_patch=second.metadata,
+            )
+            third = workflow.run_stage(task)
+
+            self.assertEqual(third.outcome.value, "complete")
             self.assertEqual(len(p115.add_calls), 1)
             self.assertEqual(p115.receive_calls, [])
             self.assertEqual(len(submissions.rows), 1)
-            self.assertEqual(second.metadata["submission_id"], 1)
-            self.assertEqual(second.metadata["cloud_output_file_id"], "folder-1")
+            self.assertEqual(third.metadata["submission_id"], 1)
+            self.assertEqual(third.metadata["cloud_output_file_id"], "folder-1")
             self.assertEqual(cms.auto_organize_calls, 1)
             self.assertEqual(next(iter(submissions.rows.values()))["workflow_phase"], "auto_organize_submitted")
 
@@ -320,6 +358,16 @@ class CloudWorkflowTests(unittest.TestCase):
                 TaskStatus.RUNNING,
                 first.message,
                 metadata_patch=first.metadata,
+            )
+
+            second = workflow.run_stage(task)
+            self.assertEqual(second.outcome.value, "defer")
+            task = task_store.record_event(
+                task.id,
+                TaskStage.CLOUD_DOWNLOADING,
+                TaskStatus.RUNNING,
+                second.message,
+                metadata_patch=second.metadata,
             )
 
             try:

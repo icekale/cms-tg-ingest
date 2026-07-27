@@ -34,6 +34,10 @@ class P115SharePendingError(RuntimeError):
     """Raised when 115 accepts share creation but has not issued a share code."""
 
 
+class P115CloudOutputPendingError(RuntimeError):
+    """Raised when a completed cloud task has no visible output children yet."""
+
+
 def is_p115_risk_control_message(value: str) -> bool:
     text = str(value or "")
     return any(
@@ -916,52 +920,84 @@ class P115WebClient:
                 return dict(candidate)
         return {}
 
-    def cloud_download_output(self, identity: dict[str, Any], target_cid: str) -> dict[str, str]:
+    def cloud_download_output(self, identity: dict[str, Any], target_cid: str) -> dict[str, Any]:
         status = self.cloud_download_status(identity)
         if status["status"] != "completed":
             raise RuntimeError(f"115 cloud download is not completed: {status['status']}")
         return self.resolve_cloud_download_output(status, target_cid)
 
-    def resolve_cloud_download_output(self, status: dict[str, Any], target_cid: str) -> dict[str, str]:
-        """Locate the media inside 115's cloud-download container and move it to target."""
-        target = str(target_cid or "").strip()
+    def discover_cloud_download_outputs(self, status: dict[str, Any]) -> list[dict[str, Any]]:
+        """List every child produced by a completed cloud-download container."""
         output_id = p115_file_id(status)
-        output_name = p115_file_name(status)
         if not output_id:
             raise RuntimeError("115 cloud download completed without an output file id")
+
+        children = [status] if status.get("fid") and p115_file_name(status) else self.list_files(output_id, limit=500)
+        if not children:
+            raise P115CloudOutputPendingError("115 云下载已完成，输出文件仍在生成")
+
+        outputs = []
+        for child in children:
+            file_id = p115_item_id(child)
+            file_name = p115_file_name(child)
+            if not file_id or not file_name:
+                raise RuntimeError("115 cloud download output is missing child identity")
+            outputs.append(
+                {
+                    "file_id": file_id,
+                    "file_name": file_name,
+                    "parent_id": p115_item_parent_id(child) or output_id,
+                    "is_folder": p115_is_folder(child),
+                }
+            )
+        return outputs
+
+    def ensure_cloud_outputs_in_target(
+        self,
+        items: list[dict[str, Any]],
+        target_cid: str,
+    ) -> list[dict[str, Any]]:
+        """Move missing cloud outputs to target, tolerating partial prior moves."""
+        target = str(target_cid or "").strip()
         if not target:
             raise RuntimeError("115 cloud download output target CID is empty")
+        if not items:
+            raise P115CloudOutputPendingError("115 云下载没有可移动的输出文件")
 
-        item = dict(status)
-        try:
-            children = self.list_files(output_id, limit=500)
-        except P115RiskControlError:
-            raise
-        except Exception:
-            LOG.debug("Cloud output is not a readable container id=%s", output_id, exc_info=True)
-            children = []
-        if children:
-            normalized_name = normalize_text(output_name)
-            matches = [
-                child
-                for child in children
-                if normalized_name and normalize_text(p115_file_name(child)) == normalized_name
-            ]
-            if not matches and len(children) == 1:
-                matches = children
-            if len(matches) != 1:
-                raise RuntimeError("115 cloud download output contains no unique media item")
-            item = dict(matches[0])
+        existing_ids = {p115_item_id(item) for item in self.list_files(target, limit=500)}
+        normalized = []
+        for raw in items:
+            file_id = str(raw.get("file_id") or "").strip()
+            file_name = str(raw.get("file_name") or "").strip()
+            if not file_id or not file_name:
+                raise RuntimeError("115 cloud download output is missing child identity")
+            parent_id = str(raw.get("parent_id") or "").strip()
+            if file_id not in existing_ids and parent_id != target:
+                self.move_file(file_id, target)
+                existing_ids.add(file_id)
+            normalized.append(
+                {
+                    "file_id": file_id,
+                    "file_name": file_name,
+                    "parent_id": target,
+                    "is_folder": bool(raw.get("is_folder")),
+                }
+            )
+        return normalized
 
-        file_id = p115_item_id(item)
-        parent_id = p115_item_parent_id(item) or p115_parent_id(status)
-        file_name = p115_file_name(item) or output_name
-        if not file_id or not file_name:
-            raise RuntimeError("115 cloud download output is missing media identity")
-        if parent_id != target:
-            self.move_file(file_id, target)
-            parent_id = target
-        return {"file_id": file_id, "parent_id": parent_id, "file_name": file_name}
+    def resolve_cloud_download_output(
+        self,
+        status: dict[str, Any],
+        target_cid: str,
+    ) -> dict[str, Any]:
+        """Compatibility wrapper for discovery followed by idempotent movement."""
+        outputs = self.ensure_cloud_outputs_in_target(
+            self.discover_cloud_download_outputs(status),
+            target_cid,
+        )
+        if len(outputs) != 1:
+            raise RuntimeError("115 cloud download output has multiple children; use discovery APIs")
+        return outputs[0]
 
     def list_files(self, parent_id: str, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         resp = self._request(

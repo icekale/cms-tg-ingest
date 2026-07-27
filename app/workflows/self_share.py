@@ -11,6 +11,7 @@ from typing import Any
 from app.clients.cms import CmsClient, CmsSharePlaybackUnavailableError
 from app.cms_cloud_index import CmsCloudDataIndex
 from app.clients.p115 import (
+    P115CloudOutputPendingError,
     P115RiskControlError,
     P115SharePendingError,
     P115ShareUnavailableError,
@@ -22,7 +23,6 @@ from app.clients.p115 import (
     p115_file_name,
     p115_is_folder,
     p115_parent_id,
-    validate_cloud_output,
 )
 from app.config import MovePlan, SelfShareConfig, default_library_roots, is_relative_to, safe_resolve
 from app.media.classify import (
@@ -485,7 +485,9 @@ class BridgeSelfShareTaskWorkflow:
         receive_cid = str(metadata.get("cloud_target_cid") or "").strip() or self._configured_receive_cid()
         if not receive_cid:
             return StageResult.failed("缺少 115 接收目录 ID", error_type="missing_receive_cid")
-        if metadata.get("auto_organize_pending") and metadata.get("cloud_output_file_id"):
+        if metadata.get("auto_organize_pending") and (
+            metadata.get("cloud_output_items") or metadata.get("cloud_output_file_id")
+        ):
             row = self._submission_row(task)
             if not row:
                 return StageResult.failed("找不到云下载提交记录", error_type="submission_missing")
@@ -520,10 +522,15 @@ class BridgeSelfShareTaskWorkflow:
                 metadata=metadata,
             )
 
-        identity = {"info_hash": info_hash, "task_id": task_id}
-        status = self.p115.cloud_download_status(identity)
-        normalized = normalize_cloud_status(status)
-        metadata["cloud_status"] = normalized
+        persisted_output_items = metadata.get("cloud_output_items")
+        if isinstance(persisted_output_items, list) and persisted_output_items:
+            status = {"status": "completed"}
+            normalized = "completed"
+        else:
+            identity = {"info_hash": info_hash, "task_id": task_id}
+            status = self.p115.cloud_download_status(identity)
+            normalized = normalize_cloud_status(status)
+            metadata["cloud_status"] = normalized
         if normalized == "running":
             return StageResult.defer(
                 "等待 115 云下载完成",
@@ -543,13 +550,51 @@ class BridgeSelfShareTaskWorkflow:
                 metadata,
             )
 
-        resolver = getattr(self.p115, "resolve_cloud_download_output", None)
-        output = resolver(status, receive_cid) if callable(resolver) else validate_cloud_output(status, receive_cid)
+        output_items = metadata.get("cloud_output_items")
+        if not isinstance(output_items, list) or not output_items:
+            discover = getattr(self.p115, "discover_cloud_download_outputs", None)
+            if not callable(discover):
+                return StageResult.failed(
+                    "115 客户端不支持云下载输出发现",
+                    error_type="cloud_output_discovery_unsupported",
+                    metadata=metadata,
+                )
+            try:
+                output_items = discover(status)
+            except P115CloudOutputPendingError as exc:
+                return StageResult.defer(
+                    str(exc),
+                    self.self_share_config.cloud_poll_seconds,
+                    metadata,
+                )
+            metadata["cloud_output_items"] = output_items
+            return StageResult.defer(
+                "已识别云下载输出，等待移动到待整理目录",
+                1,
+                metadata,
+            )
+
+        ensure = getattr(self.p115, "ensure_cloud_outputs_in_target", None)
+        if not callable(ensure):
+            return StageResult.failed(
+                "115 客户端不支持云下载输出移动",
+                error_type="cloud_output_movement_unsupported",
+                metadata=metadata,
+            )
+        output_items = ensure(output_items, receive_cid)
+        if not output_items:
+            return StageResult.defer(
+                "115 云下载输出尚未可移动",
+                self.self_share_config.cloud_poll_seconds,
+                metadata,
+            )
+        metadata["cloud_output_items"] = output_items
+        first_output = output_items[0]
         row = self.store.upsert_submission(
             _ShareKey(task.share_code, task.receive_code),
             task.url,
             "received",
-            title=output.get("file_name") or task.title or task.share_code,
+            title=first_output.get("file_name") or task.title or task.share_code,
         )
         row = self.store.update_self_share(
             int(row["id"]),
@@ -559,24 +604,25 @@ class BridgeSelfShareTaskWorkflow:
         metadata.update(
             {
                 "submission_id": int(row["id"]),
-                "received_title": output.get("file_name") or task.title or task.share_code,
-                "received_file_ids": [output["file_id"]],
+                "received_title": first_output.get("file_name") or task.title or task.share_code,
+                "received_file_ids": [item["file_id"] for item in output_items],
                 "received_items": [
                     {
-                        "file_id": output["file_id"],
-                        "file_name": output.get("file_name") or task.title or task.share_code,
-                        "is_folder": False,
-                        "parent_id": output.get("parent_id") or receive_cid,
+                        "file_id": item["file_id"],
+                        "file_name": item.get("file_name") or task.title or task.share_code,
+                        "is_folder": bool(item.get("is_folder")),
+                        "parent_id": item.get("parent_id") or receive_cid,
                         "received_item_verified": True,
                     }
+                    for item in output_items
                 ],
                 "received_items_complete": True,
-                "received_expected_item_count": 1,
+                "received_expected_item_count": len(output_items),
                 "received_existing_file_ids": [],
                 "received_snapshot_complete": True,
-                "cloud_output_file_id": output["file_id"],
-                "cloud_output_parent_id": output["parent_id"],
-                "cloud_output_name": output.get("file_name") or "",
+                "cloud_output_file_id": first_output["file_id"],
+                "cloud_output_parent_id": first_output["parent_id"],
+                "cloud_output_name": first_output.get("file_name") or "",
                 "auto_organize_pending": True,
             }
         )
