@@ -916,7 +916,7 @@ def render_quality_page(store: TaskStore, quality_automation: QualityAutomation 
     <div class="summary-item"><div class="summary-label">自动运行</div><div class="summary-value">{'已启用' if snapshot.get('enabled') else '已停用'}</div></div>
     <div class="summary-item"><div class="summary-label">执行时间</div><div class="summary-value">{html.escape(str(snapshot.get('time') or '-'))} · {html.escape(str(snapshot.get('timezone') or '-'))}</div></div>
     <div class="summary-item"><div class="summary-label">下次运行</div><div class="summary-value">{html.escape(str(snapshot.get('next_run_at') or '-'))}</div></div>
-    <div class="summary-item"><div class="summary-label">最近结果</div><div class="summary-value">扫描 {html.escape(str(summary.get('scanned_count', 0)))}，问题 {html.escape(str(summary.get('issue_count', 0)))}，失败 {html.escape(str(summary.get('failed_count', 0)))}</div></div>
+    <div class="summary-item"><div class="summary-label">最近结果</div><div class="summary-value">扫描 {html.escape(str(summary.get('scanned_count', 0)))}，问题 {html.escape(str(summary.get('issue_count', 0)))}，排队 {html.escape(str(summary.get('queued_count', 0)))}，失败 {html.escape(str(summary.get('failed_count', 0)))}</div></div>
   </div>
   <form method="post" action="/quality/settings" class="actions">
     <label>启用 <input type="checkbox" name="enabled" value="true" {'checked' if snapshot.get('enabled') else ''}></label>

@@ -772,6 +772,81 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.claimed_by, "")
             self.assertEqual(updated.metadata["retry_stage"], TaskStage.STRM_READY.value)
 
+    def test_quality_repair_wait_does_not_timeout_before_deadline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("quality-repair", "", "https://115cdn.com/s/quality-repair")
+            store.record_event(
+                task.id,
+                TaskStage.EMBY_CONFIRMED,
+                TaskStatus.RUNNING,
+                "等待自有分享 STRM",
+                metadata_patch={
+                    "quality_repair_queued": True,
+                    "quality_repair_deadline_at": 10_000.0,
+                    "_defer_stage": TaskStage.EMBY_CONFIRMED.value,
+                    "_defer_message": "等待自有分享 STRM",
+                    "_defer_count": 19,
+                },
+                next_run_at=1.0,
+                clear_claim=True,
+            )
+            runner = TaskRunner(
+                store,
+                FakeWorkflow([StageResult.defer("等待自有分享 STRM", delay_seconds=15)]),
+                worker_id="worker-1",
+                now=lambda: 1.0,
+            )
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(updated.current_stage, TaskStage.EMBY_CONFIRMED)
+            self.assertEqual(updated.status, TaskStatus.RUNNING)
+            self.assertEqual(updated.metadata["_defer_count"], 20)
+            self.assertEqual(updated.error_summary, "")
+
+    def test_quality_repair_markers_are_cleared_after_cleaned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("quality-cleaned", "", "https://115cdn.com/s/quality-cleaned")
+            store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.RUNNING,
+                "等待清理确认",
+                metadata_patch={
+                    "quality_repair_queued": True,
+                    "quality_repair_action": "restore",
+                    "quality_repair_reason": "missing_dest",
+                    "quality_run_id": "quality-run",
+                    "quality_repair_started_at": 1.0,
+                    "quality_repair_deadline_at": 100.0,
+                },
+                next_run_at=1.0,
+                clear_claim=True,
+            )
+            runner = TaskRunner(
+                store,
+                FakeWorkflow([StageResult.complete("清理完成")]),
+                worker_id="worker-1",
+                now=lambda: 1.0,
+            )
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(updated.status, TaskStatus.SUCCEEDED)
+            for key in (
+                "quality_repair_queued",
+                "quality_repair_action",
+                "quality_repair_reason",
+                "quality_run_id",
+                "quality_repair_started_at",
+                "quality_repair_deadline_at",
+            ):
+                self.assertNotIn(key, updated.metadata)
+
     def test_run_once_records_stage_timing_metadata_on_success(self):
         now_value = 13.5
 

@@ -507,6 +507,22 @@ class QualityPlanningTests(unittest.TestCase):
 
             self.assertEqual(list_recent_tasks.call_count, 1)
 
+    def test_run_once_scans_beyond_repair_limit_without_increasing_repair_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            library = Path(tmp) / "library"
+            direct_dest = library / "direct"
+            direct_dest.mkdir(parents=True)
+            (direct_dest / "movie.strm").write_text("https://cms/d/direct.mkv", encoding="utf-8")
+            service, _ = self.make_service(tmp, max_tasks=1)
+            self.add_task(service.store, "direct", direct_dest)
+            clean = service.store.upsert_task("clean", "", "https://115cdn.com/s/clean")
+            service.store.record_event(clean.id, TaskStage.MOVED, TaskStatus.SUCCEEDED, "moved")
+
+            summary = service.run_once("scan-more-than-repair-limit")
+
+            self.assertEqual(summary.scanned_count, 2)
+            self.assertEqual(summary.planned_count, 1)
+
 
 class FakeQualityRepairAdapter:
     def __init__(self):
@@ -589,6 +605,7 @@ class QualityRepairExecutionTests(unittest.TestCase):
             summary = service.run_once("repair-run", datetime(2099, 7, 20, 2, 50, tzinfo=ZoneInfo("Asia/Shanghai")))
 
             self.assertEqual(summary.status, "succeeded")
+            self.assertEqual(summary.queued_count, 2)
             self.assertEqual(service.store.find_task(missing.id).current_stage, TaskStage.EMBY_CONFIRMED)
             self.assertEqual(service.store.find_task(direct.id).current_stage, TaskStage.RECEIVED)
             reprocessed = service.store.find_task(direct.id)

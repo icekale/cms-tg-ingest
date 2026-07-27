@@ -44,6 +44,7 @@ const columns = [{ title: '任务', key: 'title' }, { title: '问题', key: 'mes
   <n-card v-if="automation" title="自动巡检设置" class="section-card">
     <n-space align="center"><label>启用 <input v-model="settings.enabled" type="checkbox"></label><label>时间 <input v-model="settings.time" size="5"></label><label>时区 <input v-model="settings.timezone" size="18"></label><label>任务上限 <input v-model.number="settings.max_tasks" type="number" min="1"></label><label>115检查上限 <input v-model.number="settings.check_limit" type="number" min="1"></label><n-button @click="saveSettings">保存 settings</n-button><n-button secondary @click="reset">恢复 reset</n-button></n-space>
     <p class="muted">状态：{{ automation.status }}，下次运行：{{ automation.next_run_at }}</p>
+    <p v-if="automation.last_summary" class="muted">最近结果：扫描 {{ automation.last_summary.scanned_count || 0 }}，问题 {{ automation.last_summary.issue_count || 0 }}，排队 {{ automation.last_summary.queued_count || 0 }}，失败 {{ automation.last_summary.failed_count || 0 }}</p>
   </n-card>
   <n-card><n-data-table :columns="columns" :data="issues" :pagination="{ pageSize: 20 }" /></n-card>
 </template>

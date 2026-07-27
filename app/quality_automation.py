@@ -13,6 +13,7 @@ from .config import Config, MoveConfig, is_relative_to, is_under_any_root, safe_
 from .models import TaskSnapshot, TaskStage, TaskStatus
 from .quality import QualityIssue, scan_task_quality
 from .task_store import REPROCESS_METADATA_DELETE_KEYS, TaskStore, build_reprocess_metadata
+from .task_runner import QUALITY_REPAIR_WAIT_SECONDS
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class QualityRunSummary:
     finished_at: str | None = None
     issue_count: int = 0
     planned_count: int = 0
+    queued_count: int = 0
     skipped_count: int = 0
     failed_count: int = 0
     scanned_count: int = 0
@@ -49,6 +51,7 @@ class QualityRunSummary:
 class QualityAutomation:
     STALE_RUN_SECONDS = 21600
     MAX_TASKS = 1000
+    SCAN_TASK_MULTIPLIER = 10
     MAX_115_CHECK_LIMIT = 100
     _STATUS_KEY = "quality_auto_status"
     _SUMMARY_KEY = "quality_auto_last_summary"
@@ -264,10 +267,11 @@ class QualityAutomation:
             return replace(running, status="superseded", error="quality run lease was superseded")
         try:
             limit = max(1, int(self.config.quality_auto_max_tasks))
-            tasks = self.store.list_recent_tasks(limit=limit)
+            scan_limit = min(self.MAX_TASKS, max(limit, limit * self.SCAN_TASK_MULTIPLIER))
+            tasks = self.store.list_recent_tasks(limit=scan_limit)
             issues = scan_task_quality(
                 self.store,
-                limit=limit,
+                limit=scan_limit,
                 allowed_roots=self.allowed_roots,
                 tasks=tasks,
             )
@@ -296,6 +300,7 @@ class QualityAutomation:
                 finished_at=finished_local.isoformat(),
                 issue_count=len(issues),
                 planned_count=sum(plan.action != "skip" for plan in plans),
+                queued_count=sum(plan.execution_status == "queued" for plan in plans),
                 skipped_count=sum(plan.action == "skip" or plan.execution_status == "skipped" for plan in plans),
                 failed_count=failed_count,
                 scanned_count=len(tasks),
@@ -450,6 +455,13 @@ class QualityAutomation:
             "quality_repair_action": plan.action,
             "quality_repair_reason": plan.reason,
         }
+        repair_started_at = time.time()
+        metadata.update(
+            {
+                "quality_repair_started_at": repair_started_at,
+                "quality_repair_deadline_at": repair_started_at + QUALITY_REPAIR_WAIT_SECONDS,
+            }
+        )
         metadata_delete_keys: tuple[str, ...] = ()
         if plan.action in {"reprocess", "invalid_share"}:
             metadata = build_reprocess_metadata(task, metadata)

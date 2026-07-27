@@ -39,6 +39,21 @@ _STAGE_MAX_DEFER_COUNT = {
     TaskStage.CMS_DELETE_SETTLED: 30,
     TaskStage.EMBY_CONFIRMED: 20,
 }
+QUALITY_REPAIR_WAIT_SECONDS = 24 * 60 * 60
+QUALITY_REPAIR_METADATA_KEYS = (
+    "quality_repair_queued",
+    "quality_repair_action",
+    "quality_repair_reason",
+    "quality_run_id",
+    "quality_repair_started_at",
+    "quality_repair_deadline_at",
+)
+_QUALITY_REPAIR_WAIT_STAGES = {
+    TaskStage.STRM_READY,
+    TaskStage.CMS_DELETE_SETTLED,
+    TaskStage.MOVED,
+    TaskStage.EMBY_CONFIRMED,
+}
 _DEFER_METADATA_KEYS = ("_defer_stage", "_defer_message", "_defer_count")
 _HEARTBEAT_INTERVAL_SECONDS = 30.0
 _P115_RISK_COOLDOWN_STATE_KEY = "115:risk_cooldown_until"
@@ -432,6 +447,9 @@ class TaskRunner:
                 p115_metadata["p115_stage_request_count"],
             )
         if result.outcome == StageOutcome.COMPLETE:
+            metadata_delete_keys = _DEFER_METADATA_KEYS
+            if task.current_stage == TaskStage.CLEANED and task.metadata.get("quality_repair_queued"):
+                metadata_delete_keys += QUALITY_REPAIR_METADATA_KEYS
             committed = self.store.complete_claimed_stage(
                 task.id,
                 expected_stage=task.current_stage,
@@ -442,7 +460,7 @@ class TaskRunner:
                 success_metadata=_without_defer_metadata(
                     result.metadata | timing_metadata | p115_metadata | observability_metadata
                 ),
-                metadata_delete_keys=_DEFER_METADATA_KEYS,
+                metadata_delete_keys=metadata_delete_keys,
                 next_stage=next_stage_after_success(
                     task.current_stage,
                     effective_task_strm_mode(task),
@@ -465,6 +483,15 @@ class TaskRunner:
                 "_defer_count": defer_count,
             }
             max_defer_count = _STAGE_MAX_DEFER_COUNT.get(task.current_stage)
+            quality_repair_deadline = None
+            if task.metadata.get("quality_repair_queued") and task.current_stage in _QUALITY_REPAIR_WAIT_STAGES:
+                try:
+                    quality_repair_deadline = float(task.metadata.get("quality_repair_deadline_at") or 0)
+                except (TypeError, ValueError):
+                    quality_repair_deadline = 0
+                if quality_repair_deadline <= 0:
+                    quality_repair_deadline = now + QUALITY_REPAIR_WAIT_SECONDS
+                    metadata_patch["quality_repair_deadline_at"] = quality_repair_deadline
             if (
                 task.current_stage == TaskStage.ORGANIZING
                 and result.message in _ORGANIZING_TIMEOUT_MESSAGES
@@ -491,7 +518,17 @@ class TaskRunner:
                     clear_claim=True,
                 )
                 return
-            if max_defer_count is not None and defer_count >= max_defer_count:
+            quality_repair_timed_out = (
+                quality_repair_deadline is not None
+                and quality_repair_deadline > 0
+                and now >= quality_repair_deadline
+            )
+            normal_wait_timed_out = (
+                quality_repair_deadline is None
+                and max_defer_count is not None
+                and defer_count >= max_defer_count
+            )
+            if quality_repair_timed_out or normal_wait_timed_out:
                 error_summary = f"{result.message} 等待超时，请人工检查后重试"
                 metadata_patch.update(
                     {
