@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -102,23 +103,39 @@ def mode_rule_for_issue(mode: str, issue_code: str) -> str | None:
     return None if mode == "direct" else "strm_mode_mismatch"
 
 
+def _risk_timestamp(value: Any) -> float | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        return math.nan
+
+
+def risk_cooldown_is_active(value: Any, now: float) -> bool:
+    timestamp = _risk_timestamp(value)
+    if timestamp is None:
+        return False
+    if not math.isfinite(timestamp) or not math.isfinite(float(now)):
+        return True
+    return timestamp > float(now)
+
+
 def has_risk_control_marker(task: TaskSnapshot, *, now: float | None = None, cooldown_seconds: int = 0) -> bool:
     metadata = task.metadata
     if _bool_value(metadata.get("p115_risk_controlled")):
         return True
-    try:
-        cooldown_until = float(metadata.get("p115_risk_cooldown_until") or 0)
-    except (TypeError, ValueError):
-        cooldown_until = 0
     current_time = time.time() if now is None else float(now)
-    if cooldown_until > current_time:
+    if risk_cooldown_is_active(metadata.get("p115_risk_cooldown_until"), current_time):
         return True
     if cooldown_seconds <= 0:
         return False
-    try:
-        marked_at = float(metadata.get("p115_risk_controlled_at") or 0)
-    except (TypeError, ValueError):
-        marked_at = 0
+    marked_at = _risk_timestamp(metadata.get("p115_risk_controlled_at"))
+    if marked_at is not None and not math.isfinite(marked_at):
+        return True
+    if not math.isfinite(current_time):
+        return True
+    marked_at = marked_at or 0
     return marked_at > 0 and marked_at + cooldown_seconds > current_time
 
 

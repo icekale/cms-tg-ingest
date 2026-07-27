@@ -44,6 +44,57 @@ class _ManualActionRuleEngine:
 
 
 class WebAdminTests(unittest.TestCase):
+    def test_quality_page_reprocess_action_is_registered_and_orphan_is_not_linked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = TaskStore(root / "tasks.db")
+            destination = root / "direct"
+            destination.mkdir()
+            (destination / "movie.strm").write_text("https://cms/d/movie.mkv", encoding="utf-8")
+            task = store.upsert_task("legacy-reprocess", "", "https://115cdn.com/s/legacy-reprocess")
+            task = store.record_event(
+                task.id,
+                TaskStage.MOVED,
+                TaskStatus.SUCCEEDED,
+                "moved",
+                title="旧版重跑任务",
+                metadata_patch={
+                    "dest_path": str(destination),
+                    "own_share_code": "own",
+                    "own_share_receive_code": "1212",
+                },
+            )
+            config = Config(
+                tg_bot_token="token",
+                tg_allowed_chat_id="chat",
+                cms_base_url="http://cms",
+                cms_username="user",
+                cms_password="pass",
+                task_db_path=str(root / "tasks.db"),
+                quality_auto_enabled=False,
+            )
+            quality = QualityAutomation(store, config, allowed_roots=[root])
+            orphan = QualityIssue("direct_strm", "发现直链 STRM", str(destination / "movie.strm"), 999, "孤立问题")
+
+            with patch("app.web.scan_task_quality", return_value=[orphan]):
+                orphan_markup = render_quality_page(store, quality)
+            self.assertNotIn("/task/999", orphan_markup)
+
+            issue = QualityIssue("direct_strm", "发现直链 STRM", str(destination / "movie.strm"), task.id, task.title)
+            with patch("app.web.scan_task_quality", return_value=[issue]):
+                markup = render_quality_page(store, quality)
+                status, headers, _body = WebApp(store, quality_automation=quality).handle_request(
+                    "POST",
+                    "/quality/action/reprocess",
+                    {},
+                    f"task_id={task.id}&rule_id=strm_mode_mismatch&rule_version=1&action=reprocess".encode(),
+                )
+
+            self.assertIn("movie.strm", markup)
+            self.assertNotIn(str(destination), markup)
+            self.assertEqual(status, 303)
+            self.assertEqual(headers["Location"], "/quality")
+
     def test_quality_page_groups_manual_state_and_posts_through_quality_automation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1419,7 +1470,8 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn("TaskStore 本地轻量巡检", html)
             self.assertIn("直链电影", html)
             self.assertIn("发现直链 STRM", html)
-            self.assertIn(str(dest / "movie.strm"), html)
+            self.assertIn("本地路径已隐藏（名称：movie.strm）", html)
+            self.assertNotIn(str(dest), html)
             self.assertIn('action="/quality/fix"', html)
             self.assertIn("修复 1 个可处理任务", html)
             self.assertIn("本地质量巡检", html)
@@ -1464,8 +1516,9 @@ class WebAdminTests(unittest.TestCase):
             self.assertIn(f'href="/task/{task.id}"', markup)
             self.assertIn('<details class="diagnostic-details">', markup)
             self.assertIn("查看完整原始报告（2 条）", markup)
-            self.assertIn(str(dest / "one.strm"), markup)
-            self.assertIn(str(dest / "two.strm"), markup)
+            self.assertIn("本地路径已隐藏（名称：one.strm）", markup)
+            self.assertIn("本地路径已隐藏（名称：two.strm）", markup)
+            self.assertNotIn(str(dest), markup)
             self.assertIn(".quality-row { grid-template-columns: 1fr;", markup)
 
     def test_quality_page_aggregates_issue_codes_and_tasks(self):

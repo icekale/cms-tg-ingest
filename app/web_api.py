@@ -12,7 +12,7 @@ from .models import TaskSnapshot
 from .quality_rules import QUALITY_RULE_VERSION, QualityRuleEngine, quality_attempt_count
 from .task_diagnostics import explain_task_slowness, format_stage_observability
 from .task_health import build_task_health
-from .quality import scan_task_quality
+from .quality import redact_quality_detail, scan_task_quality
 from .task_store import TaskStore
 
 
@@ -338,13 +338,15 @@ def quality_items(
                 "auto_allowed": False,
                 "rule_version": QUALITY_RULE_VERSION,
             }
+        descriptor = dict(descriptor)
+        descriptor["evidence"] = [redact_quality_detail(value) for value in descriptor.get("evidence", [])]
         items.append(
             {
                 "task_id": issue.task_id,
                 "title": issue.title or (task.title if task is not None else ""),
                 "code": issue.code,
                 "message": issue.message,
-                "detail": issue.detail,
+                "detail": redact_quality_detail(issue.detail),
                 **descriptor,
             }
         )

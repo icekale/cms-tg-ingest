@@ -1104,7 +1104,13 @@ class TaskStore:
         )
 
     def mark_quality_snoozed(
-        self, task_id: int, until: float, actor: str, *, rule_id: str | None = None
+        self,
+        task_id: int,
+        until: float,
+        actor: str,
+        *,
+        rule_id: str | None = None,
+        expected_updated_at: float | None = None,
     ) -> TaskSnapshot | None:
         task = self.find_task(int(task_id))
         if task is None:
@@ -1112,7 +1118,7 @@ class TaskStore:
         timestamp = float(until)
         return self.update_quality_state(
             task.id,
-            task.updated_at,
+            task.updated_at if expected_updated_at is None else float(expected_updated_at),
             {
                 "quality_manual_status": "snoozed",
                 "quality_next_eligible_at": timestamp,
@@ -1124,13 +1130,20 @@ class TaskStore:
             action="snooze" if rule_id is not None else None,
         )
 
-    def mark_quality_ignored(self, task_id: int, actor: str, *, rule_id: str | None = None) -> TaskSnapshot | None:
+    def mark_quality_ignored(
+        self,
+        task_id: int,
+        actor: str,
+        *,
+        rule_id: str | None = None,
+        expected_updated_at: float | None = None,
+    ) -> TaskSnapshot | None:
         task = self.find_task(int(task_id))
         if task is None:
             raise KeyError(f"task not found: {task_id}")
         return self.update_quality_state(
             task.id,
-            task.updated_at,
+            task.updated_at if expected_updated_at is None else float(expected_updated_at),
             {"quality_manual_status": "ignored"},
             "质量问题已忽略",
             actor,
@@ -1138,13 +1151,20 @@ class TaskStore:
             action="ignore" if rule_id is not None else None,
         )
 
-    def resume_quality(self, task_id: int, actor: str, *, rule_id: str | None = None) -> TaskSnapshot | None:
+    def resume_quality(
+        self,
+        task_id: int,
+        actor: str,
+        *,
+        rule_id: str | None = None,
+        expected_updated_at: float | None = None,
+    ) -> TaskSnapshot | None:
         task = self.find_task(int(task_id))
         if task is None:
             raise KeyError(f"task not found: {task_id}")
         return self.update_quality_state(
             task.id,
-            task.updated_at,
+            task.updated_at if expected_updated_at is None else float(expected_updated_at),
             {
                 "quality_manual_status": "open",
                 "quality_repair_attempts": 0,

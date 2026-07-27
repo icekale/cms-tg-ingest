@@ -66,6 +66,8 @@ class WebApiTests(unittest.TestCase):
             self.assertIn("snooze", item["available_actions"])
             self.assertIn("strm_mode_mismatch", payload["rule_counts"])
             self.assertIn("automation", payload)
+            self.assertNotIn(str(destination), body.decode())
+            self.assertIn("movie.strm", item["detail"])
 
     def test_quality_action_api_validates_rule_and_returns_conflict_without_external_clients(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -151,6 +153,8 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(item["manual_status"], "manual_required")
             self.assertEqual(item["available_actions"], ["view"])
             self.assertEqual(payload["manual_count"], 1)
+            self.assertNotIn("/private/path", json.dumps(payload, ensure_ascii=False))
+            self.assertIn("本地路径已隐藏", item["detail"])
 
     def test_quality_action_api_supports_ignore_and_resume_and_rejects_invalid_action(self):
         with tempfile.TemporaryDirectory() as tmp:

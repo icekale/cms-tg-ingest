@@ -622,6 +622,46 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertEqual(resumed["status"], "resumed")
             self.assertEqual(missing["status"], "not_found")
 
+    def test_manual_action_passes_initial_updated_at_to_cas_transition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            service.rule_engine = _ManualActionRuleEngine()
+            task = self.add_task(service.store, "manual-cas", library / "does-not-exist")
+            initial_updated_at = task.updated_at
+            original = service.store.mark_quality_snoozed
+
+            with patch.object(service.store, "mark_quality_snoozed", wraps=original) as mark:
+                result = service.manual_action(
+                    task.id,
+                    "missing_destination",
+                    "snooze",
+                    "tester",
+                    until=time.time() + 3600,
+                    rule_version="1",
+                )
+
+            self.assertEqual(result["status"], "snoozed")
+            self.assertEqual(mark.call_args.kwargs["expected_updated_at"], initial_updated_at)
+
+    def test_non_finite_risk_cooldown_is_not_auto_repaired(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            destination = library / "risk-nan"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/d/direct.mkv", encoding="utf-8")
+            task = self.add_task(
+                service.store,
+                "risk-nan",
+                destination,
+                own_share_receive_code="1212",
+                p115_risk_cooldown_until="NaN",
+            )
+
+            descriptor = service.quality_descriptor(service.store.find_task(task.id))
+
+            self.assertEqual(descriptor["rule_id"], "risk_controlled")
+            self.assertEqual(descriptor["available_actions"], ["view"])
+
     def test_manual_snooze_rejects_non_finite_until(self):
         with tempfile.TemporaryDirectory() as tmp:
             service, library = self.make_service(tmp)

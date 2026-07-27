@@ -13,7 +13,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .config import Config, MoveConfig, is_relative_to, is_under_any_root, safe_resolve
 from .models import TaskSnapshot, TaskStage, TaskStatus
 from .quality import QualityIssue, scan_task_quality
-from .quality_rules import QUALITY_RULE_VERSION, QualityRuleEngine, QualityRuleMatch, quality_attempt_count, rule_config
+from .quality_rules import (
+    QUALITY_RULE_VERSION,
+    QualityRuleEngine,
+    QualityRuleMatch,
+    quality_attempt_count,
+    risk_cooldown_is_active,
+    rule_config,
+)
 from .task_store import REPROCESS_METADATA_DELETE_KEYS, TaskStore, build_reprocess_metadata
 from .task_runner import QUALITY_REPAIR_WAIT_SECONDS
 
@@ -550,20 +557,34 @@ class QualityAutomation:
             except (TypeError, ValueError, OverflowError):
                 return {"status": "rejected", "task": task, "action": normalized_action, "reason": "invalid_until"}
             updated = self.store.mark_quality_snoozed(
-                task.id, target_until, actor, rule_id=str(descriptor["rule_id"])
+                task.id,
+                target_until,
+                actor,
+                rule_id=str(descriptor["rule_id"]),
+                expected_updated_at=task.updated_at,
             )
             if updated is None:
                 latest = self.store.find_task(task.id)
                 return {"status": "conflict", "task": latest or task, "action": normalized_action, "reason": "task_changed"}
             return {"status": "snoozed", "task": updated, "action": normalized_action, "reason": "manual_snooze"}
         if normalized_action == "ignore":
-            updated = self.store.mark_quality_ignored(task.id, actor, rule_id=str(descriptor["rule_id"]))
+            updated = self.store.mark_quality_ignored(
+                task.id,
+                actor,
+                rule_id=str(descriptor["rule_id"]),
+                expected_updated_at=task.updated_at,
+            )
             if updated is None:
                 latest = self.store.find_task(task.id)
                 return {"status": "conflict", "task": latest or task, "action": normalized_action, "reason": "task_changed"}
             return {"status": "ignored", "task": updated, "action": normalized_action, "reason": "manual_ignore"}
         if normalized_action == "resume":
-            updated = self.store.resume_quality(task.id, actor, rule_id=str(descriptor["rule_id"]))
+            updated = self.store.resume_quality(
+                task.id,
+                actor,
+                rule_id=str(descriptor["rule_id"]),
+                expected_updated_at=task.updated_at,
+            )
             if updated is None:
                 latest = self.store.find_task(task.id)
                 return {"status": "conflict", "task": latest or task, "action": normalized_action, "reason": "task_changed"}
@@ -795,10 +816,7 @@ class QualityAutomation:
         value = str(task.metadata.get("p115_risk_controlled") or "").strip().lower()
         if value in {"1", "true", "yes", "on", "enabled"}:
             return True
-        try:
-            return float(task.metadata.get("p115_risk_cooldown_until") or 0) > float(now)
-        except (TypeError, ValueError):
-            return False
+        return risk_cooldown_is_active(task.metadata.get("p115_risk_cooldown_until"), float(now))
 
     def _mark_manual_required(self, task: TaskSnapshot) -> TaskSnapshot:
         state = self.store.quality_state(task.id)

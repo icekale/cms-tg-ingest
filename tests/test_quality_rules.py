@@ -3,7 +3,13 @@ from dataclasses import replace
 
 from app.models import TaskStage, TaskStatus, TaskSnapshot
 from app.quality import QualityIssue
-from app.quality_rules import QUALITY_RULE_VERSION, QualityRuleEngine, is_rule_enabled, rule_config
+from app.quality_rules import (
+    QUALITY_RULE_VERSION,
+    QualityRuleEngine,
+    has_risk_control_marker,
+    is_rule_enabled,
+    rule_config,
+)
 
 
 def task(**metadata):
@@ -59,6 +65,18 @@ class QualityRuleEngineTests(unittest.TestCase):
         )
 
         self.assertEqual(match.rule_id, "no_issue")
+
+    def test_non_finite_risk_cooldown_is_treated_as_active_risk_control(self):
+        for value in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(value=value):
+                current = task(p115_risk_cooldown_until=value)
+                self.assertTrue(has_risk_control_marker(current, now=100.0))
+                match = self.engine.evaluate(
+                    current,
+                    [QualityIssue("direct_strm", "direct", "/library/movie.strm")],
+                    config={"allow_auto_reprocess": True},
+                )
+                self.assertEqual(match.rule_id, "risk_controlled")
 
     def test_shared_direct_strm_requires_reprocess(self):
         match = self.engine.evaluate(

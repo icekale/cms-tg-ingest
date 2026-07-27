@@ -182,6 +182,22 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(state["quality_rule_id"], "")
             self.assertGreaterEqual(len(store.list_events(task.id)), 3)
 
+    def test_quality_manual_transition_rejects_stale_expected_updated_at(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("quality-cas-stale", "", "https://115cdn.com/s/quality-cas-stale")
+            store.patch_metadata(task.id, {"changed": True})
+
+            self.assertIsNone(
+                store.mark_quality_snoozed(
+                    task.id,
+                    time.time() + 456,
+                    "alice",
+                    expected_updated_at=task.updated_at,
+                )
+            )
+            self.assertEqual(store.quality_state(task.id)["quality_manual_status"], "open")
+
     def test_quality_manual_transition_persists_optional_rule_and_action_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

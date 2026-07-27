@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Iterable
 
 from .media.strm import UnsafeMediaPathError, iter_strm_files
@@ -19,6 +19,22 @@ class QualityIssue:
     detail: str = ""
     task_id: int = 0
     title: str = ""
+
+
+def redact_quality_detail(value: object) -> str:
+    """Keep quality evidence useful without exposing absolute host paths."""
+    text = str(value or "")
+    if not text:
+        return ""
+    try:
+        posix_path = Path(text)
+        windows_path = PureWindowsPath(text)
+        if posix_path.is_absolute() or windows_path.is_absolute():
+            name = posix_path.name or windows_path.name
+            return f"本地路径已隐藏（名称：{name or '未知'}）"
+    except (OSError, RuntimeError, ValueError):
+        return "本地路径已隐藏"
+    return text
 
 
 def inspect_task_files(
@@ -101,6 +117,6 @@ def format_task_quality_report(issues: list[QualityIssue]) -> str:
     for idx, issue in enumerate(issues, 1):
         title = issue.title or f"任务 #{issue.task_id}"
         task_label = f"#{issue.task_id} {title}" if issue.task_id else title
-        detail = f"：{issue.detail}" if issue.detail else ""
+        detail = f"：{redact_quality_detail(issue.detail)}" if issue.detail else ""
         lines.append(f"{idx}. {task_label} - {issue.message}{detail}")
     return "\n".join(lines)

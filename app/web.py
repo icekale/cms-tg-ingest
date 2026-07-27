@@ -908,6 +908,7 @@ def render_quality_page(store: TaskStore, quality_automation: QualityAutomation 
         )
         task_id = int(row["task_id"])
         title = html.escape(str(row["title"] or f"任务 #{task_id}"))
+        task_link = f'<a href="/task/{task_id}">#{task_id} {title}</a>' if tasks.get(task_id) is not None else f'<span>#{task_id} {title}</span>'
         descriptor = row["items"][0] if row["items"] else {}
         evidence = "；".join(str(value) for value in descriptor.get("evidence", []) if value) or "-"
         next_time = descriptor.get("next_eligible_at") or 0
@@ -943,11 +944,11 @@ def render_quality_page(store: TaskStore, quality_automation: QualityAutomation 
             f"""<article class="quality-row" data-quality-group="{html.escape(status_label.replace(' ', '-'), quote=True)}">
   <div class="quality-task">
     <div class="subtle">{html.escape(status_label)}</div>
-    <div class="task-title"><a href="/task/{task_id}">#{task_id} {title}</a></div>
+  <div class="task-title">{task_link}</div>
     <div class="quality-issue-counts">{counts_markup}</div>
     <div class="quality-issue-counts"><span class="quality-count"><span>规则</span><strong>{html.escape(str(descriptor.get("rule_id") or "manual_required"))}</strong></span><span class="quality-count"><span>风险</span><strong>{html.escape(str(descriptor.get("risk_level") or "-"))}</strong></span><span class="quality-count"><span>状态</span><strong>{html.escape(status_label)}</strong></span><span class="quality-count"><span>尝试次数</span><strong>{html.escape(str(descriptor.get("attempts", 0)))}</strong></span><span class="quality-count"><span>下次时间</span><strong>{html.escape(next_label)}</strong></span><span class="quality-count"><span>证据</span><strong>{html.escape(evidence)}</strong></span></div>
   </div>
-  <div class="quality-row-action"><span class="quality-total">共 {row['total']} 条</span><a class="button" href="/task/{task_id}">查看任务</a><div class="actions">{actions_markup}</div></div>
+  <div class="quality-row-action"><span class="quality-total">共 {row['total']} 条</span>{f'<a class="button" href="/task/{task_id}">查看任务</a>' if tasks.get(task_id) is not None else '<span class="subtle">任务已不存在</span>'}<div class="actions">{actions_markup}</div></div>
 </article>"""
         )
     results_markup = (
@@ -1417,6 +1418,7 @@ class WebApp:
             return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, render_quality_page(self.store, self.quality_automation).encode("utf-8")
         if method == "POST" and parsed.path in {
             "/quality/action/execute",
+            "/quality/action/reprocess",
             "/quality/action/snooze",
             "/quality/action/ignore",
             "/quality/action/resume",
