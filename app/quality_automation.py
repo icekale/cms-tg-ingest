@@ -527,7 +527,12 @@ class QualityAutomation:
         if manual_status in {"snoozed", "ignored"}:
             return QualityRepairPlan(action="skip", reason=f"manual_{manual_status}", execution_status="skipped", **base)
         if manual_status == "manual_required":
-            return QualityRepairPlan(action="skip", reason="manual_required", execution_status="skipped", **base)
+            return QualityRepairPlan(
+                action="skip",
+                reason=str(state.get("quality_rule_reason") or "manual_required"),
+                execution_status="skipped",
+                **base,
+            )
         try:
             next_eligible = float(state.get("quality_next_eligible_at") or 0)
         except (TypeError, ValueError):
@@ -664,7 +669,11 @@ class QualityAutomation:
         if current_manual_status in {"snoozed", "ignored"}:
             return replace(plan, execution_status="skipped", reason="manual_suppressed")
         if current_manual_status == "manual_required":
-            return replace(plan, execution_status="skipped", reason="manual_required")
+            return replace(
+                plan,
+                execution_status="skipped",
+                reason=str(state.get("quality_rule_reason") or "manual_required"),
+            )
         try:
             if float(state.get("quality_next_eligible_at") or 0) > time.time():
                 return replace(plan, execution_status="skipped", reason="cooldown")
@@ -731,6 +740,7 @@ class QualityAutomation:
                 "自动巡检没有可用的修复适配器",
                 owner_run_id=run_id,
                 claimed_at=reserved.claimed_at,
+                reserved_updated_at=reserved.updated_at,
                 error_type="quality_repair_adapter_missing",
                 error_summary="repair adapter missing",
                 clear_claim=True,
@@ -747,6 +757,7 @@ class QualityAutomation:
                     "自动巡检修复适配器拒绝执行",
                     owner_run_id=run_id,
                     claimed_at=reserved.claimed_at,
+                    reserved_updated_at=reserved.updated_at,
                     error_type="quality_repair_rejected",
                     error_summary="repair rejected",
                     clear_claim=True,
@@ -761,6 +772,7 @@ class QualityAutomation:
                 f"自动巡检修复已入队：{plan.action}",
                 owner_run_id=run_id,
                 claimed_at=reserved.claimed_at,
+                reserved_updated_at=reserved.updated_at,
                 metadata_patch={"quality_repair_queued": True, "quality_last_actor": "quality-auto"},
                 next_run_at=time.time(),
                 clear_claim=True,
@@ -775,6 +787,7 @@ class QualityAutomation:
                     f"自动巡检修复失败：{exc}",
                     owner_run_id=run_id,
                     claimed_at=reserved.claimed_at,
+                    reserved_updated_at=reserved.updated_at,
                     error_type="quality_repair_failed",
                     error_summary=str(exc),
                     error_detail=repr(exc),
@@ -796,6 +809,7 @@ class QualityAutomation:
         *,
         owner_run_id: str,
         claimed_at: float,
+        reserved_updated_at: float,
         **kwargs: object,
     ) -> TaskSnapshot | None:
         return self.store.record_event(
@@ -807,6 +821,7 @@ class QualityAutomation:
             expected_status=TaskStatus.RUNNING,
             expected_claimed_by=f"quality:{owner_run_id}",
             expected_claimed_at=claimed_at,
+            expected_updated_at=reserved_updated_at,
             **kwargs,
         )
 
@@ -889,6 +904,8 @@ class QualityAutomation:
                         str(run_id),
                         reserved.status,
                         "自动巡检清理被拒绝",
+                        expected_claimed_at=reserved.claimed_at,
+                        expected_updated_at=reserved.updated_at,
                         error_type="quality_cleanup_rejected",
                         error_summary="cleanup rejected",
                     )
@@ -901,6 +918,8 @@ class QualityAutomation:
                     str(run_id),
                     TaskStatus.NEEDS_ACTION,
                     "自动巡检清理失败",
+                    expected_claimed_at=reserved.claimed_at,
+                    expected_updated_at=reserved.updated_at,
                     error_type="quality_cleanup_failed",
                     error_summary="cleanup failed",
                 )
@@ -913,11 +932,18 @@ class QualityAutomation:
                 reserved.status,
                 "自动巡检清理完成",
                 metadata_patch={"quality_cleanup_completed": True},
+                expected_claimed_at=reserved.claimed_at,
+                expected_updated_at=reserved.updated_at,
             ):
                 raise RuntimeError("cleanup owner changed before completion was persisted")
         except Exception:
             finalize = getattr(self.store, "finalize_quality_cleanup", None)
-            if not callable(finalize) or not finalize(reserved.id, str(run_id)):
+            if not callable(finalize) or not finalize(
+                reserved.id,
+                str(run_id),
+                expected_claimed_at=reserved.claimed_at,
+                expected_updated_at=reserved.updated_at,
+            ):
                 return QualityCleanupResult("blocked_cleanup", "cleanup_completion_persist_failed")
         return QualityCleanupResult("cleaned")
 

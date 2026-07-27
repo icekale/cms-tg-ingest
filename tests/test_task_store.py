@@ -128,6 +128,42 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(state["quality_repair_deadline_at"], 0)
             self.assertEqual(state["quality_snoozed_until"], patched.metadata["quality_snoozed_until"])
 
+    def test_cleanup_completion_cas_checks_claim_timestamp_and_task_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("cleanup-cas", "", "https://115cdn.com/s/cleanup-cas")
+            reserved = store.claim_quality_cleanup(task.id, "cleanup-run", now=100.0)
+
+            self.assertIsNotNone(reserved)
+            self.assertFalse(
+                store.record_quality_cleanup_event(
+                    task.id,
+                    "cleanup-run",
+                    TaskStatus.SUCCEEDED,
+                    "stale completion",
+                    expected_claimed_at=reserved.claimed_at,
+                    expected_updated_at=reserved.updated_at + 1,
+                )
+            )
+            still_claimed = store.find_task(task.id)
+            self.assertEqual(still_claimed.claimed_by, "quality-cleanup:cleanup-run")
+            self.assertFalse(
+                store.finalize_quality_cleanup(
+                    task.id,
+                    "cleanup-run",
+                    expected_claimed_at=reserved.claimed_at,
+                    expected_updated_at=reserved.updated_at + 1,
+                )
+            )
+            self.assertTrue(
+                store.finalize_quality_cleanup(
+                    task.id,
+                    "cleanup-run",
+                    expected_claimed_at=reserved.claimed_at,
+                    expected_updated_at=reserved.updated_at,
+                )
+            )
+
     def test_quality_manual_state_transitions_are_atomic_and_resume_clears_quality_suppression(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

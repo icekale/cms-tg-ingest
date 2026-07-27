@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import threading
 import time
@@ -1021,6 +1022,25 @@ class TaskStore:
                 state[key] = float(metadata.get(key) or 0)
             except (TypeError, ValueError):
                 state[key] = 0
+        raw_next_eligible = metadata.get("quality_next_eligible_at")
+        invalid_cooldown = False
+        if raw_next_eligible is None or (
+            isinstance(raw_next_eligible, str) and not raw_next_eligible.strip()
+        ):
+            state["quality_next_eligible_at"] = 0
+        else:
+            try:
+                if isinstance(raw_next_eligible, bool):
+                    raise ValueError
+                state["quality_next_eligible_at"] = float(raw_next_eligible)
+                if not math.isfinite(state["quality_next_eligible_at"]):
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError):
+                state["quality_next_eligible_at"] = 0
+                invalid_cooldown = True
+        if invalid_cooldown:
+            state["quality_manual_status"] = "manual_required"
+            state["quality_rule_reason"] = "invalid_cooldown"
         current_time = time.time() if now is None else float(now)
         if (
             str(state.get("quality_manual_status") or "").strip().lower() == "snoozed"
@@ -1507,15 +1527,26 @@ class TaskStore:
                 and row["stage"] in {TaskStage.EMBY_CONFIRMED.value, TaskStage.CLEANED.value}
             )
 
-    def finalize_quality_cleanup(self, task_id: int, run_id: str) -> bool:
+    def finalize_quality_cleanup(
+        self,
+        task_id: int,
+        run_id: str,
+        *,
+        expected_claimed_at: float | None = None,
+        expected_updated_at: float | None = None,
+    ) -> bool:
         """Persist an idempotent cleanup marker and release its lease."""
         with self._lock, self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT metadata_json, claimed_by FROM tasks WHERE id = ?",
+                "SELECT metadata_json, claimed_by, claimed_at, updated_at FROM tasks WHERE id = ?",
                 (int(task_id),),
             ).fetchone()
             if row is None or str(row["claimed_by"] or "") != f"quality-cleanup:{run_id}":
+                return False
+            if expected_claimed_at is not None and float(row["claimed_at"] or 0) != float(expected_claimed_at):
+                return False
+            if expected_updated_at is not None and float(row["updated_at"] or 0) != float(expected_updated_at):
                 return False
             metadata = self._merge_metadata(row["metadata_json"], {"quality_cleanup_completed": True})
             cursor = conn.execute(
@@ -1538,6 +1569,8 @@ class TaskStore:
         metadata_patch: dict[str, Any] | None = None,
         error_type: str = "",
         error_summary: str = "",
+        expected_claimed_at: float | None = None,
+        expected_updated_at: float | None = None,
     ) -> bool:
         """Record cleanup completion only while the same cleanup run owns the lease."""
         now = time.time()
@@ -1545,10 +1578,15 @@ class TaskStore:
         with self._lock, self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT current_stage, metadata_json FROM tasks WHERE id = ? AND claimed_by = ?",
+                "SELECT current_stage, metadata_json, claimed_at, updated_at "
+                "FROM tasks WHERE id = ? AND claimed_by = ?",
                 (int(task_id), owner),
             ).fetchone()
             if row is None:
+                return False
+            if expected_claimed_at is not None and float(row["claimed_at"] or 0) != float(expected_claimed_at):
+                return False
+            if expected_updated_at is not None and float(row["updated_at"] or 0) != float(expected_updated_at):
                 return False
             metadata = self._merge_metadata(row["metadata_json"], metadata_patch)
             conn.execute(
@@ -1558,7 +1596,7 @@ class TaskStore:
                 """,
                 (int(task_id), row["current_stage"], status.value, message, error_type, now),
             )
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE tasks
                 SET status = ?, error_type = ?, error_summary = ?, metadata_json = ?,
@@ -1567,7 +1605,7 @@ class TaskStore:
                 """,
                 (status.value, error_type, error_summary, metadata, now, int(task_id), owner),
             )
-        return True
+        return int(cursor.rowcount or 0) == 1
 
     def enqueue_task(
         self,

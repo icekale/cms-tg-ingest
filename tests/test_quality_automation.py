@@ -507,6 +507,39 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertEqual(plan.action, "reprocess")
             self.assertEqual(service.execute_plan(plan, "expired-snooze-run").execution_status, "queued")
 
+    def test_invalid_cooldown_is_manual_and_never_executes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = FakeQualityRepairAdapter()
+            service, library = self.make_service(tmp)
+            service.repair_adapter = adapter
+            destination = library / "invalid-cooldown"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/d/direct.mkv", encoding="utf-8")
+            task = self.add_task(
+                service.store,
+                "invalid-cooldown",
+                destination,
+                own_share_receive_code="1212",
+                quality_next_eligible_at="not-a-timestamp",
+            )
+            issue = QualityIssue("direct_strm", "direct", str(destination / "movie.strm"), task.id)
+            current = service.store.find_task(task.id)
+
+            plan = service._plan([current], [issue])[0]
+            result = service.execute_plan(
+                QualityRepairPlan(task.id, "reprocess", "strm_mode_mismatch", ("direct_strm",)),
+                "invalid-cooldown-run",
+            )
+            state = service.store.quality_state(task.id)
+
+            self.assertEqual(plan.action, "skip")
+            self.assertEqual(plan.reason, "invalid_cooldown")
+            self.assertEqual(state["quality_manual_status"], "manual_required")
+            self.assertEqual(state["quality_rule_reason"], "invalid_cooldown")
+            self.assertEqual(result.execution_status, "skipped")
+            self.assertEqual(result.reason, "invalid_cooldown")
+            self.assertEqual(adapter.calls, [])
+
     def test_reprocess_requires_complete_source_evidence_and_rule_match(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = FakeQualityRepairAdapter()
@@ -776,6 +809,49 @@ class ClaimTakingAdapter(FakeQualityRepairAdapter):
             claim_by="worker:takeover",
         )
         self.assert_taken_over = takeover is not None
+        return True
+
+
+class MetadataUpdatingAdapter(FakeQualityRepairAdapter):
+    def __init__(self, store):
+        super().__init__()
+        self.store = store
+
+    def reprocess(self, task, run_id):
+        self.calls.append(("reprocess", task.id, run_id))
+        self.store.patch_metadata(task.id, {"adapter_metadata": "updated"})
+        return True
+
+
+class CleanupClaimTakingAdapter(FakeQualityRepairAdapter):
+    def __init__(self, store):
+        super().__init__()
+        self.store = store
+
+    def cleanup(self, task, run_id):
+        self.calls.append(("cleanup", task.id, run_id))
+        takeover = self.store.compare_and_set_transition(
+            task.id,
+            task.current_stage,
+            {TaskStatus.SUCCEEDED},
+            require_unclaimed=False,
+            target_stage=task.current_stage,
+            target_status=TaskStatus.SUCCEEDED,
+            target_event_message="cleanup claim taken over",
+            claim_by="worker:cleanup-takeover",
+        )
+        self.assert_taken_over = takeover is not None
+        return True
+
+
+class CleanupMetadataUpdatingAdapter(FakeQualityRepairAdapter):
+    def __init__(self, store):
+        super().__init__()
+        self.store = store
+
+    def cleanup(self, task, run_id):
+        self.calls.append(("cleanup", task.id, run_id))
+        self.store.patch_metadata(task.id, {"adapter_cleanup_metadata": "updated"})
         return True
 
 
@@ -1050,6 +1126,87 @@ class QualityRepairExecutionTests(unittest.TestCase):
             self.assertTrue(adapter.assert_taken_over)
             self.assertEqual(current.claimed_by, "worker:takeover")
             self.assertEqual(current.status, TaskStatus.RUNNING)
+
+    def test_completion_rejects_metadata_update_during_adapter_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            adapter = MetadataUpdatingAdapter(store)
+            service, library = self.make_service(tmp, adapter)
+            destination = library / "metadata-updated"
+            destination.mkdir(parents=True)
+            task = self.add_task(service.store, "metadata-updated", destination, own_share_receive_code="1212")
+            plan = QualityRepairPlan(task.id, "reprocess", "strm_mode_mismatch", ("direct_strm",))
+
+            result = service.execute_plan(plan, "metadata-owner")
+            current = service.store.find_task(task.id)
+
+            self.assertEqual(result.execution_status, "skipped")
+            self.assertEqual(result.reason, "claim_lost")
+            self.assertEqual(current.claimed_by, "quality:metadata-owner")
+            self.assertEqual(current.status, TaskStatus.RUNNING)
+            self.assertEqual(current.metadata["adapter_metadata"], "updated")
+            self.assertFalse(current.metadata.get("quality_repair_queued", False))
+
+    def test_cleanup_completion_rejects_a_claim_taken_over_by_another_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = CleanupClaimTakingAdapter(TaskStore(Path(tmp) / "tasks.db"))
+            service, library = self.make_service(tmp, adapter)
+            destination = library / "cleanup-claim-taken-over"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/s/own_1212_movie.mkv", encoding="utf-8")
+            task = self.add_task(
+                service.store,
+                "cleanup-claim-taken-over",
+                destination,
+                own_share_available=True,
+                own_share_receive_code="1212",
+                emby_status="confirmed",
+                emby_match_count=1,
+                share_review_status="passed",
+            )
+            service.store.patch_metadata(task.id, {"quality_success_event": True})
+            service.store.record_event(task.id, TaskStage.EMBY_CONFIRMED, TaskStatus.SUCCEEDED, "Emby confirmed")
+            current = service.store.find_task(task.id)
+
+            result = service.cleanup_if_safe(current, "cleanup-owner")
+            final = service.store.find_task(task.id)
+
+            self.assertEqual(result.status, "blocked_cleanup")
+            self.assertEqual(result.reason, "cleanup_completion_persist_failed")
+            self.assertTrue(adapter.assert_taken_over)
+            self.assertEqual(final.claimed_by, "worker:cleanup-takeover")
+            self.assertFalse(final.metadata.get("quality_cleanup_completed", False))
+
+    def test_cleanup_completion_rejects_metadata_update_during_adapter_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            adapter = CleanupMetadataUpdatingAdapter(service.store)
+            service.repair_adapter = adapter
+            destination = library / "cleanup-metadata-updated"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/s/own_1212_movie.mkv", encoding="utf-8")
+            task = self.add_task(
+                service.store,
+                "cleanup-metadata-updated",
+                destination,
+                own_share_available=True,
+                own_share_receive_code="1212",
+                emby_status="confirmed",
+                emby_match_count=1,
+                share_review_status="passed",
+            )
+            service.store.patch_metadata(task.id, {"quality_success_event": True})
+            service.store.record_event(task.id, TaskStage.EMBY_CONFIRMED, TaskStatus.SUCCEEDED, "Emby confirmed")
+            current = service.store.find_task(task.id)
+
+            result = service.cleanup_if_safe(current, "cleanup-metadata-owner")
+            final = service.store.find_task(task.id)
+
+            self.assertEqual(result.status, "blocked_cleanup")
+            self.assertEqual(result.reason, "cleanup_completion_persist_failed")
+            self.assertEqual(final.claimed_by, "quality-cleanup:cleanup-metadata-owner")
+            self.assertEqual(final.metadata["adapter_cleanup_metadata"], "updated")
+            self.assertFalse(final.metadata.get("quality_cleanup_completed", False))
 
     def test_two_executions_reach_attempt_limit_and_third_is_not_queued(self):
         with tempfile.TemporaryDirectory() as tmp:
