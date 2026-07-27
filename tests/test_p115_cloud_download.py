@@ -35,6 +35,10 @@ class FakeHttp:
 
 
 class P115CloudDownloadTests(unittest.TestCase):
+    @staticmethod
+    def _cloud_page(items):
+        return {"state": True, "tasks": list(items)}
+
     def test_discover_cloud_outputs_returns_all_children_without_moving(self):
         http = FakeHttp(
             [
@@ -253,6 +257,76 @@ class P115CloudDownloadTests(unittest.TestCase):
         self.assertEqual(result["task_id"], "task-1")
         self.assertEqual(result["status"], "running")
         self.assertEqual(result["file_id"], "folder")
+
+    def test_cloud_download_status_paginates_only_after_a_full_page(self):
+        unrelated = [
+            {"task_id": f"other-{index}", "status": 12}
+            for index in range(30)
+        ]
+        http = FakeHttp(
+            [
+                self._cloud_page(unrelated),
+                self._cloud_page([{"task_id": "task-2", "status": 2, "fid": "folder"}]),
+            ]
+        )
+        client = P115WebClient("UID=1", http=http, timeout=3)
+
+        result = client.cloud_download_status({"task_id": "task-2"})
+
+        self.assertEqual(result["task_id"], "task-2")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(http.calls), 2)
+        self.assertEqual([call["params"]["page"] for call in http.calls], [1, 2])
+        self.assertTrue(all(call["params"]["page_size"] == 30 for call in http.calls))
+
+    def test_cloud_download_source_lookup_is_bounded_to_three_full_pages(self):
+        pages = [
+            self._cloud_page(
+                [{"task_id": f"other-{page}-{index}", "status": 12} for index in range(30)]
+            )
+            for page in range(1, 4)
+        ]
+        http = FakeHttp(pages)
+        client = P115WebClient("UID=1", http=http, timeout=3)
+
+        result = client._find_cloud_task(source_url="magnet:?xt=urn:btih:MISSING")
+
+        self.assertEqual(result, {})
+        self.assertEqual(len(http.calls), 3)
+        self.assertEqual([call["params"]["page"] for call in http.calls], [1, 2, 3])
+
+    def test_cloud_download_add_recovers_source_identity_from_second_page(self):
+        http = FakeHttp(
+            [
+                {"state": True},
+                self._cloud_page(
+                    [{"task_id": f"other-{index}", "status": 12} for index in range(30)]
+                ),
+                self._cloud_page(
+                    [{"info_hash": INFO_HASH, "url": ED2K, "status": 12}]
+                ),
+            ]
+        )
+        client = P115WebClient("UID=1", http=http, timeout=3)
+
+        result = client.cloud_download_add(ED2K, TARGET_CID)
+
+        self.assertEqual(result["info_hash"], INFO_HASH.lower())
+        list_calls = [call for call in http.calls if call["url"] == "https://lixian.115.com/lixian/"]
+        self.assertEqual([call["params"]["page"] for call in list_calls], [1, 2])
+
+    def test_cloud_download_lookup_stops_after_a_short_page(self):
+        http = FakeHttp(
+            [
+                self._cloud_page(
+                    [{"task_id": f"other-{index}", "status": 12} for index in range(2)]
+                )
+            ]
+        )
+        client = P115WebClient("UID=1", http=http, timeout=3)
+
+        self.assertEqual(client._find_cloud_task(identity={"task_id": "missing"}), {})
+        self.assertEqual(len(http.calls), 1)
 
     def test_cloud_download_output_rejects_wrong_parent_cid(self):
         with self.assertRaises(RuntimeError):

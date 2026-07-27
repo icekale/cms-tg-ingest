@@ -86,7 +86,7 @@ class HttpJson:
         try:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Non-JSON response from {url}: {raw[:300]}") from exc
+            raise RuntimeError(f"Non-JSON response from {_redact_url(url)}: {raw[:300]}") from exc
 
 
 class FormHttp:
@@ -124,7 +124,7 @@ class FormHttp:
         try:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Non-JSON response from {url}: {raw[:300]}") from exc
+            raise RuntimeError(f"Non-JSON response from {_redact_url(url)}: {raw[:300]}") from exc
 
 
 def load_cookie_value(value_or_path: str) -> str:

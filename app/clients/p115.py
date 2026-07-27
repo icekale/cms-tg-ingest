@@ -871,7 +871,7 @@ class P115WebClient:
         item = _cloud_task_item(resp)
         identity = _cloud_identity(item)
         if not identity["info_hash"] and not identity["task_id"]:
-            item = self._find_cloud_task_by_source(url)
+            item = self._find_cloud_task(source_url=url)
             identity = _cloud_identity(item)
         if not identity["info_hash"] and not identity["task_id"]:
             raise RuntimeError("115 cloud download did not return task identity")
@@ -884,12 +884,9 @@ class P115WebClient:
         }
 
     def cloud_download_status(self, identity: dict[str, Any]) -> dict[str, Any]:
-        resp = self._request(
-            PAN115_LIXIAN_WEB_URL,
-            params={"ct": "lixian", "ac": "task_lists", "page": 1, "page_size": 30},
-        )
-        self._ensure_state(resp, "115 cloud download status failed")
-        item = _cloud_task_item(resp, identity=identity)
+        item = self._find_cloud_task(identity=identity)
+        if not item:
+            raise RuntimeError("115 cloud download task identity was not found")
         normalized_identity = _cloud_identity(item)
         return {
             **normalized_identity,
@@ -901,24 +898,47 @@ class P115WebClient:
             "raw": item,
         }
 
-    def _find_cloud_task_by_source(self, source_url: str) -> dict[str, Any]:
-        resp = self._request(
-            PAN115_LIXIAN_WEB_URL,
-            params={"ct": "lixian", "ac": "task_lists", "page": 1, "page_size": 30},
-        )
-        self._ensure_state(resp, "115 cloud download task list failed")
-        data = resp.get("data") if isinstance(resp.get("data"), dict) else resp
-        candidates = iter_items(data)
+    def _find_cloud_task(
+        self,
+        identity: dict[str, Any] | None = None,
+        source_url: str = "",
+        max_pages: int = 3,
+    ) -> dict[str, Any]:
+        page_size = 30
+        try:
+            page_limit = max(1, min(int(max_pages), 3))
+        except (TypeError, ValueError):
+            page_limit = 3
+        expected = _cloud_identity(identity or {})
         source_hash = _cloud_source_hash(source_url)
         source_text = str(source_url or "").strip().lower()
-        for candidate in candidates:
-            candidate_hash = _cloud_identity(candidate)["info_hash"]
-            candidate_url = str(candidate.get("url") or "").strip().lower()
-            if source_hash and candidate_hash == source_hash:
-                return dict(candidate)
-            if candidate_url and candidate_url == source_text:
-                return dict(candidate)
+
+        for page in range(1, page_limit + 1):
+            resp = self._request(
+                PAN115_LIXIAN_WEB_URL,
+                params={"ct": "lixian", "ac": "task_lists", "page": page, "page_size": page_size},
+            )
+            self._ensure_state(resp, "115 cloud download task list failed")
+            data = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+            candidates = iter_items(data)
+            for candidate in candidates:
+                candidate_identity = _cloud_identity(candidate)
+                candidate_url = str(candidate.get("url") or "").strip().lower()
+                if expected["info_hash"] and candidate_identity["info_hash"] == expected["info_hash"]:
+                    return dict(candidate)
+                if expected["task_id"] and candidate_identity["task_id"] == expected["task_id"]:
+                    return dict(candidate)
+                if source_hash and candidate_identity["info_hash"] == source_hash:
+                    return dict(candidate)
+                if source_text and candidate_url and candidate_url == source_text:
+                    return dict(candidate)
+            if len(candidates) < page_size:
+                break
         return {}
+
+    def _find_cloud_task_by_source(self, source_url: str) -> dict[str, Any]:
+        """Compatibility wrapper for callers using the old source lookup name."""
+        return self._find_cloud_task(source_url=source_url)
 
     def cloud_download_output(self, identity: dict[str, Any], target_cid: str) -> dict[str, Any]:
         status = self.cloud_download_status(identity)

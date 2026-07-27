@@ -64,6 +64,47 @@ class HttpClientTests(unittest.TestCase):
 
         self.assertEqual(urlopen.call_count, 1)
 
+    def test_non_json_json_response_redacts_telegram_bot_token(self):
+        with patch(
+            "app.clients.http.urllib.request.urlopen",
+            return_value=FakeResponse("<html>bad gateway</html>"),
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                HttpJson(timeout=1).request("https://api.telegram.org/botSECRET/getMe")
+
+        self.assertNotIn("SECRET", str(raised.exception))
+        self.assertIn("bot<redacted>", str(raised.exception))
+
+    def test_non_json_form_response_redacts_query_token(self):
+        with patch(
+            "app.clients.http.urllib.request.urlopen",
+            return_value=FakeResponse("not json"),
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                FormHttp(timeout=1).request(
+                    "https://example.test/status",
+                    params={"token": "SECRET"},
+                )
+
+        self.assertNotIn("SECRET", str(raised.exception))
+        self.assertIn("token=%3Credacted%3E", str(raised.exception))
+
+    def test_json_decode_error_redacts_url_and_truncates_response(self):
+        body = "!" * 400
+        with patch(
+            "app.clients.http.urllib.request.urlopen",
+            return_value=FakeResponse(body),
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                FormHttp(timeout=1).request(
+                    "https://example.test/status?access_token=SECRET",
+                )
+
+        message = str(raised.exception)
+        self.assertNotIn("SECRET", message)
+        self.assertIn("access_token=%3Credacted%3E", message)
+        self.assertTrue(message.endswith(": " + ("!" * 300)))
+
 
 if __name__ == "__main__":
     unittest.main()

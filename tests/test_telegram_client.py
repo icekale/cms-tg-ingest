@@ -3,6 +3,21 @@ from unittest.mock import patch
 
 from bridge import TelegramClient
 from app.clients.http import _redact_url
+from app.clients.http import HttpJson
+
+
+class FakeResponse:
+    def __init__(self, payload):
+        self.payload = payload.encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self):
+        return self.payload
 
 
 class SequenceHttp:
@@ -56,6 +71,17 @@ class TelegramClientTests(unittest.TestCase):
         redacted = _redact_url(url)
 
         self.assertEqual(redacted, "https://api.telegram.org/bot<redacted>/answerCallbackQuery")
+
+    def test_non_json_telegram_response_redacts_bot_token(self):
+        with patch(
+            "app.clients.http.urllib.request.urlopen",
+            return_value=FakeResponse("<html>bad gateway</html>"),
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                HttpJson(timeout=1).request("https://api.telegram.org/botSECRET/getMe")
+
+        self.assertNotIn("SECRET", str(raised.exception))
+        self.assertIn("bot<redacted>", str(raised.exception))
 
 
 if __name__ == "__main__":
