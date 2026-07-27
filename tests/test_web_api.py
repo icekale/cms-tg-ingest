@@ -6,14 +6,188 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.models import TaskStage, TaskStatus
+from app.quality import QualityIssue
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
 from app.series_rules import parse_episode_filter
 from app.task_store import TaskStore
+from app.config import Config
+from app.quality_automation import QualityAutomation
 from app.web import WebApp
 from app.web_api import _safe_error, _safe_url, serialize_health, serialize_task
 
 
 class WebApiTests(unittest.TestCase):
+    def _quality_service(self, tmp, store):
+        root = Path(tmp) / "library"
+        config = Config(
+            tg_bot_token="token",
+            tg_allowed_chat_id="chat",
+            cms_base_url="http://cms",
+            cms_username="user",
+            cms_password="pass",
+            task_db_path=str(Path(tmp) / "tasks.db"),
+            quality_auto_enabled=False,
+        )
+        return QualityAutomation(store, config, allowed_roots=[root]), root
+
+    def test_quality_api_exposes_rule_state_and_aggregates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            quality, root = self._quality_service(tmp, store)
+            destination = root / "direct"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/d/movie.mkv", encoding="utf-8")
+            task = store.upsert_task("quality-api", "", "https://115cdn.com/s/quality-api")
+            store.record_event(
+                task.id,
+                TaskStage.MOVED,
+                TaskStatus.SUCCEEDED,
+                "moved",
+                title="质量 API 任务",
+                metadata_patch={"dest_path": str(destination), "own_share_code": "own"},
+            )
+            app = WebApp(store, quality_automation=quality)
+
+            status, _headers, body = app.handle_request("GET", "/api/v1/quality", {}, b"")
+            payload = json.loads(body)
+            item = payload["items"][0]
+
+            self.assertEqual(status, 200)
+            self.assertEqual(item["code"], "direct_strm")
+            self.assertEqual(item["task_id"], task.id)
+            self.assertEqual(item["title"], "质量 API 任务")
+            self.assertEqual(item["rule_id"], "strm_mode_mismatch")
+            self.assertIn("execute", item["available_actions"])
+            self.assertIn("snooze", item["available_actions"])
+            self.assertIn("strm_mode_mismatch", payload["rule_counts"])
+            self.assertIn("automation", payload)
+
+    def test_quality_action_api_validates_rule_and_returns_conflict_without_external_clients(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            quality, root = self._quality_service(tmp, store)
+            destination = root / "direct"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/d/movie.mkv", encoding="utf-8")
+            task = store.upsert_task("quality-action", "", "https://115cdn.com/s/quality-action")
+            store.record_event(
+                task.id,
+                TaskStage.MOVED,
+                TaskStatus.SUCCEEDED,
+                "moved",
+                metadata_patch={"dest_path": str(destination), "own_share_code": "own"},
+            )
+            app = WebApp(store, quality_automation=quality)
+            _, _, quality_body = app.handle_request("GET", "/api/v1/quality", {}, b"")
+            item = json.loads(quality_body)["items"][0]
+            request = json.dumps(
+                {
+                    "task_id": task.id,
+                    "rule_id": item["rule_id"],
+                    "rule_version": item["rule_version"],
+                    "action": "execute",
+                    "actor": "tester",
+                }
+            ).encode()
+
+            first_status, _, first_body = app.handle_request(
+                "POST", "/api/v1/quality/action/execute", {"Content-Type": "application/json"}, request
+            )
+            second_status, _, second_body = app.handle_request(
+                "POST", "/api/v1/quality/action/execute", {"Content-Type": "application/json"}, request
+            )
+            bad_status, _, bad_body = app.handle_request(
+                "POST",
+                "/api/v1/quality/action/execute",
+                {"Content-Type": "application/json"},
+                json.dumps({**json.loads(request), "rule_id": "wrong"}).encode(),
+            )
+
+            self.assertEqual(first_status, 200)
+            self.assertEqual(json.loads(first_body)["action"], "execute")
+            self.assertEqual(second_status, 409)
+            self.assertEqual(json.loads(second_body)["error"], "quality_action_conflict")
+            self.assertEqual(bad_status, 409)
+            self.assertEqual(json.loads(bad_body)["error"], "quality_rule_mismatch")
+
+    def test_missing_quality_destination_exposes_reprocess_not_restore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            quality, root = self._quality_service(tmp, store)
+            task = store.upsert_task("quality-missing", "", "https://115cdn.com/s/quality-missing")
+            store.record_event(
+                task.id,
+                TaskStage.MOVED,
+                TaskStatus.SUCCEEDED,
+                "moved",
+                metadata_patch={"dest_path": str(root / "missing"), "own_share_code": "own"},
+            )
+            app = WebApp(store, quality_automation=quality)
+            _, _, body = app.handle_request("GET", "/api/v1/quality", {}, b"")
+            item = json.loads(body)["items"][0]
+
+            self.assertIn("reprocess", item["available_actions"])
+            self.assertNotIn("restore", item["available_actions"])
+
+    def test_quality_api_orphan_issue_is_view_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            with patch(
+                "app.web_api.scan_task_quality",
+                return_value=[QualityIssue("missing_dest", "missing", "/private/path", 999, "孤立问题")],
+            ):
+                payload = __import__("app.web_api", fromlist=["api_quality"]).api_quality(store)
+
+            item = payload["items"][0]
+            self.assertEqual(item["manual_status"], "manual_required")
+            self.assertEqual(item["available_actions"], ["view"])
+            self.assertEqual(payload["manual_count"], 1)
+
+    def test_quality_action_api_supports_ignore_and_resume_and_rejects_invalid_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            quality, root = self._quality_service(tmp, store)
+            task = store.upsert_task("quality-ignore", "", "https://115cdn.com/s/quality-ignore")
+            store.record_event(
+                task.id,
+                TaskStage.MOVED,
+                TaskStatus.SUCCEEDED,
+                "moved",
+                metadata_patch={"dest_path": str(root / "missing"), "own_share_code": "own"},
+            )
+            app = WebApp(store, quality_automation=quality)
+            _, _, body = app.handle_request("GET", "/api/v1/quality", {}, b"")
+            item = json.loads(body)["items"][0]
+            base = {
+                "task_id": task.id,
+                "rule_id": item["rule_id"],
+                "rule_version": item["rule_version"],
+            }
+            ignored_status, _, ignored_body = app.handle_request(
+                "POST",
+                "/api/v1/quality/action/ignore",
+                {"Content-Type": "application/json"},
+                json.dumps({**base, "action": "ignore"}).encode(),
+            )
+            resumed_status, _, resumed_body = app.handle_request(
+                "POST",
+                "/api/v1/quality/action/resume",
+                {"Content-Type": "application/json"},
+                json.dumps({**base, "action": "resume"}).encode(),
+            )
+            invalid_status, _, invalid_body = app.handle_request(
+                "POST",
+                "/api/v1/quality/action/ignore",
+                {"Content-Type": "application/json"},
+                json.dumps({**base, "action": "execute"}).encode(),
+            )
+
+            self.assertEqual(ignored_status, 200)
+            self.assertEqual(json.loads(ignored_body)["status"], "ignored")
+            self.assertEqual(resumed_status, 200)
+            self.assertEqual(json.loads(resumed_body)["status"], "resumed")
+            self.assertEqual(invalid_status, 409)
+            self.assertEqual(json.loads(invalid_body)["error"], "quality_action_not_allowed")
     def test_health_api_exposes_runner_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

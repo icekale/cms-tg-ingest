@@ -489,6 +489,70 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertIn(plan.reason, {"missing_destination", "manual_required"})
             self.assertEqual(adapter.calls, [])
 
+    def test_manual_action_reprocesses_only_through_taskstore_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = FakeQualityRepairAdapter()
+            service, library = self.make_service(tmp)
+            service.repair_adapter = adapter
+            destination = library / "manual-direct"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/d/direct.mkv", encoding="utf-8")
+            task = self.add_task(service.store, "manual-direct", destination, own_share_receive_code="1212")
+
+            first = service.manual_action(
+                task.id,
+                "strm_mode_mismatch",
+                "execute",
+                "tester",
+                rule_version="1",
+            )
+            second = service.manual_action(
+                task.id,
+                "strm_mode_mismatch",
+                "execute",
+                "tester",
+                rule_version="1",
+            )
+
+            current = service.store.find_task(task.id)
+            self.assertEqual(first["status"], "queued")
+            self.assertEqual(first["action"], "execute")
+            self.assertEqual(current.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(current.status, TaskStatus.PENDING)
+            self.assertEqual(adapter.calls, [])
+            self.assertEqual(second["status"], "conflict")
+            self.assertEqual(len(service.store.list_events(task.id)), 2)
+
+    def test_manual_missing_destination_allows_explicit_reprocess_but_never_restore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            task = self.add_task(service.store, "manual-missing", library / "does-not-exist")
+
+            restore = service.manual_action(task.id, "missing_destination", "restore", "tester", rule_version="1")
+            reprocess = service.manual_action(
+                task.id, "missing_destination", "reprocess", "tester", rule_version="1"
+            )
+
+            self.assertEqual(restore["status"], "rejected")
+            self.assertEqual(restore["reason"], "action_not_allowed")
+            self.assertEqual(reprocess["status"], "queued")
+            self.assertEqual(service.store.find_task(task.id).current_stage, TaskStage.RECEIVED)
+
+    def test_manual_action_snooze_resume_and_rejects_unknown_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            task = self.add_task(service.store, "manual-snooze", library / "does-not-exist")
+
+            snoozed = service.manual_action(
+                task.id, "missing_destination", "snooze", "tester", until=time.time() + 3600, rule_version="1"
+            )
+            resumed = service.manual_action(task.id, "missing_destination", "resume", "tester", rule_version="1")
+            missing = service.manual_action(999999, "missing_destination", "view", "tester", rule_version="1")
+
+            self.assertEqual(snoozed["status"], "snoozed")
+            self.assertEqual(resumed["status"], "resumed")
+            self.assertEqual(missing["status"], "not_found")
+
     def test_expired_snooze_is_open_for_planning_and_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = FakeQualityRepairAdapter()

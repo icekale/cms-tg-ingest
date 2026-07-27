@@ -73,6 +73,7 @@ class QualityAutomation:
         "cooldown_seconds": 86400,
     }
     MAX_COOLDOWN_SECONDS = 7 * 24 * 60 * 60
+    MAX_TASK_ID = 2**63 - 1
 
     def __init__(
         self,
@@ -423,6 +424,172 @@ class QualityAutomation:
             return False
         self._run_once_owned(run_id, self._local_now(None), injected_now=False)
         return True
+
+    def quality_descriptor(
+        self,
+        task: TaskSnapshot,
+        issues: Iterable[QualityIssue] | None = None,
+        *,
+        now: float | None = None,
+    ) -> dict[str, object]:
+        """Describe one current rule decision for presentation and manual actions."""
+        current_time = time.time() if now is None else float(now)
+        issue_list = tuple(issues) if issues is not None else tuple(
+            scan_task_quality(self.store, tasks=[task], allowed_roots=self.allowed_roots)
+        )
+        match = self.rule_engine.evaluate(task, issue_list, config=self.rule_config)
+        state = self.store.quality_state(task.id, now=current_time)
+        manual_status = str(state.get("quality_manual_status") or "open").strip().lower()
+        next_eligible = float(state.get("quality_next_eligible_at") or 0)
+        busy = task.status == TaskStatus.RUNNING or bool(task.claimed_by.strip())
+        terminal = task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {
+            TaskStage.FAILED,
+            TaskStage.NEEDS_ACTION,
+        }
+        safe = self._safe_metadata(task)
+        queued = bool(state.get("quality_repair_queued"))
+        auto_allowed = bool(
+            match.auto_allowed
+            and match.auto_action == "reprocess"
+            and safe
+            and not busy
+            and not terminal
+            and not queued
+            and manual_status == "open"
+            and next_eligible <= current_time
+        )
+        actions = ["view"]
+        if manual_status in {"snoozed", "ignored", "manual_required"}:
+            actions.append("resume")
+        elif not queued and not busy and not terminal:
+            actions.extend(("snooze", "ignore"))
+            if auto_allowed:
+                actions.extend(("execute", "reprocess"))
+            elif match.rule_id in {"missing_destination", "missing_strm"} and safe:
+                actions.append("reprocess")
+        reason = str(state.get("quality_rule_reason") or "").strip()
+        if not reason or reason == "manual_required" and match.rule_id != "repeated_failure":
+            reason = match.reason
+        return {
+            "rule_id": match.rule_id,
+            "rule_reason": reason,
+            "risk_level": match.risk_level,
+            "issue_codes": list(match.issue_codes),
+            "manual_status": manual_status,
+            "attempts": quality_attempt_count(task),
+            "next_eligible_at": next_eligible,
+            "available_actions": actions,
+            "evidence": list(match.evidence),
+            "auto_allowed": auto_allowed,
+            "rule_version": QUALITY_RULE_VERSION,
+        }
+
+    def manual_action(
+        self,
+        task_id: int,
+        rule_id: str,
+        action: str,
+        actor: str,
+        until: float | None = None,
+        *,
+        rule_version: str | None = None,
+    ) -> dict[str, object]:
+        """Apply one validated human quality action without touching external services."""
+        try:
+            if isinstance(task_id, bool):
+                raise ValueError
+            normalized_task_id = int(task_id)
+        except (TypeError, ValueError, OverflowError):
+            return {"status": "invalid", "task": None, "action": str(action or ""), "reason": "invalid_task_id"}
+        if not 1 <= normalized_task_id <= self.MAX_TASK_ID:
+            return {"status": "invalid", "task": None, "action": str(action or ""), "reason": "invalid_task_id"}
+        task = self.store.find_task(normalized_task_id)
+        if task is None:
+            return {"status": "not_found", "task": None, "action": str(action or ""), "reason": "task_not_found"}
+        normalized_action = str(action or "").strip().lower()
+        stored_rule = str(task.metadata.get("quality_rule_id") or "").strip()
+        if stored_rule and str(rule_id or "").strip() != stored_rule:
+            return {"status": "rejected", "task": task, "action": normalized_action, "reason": "rule_mismatch"}
+        if normalized_action in {"execute", "reprocess"} and bool(task.metadata.get("quality_repair_queued")):
+            return {"status": "conflict", "task": task, "action": normalized_action, "reason": "already_queued"}
+        descriptor = self.quality_descriptor(task)
+        if str(rule_id or "").strip() != str(descriptor["rule_id"]):
+            return {"status": "rejected", "task": task, "action": normalized_action, "reason": "rule_mismatch"}
+        stored_version = str(task.metadata.get("quality_rule_version") or "").strip()
+        if rule_version is not None and str(rule_version).strip() != QUALITY_RULE_VERSION:
+            return {"status": "rejected", "task": task, "action": normalized_action, "reason": "rule_version_changed"}
+        if stored_version and stored_version != QUALITY_RULE_VERSION:
+            return {"status": "rejected", "task": task, "action": normalized_action, "reason": "rule_version_changed"}
+        if normalized_action not in set(descriptor["available_actions"]):
+            return {"status": "rejected", "task": task, "action": normalized_action, "reason": "action_not_allowed"}
+        if normalized_action == "view":
+            return {"status": "viewed", "task": task, "action": normalized_action, "reason": "read_only"}
+        if task.status == TaskStatus.RUNNING or task.claimed_by.strip():
+            return {"status": "conflict", "task": task, "action": normalized_action, "reason": "task_busy"}
+        actor = str(actor or "web").strip()[:128] or "web"
+        if normalized_action == "snooze":
+            try:
+                target_until = time.time() + 24 * 60 * 60 if until is None else float(until)
+                if target_until <= time.time() or target_until > time.time() + self.MAX_COOLDOWN_SECONDS:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError):
+                return {"status": "rejected", "task": task, "action": normalized_action, "reason": "invalid_until"}
+            updated = self.store.mark_quality_snoozed(task.id, target_until, actor)
+            if updated is None:
+                latest = self.store.find_task(task.id)
+                return {"status": "conflict", "task": latest or task, "action": normalized_action, "reason": "task_changed"}
+            return {"status": "snoozed", "task": updated, "action": normalized_action, "reason": "manual_snooze"}
+        if normalized_action == "ignore":
+            updated = self.store.mark_quality_ignored(task.id, actor)
+            if updated is None:
+                latest = self.store.find_task(task.id)
+                return {"status": "conflict", "task": latest or task, "action": normalized_action, "reason": "task_changed"}
+            return {"status": "ignored", "task": updated, "action": normalized_action, "reason": "manual_ignore"}
+        if normalized_action == "resume":
+            updated = self.store.resume_quality(task.id, actor)
+            if updated is None:
+                latest = self.store.find_task(task.id)
+                return {"status": "conflict", "task": latest or task, "action": normalized_action, "reason": "task_changed"}
+            return {"status": "resumed", "task": updated, "action": normalized_action, "reason": "manual_resume"}
+
+        attempts = quality_attempt_count(task)
+        started_at = time.time()
+        metadata = build_reprocess_metadata(
+            task,
+            {
+                "quality_manual_status": "open",
+                "quality_repair_queued": True,
+                "quality_repair_action": normalized_action,
+                "quality_repair_reason": str(descriptor["rule_id"]),
+                "quality_rule_id": str(descriptor["rule_id"]),
+                "quality_rule_version": QUALITY_RULE_VERSION,
+                "quality_last_actor": actor,
+                "quality_last_attempt_at": started_at,
+                "quality_repair_attempts": attempts + 1,
+                "quality_repair_started_at": started_at,
+                "quality_next_eligible_at": started_at + int(self.rule_config["cooldown_seconds"]),
+            },
+        )
+        updated = self.store.compare_and_set_transition(
+            task.id,
+            task.current_stage,
+            {TaskStatus.PENDING, TaskStatus.SUCCEEDED},
+            require_unclaimed=True,
+            target_stage=TaskStage.RECEIVED,
+            target_status=TaskStatus.PENDING,
+            target_event_message=f"人工质量操作已入队：{normalized_action}（actor={actor}）",
+            metadata_patch=metadata,
+            metadata_delete_keys=tuple(
+                key for key in REPROCESS_METADATA_DELETE_KEYS if key != "quality_repair_queued"
+            ),
+            next_run_at=0,
+            clear_errors=True,
+            expected_updated_at=task.updated_at,
+        )
+        if updated is None:
+            latest = self.store.find_task(task.id)
+            return {"status": "conflict", "task": latest or task, "action": normalized_action, "reason": "task_changed"}
+        return {"status": "queued", "task": updated, "action": normalized_action, "reason": "manual_reprocess"}
 
     def _persist_summary(self, summary: QualityRunSummary, updated_at: float) -> bool:
         return self.store.update_quality_run_state_if_owner(

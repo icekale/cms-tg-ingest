@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 from .models import TaskSnapshot
+from .quality_rules import QUALITY_RULE_VERSION, QualityRuleEngine, quality_attempt_count
 from .task_diagnostics import explain_task_slowness, format_stage_observability
 from .task_health import build_task_health
 from .quality import scan_task_quality
@@ -260,15 +261,122 @@ def api_task_detail(store: TaskStore, task_id: int, *, now: float | None = None)
     return result
 
 
+def quality_items(
+    store: TaskStore,
+    *,
+    limit: int = 100,
+    quality_automation: Any | None = None,
+    now: float | None = None,
+    issues: list[Any] | None = None,
+) -> list[dict[str, Any]]:
+    allowed_roots = getattr(quality_automation, "allowed_roots", None)
+    if not isinstance(allowed_roots, (list, tuple, set, frozenset)):
+        allowed_roots = None
+    if issues is None:
+        issues = scan_task_quality(
+            store,
+            limit=max(1, min(int(limit), 500)),
+            allowed_roots=allowed_roots,
+        )
+    grouped: dict[int, list[Any]] = {}
+    for issue in issues:
+        grouped.setdefault(int(issue.task_id), []).append(issue)
+    engine = getattr(quality_automation, "rule_engine", None)
+    if not isinstance(engine, QualityRuleEngine):
+        engine = QualityRuleEngine()
+    config = getattr(quality_automation, "rule_config", None)
+    if not isinstance(config, dict):
+        config = None
+    current_time = time.time() if now is None else float(now)
+    items: list[dict[str, Any]] = []
+    for issue in issues:
+        task = store.find_task(int(issue.task_id)) if int(issue.task_id) > 0 else None
+        if task is None:
+            descriptor = {
+                "rule_id": "manual_required",
+                "rule_reason": "task_not_found",
+                "risk_level": "high",
+                "issue_codes": [issue.code],
+                "manual_status": "manual_required",
+                "attempts": 0,
+                "next_eligible_at": 0,
+                "available_actions": ["view"],
+                "evidence": [issue.detail] if issue.detail else [],
+                "auto_allowed": False,
+                "rule_version": QUALITY_RULE_VERSION,
+            }
+        elif quality_automation is not None and callable(getattr(quality_automation, "quality_descriptor", None)):
+            candidate = quality_automation.quality_descriptor(task, grouped[int(issue.task_id)], now=current_time)
+            descriptor = candidate if isinstance(candidate, dict) else None
+            if descriptor is None:
+                match = engine.evaluate(task, grouped[int(issue.task_id)], config=config)
+                descriptor = {
+                    "rule_id": match.rule_id,
+                    "rule_reason": match.reason,
+                    "risk_level": match.risk_level,
+                    "issue_codes": list(match.issue_codes),
+                    "manual_status": "manual_required",
+                    "attempts": quality_attempt_count(task),
+                    "next_eligible_at": 0,
+                    "available_actions": ["view"],
+                    "evidence": list(match.evidence),
+                    "auto_allowed": False,
+                    "rule_version": QUALITY_RULE_VERSION,
+                }
+        else:
+            match = engine.evaluate(task, grouped[int(issue.task_id)], config=config)
+            descriptor = {
+                "rule_id": match.rule_id,
+                "rule_reason": match.reason,
+                "risk_level": match.risk_level,
+                "issue_codes": list(match.issue_codes),
+                "manual_status": "manual_required",
+                "attempts": quality_attempt_count(task),
+                "next_eligible_at": 0,
+                "available_actions": ["view"],
+                "evidence": list(match.evidence),
+                "auto_allowed": False,
+                "rule_version": QUALITY_RULE_VERSION,
+            }
+        items.append(
+            {
+                "task_id": issue.task_id,
+                "title": issue.title or (task.title if task is not None else ""),
+                "code": issue.code,
+                "message": issue.message,
+                "detail": issue.detail,
+                **descriptor,
+            }
+        )
+    return items
+
+
 def api_quality(store: TaskStore, *, limit: int = 100, quality_automation: Any | None = None) -> dict[str, Any]:
-    issues = scan_task_quality(store, limit=max(1, min(int(limit), 500)))
+    items = quality_items(store, limit=limit, quality_automation=quality_automation)
+    rule_counts: dict[str, int] = {}
+    task_keys: set[tuple[int, str]] = set()
+    manual_count = 0
+    cooldown_count = 0
+    now = time.time()
+    for item in items:
+        key = (int(item["task_id"]), str(item["rule_id"]))
+        if key not in task_keys:
+            task_keys.add(key)
+            rule_counts[str(item["rule_id"])] = rule_counts.get(str(item["rule_id"]), 0) + 1
+            if str(item["manual_status"]) == "manual_required":
+                manual_count += 1
+            try:
+                cooldown_count += float(item["next_eligible_at"] or 0) > now
+            except (TypeError, ValueError):
+                pass
     payload = {
-        "count": len(issues),
-        "items": [
-            {"task_id": issue.task_id, "title": issue.title, "code": issue.code, "message": issue.message, "detail": issue.detail}
-            for issue in issues
-        ],
+        "count": len(items),
+        "items": items,
+        "rule_counts": rule_counts,
+        "manual_count": manual_count,
+        "cooldown_count": cooldown_count,
     }
     if quality_automation is not None:
-        payload["automation"] = quality_automation.status_snapshot()
+        snapshot = quality_automation.status_snapshot()
+        payload["automation"] = snapshot if isinstance(snapshot, dict) else {}
     return payload

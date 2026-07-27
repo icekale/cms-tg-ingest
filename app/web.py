@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import mimetypes
 import time
 from http.cookies import CookieError, SimpleCookie
@@ -33,6 +34,7 @@ from .web_api import (
     api_task_detail,
     api_quality,
     api_tasks,
+    quality_items,
     serialize_health,
     serialize_hdhive,
     serialize_hdhive_subscription,
@@ -844,14 +846,36 @@ def _apply_task_action(store: TaskStore, task: Any, action: str) -> bool:
 def render_quality_page(store: TaskStore, quality_automation: QualityAutomation | None = None) -> str:
     issues = scan_task_quality(store)
     report = format_task_quality_report(issues)
-    grouped = _group_quality_issues(issues)
+    quality_rows = quality_items(store, quality_automation=quality_automation, issues=issues)
+    grouped: dict[int, dict[str, Any]] = {}
+    for item in quality_rows:
+        task_id = int(item["task_id"])
+        row = grouped.setdefault(
+            task_id,
+            {
+                "task_id": task_id,
+                "title": item.get("title") or "",
+                "codes": {},
+                "total": 0,
+                "items": [],
+            },
+        )
+        row["title"] = row["title"] or item.get("title") or ""
+        row["codes"][item["code"]] = row["codes"].get(item["code"], 0) + 1
+        row["total"] += 1
+        row["items"].append(item)
+    grouped = list(grouped.values())
     tasks: dict[int, Any | None] = {}
     actionable_task_ids: set[int] = set()
-    for issue in issues:
-        if issue.task_id not in tasks:
-            tasks[issue.task_id] = store.find_task(issue.task_id)
-        if _quality_repair_action(issue, tasks[issue.task_id]):
-            actionable_task_ids.add(issue.task_id)
+    for row in grouped:
+        task_id = int(row["task_id"])
+        tasks[task_id] = store.find_task(task_id)
+        if any(item.get("auto_allowed") for item in row["items"]):
+            actionable_task_ids.add(task_id)
+        elif quality_automation is None:
+            descriptor_for_row = row["items"][0] if row["items"] else None
+            if descriptor_for_row and descriptor_for_row.get("rule_id") in {"strm_mode_mismatch", "unexpected_strm"} and _task_can_reprocess(tasks[task_id]):
+                actionable_task_ids.add(task_id)
     category_counts = {
         "目标目录缺失": sum(issue.code == "missing_dest" for issue in issues),
         "STRM 缺失": sum(issue.code == "missing_strm" for issue in issues),
@@ -883,13 +907,41 @@ def render_quality_page(store: TaskStore, quality_automation: QualityAutomation 
         )
         task_id = int(row["task_id"])
         title = html.escape(str(row["title"] or f"任务 #{task_id}"))
+        descriptor = row["items"][0] if row["items"] else {}
+        evidence = "；".join(str(value) for value in descriptor.get("evidence", []) if value) or "-"
+        next_time = descriptor.get("next_eligible_at") or 0
+        next_label = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(next_time))) if next_time else "-"
+        actions = descriptor.get("available_actions", [])
+        action_forms = []
+        for action_name, label, css, confirm in (
+            ("execute", "执行重跑", "button-primary", "将该任务从头重跑并入队，确定继续？"),
+            ("reprocess", "人工重跑", "button-primary", "将该任务从头重跑并入队，确定继续？"),
+            ("snooze", "暂缓 24 小时", "button-secondary", "暂缓该质量问题 24 小时，确定继续？"),
+            ("ignore", "忽略", "button-danger", "忽略该质量问题，确定继续？"),
+            ("resume", "恢复评估", "button-secondary", "恢复该质量问题的规则评估，确定继续？"),
+        ):
+            if action_name not in actions:
+                continue
+            until = f'<input type="hidden" name="until" value="{time.time() + 24 * 60 * 60}">' if action_name == "snooze" else ""
+            action_forms.append(
+                f'<form method="post" action="/quality/action/{action_name}" onsubmit="return confirm(\'{html.escape(confirm, quote=True)}\')">'
+                f'<input type="hidden" name="task_id" value="{task_id}">'
+                f'<input type="hidden" name="rule_id" value="{html.escape(str(descriptor.get("rule_id") or ""), quote=True)}">'
+                f'<input type="hidden" name="rule_version" value="{html.escape(str(descriptor.get("rule_version") or "1"), quote=True)}">'
+                f'<input type="hidden" name="action" value="{action_name}">{until}'
+                f'<button class="{css}" type="submit">{label}</button></form>'
+            )
+        actions_markup = "".join(action_forms)
+        status_label = "auto eligible" if descriptor.get("auto_allowed") else str(descriptor.get("manual_status") or "manual required").replace("_", " ")
         rows.append(
-            f"""<article class="quality-row">
+            f"""<article class="quality-row" data-quality-group="{html.escape(status_label.replace(' ', '-'), quote=True)}">
   <div class="quality-task">
+    <div class="subtle">{html.escape(status_label)}</div>
     <div class="task-title"><a href="/task/{task_id}">#{task_id} {title}</a></div>
     <div class="quality-issue-counts">{counts_markup}</div>
+    <div class="quality-issue-counts"><span class="quality-count"><span>规则</span><strong>{html.escape(str(descriptor.get("rule_id") or "manual_required"))}</strong></span><span class="quality-count"><span>风险</span><strong>{html.escape(str(descriptor.get("risk_level") or "-"))}</strong></span><span class="quality-count"><span>状态</span><strong>{html.escape(status_label)}</strong></span><span class="quality-count"><span>尝试次数</span><strong>{html.escape(str(descriptor.get("attempts", 0)))}</strong></span><span class="quality-count"><span>下次时间</span><strong>{html.escape(next_label)}</strong></span><span class="quality-count"><span>证据</span><strong>{html.escape(evidence)}</strong></span></div>
   </div>
-  <div class="quality-row-action"><span class="quality-total">共 {row['total']} 条</span><a class="button" href="/task/{task_id}">查看任务</a></div>
+  <div class="quality-row-action"><span class="quality-total">共 {row['total']} 条</span><a class="button" href="/task/{task_id}">查看任务</a><div class="actions">{actions_markup}</div></div>
 </article>"""
         )
     results_markup = (
@@ -899,7 +951,7 @@ def render_quality_page(store: TaskStore, quality_automation: QualityAutomation 
     )
     fix_action = ""
     if actionable_task_ids:
-        fix_action = f"""<form method="post" action="/quality/fix" onsubmit="return confirm('将按巡检结果入队修复：缺失目录恢复 STRM，直链 STRM 从头重跑。确定继续？')">
+        fix_action = f"""<form method="post" action="/quality/fix" onsubmit="return confirm('将按当前允许的质量动作入队重跑，不会恢复缺失目录。确定继续？')">
         <button class="button-primary" type="submit">修复 {len(actionable_task_ids)} 个可处理任务</button>
       </form>"""
     automation_markup = ""
@@ -955,38 +1007,99 @@ def render_quality_page(store: TaskStore, quality_automation: QualityAutomation 
 """
     return _page("质量巡检", body, active="quality")
 
-def fix_quality_issues(store: TaskStore) -> int:
+def fix_quality_issues(store: TaskStore, quality_automation: QualityAutomation | None = None) -> int:
+    if quality_automation is None:
+        return 0
     fixed_task_ids: set[int] = set()
-    for issue in scan_task_quality(store):
-        if issue.task_id in fixed_task_ids:
+    for item in quality_items(store, quality_automation=quality_automation):
+        task_id = int(item["task_id"])
+        if task_id in fixed_task_ids:
             continue
-        task = store.find_task(issue.task_id)
-        action = _quality_repair_action(issue, task)
-        if action == "restore":
-            if _apply_web_transition(
-                store,
-                task,
-                target_stage=TaskStage.EMBY_CONFIRMED,
-                target_event_message="Web 巡检恢复 STRM 已入队",
-                initial_event_message="Web 巡检自动修复：恢复 STRM",
-                initial_event_stage=TaskStage.EMBY_CONFIRMED,
-                metadata_patch={
-                    "retry_from_stage": task.current_stage.value,
-                    "retry_stage": TaskStage.EMBY_CONFIRMED.value,
-                },
-            ):
-                fixed_task_ids.add(task.id)
-        elif action == "reprocess":
-            if _apply_web_transition(
-                store,
-                task,
-                target_stage=TaskStage.RECEIVED,
-                target_event_message="Web 巡检自动修复：从头重跑",
-                metadata_patch=build_reprocess_metadata(task),
-                metadata_delete_keys=REPROCESS_METADATA_DELETE_KEYS,
-            ):
-                fixed_task_ids.add(task.id)
+        if not item.get("auto_allowed") or "execute" not in item.get("available_actions", []):
+            continue
+        result = quality_automation.manual_action(
+            task_id,
+            str(item.get("rule_id") or ""),
+            "execute",
+            "legacy-web",
+            rule_version=str(item.get("rule_version") or "1"),
+        )
+        if result.get("status") == "queued":
+            fixed_task_ids.add(task_id)
     return len(fixed_task_ids)
+
+
+def _quality_task_id(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        task_id = int(str(value).strip())
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return task_id if 1 <= task_id <= QualityAutomation.MAX_TASK_ID else None
+
+
+def _quality_action_result(result: dict[str, object]) -> dict[str, object]:
+    payload = dict(result)
+    task = payload.get("task")
+    if task is not None:
+        payload["task"] = {
+            "id": task.id,
+            "title": task.title,
+            "stage": task.current_stage.value,
+            "status": task.status.value,
+            "updated_at": task.updated_at,
+        }
+    return payload
+
+
+def _run_quality_action(
+    quality_automation: QualityAutomation | None,
+    values: dict[str, object],
+    route_action: str,
+) -> tuple[int, dict[str, object]]:
+    if quality_automation is None:
+        return 409, {"error": "quality_unavailable"}
+    task_id = _quality_task_id(values.get("task_id"))
+    if task_id is None:
+        return 400, {"error": "invalid_task_id"}
+    rule_id = str(values.get("rule_id") or "").strip()
+    rule_version = str(values.get("rule_version") or values.get("version") or "").strip()
+    action = str(values.get("action") or route_action).strip().lower()
+    if not rule_id:
+        return 400, {"error": "quality_rule_required"}
+    if not rule_version:
+        return 409, {"error": "quality_rule_version_required"}
+    if route_action == "execute":
+        if action not in {"execute", "reprocess"}:
+            return 409, {"error": "quality_action_not_allowed"}
+    elif action != route_action:
+        return 409, {"error": "quality_action_not_allowed"}
+    result = quality_automation.manual_action(
+        task_id,
+        rule_id,
+        action,
+        str(values.get("actor") or "web"),
+        values.get("until"),
+        rule_version=rule_version,
+    )
+    status = str(result.get("status") or "")
+    if status == "not_found":
+        return 404, {"error": "quality_task_not_found", "reason": result.get("reason", "")}
+    if status == "invalid":
+        return 400, {"error": "invalid_quality_action", "reason": result.get("reason", "")}
+    if status == "conflict":
+        return 409, {"error": "quality_action_conflict", "reason": result.get("reason", "")}
+    if status == "rejected":
+        reason = str(result.get("reason") or "quality_action_rejected")
+        error = {
+            "rule_mismatch": "quality_rule_mismatch",
+            "rule_version_changed": "quality_rule_version_changed",
+            "action_not_allowed": "quality_action_not_allowed",
+            "invalid_until": "invalid_until",
+        }.get(reason, "quality_action_rejected")
+        return 409, {"error": error, "reason": reason}
+    return 200, _quality_action_result(result)
 
 
 def _render_health_notice(label: str, task: Any, detail: str) -> str:
@@ -1295,8 +1408,23 @@ class WebApp:
             return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, page.encode("utf-8")
         if method == "GET" and parsed.path == "/quality":
             return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, render_quality_page(self.store, self.quality_automation).encode("utf-8")
+        if method == "POST" and parsed.path in {
+            "/quality/action/execute",
+            "/quality/action/snooze",
+            "/quality/action/ignore",
+            "/quality/action/resume",
+        }:
+            route_action = parsed.path.rsplit("/", 1)[-1]
+            try:
+                values = {key: items[0] if items else "" for key, items in parse_qs(body.decode("utf-8"), keep_blank_values=True).items()}
+            except UnicodeDecodeError:
+                return 400, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"invalid quality request"
+            status, result = _run_quality_action(self.quality_automation, values, route_action)
+            if status != 200:
+                return status, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, str(result.get("error") or "quality action rejected").encode("utf-8")
+            return 303, {"Location": "/quality", **auth_headers}, b""
         if method == "POST" and parsed.path == "/quality/fix":
-            fix_quality_issues(self.store)
+            fix_quality_issues(self.store, self.quality_automation)
             return 303, {"Location": "/quality", **auth_headers}, b""
         if method == "POST" and parsed.path == "/quality/run":
             if self.quality_automation is None:
@@ -1430,8 +1558,6 @@ class WebApp:
     def _api_body(body: bytes, headers: dict[str, str]) -> dict[str, Any]:
         text = body.decode("utf-8") if body else ""
         if "application/json" in str(headers.get("Content-Type") or headers.get("content-type") or ""):
-            import json
-
             value = json.loads(text or "{}")
             return value if isinstance(value, dict) else {}
         values = parse_qs(text, keep_blank_values=True)
@@ -1465,8 +1591,23 @@ class WebApp:
             cleared = self.store.clear_finished_tasks()
             status, response_headers, response_body = api_response({"cleared": cleared})
             return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path in {
+            "/api/v1/quality/action/execute",
+            "/api/v1/quality/action/snooze",
+            "/api/v1/quality/action/ignore",
+            "/api/v1/quality/action/resume",
+        }:
+            route_action = path.rsplit("/", 1)[-1]
+            try:
+                values = self._api_body(body, headers)
+            except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError):
+                status, response_headers, response_body = api_response({"error": "invalid_quality_request"}, status=400)
+                return status, {**response_headers, **auth_headers}, response_body
+            status, result = _run_quality_action(self.quality_automation, values, route_action)
+            response_status, response_headers, response_body = api_response(result, status=status)
+            return response_status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path == "/api/v1/quality/fix":
-            fixed = fix_quality_issues(self.store)
+            fixed = fix_quality_issues(self.store, self.quality_automation)
             status, response_headers, response_body = api_response({"fixed": fixed})
             return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path == "/api/v1/quality/run":
