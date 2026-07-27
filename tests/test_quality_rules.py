@@ -114,6 +114,30 @@ class QualityRuleEngineTests(unittest.TestCase):
         self.assertIn("view", match.manual_actions)
         self.assertIn("resume", match.manual_actions)
 
+    def test_explicit_invalid_share_is_terminal_even_with_strm_issue(self):
+        for key in ("invalid_share_status", "share_validation_status"):
+            with self.subTest(key=key):
+                match = self.engine.evaluate(
+                    task(**{key: "invalid"}, strm_mode="shared"),
+                    [QualityIssue("direct_strm", "direct", "/library/movie.strm")],
+                    config={"allow_auto_reprocess": True, "max_attempts": 2},
+                )
+
+                self.assertEqual(match.rule_id, "terminal_invalid_share")
+                self.assertFalse(match.auto_allowed)
+                self.assertEqual(match.auto_action, "none")
+
+    def test_new_quality_repair_attempts_limit_auto_reprocess(self):
+        match = self.engine.evaluate(
+            task(strm_mode="shared", quality_repair_attempts=2),
+            [QualityIssue("direct_strm", "direct", "/library/movie.strm")],
+            config={"allow_auto_reprocess": True, "max_attempts": 2},
+        )
+
+        self.assertEqual(match.rule_id, "repeated_failure")
+        self.assertFalse(match.auto_allowed)
+        self.assertIn("view", match.manual_actions)
+
     def test_missing_destination_is_manual(self):
         match = self.engine.evaluate(task(), [QualityIssue("missing_dest", "missing", "/library/movie")])
 

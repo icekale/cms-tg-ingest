@@ -126,6 +126,9 @@ def has_terminal_invalid_share_marker(task: TaskSnapshot) -> bool:
     for key in ("invalid_share_cleaned", "source_deleted"):
         if _bool_value(metadata.get(key)):
             return True
+    for key in ("invalid_share_status", "share_validation_status"):
+        if str(metadata.get(key) or "").strip().lower() == "invalid":
+            return True
     for key in ("move_status", "emby_status", "share_validation_status", "invalid_share_status"):
         if str(metadata.get(key) or "").strip().lower() in {"invalid_share_cleaned", "source_deleted"}:
             return True
@@ -139,10 +142,15 @@ def has_complete_evidence(issues: Iterable[QualityIssue], issue_code: str) -> bo
 
 def attempts_exhausted(task: TaskSnapshot, config: object | None = None) -> bool:
     controls = rule_config(config)
-    try:
-        attempts = int(task.metadata.get("quality_attempts", task.retry_count) or 0)
-    except (TypeError, ValueError):
-        attempts = task.retry_count
+    attempts = task.retry_count
+    for key in ("quality_repair_attempts", "quality_attempts"):
+        if key not in task.metadata or task.metadata[key] is None:
+            continue
+        try:
+            attempts = int(task.metadata[key] or 0)
+        except (TypeError, ValueError):
+            continue
+        break
     return attempts >= int(controls["max_attempts"])
 
 
@@ -224,6 +232,15 @@ class QualityRuleEngine:
                 invalid_codes,
                 manual_actions=_MANUAL_ACTIONS,
                 evidence=(raw_mode or str(exc),),
+            )
+        if issue_list and attempts_exhausted(task, controls):
+            return _match(
+                "repeated_failure",
+                "high",
+                "quality attempts have reached the configured limit",
+                issue_codes,
+                manual_actions=_MANUAL_ACTIONS,
+                evidence=(issue.detail for issue in issue_list if issue.detail),
             )
         mismatch_issues = tuple(
             issue for issue in issue_list if mode_rule_for_issue(mode, issue.code) == "strm_mode_mismatch"

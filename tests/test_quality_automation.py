@@ -7,7 +7,7 @@ from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Barrier, Event, Lock
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from app.config import Config
@@ -521,6 +521,26 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertEqual(summary.budget_used["used"]["115_checks"], 1)
             self.assertEqual(set(plans), {task.id for task in tasks})
 
+    def test_max_tasks_budget_limits_actual_adapter_calls_across_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = FakeQualityRepairAdapter()
+            service, library = self.make_service(tmp, max_tasks=1)
+            service.repair_adapter = adapter
+            tasks = []
+            for name in ("max-one", "max-two"):
+                dest = library / name
+                dest.mkdir(parents=True)
+                (dest / "movie.strm").write_text("https://cms/d/direct.mkv", encoding="utf-8")
+                tasks.append(self.add_task(service.store, name, dest, own_share_receive_code="1212"))
+
+            summary = service.run_once("max-tasks-run")
+
+            self.assertEqual(len([call for call in adapter.calls if call[0] == "reprocess"]), 1)
+            self.assertEqual(sum(plan.execution_status == "queued" for plan in summary.plans), 1)
+            self.assertEqual(sum(plan.reason == "max_tasks" for plan in summary.plans), 1)
+            self.assertEqual(summary.budget_used["max_tasks"], 1)
+            self.assertEqual(summary.budget_used["used"]["max_tasks"], 1)
+
     def test_reprocess_cooldown_and_attempt_limit_block_until_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
             service, library = self.make_service(tmp)
@@ -574,6 +594,19 @@ class QualityPlanningTests(unittest.TestCase):
 
             self.assertEqual(plan.action, "skip")
             self.assertEqual(plan.reason, "task_busy")
+
+    def test_safe_task_without_issues_is_still_evaluated_without_a_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            task = self.add_task(service.store, "clean-evaluation", library / "movie")
+            evaluator = Mock(wraps=service.rule_engine.evaluate)
+            service.rule_engine.evaluate = evaluator
+
+            plans = service._plan([task], [])
+
+            evaluator.assert_called_once()
+            self.assertEqual(evaluator.call_args.args[1], [])
+            self.assertEqual(plans, [])
 
     def test_missing_or_outside_metadata_is_skipped_as_unsafe(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -774,12 +807,40 @@ class QualityRepairExecutionTests(unittest.TestCase):
 
             plans = {plan.task_id: plan for plan in summary.plans}
             self.assertEqual(plans[invalid.id].execution_status, "skipped")
-            self.assertEqual(plans[invalid.id].reason, "manual_required")
+            self.assertEqual(plans[invalid.id].reason, "terminal_invalid_share")
             self.assertEqual(plans[unknown.id].execution_status, "skipped")
             self.assertEqual(plans[unknown.id].reason, "manual_required")
             self.assertEqual(plans[risk.id].execution_status, "skipped")
             self.assertEqual(plans[risk.id].reason, "risk_controlled")
             self.assertEqual([call[0] for call in adapter.calls], [])
+
+    def test_execute_plan_rejects_explicit_invalid_share_before_cas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = FakeQualityRepairAdapter()
+            service, library = self.make_service(tmp, adapter)
+            task = self.add_task(
+                service.store,
+                "execute-invalid",
+                library / "movie",
+                own_share_receive_code="1212",
+                invalid_share_status="invalid",
+            )
+            plan = QualityRepairPlan(
+                task.id,
+                "reprocess",
+                "strm_mode_mismatch",
+                ("direct_strm",),
+                planned_updated_at=task.updated_at,
+            )
+
+            result = service.execute_plan(plan, "execute-invalid-run")
+
+            self.assertEqual(result.execution_status, "skipped")
+            self.assertEqual(result.reason, "terminal_invalid_share")
+            self.assertEqual(adapter.calls, [])
+            current = service.store.find_task(task.id)
+            self.assertEqual(current.current_stage, TaskStage.MOVED)
+            self.assertEqual(current.status, TaskStatus.SUCCEEDED)
 
     def test_cleanup_requires_all_positive_gates_and_preserves_files_on_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -892,6 +953,46 @@ class QualityRepairExecutionTests(unittest.TestCase):
             self.assertEqual(first_result.execution_status, "queued")
             self.assertEqual(second_result.execution_status, "skipped")
             self.assertEqual(second_result.reason, "task_busy")
+
+    def test_two_executions_reach_attempt_limit_and_third_is_not_queued(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = FakeQualityRepairAdapter()
+            service, library = self.make_service(tmp, adapter)
+            destination = library / "attempts"
+            destination.mkdir(parents=True)
+            task = self.add_task(service.store, "attempts", destination, own_share_receive_code="1212")
+            issue = QualityIssue("direct_strm", "direct", str(destination / "movie.strm"), task.id)
+
+            first = service._plan([task], [issue])[0]
+            self.assertEqual(service.execute_plan(first, "attempt-one").execution_status, "queued")
+
+            service.store.patch_metadata(
+                task.id,
+                {
+                    "dest_path": str(destination),
+                    "own_share_code": "own",
+                    "own_share_receive_code": "1212",
+                    "quality_next_eligible_at": 0,
+                },
+            )
+            current = service.store.find_task(task.id)
+            second = service._plan([current], [issue])[0]
+            self.assertEqual(service.execute_plan(second, "attempt-two").execution_status, "queued")
+
+            service.store.patch_metadata(
+                task.id,
+                {
+                    "dest_path": str(destination),
+                    "own_share_code": "own",
+                    "own_share_receive_code": "1212",
+                    "quality_next_eligible_at": 0,
+                },
+            )
+            current = service.store.find_task(task.id)
+            third = service._plan([current], [issue])[0]
+
+            self.assertEqual(third.reason, "attempt_limit")
+            self.assertEqual(len([call for call in adapter.calls if call[0] == "reprocess"]), 2)
 
 
 

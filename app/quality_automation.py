@@ -413,6 +413,13 @@ class QualityAutomation:
             task_issues = grouped.get(task.id)
             if not task_issues:
                 if self._safe_metadata(task):
+                    match = self.rule_engine.evaluate(task, [], config=self.rule_config)
+                    if match.rule_id == "no_issue":
+                        continue
+                    current = task
+                    if run_id:
+                        current = self._persist_rule_match(task, match, run_id) or task
+                    plans.append(self._plan_match(current, match, current_time))
                     continue
                 task_issues = [QualityIssue("unsafe_metadata", "任务质量元数据不安全", task_id=task.id, title=task.title)]
             match = self.rule_engine.evaluate(task, task_issues, config=self.rule_config)
@@ -572,6 +579,14 @@ class QualityAutomation:
             TaskStage.NEEDS_ACTION,
         }:
             return replace(plan, execution_status="skipped", reason="terminal_task")
+        invalid_status = str(
+            task.metadata.get("invalid_share_status") or task.metadata.get("share_validation_status") or ""
+        ).strip().lower()
+        if invalid_status in {"invalid", "invalid_share_cleaned", "source_deleted"} or any(
+            str(task.metadata.get(key) or "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
+            for key in ("invalid_share_cleaned", "source_deleted")
+        ):
+            return replace(plan, execution_status="skipped", reason="terminal_invalid_share")
         if task.status == TaskStatus.RUNNING or task.claimed_by.strip():
             return replace(plan, execution_status="skipped", reason="task_busy")
         if not self._safe_metadata(task):
@@ -580,13 +595,6 @@ class QualityAutomation:
             return replace(plan, execution_status="skipped", reason="missing_source_evidence")
         if self._risk_controlled(task, time.time()):
             return replace(plan, execution_status="skipped", reason="risk_control")
-        if any(
-            str(task.metadata.get(key) or "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
-            for key in ("invalid_share_cleaned", "source_deleted")
-        ) or str(
-            task.metadata.get("invalid_share_status") or task.metadata.get("share_validation_status") or ""
-        ).strip().lower() in {"invalid_share_cleaned", "source_deleted"}:
-            return replace(plan, execution_status="skipped", reason="terminal_invalid_share")
         state = self.store.quality_state(task.id)
         if str(state.get("quality_manual_status") or "open").strip().lower() in {"snoozed", "ignored"}:
             return replace(plan, execution_status="skipped", reason="manual_suppressed")
