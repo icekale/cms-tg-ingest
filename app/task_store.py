@@ -639,6 +639,14 @@ class TaskStore:
                 "SELECT * FROM tasks WHERE source_type = ? AND source_key = ?",
                 ("cloud_download", source_key),
             ).fetchone()
+            if row is not None and not str(row["claimed_by"] or "").strip():
+                merged_metadata = self._merge_metadata(row["metadata_json"], {"strm_mode": "shared"})
+                if merged_metadata != str(row["metadata_json"] or "{}"):
+                    conn.execute(
+                        "UPDATE tasks SET metadata_json = ? WHERE id = ?",
+                        (merged_metadata, int(row["id"])),
+                    )
+                    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(row["id"]),)).fetchone()
         return self._snapshot(row)
 
     def find_task(self, task_id: int) -> TaskSnapshot | None:

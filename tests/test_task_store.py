@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.models import TaskStage, TaskStatus
+from app.strm_mode import effective_task_strm_mode
 from app.task_store import TaskStore
 
 
@@ -456,6 +457,23 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(second.source_type, "cloud_download")
             self.assertEqual(second.source_key, "ed2k:hash:10")
             self.assertEqual(second.current_stage, TaskStage.CLOUD_DOWNLOADING)
+
+    def test_legacy_cloud_task_always_resolves_to_shared_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db", default_strm_mode="direct")
+            task = store.upsert_cloud_task("btih:legacy", "magnet:?xt=urn:btih:legacy")
+            with store._connection() as conn:
+                conn.execute(
+                    "UPDATE tasks SET metadata_json = ? WHERE id = ?",
+                    ('{"legacy_marker":"keep"}', task.id),
+                )
+
+            loaded = store.find_task(task.id)
+            self.assertEqual(effective_task_strm_mode(loaded, default_mode="direct"), "shared")
+
+            upserted = store.upsert_cloud_task("btih:legacy", "magnet:?xt=urn:btih:legacy")
+            self.assertEqual(upserted.metadata["strm_mode"], "shared")
+            self.assertEqual(upserted.metadata["legacy_marker"], "keep")
 
     def test_upsert_cloud_task_does_not_mutate_active_claim(self):
         with tempfile.TemporaryDirectory() as tmp:

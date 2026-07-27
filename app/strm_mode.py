@@ -68,6 +68,13 @@ def effective_task_strm_mode(
     default_mode: str = "shared",
     legacy_workflow_mode: str = "",
 ) -> str:
+    if isinstance(task, Mapping):
+        source_type = task.get("source_type")
+    else:
+        source_type = getattr(task, "source_type", None)
+    if str(source_type or "").strip().lower() == "cloud_download":
+        return "shared"
+
     metadata = _task_metadata(task)
     metadata_mode = metadata.get("strm_mode")
     if metadata_mode is not None and str(metadata_mode).strip():
