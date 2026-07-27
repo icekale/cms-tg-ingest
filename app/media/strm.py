@@ -636,6 +636,26 @@ def remove_direct_strm_relative_paths(path: Path, relative_paths: set[Path]) -> 
     return removed
 
 
+def remove_direct_strm_files_matching_source(source: Path, destination: Path) -> int:
+    """Remove only stale direct STRMs at paths supplied by a validated source."""
+    source = safe_resolve(source)
+    destination = safe_resolve(destination)
+    if not source.is_dir() or not destination.is_dir():
+        return 0
+    removed = 0
+    for source_path in iter_strm_files(source):
+        relative_path = source_path.relative_to(source)
+        target = safe_resolve(destination / relative_path)
+        if not is_relative_to(target, destination) or not target.is_file() or not _strm_has_direct_link(target):
+            continue
+        try:
+            target.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
 def _self_share_move_path_issue(source: Path, dest: Path, move_config: MoveConfig) -> str:
     if not is_under_any_root(source, move_config.source_roots):
         return "源目录不在允许范围内"
@@ -703,7 +723,9 @@ def merge_self_share_strm_folder(
                 source_target = safe_resolve(source / relative)
                 if not is_relative_to(source_target, source) or not source_target.is_file():
                     issue = f"源自有分享 STRM 不存在：{relative}"
+        stale_direct_removed = 0
         if not issue and str(row.get("workflow_mode") or "") == "self_share_sync" and dest.exists():
+            stale_direct_removed = remove_direct_strm_files_matching_source(source, dest)
             if relative is not None:
                 target = safe_resolve(dest / relative)
                 if not is_relative_to(target, dest):
@@ -713,7 +735,7 @@ def merge_self_share_strm_folder(
                     if not target.exists() and issue == f"目标自有分享 STRM 不存在：{relative}":
                         issue = validate_self_share_strm_source(dest, row) if has_strm_file(dest) else ""
             else:
-                issue = validate_self_share_strm_destination(dest, row)
+                issue = "" if stale_direct_removed and not has_strm_file(dest) else validate_self_share_strm_destination(dest, row)
         if issue:
             return store.update_move(
                 int(row["id"]),

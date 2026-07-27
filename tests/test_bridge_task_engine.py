@@ -2684,7 +2684,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.cms.share_sync_calls, [("owncode", "ownpwd", "0", "/media/share")])
             self.assertEqual(updated["workflow_phase"], "restore_share_sync_submitted")
 
-    def test_moved_stage_rejects_direct_existing_episode_target_without_deleting_source(self):
+    def test_moved_stage_replaces_direct_existing_episode_target_without_deleting_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             tv_root = Path(tmp) / "library" / "tv"
             emby = FakeEmby()
@@ -2737,11 +2737,12 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             result = workflow.run_stage(task)
 
             target = episode_dir / "权力的游戏前传：龙族 (2022) - S03E03.strm"
-            self.assertEqual(result.outcome, StageOutcome.FAILED)
-            self.assertEqual(target.read_text(encoding="utf-8"), "https://115.com/d/direct/S03E03.mkv")
-            self.assertTrue((self.config.strm_root / row["own_share_file_name"] / relative_path).exists())
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIn("已用自有分享 STRM 恢复", result.message)
+            self.assertEqual(target.read_text(encoding="utf-8"), "https://115.com/s/owncode_ownpwd_/S03E03.mkv")
+            self.assertFalse((self.config.strm_root / row["own_share_file_name"] / relative_path).exists())
             self.assertEqual(self.cms.share_sync_calls, [])
-            self.assertEqual(emby.refreshed_paths, [])
+            self.assertEqual(emby.refreshed_paths, [str(bridge.safe_resolve(dest))])
 
     def test_moved_stage_requests_emby_refresh_for_destination_once(self):
         with tempfile.TemporaryDirectory() as tmp:

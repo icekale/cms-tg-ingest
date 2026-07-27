@@ -2555,6 +2555,44 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertIn("发现直链 STRM", updated["move_error"])
             self.assertFalse((dest / "movie.strm").exists())
 
+    def test_merge_self_share_folder_replaces_stale_matching_direct_strm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            dest = root / "library" / "Movie"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            (source / "movie.strm").write_text(
+                "http://cms/s/ownshare_1212_movie.mkv",
+                encoding="utf-8",
+            )
+            (dest / "movie.strm").write_text(
+                "http://cms/d/old-direct.mkv",
+                encoding="utf-8",
+            )
+            store = bridge.SubmissionStore(root / "db.sqlite")
+            row = store.upsert_submission(
+                bridge.ShareKey("abc", "1234"),
+                "https://115cdn.com/s/abc?password=1234",
+                "received",
+            )
+            row = store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_code="ownshare",
+                own_share_receive_code="1212",
+            ) or row
+            plan = bridge.MovePlan("conflict", "ready", source, dest, "欧美电影")
+
+            updated = bridge.merge_self_share_strm_folder(plan, store, row)
+
+            self.assertEqual(updated["move_status"], "moved")
+            self.assertEqual(
+                (dest / "movie.strm").read_text(encoding="utf-8"),
+                "http://cms/s/ownshare_1212_movie.mkv",
+            )
+            self.assertFalse(source.exists())
+
     def test_merge_self_share_folder_rejects_uppercase_direct_strm_before_copy(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3172,7 +3210,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertTrue(source.exists())
             self.assertEqual(direct.read_text(encoding="utf-8"), "http://cms/d/direct_movie")
 
-    def test_merge_self_share_folder_rejects_direct_existing_destination_before_copy(self):
+    def test_merge_self_share_folder_replaces_matching_direct_existing_destination(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "share" / "Movie"
@@ -3191,10 +3229,9 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
             updated = bridge.merge_self_share_strm_folder(plan, store, row, config)
 
-            self.assertEqual(updated["move_status"], "error")
-            self.assertIn("直链 STRM", updated["move_error"])
-            self.assertTrue(source.exists())
-            self.assertEqual(direct.read_text(encoding="utf-8"), "http://cms/d/direct_movie")
+            self.assertEqual(updated["move_status"], "moved")
+            self.assertFalse(source.exists())
+            self.assertEqual(direct.read_text(encoding="utf-8"), "http://cms/s/direct_target_1212_movie")
 
     def test_repair_does_not_use_legacy_discovery_for_single_persisted_move_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3584,7 +3621,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertTrue((movie_root / own_name / "movie.strm").exists())
             self.assertEqual(updated["move_status"], "moved")
 
-    def test_repair_stranded_self_share_folder_rejects_direct_target(self):
+    def test_repair_stranded_self_share_folder_replaces_matching_direct_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             share_root = root / "share"
@@ -3620,11 +3657,10 @@ class SelfShareWorkflowTests(unittest.TestCase):
             repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
             updated = store.find_by_id(int(row["id"]))
 
-            self.assertEqual(repaired, 0)
-            self.assertTrue(source.exists())
-            self.assertEqual((dest / strm_name).read_text(encoding="utf-8"), "http://cms/d/direct.mp4")
-            self.assertEqual(updated["move_status"], "error")
-            self.assertIn("直链 STRM", updated["move_error"])
+            self.assertEqual(repaired, 1)
+            self.assertFalse(source.exists())
+            self.assertEqual((dest / strm_name).read_text(encoding="utf-8"), "http://cms/s/swswmerge_1212_1.mp4")
+            self.assertEqual(updated["move_status"], "moved")
 
     def test_remove_direct_strm_files_deletes_uppercase_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
