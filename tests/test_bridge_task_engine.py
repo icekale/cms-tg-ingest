@@ -354,6 +354,23 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertIn("111", self.p115.find_organized_calls[0][2])
             self.assertNotIn("222", self.p115.find_organized_calls[0][2])
 
+    def test_received_stage_stops_when_claimed_receive_cid_persistence_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            task = self._claim_task("abc", "1234", TaskStage.RECEIVED)
+
+            with patch.object(workflow.task_store, "patch_claimed_metadata", return_value=None) as persist:
+                result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(result.error_type, "receive_cid_persistence_stale_claim")
+            self.assertIn("claim 已失效", result.message)
+            self.assertEqual(result.metadata["receive_target_cid"], "pending-cid")
+            self.assertEqual(result.metadata["receive_cid_persist_status"], "stale_claim")
+            self.assertEqual(self.p115.received, [("abc", "1234", "pending-cid")])
+            self.assertIsNone(self.submissions.find_by_key(bridge.ShareKey("abc", "1234")))
+            persist.assert_called_once()
+
     def test_received_stage_stops_when_115_receive_is_restricted(self):
         class RestrictedP115(FakeP115):
             def receive_share_to_cid(self, share_code, receive_code, receive_cid):

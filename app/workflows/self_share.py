@@ -738,12 +738,32 @@ class BridgeSelfShareTaskWorkflow:
             raise
         patch_claimed_metadata = getattr(self.task_store, "patch_claimed_metadata", None)
         if callable(patch_claimed_metadata) and str(getattr(task, "claimed_by", "") or "").strip():
-            patch_claimed_metadata(
+            persisted = patch_claimed_metadata(
                 int(task.id),
                 expected_claimed_by=str(task.claimed_by),
                 expected_claimed_at=float(task.claimed_at),
                 expected_updated_at=float(task.updated_at),
                 patch={"receive_target_cid": receive_cid},
+            )
+            if persisted is None:
+                return StageResult(
+                    StageOutcome.NEEDS_ACTION,
+                    "115 接收成功，但接收目录 CID 未能持久化，任务 claim 已失效；已停止后续处理，请重试",
+                    {
+                        "receive_target_cid": receive_cid,
+                        "receive_cid_persist_status": "stale_claim",
+                    },
+                    error_type="receive_cid_persistence_stale_claim",
+                )
+        elif str(getattr(task, "claimed_by", "") or "").strip():
+            return StageResult(
+                StageOutcome.NEEDS_ACTION,
+                "115 接收成功，但当前任务不支持原子持久化接收目录 CID，已停止后续处理",
+                {
+                    "receive_target_cid": receive_cid,
+                    "receive_cid_persist_status": "unsupported",
+                },
+                error_type="receive_cid_persistence_unsupported",
             )
         title = str(received.get("title") or task.title or task.share_code).strip()
         row = self.store.upsert_submission(
