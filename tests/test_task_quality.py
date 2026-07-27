@@ -36,6 +36,25 @@ class TaskQualityTests(unittest.TestCase):
 
             self.assertEqual([issue.code for issue in issues], ["unexpected_strm"])
 
+    def test_allowed_roots_generator_is_reusable_for_strm_file_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            allowed_root = root / "library"
+            dest = allowed_root / "Movie"
+            dest.mkdir(parents=True)
+            (dest / "movie.strm").write_text("http://cms/s/ownshare_1212_fileid.mkv", encoding="utf-8")
+            store = TaskStore(root / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+
+            issues = inspect_task_files(
+                task,
+                dest_path=dest,
+                own_share_code="ownshare",
+                allowed_roots=(path for path in (allowed_root,)),
+            )
+
+            self.assertEqual(issues, [])
+
     def test_source_shared_mode_accepts_original_share_strm_without_own_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

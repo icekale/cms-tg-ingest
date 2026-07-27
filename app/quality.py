@@ -31,6 +31,7 @@ def inspect_task_files(
     allowed_roots: Iterable[str | Path] | None = None,
 ) -> list[QualityIssue]:
     del task
+    allowed_roots = tuple(allowed_roots) if allowed_roots is not None else None
     expected_mode = normalize_strm_mode(expected_mode)
     dest = Path(dest_path)
     if not is_path_within_allowed_roots(dest, allowed_roots):
