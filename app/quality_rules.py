@@ -42,7 +42,8 @@ _RULE_PRIORITIES = {
     "no_issue": 10,
     "manual_required": 1,
 }
-_MANUAL_ACTIONS = ("view", "resume")
+_MANUAL_ACTIONS = ("view", "snooze", "ignore")
+_RESTRICTED_MANUAL_ACTIONS = ("view", "resume")
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on", "enabled"})
 
 
@@ -208,7 +209,7 @@ class QualityRuleEngine:
                 "critical",
                 "share or source has reached a terminal invalid state",
                 issue_codes,
-                manual_actions=_MANUAL_ACTIONS,
+                manual_actions=_RESTRICTED_MANUAL_ACTIONS,
                 evidence=(issue.detail for issue in issue_list if issue.detail),
             )
 
@@ -218,7 +219,7 @@ class QualityRuleEngine:
                 "high",
                 "path is outside the allowed boundary",
                 issue_codes,
-                manual_actions=_MANUAL_ACTIONS,
+                manual_actions=_RESTRICTED_MANUAL_ACTIONS,
                 evidence=(issue.detail for issue in issue_list if issue.detail),
             )
 
@@ -228,7 +229,7 @@ class QualityRuleEngine:
                 "high",
                 "115 risk control or cooldown is active",
                 issue_codes,
-                manual_actions=_MANUAL_ACTIONS,
+                manual_actions=_RESTRICTED_MANUAL_ACTIONS,
                 evidence=(issue.detail for issue in issue_list if issue.detail),
             )
 
@@ -242,7 +243,7 @@ class QualityRuleEngine:
                 "high",
                 "task STRM mode is invalid and requires manual review",
                 invalid_codes,
-                manual_actions=_MANUAL_ACTIONS,
+                manual_actions=_RESTRICTED_MANUAL_ACTIONS,
                 evidence=(raw_mode or str(exc),),
             )
         mismatch_issues = tuple(
@@ -255,7 +256,7 @@ class QualityRuleEngine:
                     "high",
                     "quality attempts have reached the configured limit",
                     issue_codes,
-                    manual_actions=_MANUAL_ACTIONS,
+                manual_actions=_RESTRICTED_MANUAL_ACTIONS,
                     evidence=(issue.detail for issue in issue_list if issue.detail),
                 )
             evidence = tuple(issue.detail for issue in mismatch_issues if str(issue.detail).strip())
@@ -271,7 +272,7 @@ class QualityRuleEngine:
                 ("direct_strm",),
                 auto_action="reprocess",
                 auto_allowed=auto_allowed,
-                manual_actions=() if auto_allowed else _MANUAL_ACTIONS,
+                manual_actions=_MANUAL_ACTIONS,
                 evidence=evidence,
             )
 
@@ -301,7 +302,7 @@ class QualityRuleEngine:
                     "high",
                     "quality attempts have reached the configured limit",
                     issue_codes,
-                    manual_actions=_MANUAL_ACTIONS,
+                    manual_actions=_RESTRICTED_MANUAL_ACTIONS,
                     evidence=(issue.detail for issue in issue_list if issue.detail),
                 )
             auto_allowed = (
@@ -316,7 +317,7 @@ class QualityRuleEngine:
                 ("unexpected_strm",),
                 auto_action="reprocess",
                 auto_allowed=auto_allowed,
-                manual_actions=() if auto_allowed else _MANUAL_ACTIONS,
+                manual_actions=_MANUAL_ACTIONS,
                 evidence=(issue.detail for issue in unexpected_issues if issue.detail),
             )
         if "repeated_failure" in issue_codes:
@@ -325,7 +326,7 @@ class QualityRuleEngine:
                 "high",
                 "quality attempts have reached the configured limit",
                 issue_codes,
-                manual_actions=_MANUAL_ACTIONS,
+                    manual_actions=_RESTRICTED_MANUAL_ACTIONS,
                 evidence=(issue.detail for issue in issue_list if issue.detail),
             )
         if not issue_list or (mode == "direct" and issue_codes == ("direct_strm",)):

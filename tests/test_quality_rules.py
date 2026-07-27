@@ -81,6 +81,49 @@ class QualityRuleEngineTests(unittest.TestCase):
         self.assertEqual(match.auto_action, "reprocess")
         self.assertFalse(match.auto_allowed)
 
+    def test_real_issue_rules_expose_human_takeover_actions(self):
+        cases = (
+            (
+                "missing_destination",
+                task(strm_mode="shared"),
+                [QualityIssue("missing_dest", "missing", "/library/missing")],
+            ),
+            (
+                "missing_strm",
+                task(strm_mode="shared"),
+                [QualityIssue("missing_strm", "missing", "/library/empty")],
+            ),
+            (
+                "strm_mode_mismatch",
+                task(strm_mode="shared"),
+                [QualityIssue("direct_strm", "direct", "/library/movie.strm")],
+            ),
+            (
+                "unexpected_strm",
+                task(strm_mode="direct"),
+                [QualityIssue("unexpected_strm", "unexpected", "/library/movie.strm")],
+            ),
+        )
+
+        for expected_rule, current_task, issues in cases:
+            with self.subTest(rule=expected_rule):
+                match = self.engine.evaluate(current_task, issues, config={"allow_auto_reprocess": True})
+                self.assertEqual(match.rule_id, expected_rule)
+                self.assertIn("view", match.manual_actions)
+                self.assertIn("snooze", match.manual_actions)
+                self.assertIn("ignore", match.manual_actions)
+
+    def test_restricted_rules_do_not_gain_snooze_or_ignore(self):
+        for current_task, issues in (
+            (task(unsafe_path=True), [QualityIssue("unsafe_path", "unsafe", "/outside")]),
+            (task(invalid_share_cleaned=True), [QualityIssue("missing_dest", "missing", "/library/missing")]),
+            (task(p115_risk_controlled=True), [QualityIssue("missing_dest", "missing", "/library/missing")]),
+        ):
+            match = self.engine.evaluate(current_task, issues, config={"allow_auto_reprocess": True})
+            with self.subTest(rule=match.rule_id):
+                self.assertNotIn("snooze", match.manual_actions)
+                self.assertNotIn("ignore", match.manual_actions)
+
     def test_unexpected_strm_can_reprocess_with_complete_safe_evidence(self):
         match = self.engine.evaluate(
             task(strm_mode="direct"),

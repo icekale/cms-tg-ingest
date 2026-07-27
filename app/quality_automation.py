@@ -470,8 +470,7 @@ class QualityAutomation:
         }
         actions = ["view"]
         if manual_status in {"snoozed", "ignored", "manual_required"}:
-            if "resume" in rule_actions:
-                actions.append("resume")
+            actions.append("resume")
         elif not queued and not busy and not terminal:
             actions.extend(action for action in ("snooze", "ignore") if action in rule_actions)
             if auto_allowed:

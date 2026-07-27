@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,26 +9,12 @@ from unittest.mock import Mock, patch
 from app.models import TaskStage, TaskStatus
 from app.quality import QualityIssue
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
-from app.quality_rules import QualityRuleMatch
 from app.series_rules import parse_episode_filter
 from app.task_store import TaskStore
 from app.config import Config
 from app.quality_automation import QualityAutomation
 from app.web import WebApp
 from app.web_api import _safe_error, _safe_url, serialize_health, serialize_task
-
-
-class _ManualActionRuleEngine:
-    def evaluate(self, task, issues, *, config=None):
-        return QualityRuleMatch(
-            rule_id="missing_destination",
-            priority=60,
-            risk_level="medium",
-            reason="destination directory is missing",
-            issue_codes=("missing_dest",),
-            manual_actions=("view", "snooze", "ignore", "resume"),
-            evidence=(str(task.metadata.get("dest_path") or ""),),
-        )
 
 
 class WebApiTests(unittest.TestCase):
@@ -76,7 +63,7 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(item["title"], "质量 API 任务")
             self.assertEqual(item["rule_id"], "strm_mode_mismatch")
             self.assertIn("execute", item["available_actions"])
-            self.assertNotIn("snooze", item["available_actions"])
+            self.assertIn("snooze", item["available_actions"])
             self.assertIn("strm_mode_mismatch", payload["rule_counts"])
             self.assertIn("automation", payload)
 
@@ -177,7 +164,6 @@ class WebApiTests(unittest.TestCase):
                 "moved",
                 metadata_patch={"dest_path": str(root / "missing"), "own_share_code": "own"},
             )
-            quality.rule_engine = _ManualActionRuleEngine()
             app = WebApp(store, quality_automation=quality)
             _, _, body = app.handle_request("GET", "/api/v1/quality", {}, b"")
             item = json.loads(body)["items"][0]
@@ -186,13 +172,25 @@ class WebApiTests(unittest.TestCase):
                 "rule_id": item["rule_id"],
                 "rule_version": item["rule_version"],
             }
+            snoozed_status, _, snoozed_body = app.handle_request(
+                "POST",
+                "/api/v1/quality/action/snooze",
+                {"Content-Type": "application/json"},
+                json.dumps({**base, "action": "snooze", "until": time.time() + 3600}).encode(),
+            )
+            resumed_status, _, resumed_body = app.handle_request(
+                "POST",
+                "/api/v1/quality/action/resume",
+                {"Content-Type": "application/json"},
+                json.dumps({**base, "action": "resume"}).encode(),
+            )
             ignored_status, _, ignored_body = app.handle_request(
                 "POST",
                 "/api/v1/quality/action/ignore",
                 {"Content-Type": "application/json"},
                 json.dumps({**base, "action": "ignore"}).encode(),
             )
-            resumed_status, _, resumed_body = app.handle_request(
+            resumed_again_status, _, resumed_again_body = app.handle_request(
                 "POST",
                 "/api/v1/quality/action/resume",
                 {"Content-Type": "application/json"},
@@ -205,10 +203,14 @@ class WebApiTests(unittest.TestCase):
                 json.dumps({**base, "action": "execute"}).encode(),
             )
 
-            self.assertEqual(ignored_status, 200)
-            self.assertEqual(json.loads(ignored_body)["status"], "ignored")
+            self.assertEqual(snoozed_status, 200)
+            self.assertEqual(json.loads(snoozed_body)["status"], "snoozed")
             self.assertEqual(resumed_status, 200)
             self.assertEqual(json.loads(resumed_body)["status"], "resumed")
+            self.assertEqual(ignored_status, 200)
+            self.assertEqual(json.loads(ignored_body)["status"], "ignored")
+            self.assertEqual(resumed_again_status, 200)
+            self.assertEqual(json.loads(resumed_again_body)["status"], "resumed")
             self.assertEqual(invalid_status, 409)
             self.assertEqual(json.loads(invalid_body)["error"], "quality_action_not_allowed")
     def test_health_api_exposes_runner_state(self):

@@ -552,6 +552,60 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertEqual(reprocess["status"], "queued")
             self.assertEqual(service.store.find_task(task.id).current_stage, TaskStage.RECEIVED)
 
+    def test_real_rule_descriptors_expose_manual_and_gated_actions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            missing_dest = self.add_task(service.store, "descriptor-missing-dest", library / "missing")
+            empty = library / "empty"
+            empty.mkdir(parents=True)
+            missing_strm = self.add_task(service.store, "descriptor-missing-strm", empty)
+            mismatch_dir = library / "mismatch"
+            mismatch_dir.mkdir()
+            (mismatch_dir / "movie.strm").write_text("https://cms/d/movie.mkv", encoding="utf-8")
+            mismatch = self.add_task(
+                service.store,
+                "descriptor-mismatch",
+                mismatch_dir,
+                own_share_receive_code="1212",
+            )
+            unexpected_dir = library / "unexpected"
+            unexpected_dir.mkdir()
+            (unexpected_dir / "movie.strm").write_text("https://cms/s/other_1212_movie.mkv", encoding="utf-8")
+            unexpected = self.add_task(
+                service.store,
+                "descriptor-unexpected",
+                unexpected_dir,
+                own_share_receive_code="1212",
+                strm_mode="direct",
+            )
+
+            for task, expected_rule in (
+                (missing_dest, "missing_destination"),
+                (missing_strm, "missing_strm"),
+                (mismatch, "strm_mode_mismatch"),
+                (unexpected, "unexpected_strm"),
+            ):
+                with self.subTest(rule=expected_rule):
+                    descriptor = service.quality_descriptor(task)
+                    self.assertEqual(descriptor["rule_id"], expected_rule)
+                    self.assertIn("snooze", descriptor["available_actions"])
+                    self.assertIn("ignore", descriptor["available_actions"])
+
+            self.assertNotIn("execute", service.quality_descriptor(missing_dest)["available_actions"])
+            self.assertNotIn("execute", service.quality_descriptor(missing_strm)["available_actions"])
+            self.assertIn("execute", service.quality_descriptor(mismatch)["available_actions"])
+            self.assertIn("reprocess", service.quality_descriptor(unexpected)["available_actions"])
+
+            service.store.update_quality_state(
+                missing_dest.id,
+                service.store.find_task(missing_dest.id).updated_at,
+                {"quality_manual_status": "manual_required"},
+                "manual review",
+                "tester",
+            )
+            manual_required = service.quality_descriptor(service.store.find_task(missing_dest.id))
+            self.assertEqual(manual_required["available_actions"], ["view", "resume"])
+
     def test_manual_action_snooze_resume_and_rejects_unknown_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             service, library = self.make_service(tmp)
