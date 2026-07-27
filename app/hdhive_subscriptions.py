@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.clients.hdhive import HdhiveResource, HdhiveUnlockItem
 from app.hdhive_subscription_store import HdhiveSubscription, HdhiveSubscriptionItem, HdhiveSubscriptionStore
-from app.series_rules import completion_state, is_special_episode, parse_episode_filter, parse_episode_key
+from app.series_rules import EpisodeKey, completion_state, is_special_episode, parse_episode_filter, parse_episode_key
 
 
 LOG = logging.getLogger("cms-tg-ingest")
@@ -66,6 +66,22 @@ def extract_hdhive_tv_urls(text: str) -> list[str]:
 _INVALID_STATUSES = {"invalid", "expired", "unavailable"}
 _VALID_STATUSES = {"valid", "ok", "success", "available", "active"}
 _EPISODE_RE = re.compile(r"s(\d{1,3})\s*e(\d{1,3})", re.IGNORECASE)
+_EPISODE_RANGE_RE = re.compile(
+    r"(?<![A-Za-z0-9])s(?P<season>\d{1,3})\s*e(?P<start>\d{1,3})"
+    r"\s*[-~至到]\s*(?:s(?P<end_season>\d{1,3})\s*)?e?(?P<end>\d{1,3})"
+    r"(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_CHINESE_SEASON_RANGE_RE = re.compile(
+    r"第(?P<season>[0-9一二三四五六七八九十百]+)季.*?"
+    r"(?:第)?(?P<start>\d{1,3})\s*[-~至到]\s*(?:第)?(?P<end>\d{1,3})集?",
+    re.IGNORECASE,
+)
+_UPDATED_THROUGH_RE = re.compile(
+    r"(?:第(?P<chinese_season>[0-9一二三四五六七八九十百]+)季|S(?P<season>\d{1,3}))"
+    r".{0,24}?(?:更新至|更)\s*E?(?P<end>\d{1,3})集?",
+    re.IGNORECASE,
+)
 _RESOLUTION_RE = re.compile(r"(8k|4k|2160p|1440p|1080p|720p|576p|480p)", re.IGNORECASE)
 
 
@@ -90,7 +106,57 @@ class HdhiveScheduledRun:
     summary: dict[str, Any]
 
 
-def episode_key(resource: HdhiveResource) -> str:
+def _season_number(value: str) -> int | None:
+    text = str(value or "").strip()
+    if text.isdecimal():
+        return int(text)
+    digits = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    if text in digits:
+        return digits[text]
+    if text == "十":
+        return 10
+    if text.startswith("十") and text[1:] in digits:
+        return 10 + digits[text[1:]]
+    if text.endswith("十") and text[:-1] in digits:
+        return digits[text[:-1]] * 10
+    return None
+
+
+def _episode_range(season: int, start: int, end: int) -> tuple[EpisodeKey, ...]:
+    if season < 0 or start <= 0 or start > end or end - start > 200:
+        return ()
+    return tuple(EpisodeKey(season, number) for number in range(start, end + 1))
+
+
+def _parse_episode_keys(value: str) -> tuple[EpisodeKey, ...]:
+    text = str(value or "")
+    range_match = _EPISODE_RANGE_RE.search(text)
+    if range_match:
+        season = int(range_match.group("season"))
+        end_season = range_match.group("end_season")
+        end_season_number = int(end_season) if end_season else season
+        start = int(range_match.group("start"))
+        end = int(range_match.group("end"))
+        if end_season_number == season and start <= end and end - start <= 200:
+            return tuple(EpisodeKey(season, number) for number in range(start, end + 1))
+        return ()
+    chinese_range = _CHINESE_SEASON_RANGE_RE.search(text)
+    if chinese_range:
+        season = _season_number(chinese_range.group("season"))
+        if season is not None:
+            return _episode_range(season, int(chinese_range.group("start")), int(chinese_range.group("end")))
+    updated_through = _UPDATED_THROUGH_RE.search(text)
+    if updated_through:
+        season = _season_number(updated_through.group("chinese_season")) if updated_through.group("chinese_season") else int(updated_through.group("season"))
+        if season is not None:
+            return _episode_range(season, 1, int(updated_through.group("end")))
+    match = _EPISODE_RE.search(text)
+    if not match:
+        return ()
+    return (EpisodeKey(int(match.group(1)), int(match.group(2))),)
+
+
+def episode_keys(resource: HdhiveResource) -> tuple[EpisodeKey, ...]:
     if resource.season_number is not None and resource.episode_number is not None:
         try:
             season_number = int(resource.season_number)
@@ -99,14 +165,38 @@ def episode_key(resource: HdhiveResource) -> str:
             pass
         else:
             if season_number >= 0 and episode_number > 0:
-                return f"s{season_number:02d}e{episode_number:02d}"
-    for value in (getattr(resource, "episode_key", ""), getattr(resource, "episode_code", "")):
+                return (EpisodeKey(season_number, episode_number),)
+    for value in (
+        getattr(resource, "episode_key", ""),
+        getattr(resource, "episode_code", ""),
+        getattr(resource, "remark", ""),
+        getattr(resource, "title", ""),
+    ):
         if value:
-            return str(value).strip().lower()
-    match = _EPISODE_RE.search(resource.title or "")
-    if match:
-        return f"s{int(match.group(1)):02d}e{int(match.group(2)):02d}"
-    return resource.slug
+            parsed = _parse_episode_keys(str(value))
+            if parsed:
+                return parsed
+    return ()
+
+
+def _format_episode_keys(keys: tuple[EpisodeKey, ...]) -> str:
+    if not keys:
+        return ""
+    if len(keys) == 1:
+        return keys[0].normalized
+    if all(key.season == keys[0].season for key in keys) and all(
+        current.episode == previous.episode + 1
+        for previous, current in zip(keys, keys[1:])
+    ):
+        return f"{keys[0].normalized}-S{keys[-1].season:02d}E{keys[-1].episode:02d}"
+    return ",".join(key.normalized for key in keys)
+
+
+def episode_key(resource: HdhiveResource) -> str:
+    parsed = episode_keys(resource)
+    if parsed:
+        return _format_episode_keys(parsed)
+    return str(getattr(resource, "episode_key", "") or resource.slug).strip().lower()
 
 
 def resolution_score(resource: HdhiveResource) -> int:
@@ -222,36 +312,25 @@ class HdhiveSubscriptionService:
 
         episode_filter = parse_episode_filter(subscription.episode_filter)
         grouped: dict[str, list[HdhiveResource]] = {}
-        parsed_by_resource: dict[int, Any | None] = {}
+        parsed_by_resource: dict[int, tuple[EpisodeKey, ...]] = {}
         resource_item_ids: dict[int, int] = {}
-        existing_items = self.store.list_items(subscription.id)
         discovered = 0
         for resource in resources:
             if str(resource.pan_type or "").strip().lower() != "115":
                 continue
-            raw_key = episode_key(resource)
-            parsed_key = parse_episode_key(raw_key)
-            key = parsed_key.normalized if parsed_key is not None else str(raw_key or resource.slug)
+            parsed_keys = episode_keys(resource)
+            key = episode_key(resource)
             grouped.setdefault(key, []).append(resource)
-            parsed_by_resource[id(resource)] = parsed_key
-            previous = next(
-                (
-                    item
-                    for item in existing_items
-                    if item.resource_slug == resource.slug
-                    and self._stored_episode_key(item) == parsed_key
-                ),
-                None,
-            )
+            parsed_by_resource[id(resource)] = parsed_keys
             item = self.store.upsert_item(
                 subscription.id,
-                previous.episode_key if previous is not None else key,
+                key,
                 resource.slug,
                 resource.validate_status,
                 resolution_score(resource),
                 resource.unlock_points,
                 resource.title,
-                normalized_episode_key=parsed_key.normalized if parsed_key is not None else "",
+                normalized_episode_key=key if parsed_keys else "",
             )
             resource_item_ids[id(resource)] = item.id
             discovered += 1
@@ -273,18 +352,18 @@ class HdhiveSubscriptionService:
             return items
 
         for key, candidates in grouped.items():
-            parsed = parsed_by_resource.get(id(candidates[0]))
+            parsed_keys = parsed_by_resource.get(id(candidates[0]), ())
             items = group_items(key)
-            if parsed is None:
+            if not parsed_keys:
                 unparsed_groups.add(key)
                 for item in items:
                     if item.status != "enqueued":
                         self.store.mark_item_skipped(item.id, "unparsed", "无法识别季集编号")
                 continue
-            if not episode_filter.matches(parsed):
+            if not any(episode_filter.matches(parsed) for parsed in parsed_keys):
                 filtered_groups.add(key)
                 reason = "不在订阅集数过滤范围内"
-                if is_special_episode(parsed) and not subscription.episode_filter.strip():
+                if all(is_special_episode(parsed) for parsed in parsed_keys) and not subscription.episode_filter.strip():
                     reason = "特殊集默认跳过"
                 for item in items:
                     if item.status != "enqueued":
@@ -310,11 +389,11 @@ class HdhiveSubscriptionService:
                 LOG.warning("HDHive Emby episode lookup unavailable subscription_id=%s", subscription.id, exc_info=True)
 
         for key, candidates in grouped.items():
-            parsed = parsed_by_resource.get(id(candidates[0]))
-            if parsed is None or not episode_filter.matches(parsed):
+            parsed_keys = parsed_by_resource.get(id(candidates[0]), ())
+            if not parsed_keys or not any(episode_filter.matches(parsed) for parsed in parsed_keys):
                 continue
             items = group_items(key)
-            if key in emby_keys:
+            if all(parsed.normalized in emby_keys for parsed in parsed_keys):
                 emby_groups.add(key)
                 for item in items:
                     if item.status not in {"enqueued", "emby_exists"}:
@@ -325,12 +404,12 @@ class HdhiveSubscriptionService:
                         self.store.reset_item_for_check(item.id, "emby_exists")
 
         for key, candidates in grouped.items():
-            parsed = parsed_by_resource.get(id(candidates[0]))
+            parsed_keys = parsed_by_resource.get(id(candidates[0]), ())
             stored_items = {item.resource_slug: item for item in group_items(key)}
-            if parsed is None or not episode_filter.matches(parsed):
+            if not parsed_keys or not any(episode_filter.matches(parsed) for parsed in parsed_keys):
                 skipped += 1
                 continue
-            if key in emby_keys:
+            if all(parsed.normalized in emby_keys for parsed in parsed_keys):
                 skipped += 1
                 continue
             if any(item.status == "enqueued" for item in stored_items.values()):
@@ -425,19 +504,19 @@ class HdhiveSubscriptionService:
         current_item_ids = set(resource_item_ids.values())
         unparsed_count = 0
         for item in self.store.list_items(subscription.id):
-            item_key = self._stored_episode_key(item)
-            if item_key is None:
+            item_keys = self._stored_episode_keys(item)
+            if not item_keys:
                 if item.status == "unparsed":
                     unparsed_count += 1
                 continue
             if item.status in {"enqueued", "emby_exists"}:
-                terminal.add(item_key)
+                terminal.update(item_keys)
             elif item.status == "filtered" and item.id in current_item_ids:
                 # A filter only proves an episode was intentionally skipped while
                 # the corresponding HDHive resource was present in this check.
-                terminal.add(item_key)
+                terminal.update(item_keys)
             if item.status in {"pending_confirmation", "failed", "unlocking", "unparsed"}:
-                blocked.add(item_key)
+                blocked.update(item_keys)
         blocked.update(expected - terminal)
         completion = completion_state(tmdb_status, expected, terminal, blocked)
         if unparsed_count or emby_skip_unavailable or tmdb_lookup_failed:
@@ -478,8 +557,12 @@ class HdhiveSubscriptionService:
 
     @staticmethod
     def _stored_episode_key(item: HdhiveSubscriptionItem):
+        return next(iter(HdhiveSubscriptionService._stored_episode_keys(item)), None)
+
+    @staticmethod
+    def _stored_episode_keys(item: HdhiveSubscriptionItem) -> tuple[EpisodeKey, ...]:
         value = item.normalized_episode_key or item.episode_key
-        return parse_episode_key(value)
+        return _parse_episode_keys(value)
 
     @staticmethod
     def _expected_episode_keys(details: dict[str, Any], episode_filter: Any) -> set[Any]:

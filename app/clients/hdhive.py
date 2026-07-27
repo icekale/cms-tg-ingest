@@ -80,6 +80,7 @@ class HdhiveResource:
     season_number: int | None = None
     episode_number: int | None = None
     episode_key: str = ""
+    remark: str = ""
 
 
 @dataclass(frozen=True)
@@ -153,7 +154,7 @@ class HdhiveProxyClient:
     @classmethod
     def _is_expired_response(cls, response: dict[str, Any]) -> bool:
         code, message = cls._response_error(response)
-        haystack = f"{code} {message}".upper()
+        haystack = re.sub(r"[^A-Z0-9]+", "_", f"{code} {message}".upper()).strip("_")
         return any(
             marker in haystack
             for marker in (
@@ -288,6 +289,7 @@ class HdhiveProxyClient:
             season_number=_as_int(item.get("season_number")),
             episode_number=_as_int(item.get("episode_number")),
             episode_key=_as_text(item.get("episode_key") or item.get("episode_code")),
+            remark=_as_text(item.get("remark") or item.get("description")),
         )
 
     def unlock(self, slugs: list[str]) -> list[HdhiveUnlockItem]:

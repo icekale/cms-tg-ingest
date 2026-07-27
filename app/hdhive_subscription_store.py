@@ -400,6 +400,56 @@ class HdhiveSubscriptionStore:
     ) -> HdhiveSubscriptionItem:
         now = time.time()
         with self._lock, self._connection() as connection:
+            existing = connection.execute(
+                """
+                SELECT id, status FROM hdhive_subscription_items
+                WHERE subscription_id = ? AND resource_slug = ?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (int(subscription_id), str(resource_slug)),
+            ).fetchone()
+            if existing is not None:
+                parsed_key = str(normalized_episode_key or "")
+                connection.execute(
+                    """
+                    UPDATE hdhive_subscription_items
+                    SET episode_key = ?, title = CASE WHEN ? <> '' THEN ? ELSE title END,
+                        validate_status = ?, resolution_score = ?,
+                        unlock_points = COALESCE(?, unlock_points),
+                        normalized_episode_key = CASE
+                            WHEN ? <> '' THEN ? ELSE normalized_episode_key
+                        END,
+                        status = CASE
+                            WHEN status = 'unparsed' AND ? <> '' THEN 'discovered'
+                            ELSE status
+                        END,
+                        skip_reason = CASE
+                            WHEN status = 'unparsed' AND ? <> '' THEN ''
+                            ELSE skip_reason
+                        END,
+                        updated_at = CASE WHEN status = 'unlocking' THEN updated_at ELSE ? END
+                    WHERE id = ?
+                    """,
+                    (
+                        str(episode_key),
+                        str(title or ""),
+                        str(title or ""),
+                        str(validate_status or ""),
+                        int(resolution_score),
+                        unlock_points,
+                        parsed_key,
+                        parsed_key,
+                        parsed_key,
+                        parsed_key,
+                        now,
+                        int(existing["id"]),
+                    ),
+                )
+                row = connection.execute(
+                    "SELECT * FROM hdhive_subscription_items WHERE id = ?",
+                    (int(existing["id"]),),
+                ).fetchone()
+                return HdhiveSubscriptionItem.from_row(row)
             connection.execute(
                 """
                 INSERT INTO hdhive_subscription_items

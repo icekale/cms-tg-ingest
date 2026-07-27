@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.31 - 2026-07-27
+
+- 修复 HDHive 资源只在 `remark` 中携带季集信息时被错误标记为未解析的问题。
+- 支持 `S03E01-E05`、中文季集范围和“更新至”格式，并按完整集数集合判断 Emby 是否已有资源。
+- 修复 `OpenAPI token refresh required` 未触发 CMS OAuth 刷新重试的问题。
+
 ## 0.2.30 - 2026-07-26
 
 - 修复 Emby 剧集查询未请求 `ProviderIds`，导致 HDHive 订阅无法识别已入库剧集并错误提示“Emby 集数检查不可用”的问题。

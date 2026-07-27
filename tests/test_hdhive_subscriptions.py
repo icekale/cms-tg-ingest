@@ -14,6 +14,7 @@ from app.hdhive_subscriptions import (
     HdhiveSubscriptionService,
     HdhiveSubscriptionScheduler,
     HdhiveUrlError,
+    episode_keys,
     parse_hdhive_tv_url,
     select_best_resource,
 )
@@ -29,6 +30,7 @@ def resource(
     owned=False,
     season_number=None,
     episode_number=None,
+    remark="",
 ):
     return HdhiveResource(
         slug=slug,
@@ -46,6 +48,7 @@ def resource(
         season_number=season_number,
         episode_number=episode_number,
         episode_key=episode_key,
+        remark=remark,
     )
 
 
@@ -263,6 +266,72 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(item.normalized_episode_key, "S02E03")
         self.assertEqual(item.status, "enqueued")
         self.assertEqual(proxy.unlock_calls, [["numeric"]])
+
+    def test_resource_remark_range_is_matched_against_all_emby_episodes(self):
+        emby = FakeEmby({"S03E01", "S03E02", "S03E03", "S03E04", "S03E05"})
+        directory, store, subscription, proxy, service, _intake_calls = self.make_service(
+            [resource("bundle", episode_key="", remark="S03E01-E05 4K WEB-DL")],
+            emby=emby,
+        )
+        try:
+            result = service.check(subscription.id)
+            item = store.list_items(subscription.id)[0]
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.enqueued, 0)
+        self.assertEqual(result.summary["emby_exists"], 1)
+        self.assertEqual(item.status, "emby_exists")
+        self.assertEqual(item.normalized_episode_key, "S03E01-S03E05")
+        self.assertEqual(proxy.unlock_calls, [])
+
+    def test_resource_remark_supports_chinese_season_ranges_and_updated_through(self):
+        cases = {
+            "第三季 第1-5集 4K": ("S03E01", "S03E05"),
+            "S03更新至E04 4K": ("S03E01", "S03E04"),
+            "第三季(2026)【更05集】": ("S03E01", "S03E05"),
+        }
+
+        for remark, expected in cases.items():
+            with self.subTest(remark=remark):
+                parsed = episode_keys(resource("bundle", episode_key="", remark=remark))
+                self.assertEqual((parsed[0].normalized, parsed[-1].normalized), expected)
+
+    def test_resource_remark_range_is_not_skipped_when_one_emby_episode_is_missing(self):
+        emby = FakeEmby({"S03E01"})
+        unlock_items = [
+            HdhiveUnlockItem("bundle", True, "https://115cdn.com/s/bundle?password=abcd", "", "", False)
+        ]
+        directory, store, subscription, _proxy, service, intake_calls = self.make_service(
+            [resource("bundle", episode_key="", remark="S03E01-E05 4K WEB-DL")],
+            unlock_items,
+            emby=emby,
+        )
+        try:
+            result = service.check(subscription.id)
+            item = store.list_items(subscription.id)[0]
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.enqueued, 1)
+        self.assertEqual(item.status, "enqueued")
+        self.assertEqual(intake_calls, [(["https://115cdn.com/s/bundle?password=abcd"], "464100862")])
+
+    def test_reparsed_resource_reuses_existing_unparsed_item(self):
+        directory, store, subscription, _proxy, service, _intake_calls = self.make_service(
+            [resource("bundle", episode_key="", remark="S03E01-E05 4K WEB-DL")]
+        )
+        try:
+            existing = store.upsert_item(subscription.id, "opaque-resource-key", "bundle", "", 2160, 8, "old")
+            store.mark_item_skipped(existing.id, "unparsed", "无法识别季集编号")
+            service.check(subscription.id)
+            items = store.list_items(subscription.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].normalized_episode_key, "S03E01-S03E05")
+        self.assertNotEqual(items[0].status, "unparsed")
 
     def test_smart_check_skips_emby_existing_episode_across_multiple_seasons(self):
         tmdb = FakeTmdbResolver({"ok": True, "status": "Returning Series", "seasons": []})

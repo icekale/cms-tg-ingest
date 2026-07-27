@@ -53,6 +53,7 @@ class HdhiveProxyClientTests(unittest.TestCase):
                                 "validate_status": "valid",
                                 "validate_message": "链接有效",
                                 "is_unlocked": False,
+                                "remark": "S01E01 2160p",
                             }
                         ],
                     }
@@ -65,6 +66,7 @@ class HdhiveProxyClientTests(unittest.TestCase):
             self.assertEqual(resources[0].slug, "slug-1")
             self.assertEqual(resources[0].pan_type, "115")
             self.assertEqual(resources[0].unlock_points, 8)
+            self.assertEqual(resources[0].remark, "S01E01 2160p")
             self.assertEqual(
                 http.calls[0][0:3],
                 (
@@ -176,6 +178,33 @@ class HdhiveProxyClientTests(unittest.TestCase):
             self.assertEqual(refreshed, [True])
             self.assertEqual(http.calls[0][2]["access_token"], "expired")
             self.assertEqual(http.calls[1][2]["access_token"], "fresh")
+
+    def test_spaced_openapi_refresh_error_delegates_refresh_to_cms(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.token_file(directory, access_token="expired")
+            http = FakeHttp(
+                [
+                    {"success": False, "message": "OpenAPI token refresh required"},
+                    {"success": True, "code": "200", "data": {}},
+                ]
+            )
+            refreshed = []
+
+            def refresh_via_cms():
+                refreshed.append(True)
+                path.write_text(json.dumps({"access_token": "fresh"}), encoding="utf-8")
+
+            client = HdhiveProxyClient(
+                "https://proxy.test",
+                path,
+                http=http,
+                refresh_via_cms=refresh_via_cms,
+            )
+
+            client.account()
+
+        self.assertEqual(refreshed, [True])
+        self.assertEqual(http.calls[1][2]["access_token"], "fresh")
 
     def test_refresh_failure_is_reported_as_actionable_hdhive_error(self):
         with tempfile.TemporaryDirectory() as directory:
