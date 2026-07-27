@@ -251,13 +251,21 @@ class QualityRuleEngine:
                 evidence=(issue.detail for issue in issue_list if issue.code == "missing_strm" and issue.detail),
             )
         if "unexpected_strm" in issue_codes:
+            unexpected_issues = tuple(issue for issue in issue_list if issue.code == "unexpected_strm")
+            auto_allowed = (
+                bool(controls["allow_auto_reprocess"])
+                and has_complete_evidence(unexpected_issues, "unexpected_strm")
+                and not attempts_exhausted(task, controls)
+            )
             return _match(
                 "unexpected_strm",
                 "medium",
                 "STRM content does not match the expected mode",
                 ("unexpected_strm",),
-                manual_actions=_MANUAL_ACTIONS,
-                evidence=(issue.detail for issue in issue_list if issue.code == "unexpected_strm" and issue.detail),
+                auto_action="reprocess",
+                auto_allowed=auto_allowed,
+                manual_actions=() if auto_allowed else _MANUAL_ACTIONS,
+                evidence=(issue.detail for issue in unexpected_issues if issue.detail),
             )
         if "repeated_failure" in issue_codes or (issue_list and attempts_exhausted(task, controls)):
             return _match(

@@ -35,6 +35,24 @@ class TaskQualityTests(unittest.TestCase):
 
             self.assertEqual([issue.code for issue in issues], ["unexpected_strm"])
 
+    def test_source_shared_mode_accepts_original_share_strm_without_own_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "Movie"
+            dest.mkdir()
+            (dest / "movie.strm").write_text("http://cms/s/sourcecode_7788_fileid.mkv", encoding="utf-8")
+            store = TaskStore(root / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+
+            issues = inspect_task_files(
+                task,
+                dest_path=dest,
+                expected_mode="source_shared",
+                own_share_code="different-own-share",
+            )
+
+            self.assertEqual(issues, [])
+
     def test_flags_direct_strm_url(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

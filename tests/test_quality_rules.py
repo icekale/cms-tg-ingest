@@ -64,6 +64,28 @@ class QualityRuleEngineTests(unittest.TestCase):
         self.assertEqual(match.auto_action, "reprocess")
         self.assertFalse(match.auto_allowed)
 
+    def test_unexpected_strm_can_reprocess_with_complete_safe_evidence(self):
+        match = self.engine.evaluate(
+            task(strm_mode="direct"),
+            [QualityIssue("unexpected_strm", "unexpected", "/library/movie.strm")],
+            config={"allow_auto_reprocess": True},
+        )
+
+        self.assertEqual(match.rule_id, "unexpected_strm")
+        self.assertEqual(match.auto_action, "reprocess")
+        self.assertTrue(match.auto_allowed)
+
+    def test_unexpected_strm_is_manual_without_safe_reprocess_conditions(self):
+        match = self.engine.evaluate(
+            task(strm_mode="direct", retry_count=3),
+            [QualityIssue("unexpected_strm", "unexpected", "")],
+            config={"allow_auto_reprocess": True, "max_attempts": 3},
+        )
+
+        self.assertEqual(match.rule_id, "unexpected_strm")
+        self.assertEqual(match.auto_action, "reprocess")
+        self.assertFalse(match.auto_allowed)
+
     def test_cleaned_invalid_share_is_terminal_and_manual(self):
         match = self.engine.evaluate(
             task(invalid_share_cleaned=True),

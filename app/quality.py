@@ -51,6 +51,9 @@ def inspect_task_files(
         if "/d/" in text:
             if expected_mode != "direct":
                 issues.append(QualityIssue("direct_strm", "发现直链 STRM", str(path)))
+        elif expected_mode == "source_shared":
+            if "/s/" not in text:
+                issues.append(QualityIssue("unexpected_strm", "STRM 不是预期的分享链接", str(path)))
         elif expected_mode == "direct" or expected_marker not in text:
             issues.append(QualityIssue("unexpected_strm", "STRM 不是预期的分享链接", str(path)))
     return issues
