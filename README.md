@@ -33,7 +33,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.2.40`。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.2.41`。
 4. 拉取固定版本并启动：
 
 ```sh
@@ -148,9 +148,13 @@ Unraid 将上面的端口替换为 `8788`。只有容器显示 `healthy`、健�
 - `shared`：CMS 整理完成后创建自有永久分享，使用 CMS 分享同步生成 STRM，移动入库并按原安全门槛清理源文件。
 - `direct`：CMS 普通同步生成直链 STRM，校验后直接移动入库，绝不创建分享或删除 115 源文件。
 
+磁力和 ED2K 云下载任务始终锁定为 `shared`，即使全局默认模式是 `direct`，也不会生成直链 STRM；云任务完成后会把所有输出项移动到待整理目录，再触发 CMS 整理。
+
 Web 的 `/app/` 和 `/api/v1/settings/strm-mode` 可修改默认模式；任务进入建分享、STRM 或之后阶段后模式会锁定，避免同一任务半路切换导致直链/分享 STRM 混用。任务级模式优先于默认值。
 
 新建自有分享会保留 CMS 整理后的规范目录名，例如 `H-黑金-2011-[tmdb=77221]`，不再改成 `asset-*`。分享访问码可在 Web“当前任务”页设置；优先级为 Web 设置、CMS `share_115_sync` 的 `SHARE_115_PASSWORD`、`SELF_SHARE_OWN_SHARE_PASSWORD`、默认 `1212`。Web API 只返回掩码和来源，不返回明文；修改仅影响之后新建的分享，已有任务继续使用各自保存的访问码。
+
+待整理 CID 可在 Web“设置”中修改，也可使用 `SELF_SHARE_RECEIVE_CID`；修改只影响之后的新接收/云下载尝试，运行中的任务继续使用提交时保存的 CID。
 
 ### 普通入库
 
@@ -164,7 +168,7 @@ ed2k://|file|example.mkv|10|ED2K_HASH_PLACEHOLDER|/
 
 - 115 分享进入接收流程。
 - 磁力和 ED2K 进入 115 云下载。
-- 两者都会进入 CMS 整理、自有分享 STRM、Emby 和清理流程。
+- 两者都会进入 CMS 整理、自有分享 STRM、Emby 和清理流程；云下载输出最多按 3 页、每页 30 项查找，避免无界扫描 115。
 - 一条消息可以包含多个链接。
 
 ### 常用命令和按钮
@@ -283,6 +287,7 @@ v0.2 的任务引擎让真实 Telegram/CMS 工作流的新自分享链接默认�
 - `/status` 和 `/history` 优先读取 TaskStore，旧 SubmissionStore 记录为空时兜底显示。
 - /status 会附带详情、重试、查 Emby、恢复 STRM、从头重跑按钮。
 - Web 任务详情页提供重试、查 Emby、恢复 STRM、从头重跑按钮。
+- Web 和 Telegram 使用相同的状态保护和 `TASK_MAX_RETRIES` 重试上限；云任务从头重跑会清除旧的云下载尝试元数据后重新提交。
 - Vue 任务详情页和旧任务详情页都保留这些操作，并显示事件时间线、阶段耗时和 115 调用统计。
 - /health 会显示 TaskStore 本地队列健康、worker 心跳和 115 风控冷却。
 - /quality 会先执行 TaskStore 本地轻量巡检。
@@ -373,7 +378,7 @@ MOVE_CONFLICT_POLICY=merge
 STRM_STABLE_SECONDS=30
 ```
 
-115 风控后，程序会暂停新的全局 115/CMS 阶段，避免连续重试。整理目录查找使用分层搜索早停和整理目录扫描预算，降低频繁扫描风险。
+115 风控后，程序会暂停新的全局 115/CMS 阶段，避免连续重试。整理目录查找使用分层搜索早停和整理目录扫描预算，降低频繁扫描风险；云任务状态查询最多检查最近 90 个任务，不会无限翻页。HTTP 错误中的 Bot Token、Cookie、API Key、访问码和响应正文会先脱敏再写入错误信息。
 
 ## 更新、诊断和回滚
 
@@ -432,8 +437,8 @@ python3 -m unittest discover -s tests -q
 发布版本通过 GitHub Actions 构建并推送 GHCR 和 Docker Hub：
 
 ```sh
-git tag v0.2.40
-git push origin v0.2.40
+git tag v0.2.41
+git push origin v0.2.41
 ```
 
 如果 fork 后要发布自己的 Docker Hub 镜像，在 GitHub Secrets 中配置：
@@ -444,7 +449,7 @@ git push origin v0.2.40
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.2.40
+docker pull icekale/cms-tg-ingest:0.2.41
 docker pull icekale/cms-tg-ingest:latest
 ```
 

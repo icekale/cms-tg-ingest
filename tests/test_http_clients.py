@@ -4,7 +4,7 @@ from io import BytesIO
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
-from app.clients.http import FormHttp, HttpJson, _redact_url
+from app.clients.http import FormHttp, HttpJson, _redact_text, _redact_url
 
 
 class FakeResponse:
@@ -19,6 +19,16 @@ class FakeResponse:
 
     def read(self):
         return self.payload
+
+
+class TrackingHTTPError(HTTPError):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.closed_by_client = False
+
+    def close(self):
+        self.closed_by_client = True
+        return super().close()
 
 
 class HttpClientTests(unittest.TestCase):
@@ -142,6 +152,20 @@ class HttpClientTests(unittest.TestCase):
             self.assertNotIn(secret, message)
         self.assertIn("bad gateway", message)
 
+    def test_http_error_response_body_is_closed_after_error_message_is_read(self):
+        for client_type in (HttpJson, FormHttp):
+            error = TrackingHTTPError(
+                "https://example.test/status",
+                400,
+                "service unavailable",
+                {},
+                BytesIO(b"temporary failure"),
+            )
+            with patch("app.clients.http.urllib.request.urlopen", side_effect=error):
+                with self.assertRaises(RuntimeError):
+                    client_type(timeout=1).request("https://example.test/status")
+            self.assertTrue(error.closed_by_client)
+
     def test_non_json_response_redacts_sensitive_body_before_truncation(self):
         body = (
             'upstream url=https://example.test/status?secret=URL_SECRET '
@@ -161,6 +185,34 @@ class HttpClientTests(unittest.TestCase):
             self.assertNotIn(secret, message)
         self.assertIn("upstream url=https://example.test/status?secret=%3Credacted%3E", message)
         self.assertEqual(len(message.split(": ", 1)[1]), 300)
+
+    def test_redact_url_hides_camel_case_userinfo_path_and_nested_credentials(self):
+        redacted = _redact_url(
+            "https://user:USER_SECRET@example.test/v1/accessToken/PATH_SECRET"
+            "?accessToken=QUERY_SECRET#refreshToken=FRAGMENT_SECRET"
+        )
+        body = _redact_text(
+            "upstream next=https%3A%2F%2Fexample.test%2Fstatus%3FaccessToken%3D"
+            "ENCODED_SECRET%2520TAIL_SECRET"
+        )
+        nested_json = _redact_url(
+            "https://example.test/status?payload=%7B%22accessToken%22%3A%22JSON_SECRET%22%7D"
+        )
+
+        for secret in (
+            "USER_SECRET",
+            "PATH_SECRET",
+            "QUERY_SECRET",
+            "FRAGMENT_SECRET",
+            "ENCODED_SECRET",
+            "TAIL_SECRET",
+            "JSON_SECRET",
+        ):
+            self.assertNotIn(secret, redacted)
+            self.assertNotIn(secret, body)
+            self.assertNotIn(secret, nested_json)
+        self.assertIn("user:<redacted>@example.test", redacted)
+        self.assertIn("accessToken=%3Credacted%3E", redacted)
 
 
 if __name__ == "__main__":

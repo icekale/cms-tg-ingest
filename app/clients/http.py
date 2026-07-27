@@ -36,6 +36,9 @@ _SENSITIVE_URL_KEYS = {
     "share_pwd",
     "token",
 }
+_SENSITIVE_URL_KEYS_NORMALIZED = {
+    re.sub(r"[^a-z0-9]+", "", key.lower()) for key in _SENSITIVE_URL_KEYS
+}
 _SENSITIVE_KEY_PATTERN = "|".join(
     sorted(
         {
@@ -70,15 +73,24 @@ _SENSITIVE_ASSIGNMENT_RE = re.compile(
     rf"(?P<bare_value>[^,;&\s}}]+))",
     re.IGNORECASE,
 )
+_SENSITIVE_PATH_VALUE_RE = re.compile(
+    rf"(?P<prefix>/(?:{_SENSITIVE_KEY_PATTERN})(?:/|=))(?P<value>[^/?#]+)",
+    re.IGNORECASE,
+)
+_SENSITIVE_ENCODED_ASSIGNMENT_RE = re.compile(
+    rf"(?P<key>{_SENSITIVE_KEY_PATTERN})(?P<separator>%3d|=)"
+    rf"(?P<value>[^&;\s<>\"']+)",
+    re.IGNORECASE,
+)
 _URL_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
 
 
 def _normalized_url_key(key: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", str(key or "").lower()).strip("_")
+    return re.sub(r"[^a-z0-9]+", "", str(key or "").lower())
 
 
 def _is_sensitive_url_key(key: str) -> bool:
-    return _normalized_url_key(key) in _SENSITIVE_URL_KEYS
+    return _normalized_url_key(key) in _SENSITIVE_URL_KEYS_NORMALIZED
 
 
 def _redact_assignments(value: str) -> str:
@@ -106,22 +118,52 @@ def _redact_fragment(fragment: str) -> str:
     return redacted if redacted != decoded else fragment
 
 
+def _redact_netloc(netloc: str) -> str:
+    if "@" not in netloc:
+        return netloc
+    credentials, host = netloc.rsplit("@", 1)
+    if ":" in credentials:
+        username, _password = credentials.split(":", 1)
+        credentials = f"{username}:<redacted>"
+    else:
+        credentials = "<redacted>"
+    return f"{credentials}@{host}"
+
+
 def _redact_url(url: str) -> str:
     parsed = urllib.parse.urlsplit(str(url))
-    path = parsed.path
-    if parsed.netloc.lower() == "api.telegram.org":
+    path = _redact_assignments(parsed.path)
+    if (parsed.hostname or "").lower() == "api.telegram.org":
         path = re.sub(r"^/bot[^/]+(?=/|$)", "/bot<redacted>", path, count=1)
+    path = _SENSITIVE_PATH_VALUE_RE.sub(
+        lambda match: f"{match.group('prefix')}<redacted>",
+        path,
+    )
     query = []
     for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
         if _is_sensitive_url_key(key):
             value = "<redacted>"
+        else:
+            value = _redact_text(value)
         query.append((key, value))
     return urllib.parse.urlunsplit(
-        (parsed.scheme, parsed.netloc, path, urllib.parse.urlencode(query), _redact_fragment(parsed.fragment))
+        (
+            parsed.scheme,
+            _redact_netloc(parsed.netloc),
+            path,
+            urllib.parse.urlencode(query),
+            _redact_fragment(parsed.fragment),
+        )
     )
 
 
 def _redact_text(value: str) -> str:
+    redacted_value = _redact_assignments(str(value or ""))
+    redacted_value = _SENSITIVE_ENCODED_ASSIGNMENT_RE.sub(
+        lambda match: f"{match.group('key')}{match.group('separator')}%3Credacted%3E",
+        redacted_value,
+    )
+
     def replace_url(match: re.Match[str]) -> str:
         raw_url = match.group(0)
         suffix = ""
@@ -130,7 +172,7 @@ def _redact_text(value: str) -> str:
             raw_url = raw_url[:-1]
         return _redact_url(raw_url) + suffix
 
-    return _URL_RE.sub(replace_url, _redact_assignments(str(value or "")))
+    return _URL_RE.sub(replace_url, redacted_value)
 
 
 def _safe_get_retryable(req: urllib.request.Request, error: BaseException) -> bool:
@@ -176,7 +218,10 @@ class HttpJson:
         try:
             raw = _read_response(req, self.timeout)
         except urllib.error.HTTPError as exc:
-            body = _redact_text(exc.read().decode("utf-8", "replace"))[:300]
+            try:
+                body = _redact_text(exc.read().decode("utf-8", "replace"))[:300]
+            finally:
+                exc.close()
             raise RuntimeError(f"HTTP {exc.code} from {_redact_url(url)}: {body[:300]}") from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Cannot reach {_redact_url(url)}: {_redact_text(str(exc.reason))}") from exc
@@ -217,7 +262,10 @@ class FormHttp:
         try:
             raw = _read_response(req, self.timeout)
         except urllib.error.HTTPError as exc:
-            body_text = _redact_text(exc.read().decode("utf-8", "replace"))[:300]
+            try:
+                body_text = _redact_text(exc.read().decode("utf-8", "replace"))[:300]
+            finally:
+                exc.close()
             raise RuntimeError(f"HTTP {exc.code} from {_redact_url(url)}: {body_text}") from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Cannot reach {_redact_url(url)}: {_redact_text(str(exc.reason))}") from exc

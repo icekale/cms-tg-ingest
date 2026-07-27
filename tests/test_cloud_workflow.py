@@ -159,6 +159,44 @@ class PipelineP115(FakeCloudP115):
         return {"state": True}
 
 
+class FaultInjectingPipelineP115(PipelineP115):
+    def __init__(self):
+        super().__init__()
+        self.output_items = [
+            {
+                "file_id": "cloud-folder",
+                "file_name": "Example Movie",
+                "parent_id": TARGET_CID,
+                "is_folder": True,
+            },
+            {
+                "file_id": "bonus-folder",
+                "file_name": "Example Movie Extras",
+                "parent_id": TARGET_CID,
+                "is_folder": True,
+            },
+        ]
+        self.target_ids = set()
+        self.movement_calls = 0
+        self.fail_after_first_move = True
+
+    def discover_cloud_download_outputs(self, status):
+        return [dict(item) for item in self.output_items]
+
+    def ensure_cloud_outputs_in_target(self, items, target_cid):
+        self.movement_calls += 1
+        normalized = []
+        for item in items:
+            file_id = str(item["file_id"])
+            if file_id not in self.target_ids:
+                self.target_ids.add(file_id)
+                if self.fail_after_first_move and len(self.target_ids) == 1:
+                    self.fail_after_first_move = False
+                    raise RuntimeError("simulated process interruption after first cloud move")
+            normalized.append({**item, "parent_id": target_cid})
+        return normalized
+
+
 class PipelineCms(FakeCms):
     def __init__(self, source_root):
         super().__init__()
@@ -626,6 +664,119 @@ class CloudWorkflowTests(unittest.TestCase):
             self.assertTrue(Path(row["dest_path"]).is_dir())
             self.assertIn("/s/owncode_ownpwd_", next(Path(row["dest_path"]).glob("*.strm")).read_text(encoding="utf-8"))
             self.assertEqual(len(emby.refreshed), 1)
+
+    def test_cloud_fault_injection_recovers_without_duplicate_submission_or_move(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            library_root = root / "library"
+            share_root.mkdir()
+            task_store = TaskStore(root / "tasks.db")
+            submissions = bridge.SubmissionStore(root / "submissions.db")
+            p115 = FaultInjectingPipelineP115()
+            cms = PipelineCms(share_root)
+            emby = PipelineEmby()
+            config = SelfShareConfig(
+                enabled=True,
+                strm_root=share_root,
+                cms_local_path="/media/share",
+                cms_cid="0",
+                cleanup_after_emby=True,
+                parent_cid_category_map={"movie-parent": "华语电影"},
+                cloud_poll_seconds=30,
+                cloud_timeout_seconds=3600,
+                auto_organize_retry_seconds=30,
+                review_grace_seconds=1,
+                review_checkpoints_seconds=(1,),
+            )
+            move_config = MoveConfig(
+                source_roots=[share_root],
+                library_roots={"华语电影": library_root},
+                conflict_policy="merge",
+                stable_seconds=0,
+            )
+            workflow = BridgeSelfShareTaskWorkflow(
+                cms=cms,
+                telegram=FakeTelegram(),
+                chat_id="464100862",
+                store=submissions,
+                task_store=task_store,
+                p115=p115,
+                self_share_config=config,
+                move_config=move_config,
+                emby=emby,
+                openai_classifier=None,
+                tmdb_resolver=None,
+                cleanup_client=p115,
+                receive_cid=TARGET_CID,
+            )
+            task = task_store.upsert_cloud_task("ed2k:hash:10", ED2K, title="Example.mkv")
+            task_store.enqueue_task(task.id, TaskStage.CLOUD_DOWNLOADING, next_run_at=0)
+
+            claimed = task_store.claim_next_runnable("claim-worker", now=0)
+            duplicate = task_store.upsert_cloud_task("ed2k:hash:10", ED2K, title="renamed.mkv")
+            self.assertEqual(duplicate.id, claimed.id)
+            self.assertEqual(duplicate.title, "Example.mkv")
+            task_store.enqueue_task(claimed.id, TaskStage.CLOUD_DOWNLOADING, next_run_at=0)
+
+            clock = [time.time()]
+            workflow._now = lambda: clock[0]
+            runner = TaskRunner(
+                task_store,
+                workflow,
+                worker_id="cloud-fault-test",
+                interval_seconds=1,
+                now=lambda: clock[0],
+            )
+            interruption_recovered = False
+            for _ in range(60):
+                runner.run_once()
+                current = task_store.find_task(task.id)
+                self.assertIsNotNone(current)
+                if current.status == TaskStatus.FAILED and not interruption_recovered:
+                    self.assertEqual(p115.target_ids, {"cloud-folder"})
+                    task_store.record_event(
+                        task.id,
+                        TaskStage.CLOUD_DOWNLOADING,
+                        TaskStatus.RUNNING,
+                        "模拟进程中断后恢复",
+                        metadata_patch=current.metadata,
+                    )
+                    task_store.enqueue_task(task.id, TaskStage.CLOUD_DOWNLOADING, next_run_at=0)
+                    interruption_recovered = True
+                if current.current_stage == TaskStage.SHARE_SYNC_SUBMITTED and not cms.alias_name:
+                    row = submissions.find_by_id(current.metadata["submission_id"])
+                    cms.alias_name = row["own_share_file_name"]
+                if current.current_stage == TaskStage.EMBY_CONFIRMED and current.status == TaskStatus.PENDING:
+                    row = submissions.find_by_id(current.metadata["submission_id"])
+                    emby.item = {
+                        "Id": "emby-123",
+                        "Name": "Example Movie",
+                        "Path": row["dest_path"],
+                        "ProviderIds": {"Tmdb": "123"},
+                        "LibraryName": "电影库",
+                    }
+                if current.status == TaskStatus.SUCCEEDED and current.current_stage == TaskStage.CLEANED:
+                    break
+                clock[0] = max(clock[0] + 0.1, float(current.next_run_at or clock[0]) + 0.1)
+
+            final = task_store.find_task(task.id)
+            row = submissions.find_by_id(final.metadata["submission_id"])
+            self.assertTrue(interruption_recovered)
+            self.assertEqual(
+                final.current_stage,
+                TaskStage.CLEANED,
+                msg=f"events={task_store.list_events(task.id)} metadata={final.metadata}",
+            )
+            self.assertEqual(final.status, TaskStatus.SUCCEEDED)
+            self.assertEqual(len(p115.add_calls), 1)
+            self.assertEqual(p115.target_ids, {"cloud-folder", "bonus-folder"})
+            self.assertEqual(p115.movement_calls, 2)
+            self.assertEqual(p115.created_shares, ["organized-folder"])
+            self.assertEqual(p115.deleted, ["organized-folder"])
+            self.assertEqual(len(submissions.recent(limit=10)), 1)
+            self.assertEqual(row["cleanup_status"], "deleted")
+            self.assertEqual(row["emby_parent"], "电影库")
 
 
 class CloudIntakeTests(unittest.TestCase):
