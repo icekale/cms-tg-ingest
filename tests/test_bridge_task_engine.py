@@ -324,6 +324,35 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["submission_id"], row["id"])
             self.assertFalse(result.metadata["tmdb_hint_normalized"])
 
+    def test_receive_cid_is_pinned_after_receive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="111")
+            received_task = self._claim_task("abc", "1234", TaskStage.RECEIVED)
+
+            received = workflow.run_stage(received_task)
+            organizing_task = self.tasks.record_event(
+                received_task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                received.message,
+                metadata_patch=received.metadata,
+                submission_id=received.metadata["submission_id"],
+            )
+            self.tasks.set_self_share_receive_cid_override("222")
+            self.p115.folder = {
+                "file_id": "received-folder",
+                "file_name": "received folder",
+                "parent_id": "111",
+            }
+
+            result = workflow.run_stage(organizing_task)
+
+            self.assertEqual(received.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(self.p115.received, [("abc", "1234", "111")])
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIn("111", self.p115.find_organized_calls[0][2])
+            self.assertNotIn("222", self.p115.find_organized_calls[0][2])
+
     def test_received_stage_stops_when_115_receive_is_restricted(self):
         class RestrictedP115(FakeP115):
             def receive_share_to_cid(self, share_code, receive_code, receive_cid):

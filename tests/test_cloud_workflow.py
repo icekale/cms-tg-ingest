@@ -464,6 +464,49 @@ class CloudWorkflowTests(unittest.TestCase):
             self.assertEqual(cms.auto_organize_calls, 2)
             self.assertFalse(third.metadata["auto_organize_pending"])
 
+    def test_cloud_auto_organize_timeout_needs_action_without_new_cloud_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_cloud_task("ed2k:hash:10", ED2K, title="Example.mkv")
+            task = task_store.record_event(
+                task.id,
+                TaskStage.CLOUD_DOWNLOADING,
+                TaskStatus.RUNNING,
+                "等待 CMS 整理",
+                metadata_patch={
+                    "cloud_info_hash": "hash",
+                    "cloud_task_id": "task-1",
+                    "cloud_started_at": 100,
+                    "cloud_timeout_seconds": 300,
+                    "auto_organize_pending": True,
+                    "cloud_output_items": [
+                        {
+                            "file_id": "folder-1",
+                            "file_name": "Example",
+                            "parent_id": TARGET_CID,
+                            "is_folder": True,
+                        }
+                    ],
+                    "cloud_output_file_id": "folder-1",
+                    "cloud_output_parent_id": TARGET_CID,
+                },
+            )
+            p115 = FakeCloudP115([])
+            submissions = FakeSubmissionStore()
+            cms = FakeCms(fail_auto_organize=True)
+            workflow = make_workflow(p115, submissions, task_store=task_store, cms=cms)
+            workflow._now = lambda: 401
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome.value, "needs_action")
+            self.assertEqual(result.error_type, "cloud_auto_organize_timeout")
+            self.assertEqual(p115.add_calls, [])
+            self.assertEqual(p115.status_calls, [])
+            self.assertEqual(cms.auto_organize_calls, 0)
+            self.assertEqual(result.metadata["cloud_output_file_id"], "folder-1")
+            self.assertEqual(result.metadata["cloud_output_items"][0]["parent_id"], TARGET_CID)
+
     def test_cloud_timeout_fails_before_any_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:
             task_store = TaskStore(Path(tmp) / "tasks.db")

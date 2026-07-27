@@ -59,7 +59,7 @@ from app.models import TaskStage, TaskStatus
 from app.self_share_settings import resolve_own_share_receive_code
 from app.task_bridge import reset_self_share_submission_for_reprocess
 from app.strm_mode import effective_task_strm_mode
-from app.task_runner import StageResult
+from app.task_runner import StageOutcome, StageResult
 
 LOG = logging.getLogger("cms-tg-ingest")
 OPENAI_CATEGORY_LABELS = ["华语电影", "欧美电影", "亚洲电影", "动漫电影", "国产电视", "外国电视", "番剧", "纪录片"]
@@ -414,6 +414,13 @@ class BridgeSelfShareTaskWorkflow:
         override = str(getter() or "").strip() if callable(getter) else ""
         return override or self.receive_cid
 
+    def _task_receive_cid(self, task) -> str:
+        return (
+            str(task.metadata.get("receive_target_cid") or "").strip()
+            or str(task.metadata.get("cloud_target_cid") or "").strip()
+            or self._configured_receive_cid()
+        )
+
     @staticmethod
     def _shared_only_stage(stage: TaskStage) -> bool:
         return stage in {
@@ -485,16 +492,27 @@ class BridgeSelfShareTaskWorkflow:
         receive_cid = str(metadata.get("cloud_target_cid") or "").strip() or self._configured_receive_cid()
         if not receive_cid:
             return StageResult.failed("缺少 115 接收目录 ID", error_type="missing_receive_cid")
+        started_at = float(metadata.get("cloud_started_at") or 0)
+        timeout_seconds = float(
+            metadata.get("cloud_timeout_seconds") or self.self_share_config.cloud_timeout_seconds
+        )
+        timed_out = bool(started_at and self._now() - started_at >= timeout_seconds)
         if metadata.get("auto_organize_pending") and (
             metadata.get("cloud_output_items") or metadata.get("cloud_output_file_id")
         ):
+            if timed_out:
+                return StageResult(
+                    StageOutcome.NEEDS_ACTION,
+                    "云下载输出已移动，但 CMS 自动整理触发超时，请人工检查后重试",
+                    metadata,
+                    error_type="cloud_auto_organize_timeout",
+                )
             row = self._submission_row(task)
             if not row:
                 return StageResult.failed("找不到云下载提交记录", error_type="submission_missing")
             return self._trigger_cloud_auto_organize(int(row["id"]), metadata)
         info_hash = str(metadata.get("cloud_info_hash") or "").strip()
         task_id = str(metadata.get("cloud_task_id") or "").strip()
-        started_at = float(metadata.get("cloud_started_at") or 0)
         if not info_hash and not task_id:
             submitted = self.p115.cloud_download_add(task.url, receive_cid)
             info_hash = str(submitted.get("info_hash") or "").strip()
@@ -515,7 +533,7 @@ class BridgeSelfShareTaskWorkflow:
                 metadata,
             )
 
-        if started_at and self._now() - started_at >= self.self_share_config.cloud_timeout_seconds:
+        if timed_out:
             return StageResult.failed(
                 "115 云下载超时，未进入后续整理和清理阶段",
                 error_type="cloud_download_timeout",
@@ -666,7 +684,7 @@ class BridgeSelfShareTaskWorkflow:
     def _stage_received(self, task):
         if not self.self_share_config.enabled:
             return StageResult.failed("自分享工作流未启用", error_type="self_share_disabled")
-        receive_cid = self._configured_receive_cid()
+        receive_cid = self._task_receive_cid(task)
         if not receive_cid:
             return StageResult.failed("缺少 115 接收目录 ID", error_type="missing_receive_cid")
 
@@ -733,6 +751,7 @@ class BridgeSelfShareTaskWorkflow:
             "received_expected_item_count": int(received.get("received_expected_item_count") or 0),
             "received_existing_file_ids": received.get("received_existing_file_ids") or [],
             "received_snapshot_complete": bool(received.get("received_snapshot_complete", False)),
+            "receive_target_cid": receive_cid,
             "tmdb_hint_normalized": False,
         }
         if reprocess_reset:
@@ -792,7 +811,7 @@ class BridgeSelfShareTaskWorkflow:
         hint_id: str,
         expected_count: int = 1,
     ) -> list[dict[str, Any]]:
-        receive_cid = self._configured_receive_cid()
+        receive_cid = self._task_receive_cid(task)
         if (
             not hint_id
             or not receive_cid
@@ -1025,7 +1044,7 @@ class BridgeSelfShareTaskWorkflow:
             self.cms.run_auto_organize()
             row = self.store.update_self_share(int(row["id"]), workflow_phase="auto_organize_submitted") or row
         excluded_parent_ids = set(self.self_share_config.excluded_parent_ids or set())
-        receive_cid = self._configured_receive_cid()
+        receive_cid = self._task_receive_cid(task)
         if receive_cid:
             excluded_parent_ids.add(receive_cid)
         min_update_time = float(row.get("created_at") or 0)
@@ -1238,7 +1257,7 @@ class BridgeSelfShareTaskWorkflow:
         file_id = str(folder.get("file_id") or "").strip()
         folder_name = str(folder.get("file_name") or row.get("own_share_file_name") or task.title or "").strip()
         share_name = str(row.get("title") or task.title or folder_name or task.share_code).strip()
-        if is_unverified_received_source(folder, task.metadata, self._configured_receive_cid()):
+        if is_unverified_received_source(folder, task.metadata, self._task_receive_cid(task)):
             return StageResult.needs_action(
                 "等待可验证的 CMS 整理后源目录，当前 115 ID 仍是接收/分享快照，拒绝继续创建自有分享",
                 {"submission_id": int(row["id"]), "own_share_file_id": ""},
@@ -1425,7 +1444,7 @@ class BridgeSelfShareTaskWorkflow:
                 self._own_share_metadata(row) | {"own_share_file_id": ""},
             )
         folder = task.metadata.get("organized_folder")
-        if isinstance(folder, dict) and is_unverified_received_source(folder, task.metadata, self._configured_receive_cid()):
+        if isinstance(folder, dict) and is_unverified_received_source(folder, task.metadata, self._task_receive_cid(task)):
             return StageResult.needs_action(
                 "等待可验证的 CMS 整理后源目录，当前 115 ID 仍是接收/分享快照，拒绝创建自有分享",
                 self._own_share_metadata(row) | {"own_share_file_id": ""},
