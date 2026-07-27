@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from dataclasses import asdict, dataclass, field, replace
@@ -447,24 +448,34 @@ class QualityAutomation:
             TaskStage.NEEDS_ACTION,
         }
         safe = self._safe_metadata(task)
+        source_evidence = self._has_source_evidence(task)
+        risk_controlled = self._risk_controlled(task, current_time)
         queued = bool(state.get("quality_repair_queued"))
         auto_allowed = bool(
             match.auto_allowed
             and match.auto_action == "reprocess"
             and safe
+            and source_evidence
+            and not risk_controlled
             and not busy
             and not terminal
             and not queued
             and manual_status == "open"
             and next_eligible <= current_time
         )
+        rule_actions = {
+            str(value).strip().lower()
+            for value in match.manual_actions
+            if str(value).strip().lower() in {"view", "snooze", "ignore", "resume"}
+        }
         actions = ["view"]
         if manual_status in {"snoozed", "ignored", "manual_required"}:
-            actions.append("resume")
+            if "resume" in rule_actions:
+                actions.append("resume")
         elif not queued and not busy and not terminal:
-            actions.extend(("snooze", "ignore"))
+            actions.extend(action for action in ("snooze", "ignore") if action in rule_actions)
             if auto_allowed:
-                actions.extend(("execute", "reprocess"))
+                actions.extend(action for action in ("execute", "reprocess") if action not in actions)
             elif match.rule_id in {"missing_destination", "missing_strm"} and safe:
                 actions.append("reprocess")
         reason = str(state.get("quality_rule_reason") or "").strip()
@@ -529,24 +540,31 @@ class QualityAutomation:
         actor = str(actor or "web").strip()[:128] or "web"
         if normalized_action == "snooze":
             try:
-                target_until = time.time() + 24 * 60 * 60 if until is None else float(until)
-                if target_until <= time.time() or target_until > time.time() + self.MAX_COOLDOWN_SECONDS:
+                current_time = time.time()
+                target_until = current_time + 24 * 60 * 60 if until is None else float(until)
+                if (
+                    not math.isfinite(target_until)
+                    or target_until <= current_time
+                    or target_until > current_time + self.MAX_COOLDOWN_SECONDS
+                ):
                     raise ValueError
             except (TypeError, ValueError, OverflowError):
                 return {"status": "rejected", "task": task, "action": normalized_action, "reason": "invalid_until"}
-            updated = self.store.mark_quality_snoozed(task.id, target_until, actor)
+            updated = self.store.mark_quality_snoozed(
+                task.id, target_until, actor, rule_id=str(descriptor["rule_id"])
+            )
             if updated is None:
                 latest = self.store.find_task(task.id)
                 return {"status": "conflict", "task": latest or task, "action": normalized_action, "reason": "task_changed"}
             return {"status": "snoozed", "task": updated, "action": normalized_action, "reason": "manual_snooze"}
         if normalized_action == "ignore":
-            updated = self.store.mark_quality_ignored(task.id, actor)
+            updated = self.store.mark_quality_ignored(task.id, actor, rule_id=str(descriptor["rule_id"]))
             if updated is None:
                 latest = self.store.find_task(task.id)
                 return {"status": "conflict", "task": latest or task, "action": normalized_action, "reason": "task_changed"}
             return {"status": "ignored", "task": updated, "action": normalized_action, "reason": "manual_ignore"}
         if normalized_action == "resume":
-            updated = self.store.resume_quality(task.id, actor)
+            updated = self.store.resume_quality(task.id, actor, rule_id=str(descriptor["rule_id"]))
             if updated is None:
                 latest = self.store.find_task(task.id)
                 return {"status": "conflict", "task": latest or task, "action": normalized_action, "reason": "task_changed"}
@@ -577,7 +595,10 @@ class QualityAutomation:
             require_unclaimed=True,
             target_stage=TaskStage.RECEIVED,
             target_status=TaskStatus.PENDING,
-            target_event_message=f"人工质量操作已入队：{normalized_action}（actor={actor}）",
+            target_event_message=(
+                f"人工质量操作已入队：{normalized_action}"
+                f"（rule={descriptor['rule_id']}; action={normalized_action}; actor={actor}）"
+            ),
             metadata_patch=metadata,
             metadata_delete_keys=tuple(
                 key for key in REPROCESS_METADATA_DELETE_KEYS if key != "quality_repair_queued"

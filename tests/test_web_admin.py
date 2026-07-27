@@ -13,12 +13,14 @@ import bridge
 from app.models import TaskStage, TaskStatus
 from app.quality import QualityIssue
 from app.quality_automation import QualityAutomation
+from app.quality_rules import QualityRuleMatch
 from app.config import Config
 from app.task_health import format_taskstore_health
 from app.task_store import TaskStore
 from app.web import (
     WebApp,
     _event_stage,
+    fix_quality_issues,
     _render_phase_track,
     _task_phase_index,
     render_health_page,
@@ -26,6 +28,19 @@ from app.web import (
     render_task_detail,
     render_task_list,
 )
+
+
+class _ManualActionRuleEngine:
+    def evaluate(self, task, issues, *, config=None):
+        return QualityRuleMatch(
+            rule_id="missing_destination",
+            priority=60,
+            risk_level="medium",
+            reason="destination directory is missing",
+            issue_codes=("missing_dest",),
+            manual_actions=("view", "snooze", "ignore", "resume"),
+            evidence=(str(task.metadata.get("dest_path") or ""),),
+        )
 
 
 class WebAdminTests(unittest.TestCase):
@@ -43,6 +58,49 @@ class WebAdminTests(unittest.TestCase):
                 TaskStatus.SUCCEEDED,
                 "moved",
                 title="旧版质量任务",
+                metadata_patch={"dest_path": str(destination), "own_share_code": "own", "own_share_receive_code": "1212"},
+            )
+            config = Config(
+                tg_bot_token="token",
+                tg_allowed_chat_id="chat",
+                cms_base_url="http://cms",
+                cms_username="user",
+                cms_password="pass",
+                task_db_path=str(root / "tasks.db"),
+                quality_auto_enabled=False,
+            )
+            quality = QualityAutomation(store, config, allowed_roots=[root])
+            quality.rule_engine = _ManualActionRuleEngine()
+            app = WebApp(store, quality_automation=quality)
+            markup = render_quality_page(store, quality)
+            status, headers, _body = app.handle_request(
+                "POST",
+                "/quality/action/snooze",
+                {},
+                f"task_id={task.id}&rule_id=missing_destination&rule_version=1&action=snooze&until={time.time() + 3600}".encode(),
+            )
+
+            self.assertIn("manual required", markup)
+            self.assertIn("missing_destination", markup)
+            self.assertIn("尝试次数", markup)
+            self.assertIn("证据", markup)
+            self.assertEqual(status, 303)
+            self.assertEqual(headers["Location"], "/quality")
+            self.assertEqual(store.quality_state(task.id)["quality_manual_status"], "snoozed")
+
+    def test_quality_page_labels_open_non_auto_task_as_manual_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = TaskStore(root / "tasks.db")
+            destination = root / "direct"
+            destination.mkdir()
+            (destination / "movie.strm").write_text("https://cms/d/movie.mkv", encoding="utf-8")
+            task = store.upsert_task("manual-page", "", "https://115cdn.com/s/manual-page")
+            store.record_event(
+                task.id,
+                TaskStage.MOVED,
+                TaskStatus.SUCCEEDED,
+                "moved",
                 metadata_patch={"dest_path": str(destination), "own_share_code": "own"},
             )
             config = Config(
@@ -55,22 +113,78 @@ class WebAdminTests(unittest.TestCase):
                 quality_auto_enabled=False,
             )
             quality = QualityAutomation(store, config, allowed_roots=[root])
-            app = WebApp(store, quality_automation=quality)
-            markup = render_quality_page(store, quality)
-            status, headers, _body = app.handle_request(
-                "POST",
-                "/quality/action/snooze",
-                {},
-                f"task_id={task.id}&rule_id=strm_mode_mismatch&rule_version=1&action=snooze&until={time.time() + 3600}".encode(),
-            )
 
-            self.assertIn("auto eligible", markup)
-            self.assertIn("strm_mode_mismatch", markup)
-            self.assertIn("尝试次数", markup)
-            self.assertIn("证据", markup)
-            self.assertEqual(status, 303)
-            self.assertEqual(headers["Location"], "/quality")
-            self.assertEqual(store.quality_state(task.id)["quality_manual_status"], "snoozed")
+            markup = render_quality_page(store, quality)
+
+            self.assertIn('data-quality-group="manual-required"', markup)
+            self.assertIn(">manual required<", markup)
+            self.assertNotIn('data-quality-group="auto-eligible"', markup)
+
+    def test_quality_page_scans_and_legacy_fix_use_automation_allowed_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = TaskStore(root / "tasks.db")
+            config = Config(
+                tg_bot_token="token",
+                tg_allowed_chat_id="chat",
+                cms_base_url="http://cms",
+                cms_username="user",
+                cms_password="pass",
+                task_db_path=str(root / "tasks.db"),
+                quality_auto_enabled=False,
+            )
+            quality = QualityAutomation(store, config, allowed_roots=[root / "allowed"])
+
+            with patch("app.web.scan_task_quality", return_value=[]) as page_scan:
+                render_quality_page(store, quality)
+            with patch("app.web.scan_task_quality", return_value=[]) as fix_scan:
+                fix_quality_issues(store, quality)
+
+            self.assertEqual(page_scan.call_args.kwargs["allowed_roots"], quality.allowed_roots)
+            self.assertEqual(fix_scan.call_args.kwargs["allowed_roots"], quality.allowed_roots)
+
+    def test_quality_page_and_legacy_fix_reject_generator_outside_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "library"
+            outside = Path(tmp) / "outside"
+            destination = outside / "direct"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/d/movie.mkv", encoding="utf-8")
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("outside-quality", "", "https://115cdn.com/s/outside-quality")
+            store.record_event(
+                task.id,
+                TaskStage.MOVED,
+                TaskStatus.SUCCEEDED,
+                "moved",
+                metadata_patch={
+                    "dest_path": str(destination),
+                    "own_share_code": "own",
+                    "own_share_receive_code": "1212",
+                },
+            )
+            config = Config(
+                tg_bot_token="token",
+                tg_allowed_chat_id="chat",
+                cms_base_url="http://cms",
+                cms_username="user",
+                cms_password="pass",
+                task_db_path=str(Path(tmp) / "tasks.db"),
+                quality_auto_enabled=False,
+            )
+            quality = QualityAutomation(store, config, allowed_roots=(path for path in (root,)))
+            before = store.find_task(task.id)
+            event_count = len(store.list_events(task.id))
+
+            markup = render_quality_page(store, quality)
+            fixed = fix_quality_issues(store, quality)
+
+            self.assertEqual(fixed, 0)
+            self.assertIn("unsafe_path", markup)
+            self.assertIn("manual required", markup)
+            self.assertNotIn('action="/quality/action/execute"', markup)
+            self.assertEqual(store.find_task(task.id), before)
+            self.assertEqual(len(store.list_events(task.id)), event_count)
 
     def test_legacy_quality_fix_never_restores_missing_destination(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1280,9 +1394,23 @@ class WebAdminTests(unittest.TestCase):
                 TaskStatus.SUCCEEDED,
                 "moved",
                 title="直链电影",
-                metadata_patch={"dest_path": str(dest), "own_share_code": "ownabc"},
+                metadata_patch={
+                    "dest_path": str(dest),
+                    "own_share_code": "ownabc",
+                    "own_share_receive_code": "1212",
+                },
             )
-            app = WebApp(store, web_token="")
+            config = Config(
+                tg_bot_token="token",
+                tg_allowed_chat_id="chat",
+                cms_base_url="http://cms",
+                cms_username="user",
+                cms_password="pass",
+                task_db_path=str(root / "tasks.db"),
+                quality_auto_enabled=False,
+            )
+            quality = QualityAutomation(store, config, allowed_roots=[root])
+            app = WebApp(store, web_token="", quality_automation=quality)
 
             status, _headers, body = app.handle_request("GET", "/quality", {}, b"")
             html = body.decode("utf-8")
@@ -1316,7 +1444,17 @@ class WebAdminTests(unittest.TestCase):
                 metadata_patch={"dest_path": str(dest), "own_share_code": "ownabc"},
             )
 
-            markup = render_quality_page(store)
+            config = Config(
+                tg_bot_token="token",
+                tg_allowed_chat_id="chat",
+                cms_base_url="http://cms",
+                cms_username="user",
+                cms_password="pass",
+                task_db_path=str(root / "tasks.db"),
+                quality_auto_enabled=False,
+            )
+            quality = QualityAutomation(store, config, allowed_roots=[root])
+            markup = render_quality_page(store, quality)
 
             for label in ("问题总数", "受影响任务", "目标目录缺失", "STRM 缺失", "直链 STRM", "异常分享"):
                 self.assertIn(label, markup)
@@ -1344,7 +1482,7 @@ class WebAdminTests(unittest.TestCase):
             with patch("app.web.scan_task_quality", return_value=issues) as scan:
                 markup = render_quality_page(store)
 
-            scan.assert_called_once_with(store)
+            scan.assert_called_once_with(store, allowed_roots=())
             rows = re.findall(r'<article class="quality-row".*?</article>', markup, re.S)
             self.assertEqual(len(rows), 2)
             self.assertIn("#2", rows[0])

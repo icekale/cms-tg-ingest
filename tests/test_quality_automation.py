@@ -15,6 +15,7 @@ from app.config import Config
 from app.models import TaskStage, TaskStatus
 from app.quality import QualityIssue, scan_task_quality
 from app.quality_automation import QualityAutomation, QualityRepairPlan, QualityRunSummary
+from app.quality_rules import QualityRuleMatch
 from app.task_store import TaskStore
 
 
@@ -417,6 +418,19 @@ class QualityScheduleTests(unittest.TestCase):
             )
 
 
+class _ManualActionRuleEngine:
+    def evaluate(self, task, issues, *, config=None):
+        return QualityRuleMatch(
+            rule_id="missing_destination",
+            priority=60,
+            risk_level="medium",
+            reason="destination directory is missing",
+            issue_codes=("missing_dest",),
+            manual_actions=("view", "snooze", "ignore", "resume"),
+            evidence=(str(task.metadata.get("dest_path") or ""),),
+        )
+
+
 class QualityPlanningTests(unittest.TestCase):
     def make_service(self, tmp, max_tasks=50):
         library = Path(tmp) / "library"
@@ -541,6 +555,7 @@ class QualityPlanningTests(unittest.TestCase):
     def test_manual_action_snooze_resume_and_rejects_unknown_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             service, library = self.make_service(tmp)
+            service.rule_engine = _ManualActionRuleEngine()
             task = self.add_task(service.store, "manual-snooze", library / "does-not-exist")
 
             snoozed = service.manual_action(
@@ -552,6 +567,92 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertEqual(snoozed["status"], "snoozed")
             self.assertEqual(resumed["status"], "resumed")
             self.assertEqual(missing["status"], "not_found")
+
+    def test_manual_snooze_rejects_non_finite_until(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            service.rule_engine = _ManualActionRuleEngine()
+            task = self.add_task(service.store, "manual-nan", library / "does-not-exist")
+            before = service.store.find_task(task.id)
+
+            for until in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(until=until):
+                    result = service.manual_action(
+                        task.id,
+                        "missing_destination",
+                        "snooze",
+                        "tester",
+                        until=until,
+                        rule_version="1",
+                    )
+                    self.assertEqual(result["status"], "rejected")
+                    self.assertEqual(result["reason"], "invalid_until")
+                    self.assertEqual(service.store.find_task(task.id), before)
+            self.assertEqual(service.store.list_events(task.id), [
+                event for event in service.store.list_events(task.id)
+            ])
+
+    def test_quality_descriptor_requires_source_evidence_and_blocks_unsafe_risk_terminal_controls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            no_evidence_dest = library / "no-evidence"
+            no_evidence_dest.mkdir(parents=True)
+            (no_evidence_dest / "movie.strm").write_text("https://cms/d/movie.mkv", encoding="utf-8")
+            no_evidence = self.add_task(service.store, "no-evidence", no_evidence_dest)
+            no_evidence_descriptor = service.quality_descriptor(no_evidence)
+
+            unsafe = self.add_task(service.store, "unsafe", Path(tmp) / "outside")
+            unsafe_descriptor = service.quality_descriptor(unsafe)
+
+            risk_dest = library / "risk"
+            risk_dest.mkdir(parents=True)
+            (risk_dest / "movie.strm").write_text("https://cms/d/movie.mkv", encoding="utf-8")
+            risk = self.add_task(
+                service.store,
+                "risk",
+                risk_dest,
+                own_share_receive_code="1212",
+                p115_risk_controlled=True,
+            )
+            risk_descriptor = service.quality_descriptor(risk)
+
+            terminal = self.add_task(
+                service.store,
+                "terminal",
+                library / "terminal-missing",
+                invalid_share_cleaned=True,
+            )
+            terminal_descriptor = service.quality_descriptor(terminal)
+
+            self.assertNotIn("execute", no_evidence_descriptor["available_actions"])
+            self.assertNotIn("reprocess", no_evidence_descriptor["available_actions"])
+            self.assertEqual(unsafe_descriptor["available_actions"], ["view"])
+            self.assertNotIn("snooze", risk_descriptor["available_actions"])
+            self.assertNotIn("ignore", risk_descriptor["available_actions"])
+            self.assertNotIn("snooze", terminal_descriptor["available_actions"])
+            self.assertNotIn("ignore", terminal_descriptor["available_actions"])
+
+    def test_manual_quality_events_persist_rule_and_action_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            service.rule_engine = _ManualActionRuleEngine()
+            task = self.add_task(service.store, "trace", library / "does-not-exist")
+
+            service.manual_action(task.id, "missing_destination", "snooze", "tester", rule_version="1")
+            snoozed = service.store.find_task(task.id)
+            snooze_event = service.store.list_events(task.id)[-1]
+            self.assertEqual(snoozed.metadata["quality_rule_id"], "missing_destination")
+            self.assertEqual(snoozed.metadata["quality_repair_action"], "snooze")
+            self.assertIn("rule=missing_destination", snooze_event["message"])
+            self.assertIn("action=snooze", snooze_event["message"])
+
+            service.manual_action(task.id, "missing_destination", "resume", "tester", rule_version="1")
+            resumed = service.store.find_task(task.id)
+            resume_event = service.store.list_events(task.id)[-1]
+            self.assertEqual(resumed.metadata["quality_rule_id"], "missing_destination")
+            self.assertEqual(resumed.metadata["quality_repair_action"], "resume")
+            self.assertIn("rule=missing_destination", resume_event["message"])
+            self.assertIn("action=resume", resume_event["message"])
 
     def test_expired_snooze_is_open_for_planning_and_execution(self):
         with tempfile.TemporaryDirectory() as tmp:

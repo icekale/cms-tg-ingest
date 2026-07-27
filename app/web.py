@@ -844,7 +844,8 @@ def _apply_task_action(store: TaskStore, task: Any, action: str) -> bool:
 
 
 def render_quality_page(store: TaskStore, quality_automation: QualityAutomation | None = None) -> str:
-    issues = scan_task_quality(store)
+    allowed_roots = quality_automation.allowed_roots if quality_automation is not None else ()
+    issues = scan_task_quality(store, allowed_roots=allowed_roots)
     report = format_task_quality_report(issues)
     quality_rows = quality_items(store, quality_automation=quality_automation, issues=issues)
     grouped: dict[int, dict[str, Any]] = {}
@@ -932,7 +933,12 @@ def render_quality_page(store: TaskStore, quality_automation: QualityAutomation 
                 f'<button class="{css}" type="submit">{label}</button></form>'
             )
         actions_markup = "".join(action_forms)
-        status_label = "auto eligible" if descriptor.get("auto_allowed") else str(descriptor.get("manual_status") or "manual required").replace("_", " ")
+        if descriptor.get("auto_allowed"):
+            status_label = "auto eligible"
+        elif str(descriptor.get("manual_status") or "open") == "open":
+            status_label = "manual required"
+        else:
+            status_label = str(descriptor.get("manual_status") or "manual required").replace("_", " ")
         rows.append(
             f"""<article class="quality-row" data-quality-group="{html.escape(status_label.replace(' ', '-'), quote=True)}">
   <div class="quality-task">
@@ -1011,7 +1017,8 @@ def fix_quality_issues(store: TaskStore, quality_automation: QualityAutomation |
     if quality_automation is None:
         return 0
     fixed_task_ids: set[int] = set()
-    for item in quality_items(store, quality_automation=quality_automation):
+    issues = scan_task_quality(store, allowed_roots=quality_automation.allowed_roots)
+    for item in quality_items(store, quality_automation=quality_automation, issues=issues):
         task_id = int(item["task_id"])
         if task_id in fixed_task_ids:
             continue

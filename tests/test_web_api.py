@@ -8,12 +8,26 @@ from unittest.mock import Mock, patch
 from app.models import TaskStage, TaskStatus
 from app.quality import QualityIssue
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
+from app.quality_rules import QualityRuleMatch
 from app.series_rules import parse_episode_filter
 from app.task_store import TaskStore
 from app.config import Config
 from app.quality_automation import QualityAutomation
 from app.web import WebApp
 from app.web_api import _safe_error, _safe_url, serialize_health, serialize_task
+
+
+class _ManualActionRuleEngine:
+    def evaluate(self, task, issues, *, config=None):
+        return QualityRuleMatch(
+            rule_id="missing_destination",
+            priority=60,
+            risk_level="medium",
+            reason="destination directory is missing",
+            issue_codes=("missing_dest",),
+            manual_actions=("view", "snooze", "ignore", "resume"),
+            evidence=(str(task.metadata.get("dest_path") or ""),),
+        )
 
 
 class WebApiTests(unittest.TestCase):
@@ -44,7 +58,11 @@ class WebApiTests(unittest.TestCase):
                 TaskStatus.SUCCEEDED,
                 "moved",
                 title="质量 API 任务",
-                metadata_patch={"dest_path": str(destination), "own_share_code": "own"},
+                metadata_patch={
+                    "dest_path": str(destination),
+                    "own_share_code": "own",
+                    "own_share_receive_code": "1212",
+                },
             )
             app = WebApp(store, quality_automation=quality)
 
@@ -58,7 +76,7 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(item["title"], "质量 API 任务")
             self.assertEqual(item["rule_id"], "strm_mode_mismatch")
             self.assertIn("execute", item["available_actions"])
-            self.assertIn("snooze", item["available_actions"])
+            self.assertNotIn("snooze", item["available_actions"])
             self.assertIn("strm_mode_mismatch", payload["rule_counts"])
             self.assertIn("automation", payload)
 
@@ -75,7 +93,11 @@ class WebApiTests(unittest.TestCase):
                 TaskStage.MOVED,
                 TaskStatus.SUCCEEDED,
                 "moved",
-                metadata_patch={"dest_path": str(destination), "own_share_code": "own"},
+                metadata_patch={
+                    "dest_path": str(destination),
+                    "own_share_code": "own",
+                    "own_share_receive_code": "1212",
+                },
             )
             app = WebApp(store, quality_automation=quality)
             _, _, quality_body = app.handle_request("GET", "/api/v1/quality", {}, b"")
@@ -155,6 +177,7 @@ class WebApiTests(unittest.TestCase):
                 "moved",
                 metadata_patch={"dest_path": str(root / "missing"), "own_share_code": "own"},
             )
+            quality.rule_engine = _ManualActionRuleEngine()
             app = WebApp(store, quality_automation=quality)
             _, _, body = app.handle_request("GET", "/api/v1/quality", {}, b"")
             item = json.loads(body)["items"][0]

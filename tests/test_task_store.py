@@ -182,6 +182,23 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(state["quality_rule_id"], "")
             self.assertGreaterEqual(len(store.list_events(task.id)), 3)
 
+    def test_quality_manual_transition_persists_optional_rule_and_action_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("quality-context", "", "https://115cdn.com/s/quality-context")
+
+            snoozed = store.mark_quality_snoozed(task.id, time.time() + 456, "alice", rule_id="missing_destination")
+            ignored = store.mark_quality_ignored(task.id, "bob", rule_id="missing_destination")
+            resumed = store.resume_quality(task.id, "carol", rule_id="missing_destination")
+
+            self.assertEqual(snoozed.metadata["quality_rule_id"], "missing_destination")
+            self.assertEqual(ignored.metadata["quality_rule_id"], "missing_destination")
+            self.assertEqual(resumed.metadata["quality_rule_id"], "missing_destination")
+            messages = [event["message"] for event in store.list_events(task.id)]
+            self.assertTrue(any("rule=missing_destination" in message and "action=snooze" in message for message in messages))
+            self.assertTrue(any("rule=missing_destination" in message and "action=ignore" in message for message in messages))
+            self.assertTrue(any("rule=missing_destination" in message and "action=resume" in message for message in messages))
+
     def test_resume_quality_clears_current_repair_metadata_but_keeps_event_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

@@ -1066,6 +1066,8 @@ class TaskStore:
         actor: str,
         *,
         metadata_delete_keys: tuple[str, ...] = (),
+        rule_id: str | None = None,
+        action: str | None = None,
     ) -> TaskSnapshot | None:
         """CAS-update quality metadata and append one explainable task event."""
         values = self._quality_patch(patch)
@@ -1077,20 +1079,33 @@ class TaskStore:
                 + ", ".join(sorted(invalid_delete_keys))
             )
         values["quality_last_actor"] = str(actor or "")
+        if rule_id is not None:
+            values["quality_rule_id"] = str(rule_id or "")
+        if action is not None:
+            values["quality_repair_action"] = str(action or "")
         current = self.find_task(int(task_id))
         if current is None:
             raise KeyError(f"task not found: {task_id}")
+        context = []
+        if rule_id is not None:
+            context.append(f"rule={str(rule_id or '')}")
+        if action is not None:
+            context.append(f"action={str(action or '')}")
+        context.append(f"actor={str(actor or '')}")
+        event_message = f"{message}（{'; '.join(context)}）"
         return self.record_event(
             int(task_id),
             current.current_stage,
             current.status,
-            f"{message}（actor={str(actor or '')}）",
+            event_message,
             metadata_patch=values,
             metadata_delete_keys=delete_keys,
             expected_updated_at=float(expected_updated_at),
         )
 
-    def mark_quality_snoozed(self, task_id: int, until: float, actor: str) -> TaskSnapshot | None:
+    def mark_quality_snoozed(
+        self, task_id: int, until: float, actor: str, *, rule_id: str | None = None
+    ) -> TaskSnapshot | None:
         task = self.find_task(int(task_id))
         if task is None:
             raise KeyError(f"task not found: {task_id}")
@@ -1105,9 +1120,11 @@ class TaskStore:
             },
             "质量问题已暂缓",
             actor,
+            rule_id=rule_id,
+            action="snooze" if rule_id is not None else None,
         )
 
-    def mark_quality_ignored(self, task_id: int, actor: str) -> TaskSnapshot | None:
+    def mark_quality_ignored(self, task_id: int, actor: str, *, rule_id: str | None = None) -> TaskSnapshot | None:
         task = self.find_task(int(task_id))
         if task is None:
             raise KeyError(f"task not found: {task_id}")
@@ -1117,9 +1134,11 @@ class TaskStore:
             {"quality_manual_status": "ignored"},
             "质量问题已忽略",
             actor,
+            rule_id=rule_id,
+            action="ignore" if rule_id is not None else None,
         )
 
-    def resume_quality(self, task_id: int, actor: str) -> TaskSnapshot | None:
+    def resume_quality(self, task_id: int, actor: str, *, rule_id: str | None = None) -> TaskSnapshot | None:
         task = self.find_task(int(task_id))
         if task is None:
             raise KeyError(f"task not found: {task_id}")
@@ -1131,7 +1150,7 @@ class TaskStore:
                 "quality_repair_attempts": 0,
                 "quality_next_eligible_at": 0,
                 "quality_snoozed_until": 0,
-                "quality_rule_id": "",
+                "quality_rule_id": str(rule_id or "") if rule_id is not None else "",
                 "quality_rule_reason": "",
                 "quality_rule_risk_level": "",
                 "quality_issue_codes": [],
@@ -1143,12 +1162,23 @@ class TaskStore:
             "质量问题已恢复自动评估",
             actor,
             metadata_delete_keys=(
-                "quality_repair_action",
+                (
+                    "quality_repair_action",
+                    "quality_repair_reason",
+                    "quality_run_id",
+                    "quality_last_run_id",
+                    "quality_last_attempt_at",
+                )
+                if rule_id is None
+                else (
                 "quality_repair_reason",
                 "quality_run_id",
                 "quality_last_run_id",
                 "quality_last_attempt_at",
+                )
             ),
+            rule_id=rule_id,
+            action="resume" if rule_id is not None else None,
         )
 
     def clear_finished_tasks(self) -> int:
