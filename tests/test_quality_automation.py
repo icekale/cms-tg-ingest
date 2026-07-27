@@ -565,7 +565,8 @@ class QualityPlanningTests(unittest.TestCase):
             service.store.patch_metadata(task.id, {"quality_repair_attempts": 2})
             current = service.store.find_task(task.id)
             exhausted = service._plan([current], [issue], now=200000.0)[0]
-            self.assertEqual(exhausted.reason, "attempt_limit")
+            self.assertEqual(exhausted.reason, "manual_required")
+            self.assertEqual(service.store.quality_state(task.id)["quality_manual_status"], "manual_required")
 
             service.store.resume_quality(task.id, "tester")
             current = service.store.find_task(task.id)
@@ -991,7 +992,10 @@ class QualityRepairExecutionTests(unittest.TestCase):
             current = service.store.find_task(task.id)
             third = service._plan([current], [issue])[0]
 
-            self.assertEqual(third.reason, "attempt_limit")
+            self.assertEqual(third.reason, "manual_required")
+            state = service.store.quality_state(task.id)
+            self.assertEqual(state["quality_manual_status"], "manual_required")
+            self.assertEqual(state["quality_rule_reason"], "manual_required")
             self.assertEqual(len([call for call in adapter.calls if call[0] == "reprocess"]), 2)
 
 

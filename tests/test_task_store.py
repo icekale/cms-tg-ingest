@@ -91,6 +91,47 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(state["quality_rule_id"], "")
             self.assertGreaterEqual(len(store.list_events(task.id)), 3)
 
+    def test_resume_quality_clears_current_repair_metadata_but_keeps_event_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("quality-resume-clean", "", "https://115cdn.com/s/quality-resume-clean")
+            current = store.patch_metadata(
+                task.id,
+                {
+                    "quality_manual_status": "manual_required",
+                    "quality_repair_attempts": 2,
+                    "quality_next_eligible_at": 999.0,
+                    "quality_repair_queued": True,
+                    "quality_repair_started_at": 123.0,
+                    "quality_repair_deadline_at": 456.0,
+                    "quality_repair_action": "reprocess",
+                    "quality_repair_reason": "manual_required",
+                    "quality_run_id": "run-current",
+                    "quality_last_run_id": "run-current",
+                    "quality_last_attempt_at": 123.0,
+                },
+            )
+
+            resumed = store.resume_quality(task.id, "tester")
+            metadata = resumed.metadata
+            state = store.quality_state(task.id)
+
+            for key in (
+                "quality_repair_action",
+                "quality_repair_reason",
+                "quality_run_id",
+                "quality_last_run_id",
+                "quality_last_attempt_at",
+            ):
+                self.assertNotIn(key, metadata)
+            self.assertEqual(state["quality_manual_status"], "open")
+            self.assertEqual(state["quality_repair_attempts"], 0)
+            self.assertEqual(state["quality_next_eligible_at"], 0)
+            self.assertFalse(state["quality_repair_queued"])
+            self.assertEqual(state["quality_repair_started_at"], 0)
+            self.assertEqual(state["quality_repair_deadline_at"], 0)
+            self.assertTrue(any("恢复自动评估" in event["message"] for event in store.list_events(task.id)))
+
     def test_constructor_default_strm_mode_is_used_until_runtime_state_is_set(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db", default_strm_mode="direct")

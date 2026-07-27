@@ -488,6 +488,8 @@ class QualityAutomation:
         manual_status = str(state.get("quality_manual_status") or "open").strip().lower()
         if manual_status in {"snoozed", "ignored"}:
             return QualityRepairPlan(action="skip", reason=f"manual_{manual_status}", execution_status="skipped", **base)
+        if manual_status == "manual_required":
+            return QualityRepairPlan(action="skip", reason="manual_required", execution_status="skipped", **base)
         try:
             next_eligible = float(state.get("quality_next_eligible_at") or 0)
         except (TypeError, ValueError):
@@ -499,7 +501,10 @@ class QualityAutomation:
         except (TypeError, ValueError):
             attempts = 0
         if attempts >= int(self.rule_config["max_attempts"]):
-            return QualityRepairPlan(action="skip", reason="attempt_limit", execution_status="skipped", **base)
+            current = self._mark_manual_required(task)
+            if current.updated_at != task.updated_at:
+                base["planned_updated_at"] = current.updated_at
+            return QualityRepairPlan(action="skip", reason="manual_required", execution_status="skipped", **base)
         if not match.auto_allowed or match.auto_action != "reprocess":
             return QualityRepairPlan(action="skip", reason=match.rule_id, execution_status="skipped", **base)
         if not self._has_source_evidence(task):
@@ -563,6 +568,25 @@ class QualityAutomation:
         except (TypeError, ValueError):
             return False
 
+    def _mark_manual_required(self, task: TaskSnapshot) -> TaskSnapshot:
+        state = self.store.quality_state(task.id)
+        if (
+            str(state.get("quality_manual_status") or "").strip().lower() == "manual_required"
+            and str(state.get("quality_rule_reason") or "").strip().lower() == "manual_required"
+        ):
+            return task
+        updated = self.store.update_quality_state(
+            task.id,
+            task.updated_at,
+            {
+                "quality_manual_status": "manual_required",
+                "quality_rule_reason": "manual_required",
+            },
+            "质量自动修复已达到尝试上限",
+            "quality-auto",
+        )
+        return updated or self.store.find_task(task.id) or task
+
     def execute_plan(self, plan: QualityRepairPlan, run_id: str) -> QualityRepairPlan:
         """Atomically reserve a task before handing repair work to an adapter."""
         if plan.action == "skip":
@@ -596,8 +620,11 @@ class QualityAutomation:
         if self._risk_controlled(task, time.time()):
             return replace(plan, execution_status="skipped", reason="risk_control")
         state = self.store.quality_state(task.id)
-        if str(state.get("quality_manual_status") or "open").strip().lower() in {"snoozed", "ignored"}:
+        current_manual_status = str(state.get("quality_manual_status") or "open").strip().lower()
+        if current_manual_status in {"snoozed", "ignored"}:
             return replace(plan, execution_status="skipped", reason="manual_suppressed")
+        if current_manual_status == "manual_required":
+            return replace(plan, execution_status="skipped", reason="manual_required")
         try:
             if float(state.get("quality_next_eligible_at") or 0) > time.time():
                 return replace(plan, execution_status="skipped", reason="cooldown")
@@ -605,7 +632,8 @@ class QualityAutomation:
         except (TypeError, ValueError):
             attempts = 0
         if attempts >= int(self.rule_config["max_attempts"]):
-            return replace(plan, execution_status="skipped", reason="attempt_limit")
+            self._mark_manual_required(task)
+            return replace(plan, execution_status="skipped", reason="manual_required")
         stored_version = str(state.get("quality_rule_version") or "").strip()
         if stored_version and stored_version != str(plan.rule_version or QUALITY_RULE_VERSION):
             return replace(plan, execution_status="skipped", reason="rule_version_changed")
@@ -713,7 +741,7 @@ class QualityAutomation:
             "quality_last_attempt_at": time.time(),
         }
         if int(attempts) >= int(self.rule_config["max_attempts"]):
-            patch["quality_manual_status"] = "open"
+            patch["quality_manual_status"] = "manual_required"
             patch["quality_rule_reason"] = "manual_required"
         return patch
 

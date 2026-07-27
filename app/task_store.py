@@ -1040,9 +1040,18 @@ class TaskStore:
         patch: dict[str, Any],
         message: str,
         actor: str,
+        *,
+        metadata_delete_keys: tuple[str, ...] = (),
     ) -> TaskSnapshot | None:
         """CAS-update quality metadata and append one explainable task event."""
         values = self._quality_patch(patch)
+        delete_keys = tuple(str(key) for key in metadata_delete_keys)
+        invalid_delete_keys = [key for key in delete_keys if not key.startswith("quality_")]
+        if invalid_delete_keys:
+            raise ValueError(
+                "quality state delete keys must use quality_ prefix: "
+                + ", ".join(sorted(invalid_delete_keys))
+            )
         values["quality_last_actor"] = str(actor or "")
         current = self.find_task(int(task_id))
         if current is None:
@@ -1053,6 +1062,7 @@ class TaskStore:
             current.status,
             f"{message}（actor={str(actor or '')}）",
             metadata_patch=values,
+            metadata_delete_keys=delete_keys,
             expected_updated_at=float(expected_updated_at),
         )
 
@@ -1095,14 +1105,12 @@ class TaskStore:
             {
                 "quality_manual_status": "open",
                 "quality_repair_attempts": 0,
-                "quality_last_attempt_at": 0,
                 "quality_next_eligible_at": 0,
                 "quality_snoozed_until": 0,
                 "quality_rule_id": "",
                 "quality_rule_reason": "",
                 "quality_rule_risk_level": "",
                 "quality_issue_codes": [],
-                "quality_last_run_id": "",
                 "quality_rule_version": "",
                 "quality_repair_queued": False,
                 "quality_repair_started_at": 0,
@@ -1110,6 +1118,13 @@ class TaskStore:
             },
             "质量问题已恢复自动评估",
             actor,
+            metadata_delete_keys=(
+                "quality_repair_action",
+                "quality_repair_reason",
+                "quality_run_id",
+                "quality_last_run_id",
+                "quality_last_attempt_at",
+            ),
         )
 
     def clear_finished_tasks(self) -> int:
