@@ -11,6 +11,86 @@ from app.task_store import TaskStore
 
 
 class TaskStoreTests(unittest.TestCase):
+    def test_quality_state_has_non_persisting_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("quality-defaults", "", "https://115cdn.com/s/quality-defaults")
+
+            state = store.quality_state(task.id)
+
+            self.assertEqual(state["quality_manual_status"], "open")
+            self.assertEqual(state["quality_repair_attempts"], 0)
+            self.assertEqual(state["quality_last_attempt_at"], 0)
+            self.assertEqual(state["quality_next_eligible_at"], 0)
+            self.assertEqual(state["quality_rule_id"], "")
+            self.assertEqual(state["quality_issue_codes"], [])
+            self.assertEqual(store.find_task(task.id).metadata, task.metadata)
+
+    def test_quality_state_update_is_compare_and_set_and_traceable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("quality-cas", "", "https://115cdn.com/s/quality-cas")
+
+            updated = store.update_quality_state(
+                task.id,
+                expected_updated_at=task.updated_at,
+                patch={"quality_manual_status": "snoozed", "quality_next_eligible_at": 123.0},
+                message="质量问题暂缓",
+                actor="tester",
+            )
+            stale = store.update_quality_state(
+                task.id,
+                expected_updated_at=task.updated_at,
+                patch={"quality_manual_status": "ignored"},
+                message="过期更新",
+                actor="stale",
+            )
+
+            self.assertIsNotNone(updated)
+            self.assertIsNone(stale)
+            self.assertEqual(store.quality_state(task.id)["quality_manual_status"], "snoozed")
+            events = store.list_events(task.id)
+            self.assertTrue(any("tester" in str(event) and "质量问题暂缓" in str(event) for event in events))
+
+    def test_quality_state_reads_legacy_repair_fields_without_migrating_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("quality-legacy", "", "https://115cdn.com/s/quality-legacy")
+            store.patch_metadata(
+                task.id,
+                {
+                    "quality_repair_queued": True,
+                    "quality_repair_started_at": 12.5,
+                    "quality_repair_deadline_at": 20.0,
+                    "quality_attempts": 1,
+                },
+            )
+
+            state = store.quality_state(task.id)
+
+            self.assertTrue(state["quality_repair_queued"])
+            self.assertEqual(state["quality_repair_started_at"], 12.5)
+            self.assertEqual(state["quality_repair_deadline_at"], 20.0)
+            self.assertEqual(state["quality_repair_attempts"], 1)
+
+    def test_quality_manual_state_transitions_are_atomic_and_resume_clears_quality_suppression(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("quality-manual", "", "https://115cdn.com/s/quality-manual")
+
+            snoozed = store.mark_quality_snoozed(task.id, 456.0, "alice")
+            self.assertEqual(store.quality_state(snoozed.id)["quality_manual_status"], "snoozed")
+            ignored = store.mark_quality_ignored(task.id, "bob")
+            self.assertEqual(store.quality_state(ignored.id)["quality_manual_status"], "ignored")
+            resumed = store.resume_quality(task.id, "carol")
+
+            state = store.quality_state(resumed.id)
+            self.assertEqual(state["quality_manual_status"], "open")
+            self.assertEqual(state["quality_next_eligible_at"], 0)
+            self.assertEqual(state["quality_repair_attempts"], 0)
+            self.assertEqual(state["quality_rule_id"], "")
+            self.assertGreaterEqual(len(store.list_events(task.id)), 3)
+
     def test_constructor_default_strm_mode_is_used_until_runtime_state_is_set(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db", default_strm_mode="direct")

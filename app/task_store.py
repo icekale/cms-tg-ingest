@@ -93,6 +93,20 @@ REPROCESS_METADATA_DELETE_KEYS = (
     "quality_repair_queued",
 )
 
+QUALITY_STATE_DEFAULTS: dict[str, Any] = {
+    "quality_manual_status": "open",
+    "quality_repair_attempts": 0,
+    "quality_last_attempt_at": 0,
+    "quality_next_eligible_at": 0,
+    "quality_rule_id": "",
+    "quality_rule_reason": "",
+    "quality_rule_risk_level": "",
+    "quality_issue_codes": [],
+    "quality_last_run_id": "",
+    "quality_last_actor": "",
+    "quality_rule_version": "",
+}
+
 
 def build_reprocess_metadata(
     task: TaskSnapshot,
@@ -962,6 +976,142 @@ class TaskStore:
             rows = conn.execute("SELECT * FROM task_events WHERE task_id = ? ORDER BY id ASC", (task_id,)).fetchall()
         return [dict(row) for row in rows]
 
+    def quality_state(self, task_id: int) -> dict[str, Any]:
+        """Return normalized quality metadata without writing legacy tasks."""
+        task = self.find_task(int(task_id))
+        if task is None:
+            raise KeyError(f"task not found: {task_id}")
+        metadata = task.metadata
+        state = dict(QUALITY_STATE_DEFAULTS)
+        state["quality_issue_codes"] = []
+        for key in QUALITY_STATE_DEFAULTS:
+            if key in metadata and metadata[key] is not None:
+                state[key] = metadata[key]
+
+        if "quality_repair_attempts" not in metadata and "quality_attempts" in metadata:
+            try:
+                state["quality_repair_attempts"] = max(0, int(metadata["quality_attempts"]))
+            except (TypeError, ValueError):
+                pass
+        if "quality_last_attempt_at" not in metadata and metadata.get("quality_repair_started_at") is not None:
+            try:
+                state["quality_last_attempt_at"] = float(metadata["quality_repair_started_at"] or 0)
+            except (TypeError, ValueError):
+                pass
+        issue_codes = state.get("quality_issue_codes")
+        if isinstance(issue_codes, str):
+            try:
+                parsed = json.loads(issue_codes)
+            except (TypeError, ValueError):
+                parsed = [part.strip() for part in issue_codes.split(",") if part.strip()]
+            issue_codes = parsed
+        state["quality_issue_codes"] = list(issue_codes) if isinstance(issue_codes, (list, tuple)) else []
+        if "quality_repair_queued" in metadata:
+            state["quality_repair_queued"] = bool(metadata.get("quality_repair_queued"))
+        if "quality_repair_started_at" in metadata:
+            try:
+                state["quality_repair_started_at"] = float(metadata.get("quality_repair_started_at") or 0)
+            except (TypeError, ValueError):
+                state["quality_repair_started_at"] = 0
+        if "quality_repair_deadline_at" in metadata:
+            try:
+                state["quality_repair_deadline_at"] = float(metadata.get("quality_repair_deadline_at") or 0)
+            except (TypeError, ValueError):
+                state["quality_repair_deadline_at"] = 0
+        if "quality_snoozed_until" in metadata:
+            try:
+                state["quality_snoozed_until"] = float(metadata.get("quality_snoozed_until") or 0)
+            except (TypeError, ValueError):
+                state["quality_snoozed_until"] = 0
+        return state
+
+    @staticmethod
+    def _quality_patch(patch: dict[str, Any] | None) -> dict[str, Any]:
+        values = {str(key): value for key, value in (patch or {}).items()}
+        invalid = [key for key in values if not key.startswith("quality_")]
+        if invalid:
+            raise ValueError(f"quality state keys must use quality_ prefix: {', '.join(sorted(invalid))}")
+        return values
+
+    def update_quality_state(
+        self,
+        task_id: int,
+        expected_updated_at: float,
+        patch: dict[str, Any],
+        message: str,
+        actor: str,
+    ) -> TaskSnapshot | None:
+        """CAS-update quality metadata and append one explainable task event."""
+        values = self._quality_patch(patch)
+        values["quality_last_actor"] = str(actor or "")
+        current = self.find_task(int(task_id))
+        if current is None:
+            raise KeyError(f"task not found: {task_id}")
+        return self.record_event(
+            int(task_id),
+            current.current_stage,
+            current.status,
+            f"{message}（actor={str(actor or '')}）",
+            metadata_patch=values,
+            expected_updated_at=float(expected_updated_at),
+        )
+
+    def mark_quality_snoozed(self, task_id: int, until: float, actor: str) -> TaskSnapshot | None:
+        task = self.find_task(int(task_id))
+        if task is None:
+            raise KeyError(f"task not found: {task_id}")
+        timestamp = float(until)
+        return self.update_quality_state(
+            task.id,
+            task.updated_at,
+            {
+                "quality_manual_status": "snoozed",
+                "quality_next_eligible_at": timestamp,
+                "quality_snoozed_until": timestamp,
+            },
+            "质量问题已暂缓",
+            actor,
+        )
+
+    def mark_quality_ignored(self, task_id: int, actor: str) -> TaskSnapshot | None:
+        task = self.find_task(int(task_id))
+        if task is None:
+            raise KeyError(f"task not found: {task_id}")
+        return self.update_quality_state(
+            task.id,
+            task.updated_at,
+            {"quality_manual_status": "ignored"},
+            "质量问题已忽略",
+            actor,
+        )
+
+    def resume_quality(self, task_id: int, actor: str) -> TaskSnapshot | None:
+        task = self.find_task(int(task_id))
+        if task is None:
+            raise KeyError(f"task not found: {task_id}")
+        return self.update_quality_state(
+            task.id,
+            task.updated_at,
+            {
+                "quality_manual_status": "open",
+                "quality_repair_attempts": 0,
+                "quality_last_attempt_at": 0,
+                "quality_next_eligible_at": 0,
+                "quality_snoozed_until": 0,
+                "quality_rule_id": "",
+                "quality_rule_reason": "",
+                "quality_rule_risk_level": "",
+                "quality_issue_codes": [],
+                "quality_last_run_id": "",
+                "quality_rule_version": "",
+                "quality_repair_queued": False,
+                "quality_repair_started_at": 0,
+                "quality_repair_deadline_at": 0,
+            },
+            "质量问题已恢复自动评估",
+            actor,
+        )
+
     def clear_finished_tasks(self) -> int:
         terminal_statuses = (TaskStatus.SUCCEEDED.value, TaskStatus.FAILED.value)
         with self._lock, self._connection() as conn:
@@ -1211,6 +1361,7 @@ class TaskStore:
         clear_errors: bool = False,
         clear_claim: bool = False,
         claim_by: str | None = None,
+        expected_updated_at: float | None = None,
     ) -> TaskSnapshot | None:
         allowed_status_values = {status.value for status in allowed_statuses}
         if not allowed_status_values:
@@ -1226,6 +1377,8 @@ class TaskStore:
             if current["status"] not in allowed_status_values:
                 return None
             if require_unclaimed and str(current["claimed_by"] or "").strip():
+                return None
+            if expected_updated_at is not None and float(current["updated_at"] or 0) != float(expected_updated_at):
                 return None
 
             merged_metadata = self._merge_metadata(

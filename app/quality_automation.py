@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .config import Config, MoveConfig, is_relative_to, is_under_any_root, safe_resolve
 from .models import TaskSnapshot, TaskStage, TaskStatus
 from .quality import QualityIssue, scan_task_quality
+from .quality_rules import QUALITY_RULE_VERSION, QualityRuleEngine, QualityRuleMatch, rule_config
 from .task_store import REPROCESS_METADATA_DELETE_KEYS, TaskStore, build_reprocess_metadata
 from .task_runner import QUALITY_REPAIR_WAIT_SECONDS
 
@@ -24,6 +25,10 @@ class QualityRepairPlan:
     issue_codes: tuple[str, ...] = ()
     title: str = ""
     execution_status: str = "planned"
+    rule_id: str = ""
+    risk_level: str = ""
+    rule_version: str = QUALITY_RULE_VERSION
+    planned_updated_at: float = 0
 
 
 @dataclass(frozen=True)
@@ -46,6 +51,10 @@ class QualityRunSummary:
     scanned_count: int = 0
     plans: tuple[QualityRepairPlan, ...] = ()
     error: str = ""
+    rule_counts: dict[str, int] = field(default_factory=dict)
+    manual_count: int = 0
+    cooldown_count: int = 0
+    budget_used: dict[str, object] = field(default_factory=dict)
 
 
 class QualityAutomation:
@@ -57,6 +66,13 @@ class QualityAutomation:
     _SUMMARY_KEY = "quality_auto_last_summary"
     _CURRENT_RUN_KEY = "quality_auto_current_run_id"
     _OVERRIDES_KEY = "quality_auto_overrides"
+    _RULE_CONFIG_KEY = "quality_rule_config"
+    DEFAULT_RULE_CONFIG = {
+        "allow_auto_reprocess": True,
+        "max_attempts": 2,
+        "cooldown_seconds": 86400,
+    }
+    MAX_COOLDOWN_SECONDS = 7 * 24 * 60 * 60
 
     def __init__(
         self,
@@ -67,6 +83,7 @@ class QualityAutomation:
         allowed_roots: Iterable[str | Path] | None = None,
         repair_adapter: object | None = None,
         on_enabled_changed: object | None = None,
+        rule_engine: QualityRuleEngine | None = None,
     ) -> None:
         self.store = store
         self.config = config
@@ -84,6 +101,8 @@ class QualityAutomation:
             raise ValueError(f"quality_auto_115_check_limit must be between 1 and {self.MAX_115_CHECK_LIMIT}")
         self._timezone = ZoneInfo(config.quality_auto_timezone)
         self._run_time = self._parse_run_time(config.quality_auto_time)
+        self.rule_engine = rule_engine or QualityRuleEngine()
+        self.rule_config = self._load_rule_config()
 
         if allowed_roots is None:
             move_config = move_config or MoveConfig.from_config(config)
@@ -93,6 +112,20 @@ class QualityAutomation:
         self.allowed_roots = tuple(safe_resolve(Path(root)) for root in roots)
         self.repair_adapter = repair_adapter
         self.on_enabled_changed = on_enabled_changed
+
+    def _load_rule_config(self) -> dict[str, bool | int]:
+        values: dict[str, object] = dict(self.DEFAULT_RULE_CONFIG)
+        state = self.store.get_runtime_state(self._RULE_CONFIG_KEY)
+        if state:
+            try:
+                override = json.loads(state["value"])
+            except (TypeError, ValueError, KeyError):
+                override = None
+            if isinstance(override, dict):
+                values.update({key: override[key] for key in values if key in override})
+        controls = rule_config(values)
+        controls["cooldown_seconds"] = min(int(controls["cooldown_seconds"]), self.MAX_COOLDOWN_SECONDS)
+        return controls
 
     def _load_runtime_overrides(self) -> None:
         state = self.store.get_runtime_state(self._OVERRIDES_KEY)
@@ -285,14 +318,26 @@ class QualityAutomation:
                 ).strip().lower()
                 == "invalid"
             )
-            plans = self._plan(tasks, issues)
+            plans = self._plan(tasks, issues, run_id=run_id, now=local_now.timestamp())
+            plans, budget = self._apply_budgets(
+                plans,
+                max_tasks=limit,
+                check_limit=max(1, int(self.config.quality_auto_115_check_limit)),
+            )
             if self.repair_adapter is not None:
-                plans = [
-                    self.execute_plan(plan, run_id) if plan.action != "skip" else plan
-                    for plan in plans
-                ]
+                plans = [self.execute_plan(plan, run_id) if plan.action != "skip" else plan for plan in plans]
             finished_local = local_now if injected_now else self._local_now(datetime.now(self._timezone))
             failed_count = sum(plan.execution_status == "failed" for plan in plans)
+            rule_counts: dict[str, int] = {}
+            for plan in plans:
+                if plan.rule_id:
+                    rule_counts[plan.rule_id] = rule_counts.get(plan.rule_id, 0) + 1
+            manual_count = sum(
+                plan.execution_status == "skipped"
+                and plan.reason not in {"task_busy", "max_tasks", "115_check_budget"}
+                for plan in plans
+            )
+            cooldown_count = sum(plan.reason in {"cooldown", "risk_control", "p115_cooldown"} for plan in plans)
             summary = QualityRunSummary(
                 run_id=run_id,
                 status="failed" if failed_count else "succeeded",
@@ -305,6 +350,10 @@ class QualityAutomation:
                 failed_count=failed_count,
                 scanned_count=len(tasks),
                 plans=tuple(plans),
+                rule_counts=rule_counts,
+                manual_count=manual_count,
+                cooldown_count=cooldown_count,
+                budget_used=budget,
             )
         except Exception as exc:
             finished_local = local_now if injected_now else self._local_now(datetime.now(self._timezone))
@@ -345,63 +394,32 @@ class QualityAutomation:
             updated_at,
         )
 
-    def _plan(self, tasks: list[TaskSnapshot], issues: list[QualityIssue]) -> list[QualityRepairPlan]:
+    def _plan(
+        self,
+        tasks: list[TaskSnapshot],
+        issues: list[QualityIssue],
+        *,
+        run_id: str = "",
+        now: float | None = None,
+    ) -> list[QualityRepairPlan]:
         grouped: dict[int, list[QualityIssue]] = {}
         for issue in issues:
             grouped.setdefault(int(issue.task_id), []).append(issue)
 
         plans: list[QualityRepairPlan] = []
-        planned_count = 0
         tasks_by_id = {task.id: task for task in tasks}
+        current_time = time.time() if now is None else float(now)
         for task in tasks:
             task_issues = grouped.get(task.id)
-            metadata_safe = self._safe_metadata(task)
-            candidate = bool(task_issues) or not metadata_safe
-            if not candidate:
-                continue
-
-            if task.status == TaskStatus.RUNNING or task.claimed_by.strip():
-                plans.append(self._skip_plan(task, "task_busy", task_issues))
-                continue
-            if not metadata_safe:
-                plans.append(self._skip_plan(task, "unsafe_metadata", task_issues))
-                continue
-            if planned_count >= max(1, int(self.config.quality_auto_max_tasks)):
-                plans.append(self._skip_plan(task, "max_tasks", task_issues))
-                continue
-
-            issue_codes = tuple(sorted({issue.code for issue in task_issues}))
-            if str(task.metadata.get("p115_risk_controlled") or "").lower() in {"1", "true", "yes"}:
-                plans.append(self._skip_plan(task, "risk_control", task_issues))
-                continue
-            if "invalid_share" in issue_codes:
-                invalid_status = str(
-                    task.metadata.get("invalid_share_status")
-                    or task.metadata.get("share_validation_status")
-                    or ""
-                ).strip().lower()
-                if invalid_status != "invalid":
-                    plans.append(self._skip_plan(task, "unknown_share_status", task_issues))
+            if not task_issues:
+                if self._safe_metadata(task):
                     continue
-                plans.append(self._skip_plan(task, "invalid_share_manual", task_issues))
-                continue
-            elif any(code in {"direct_strm", "unexpected_strm"} for code in issue_codes):
-                action = "reprocess"
-            elif any(code in {"missing_dest", "missing_strm"} for code in issue_codes):
-                action = "restore"
-            else:
-                plans.append(self._skip_plan(task, "unsupported_issue", task_issues))
-                continue
-            plans.append(
-                QualityRepairPlan(
-                    task_id=task.id,
-                    action=action,
-                    reason=issue_codes[0] if issue_codes else "quality_issue",
-                    issue_codes=issue_codes,
-                    title=task.title,
-                )
-            )
-            planned_count += 1
+                task_issues = [QualityIssue("unsafe_metadata", "任务质量元数据不安全", task_id=task.id, title=task.title)]
+            match = self.rule_engine.evaluate(task, task_issues, config=self.rule_config)
+            current = task
+            if run_id:
+                current = self._persist_rule_match(task, match, run_id) or task
+            plans.append(self._plan_match(current, match, current_time))
 
         for task_id, task_issues in grouped.items():
             if task_id not in tasks_by_id:
@@ -411,61 +429,204 @@ class QualityAutomation:
                         action="skip",
                         reason="unsafe_metadata",
                         issue_codes=tuple(sorted({issue.code for issue in task_issues})),
+                        rule_id="unsafe_path",
+                        rule_version=QUALITY_RULE_VERSION,
+                        execution_status="skipped",
                     )
                 )
         return plans
+
+    def _persist_rule_match(
+        self,
+        task: TaskSnapshot,
+        match: QualityRuleMatch,
+        run_id: str,
+    ) -> TaskSnapshot | None:
+        updated = self.store.update_quality_state(
+            task.id,
+            task.updated_at,
+            {
+                "quality_rule_id": match.rule_id,
+                "quality_rule_reason": match.reason,
+                "quality_rule_risk_level": match.risk_level,
+                "quality_issue_codes": list(match.issue_codes),
+                "quality_last_run_id": str(run_id),
+                "quality_rule_version": QUALITY_RULE_VERSION,
+            },
+            f"质量规则评估：{match.rule_id}",
+            "quality-auto",
+        )
+        return updated if isinstance(updated, TaskSnapshot) else self.store.find_task(task.id)
+
+    def _plan_match(self, task: TaskSnapshot, match: QualityRuleMatch, now: float) -> QualityRepairPlan:
+        base = {
+            "task_id": task.id,
+            "issue_codes": match.issue_codes,
+            "title": task.title,
+            "rule_id": match.rule_id,
+            "risk_level": match.risk_level,
+            "rule_version": QUALITY_RULE_VERSION,
+            "planned_updated_at": task.updated_at,
+        }
+        if task.status == TaskStatus.RUNNING or task.claimed_by.strip():
+            return QualityRepairPlan(action="skip", reason="task_busy", execution_status="skipped", **base)
+        if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {
+            TaskStage.FAILED,
+            TaskStage.NEEDS_ACTION,
+        }:
+            return QualityRepairPlan(action="skip", reason="terminal_task", execution_status="skipped", **base)
+        if not self._safe_metadata(task):
+            return QualityRepairPlan(action="skip", reason="unsafe_metadata", execution_status="skipped", **base)
+        state = self.store.quality_state(task.id)
+        manual_status = str(state.get("quality_manual_status") or "open").strip().lower()
+        if manual_status in {"snoozed", "ignored"}:
+            return QualityRepairPlan(action="skip", reason=f"manual_{manual_status}", execution_status="skipped", **base)
+        try:
+            next_eligible = float(state.get("quality_next_eligible_at") or 0)
+        except (TypeError, ValueError):
+            next_eligible = 0
+        if next_eligible > now:
+            return QualityRepairPlan(action="skip", reason="cooldown", execution_status="skipped", **base)
+        try:
+            attempts = int(state.get("quality_repair_attempts") or 0)
+        except (TypeError, ValueError):
+            attempts = 0
+        if attempts >= int(self.rule_config["max_attempts"]):
+            return QualityRepairPlan(action="skip", reason="attempt_limit", execution_status="skipped", **base)
+        if not match.auto_allowed or match.auto_action != "reprocess":
+            return QualityRepairPlan(action="skip", reason=match.rule_id, execution_status="skipped", **base)
+        if not self._has_source_evidence(task):
+            return QualityRepairPlan(action="skip", reason="missing_source_evidence", execution_status="skipped", **base)
+        if self._risk_controlled(task, now):
+            return QualityRepairPlan(action="skip", reason="risk_control", execution_status="skipped", **base)
+        return QualityRepairPlan(action="reprocess", reason=match.rule_id, **base)
+
+    def _apply_budgets(
+        self,
+        plans: list[QualityRepairPlan],
+        *,
+        max_tasks: int,
+        check_limit: int,
+    ) -> tuple[list[QualityRepairPlan], dict[str, object]]:
+        action_count = 0
+        check_count = 0
+        output: list[QualityRepairPlan] = []
+        for plan in plans:
+            if plan.action == "skip":
+                output.append(plan)
+                continue
+            if action_count >= max_tasks:
+                output.append(replace(plan, action="skip", reason="max_tasks", execution_status="skipped"))
+                continue
+            if plan.action == "reprocess" and check_count >= check_limit:
+                output.append(replace(plan, action="skip", reason="115_check_budget", execution_status="skipped"))
+                continue
+            action_count += 1
+            if plan.action == "reprocess":
+                check_count += 1
+            output.append(plan)
+        return output, {
+            "max_tasks": int(max_tasks),
+            "115_check_limit": int(check_limit),
+            "used": {"max_tasks": action_count, "115_checks": check_count},
+            "used_actions": action_count,
+            "used_115_checks": check_count,
+        }
+
+    @staticmethod
+    def _has_source_evidence(task: TaskSnapshot) -> bool:
+        raw_submission = task.submission_id or task.metadata.get("submission_id")
+        try:
+            if raw_submission not in (None, "") and int(raw_submission) > 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+        own_code = str(task.metadata.get("own_share_code") or "").strip()
+        receive_code = str(task.metadata.get("own_share_receive_code") or "").strip()
+        source = str(task.url or task.source_key or task.metadata.get("source_url") or "").strip()
+        return bool(own_code and receive_code and source)
+
+    @staticmethod
+    def _risk_controlled(task: TaskSnapshot, now: float) -> bool:
+        value = str(task.metadata.get("p115_risk_controlled") or "").strip().lower()
+        if value in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        try:
+            return float(task.metadata.get("p115_risk_cooldown_until") or 0) > float(now)
+        except (TypeError, ValueError):
+            return False
 
     def execute_plan(self, plan: QualityRepairPlan, run_id: str) -> QualityRepairPlan:
         """Atomically reserve a task before handing repair work to an adapter."""
         if plan.action == "skip":
             return plan
-        if plan.action not in {"restore", "reprocess", "invalid_share"}:
+        if plan.action != "reprocess":
             return replace(plan, execution_status="skipped", reason="unsupported_action")
         task = self.store.find_task(plan.task_id)
         if task is None:
             return replace(plan, execution_status="skipped", reason="task_missing")
-        if (
-            task.metadata.get("quality_repair_queued")
-            and task.current_stage in {TaskStage.RECEIVED, TaskStage.EMBY_CONFIRMED}
-            and task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}
-        ):
-            return replace(plan, execution_status="skipped", reason="task_busy")
+        if plan.planned_updated_at and task.updated_at != plan.planned_updated_at:
+            return replace(plan, execution_status="skipped", reason="task_changed")
+        if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {
+            TaskStage.FAILED,
+            TaskStage.NEEDS_ACTION,
+        }:
+            return replace(plan, execution_status="skipped", reason="terminal_task")
         if task.status == TaskStatus.RUNNING or task.claimed_by.strip():
             return replace(plan, execution_status="skipped", reason="task_busy")
-        risk_until = 0.0
-        try:
-            risk_until = float(task.metadata.get("p115_risk_cooldown_until") or 0)
-        except (TypeError, ValueError):
-            pass
-        if (
-            str(task.metadata.get("p115_risk_controlled") or "").lower() in {"1", "true", "yes"}
-            or risk_until > time.time()
-        ):
+        if not self._safe_metadata(task):
+            return replace(plan, execution_status="skipped", reason="unsafe_metadata")
+        if not self._has_source_evidence(task):
+            return replace(plan, execution_status="skipped", reason="missing_source_evidence")
+        if self._risk_controlled(task, time.time()):
             return replace(plan, execution_status="skipped", reason="risk_control")
-        if plan.action == "invalid_share" and str(
-            task.metadata.get("invalid_share_status")
-            or task.metadata.get("share_validation_status")
-            or ""
-        ).strip().lower() != "invalid":
-            return replace(plan, execution_status="skipped", reason="unknown_share_status")
+        if any(
+            str(task.metadata.get(key) or "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
+            for key in ("invalid_share_cleaned", "source_deleted")
+        ) or str(
+            task.metadata.get("invalid_share_status") or task.metadata.get("share_validation_status") or ""
+        ).strip().lower() in {"invalid_share_cleaned", "source_deleted"}:
+            return replace(plan, execution_status="skipped", reason="terminal_invalid_share")
+        state = self.store.quality_state(task.id)
+        if str(state.get("quality_manual_status") or "open").strip().lower() in {"snoozed", "ignored"}:
+            return replace(plan, execution_status="skipped", reason="manual_suppressed")
+        try:
+            if float(state.get("quality_next_eligible_at") or 0) > time.time():
+                return replace(plan, execution_status="skipped", reason="cooldown")
+            attempts = int(state.get("quality_repair_attempts") or 0)
+        except (TypeError, ValueError):
+            attempts = 0
+        if attempts >= int(self.rule_config["max_attempts"]):
+            return replace(plan, execution_status="skipped", reason="attempt_limit")
+        stored_version = str(state.get("quality_rule_version") or "").strip()
+        if stored_version and stored_version != str(plan.rule_version or QUALITY_RULE_VERSION):
+            return replace(plan, execution_status="skipped", reason="rule_version_changed")
 
-        target_stage = TaskStage.EMBY_CONFIRMED if plan.action == "restore" else TaskStage.RECEIVED
+        target_stage = TaskStage.RECEIVED
         metadata = {
             "quality_run_id": str(run_id),
             "quality_repair_action": plan.action,
             "quality_repair_reason": plan.reason,
+            "quality_rule_id": plan.rule_id,
+            "quality_rule_version": QUALITY_RULE_VERSION,
+            "quality_last_run_id": str(run_id),
+            "quality_last_attempt_at": time.time(),
+            "quality_repair_attempts": attempts + 1,
         }
         repair_started_at = time.time()
+        next_eligible_at = repair_started_at + min(
+            int(self.rule_config["cooldown_seconds"]) * (2**attempts),
+            self.MAX_COOLDOWN_SECONDS,
+        )
         metadata.update(
             {
                 "quality_repair_started_at": repair_started_at,
                 "quality_repair_deadline_at": repair_started_at + QUALITY_REPAIR_WAIT_SECONDS,
+                "quality_next_eligible_at": next_eligible_at,
             }
         )
-        metadata_delete_keys: tuple[str, ...] = ()
-        if plan.action in {"reprocess", "invalid_share"}:
-            metadata = build_reprocess_metadata(task, metadata)
-            metadata_delete_keys = REPROCESS_METADATA_DELETE_KEYS
+        metadata = build_reprocess_metadata(task, metadata)
+        metadata_delete_keys = REPROCESS_METADATA_DELETE_KEYS
         reserved = self.store.compare_and_set_transition(
             task.id,
             task.current_stage,
@@ -479,11 +640,12 @@ class QualityAutomation:
             next_run_at=time.time(),
             clear_errors=True,
             claim_by=f"quality:{run_id}",
+            expected_updated_at=task.updated_at,
         )
         if reserved is None:
             return replace(plan, execution_status="skipped", reason="task_busy")
 
-        handler_name = "rebuild_invalid_share" if plan.action == "invalid_share" else plan.action
+        handler_name = plan.action
         handler = getattr(self.repair_adapter, handler_name, None) if self.repair_adapter is not None else None
         if not callable(handler):
             self.store.record_event(
@@ -494,7 +656,8 @@ class QualityAutomation:
                 error_type="quality_repair_adapter_missing",
                 error_summary="repair adapter missing",
                 clear_claim=True,
-            )
+                metadata_patch=self._failure_quality_patch(attempts + 1),
+                )
             return replace(plan, execution_status="failed", reason="repair_adapter_missing")
         try:
             if handler(reserved, str(run_id)) is False:
@@ -506,6 +669,7 @@ class QualityAutomation:
                     error_type="quality_repair_rejected",
                     error_summary="repair rejected",
                     clear_claim=True,
+                    metadata_patch=self._failure_quality_patch(attempts + 1),
                 )
                 return replace(plan, execution_status="failed", reason="repair_rejected")
             self.store.record_event(
@@ -513,7 +677,7 @@ class QualityAutomation:
                 target_stage,
                 TaskStatus.PENDING,
                 f"自动巡检修复已入队：{plan.action}",
-                metadata_patch={"quality_repair_queued": True},
+                metadata_patch={"quality_repair_queued": True, "quality_last_actor": "quality-auto"},
                 next_run_at=time.time(),
                 clear_claim=True,
             )
@@ -528,11 +692,22 @@ class QualityAutomation:
                     error_summary=str(exc),
                     error_detail=repr(exc),
                     clear_claim=True,
+                    metadata_patch=self._failure_quality_patch(attempts + 1),
                 )
             except Exception:
                 pass
             return replace(plan, execution_status="failed", reason="repair_failed")
         return replace(plan, execution_status="queued")
+
+    def _failure_quality_patch(self, attempts: int) -> dict[str, object]:
+        patch: dict[str, object] = {
+            "quality_repair_attempts": int(attempts),
+            "quality_last_attempt_at": time.time(),
+        }
+        if int(attempts) >= int(self.rule_config["max_attempts"]):
+            patch["quality_manual_status"] = "open"
+            patch["quality_rule_reason"] = "manual_required"
+        return patch
 
     def cleanup_if_safe(self, task: TaskSnapshot, run_id: str) -> QualityCleanupResult:
         """Run cleanup only after the local, share, Emby, and event gates pass."""
