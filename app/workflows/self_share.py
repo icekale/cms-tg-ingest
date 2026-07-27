@@ -1359,6 +1359,7 @@ class BridgeSelfShareTaskWorkflow:
         created = False
         direct_file_share = False
         direct_relative_path = ""
+        recovered_share_created_at = 0.0
         share_creation_pending = str(task.metadata.get("share_create_status") or "").strip().lower() == "pending"
         if share_creation_pending and not row.get("own_share_code"):
             recover = getattr(self.p115, "find_own_share_by_title", None)
@@ -1368,6 +1369,7 @@ class BridgeSelfShareTaskWorkflow:
                     min_create_time=self._positive_timestamp(task.metadata.get("share_create_requested_at")),
                 )
                 if recovered:
+                    recovered_share_created_at = self._positive_timestamp(recovered.get("create_time"))
                     row = self.store.update_self_share(
                         int(row["id"]),
                         workflow_phase="own_share_created",
@@ -1418,8 +1420,10 @@ class BridgeSelfShareTaskWorkflow:
             created = True
         message = "已创建自有 115 分享" if created else "已存在自有 115 分享"
         metadata = self._own_share_metadata(row)
-        share_created_at = self._positive_timestamp(task.metadata.get("share_created_at"))
+        share_created_at = self._positive_timestamp(task.metadata.get("share_created_at")) or recovered_share_created_at
         if created:
+            share_created_at = self._now()
+        if share_creation_pending and not share_created_at:
             share_created_at = self._now()
         if share_created_at:
             metadata["share_created_at"] = share_created_at

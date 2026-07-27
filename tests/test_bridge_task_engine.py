@@ -1381,6 +1381,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                     "share_code": "recovered",
                     "receive_code": "1212",
                     "share_url": "https://115cdn.com/s/recovered",
+                    "create_time": "123.0",
                 }
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1411,6 +1412,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
             self.assertEqual(stored["own_share_code"], "recovered")
             self.assertEqual(stored["own_share_receive_code"], "1212")
+            self.assertEqual(result.metadata["share_created_at"], 123.0)
             self.assertEqual(workflow.p115.created_shares, [])
             self.assertEqual(workflow.p115.recovery_query[0], "S-双喜-2025-[tmdb=123456]")
 

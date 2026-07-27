@@ -562,6 +562,7 @@ class CmsPlaybackProbeTests(unittest.TestCase):
 
         self.assertEqual(result["share_code"], "latest")
         self.assertEqual(result["receive_code"], "1212")
+        self.assertEqual(result["create_time"], "50.0")
 
 
     def test_receive_share_to_cid_gets_snap_file_ids_then_receives_to_target_cid(self):

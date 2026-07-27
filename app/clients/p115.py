@@ -649,6 +649,7 @@ class P115WebClient:
                         "share_code": share_code,
                         "receive_code": receive_code,
                         "share_url": share_url,
+                        "create_time": str(create_time),
                     },
                 )
             )
