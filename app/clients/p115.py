@@ -932,7 +932,9 @@ class P115WebClient:
         if not output_id:
             raise RuntimeError("115 cloud download completed without an output file id")
 
-        children = [status] if status.get("fid") and p115_file_name(status) else self.list_files(output_id, limit=500)
+        raw = status.get("raw") if isinstance(status.get("raw"), dict) else {}
+        explicit = raw if raw.get("fid") and p115_file_name(raw) else status
+        children = [explicit] if explicit.get("fid") and p115_file_name(explicit) else self.list_files(output_id, limit=500)
         if not children:
             raise P115CloudOutputPendingError("115 云下载已完成，输出文件仍在生成")
 
@@ -971,8 +973,7 @@ class P115WebClient:
             file_name = str(raw.get("file_name") or "").strip()
             if not file_id or not file_name:
                 raise RuntimeError("115 cloud download output is missing child identity")
-            parent_id = str(raw.get("parent_id") or "").strip()
-            if file_id not in existing_ids and parent_id != target:
+            if file_id not in existing_ids:
                 self.move_file(file_id, target)
                 existing_ids.add(file_id)
             normalized.append(

@@ -37,6 +37,8 @@ class FakeCloudP115:
 
     def discover_cloud_download_outputs(self, status):
         self.discover_calls.append(dict(status))
+        if status.get("output_items"):
+            return [dict(item) for item in status["output_items"]]
         return [
             {
                 "file_id": status["file_id"],
@@ -223,6 +225,71 @@ def make_workflow(p115, store, task_store=None, cms=None):
 
 
 class CloudWorkflowTests(unittest.TestCase):
+    def test_cloud_output_items_persist_before_multi_item_movement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_cloud_task("ed2k:hash:10", ED2K, title="Example.mkv")
+            p115 = FakeCloudP115(
+                [
+                    {
+                        "status": 11,
+                        "file_id": "cloud-folder",
+                        "parent_id": TARGET_CID,
+                        "file_name": "Example",
+                        "output_items": [
+                            {
+                                "file_id": "video",
+                                "file_name": "Example.mkv",
+                                "parent_id": "cloud-folder",
+                                "is_folder": False,
+                            },
+                            {
+                                "file_id": "subtitle",
+                                "file_name": "Example.zh.srt",
+                                "parent_id": "cloud-folder",
+                                "is_folder": False,
+                            },
+                        ],
+                    }
+                ]
+            )
+            workflow = make_workflow(p115, FakeSubmissionStore(), task_store=task_store)
+            task = task_store.record_event(
+                task.id,
+                TaskStage.CLOUD_DOWNLOADING,
+                TaskStatus.RUNNING,
+                "等待云下载",
+                metadata_patch={
+                    "cloud_info_hash": "hash",
+                    "cloud_task_id": "task-1",
+                    "cloud_started_at": time.time(),
+                },
+            )
+
+            discovered = workflow.run_stage(task)
+
+            self.assertEqual(discovered.outcome.value, "defer")
+            self.assertEqual(len(discovered.metadata["cloud_output_items"]), 2)
+            self.assertEqual(p115.ensure_calls, [])
+
+            task = task_store.record_event(
+                task.id,
+                TaskStage.CLOUD_DOWNLOADING,
+                TaskStatus.RUNNING,
+                discovered.message,
+                metadata_patch=discovered.metadata,
+            )
+            moved = workflow.run_stage(task)
+
+            self.assertEqual(moved.outcome.value, "complete")
+            self.assertEqual(len(p115.ensure_calls), 1)
+            self.assertEqual(moved.metadata["received_file_ids"], ["video", "subtitle"])
+            self.assertEqual(moved.metadata["received_expected_item_count"], 2)
+            self.assertEqual(
+                [item["is_folder"] for item in moved.metadata["received_items"]],
+                [False, False],
+            )
+
     def test_cloud_tasks_route_to_shared_workflow_even_with_direct_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             task_store = TaskStore(Path(tmp) / "tasks.db")

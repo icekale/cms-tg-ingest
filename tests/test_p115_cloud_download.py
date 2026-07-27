@@ -95,6 +95,21 @@ class P115CloudDownloadTests(unittest.TestCase):
             ],
         )
 
+    def test_discover_cloud_outputs_accepts_wrapped_raw_file_record(self):
+        client = P115WebClient("UID=1", http=FakeHttp([]))
+
+        items = client.discover_cloud_download_outputs(
+            {
+                "file_id": "container",
+                "file_name": "Example.mkv",
+                "raw": {"fid": "video", "cid": TARGET_CID, "n": "Example.mkv"},
+            }
+        )
+
+        self.assertEqual(items[0]["file_id"], "video")
+        self.assertEqual(items[0]["parent_id"], TARGET_CID)
+        self.assertFalse(client.http.calls)
+
     def test_ensure_cloud_outputs_moves_only_missing_items_and_preserves_flags(self):
         http = FakeHttp(
             [
@@ -135,6 +150,25 @@ class P115CloudDownloadTests(unittest.TestCase):
         move_calls = [call for call in http.calls if call["url"].endswith("/files/move")]
         self.assertEqual([call["data"]["fid"] for call in move_calls], ["subtitle", "season"])
         self.assertEqual(len([call for call in http.calls if call["url"].endswith("/files")]), 1)
+
+    def test_ensure_cloud_outputs_uses_target_listing_when_persisted_parent_matches(self):
+        http = FakeHttp([{"state": True, "data": []}, {"state": True}])
+        client = P115WebClient("UID=1", http=http)
+
+        client.ensure_cloud_outputs_in_target(
+            [
+                {
+                    "file_id": "video",
+                    "file_name": "Example.mkv",
+                    "parent_id": TARGET_CID,
+                    "is_folder": False,
+                }
+            ],
+            TARGET_CID,
+        )
+
+        move_calls = [call for call in http.calls if call["url"].endswith("/files/move")]
+        self.assertEqual(len(move_calls), 1)
 
     def test_lixian_rsa_encrypt_matches_reference_vector(self):
         self.assertEqual(
