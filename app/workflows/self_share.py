@@ -415,6 +415,12 @@ class BridgeSelfShareTaskWorkflow:
         return override or self.receive_cid
 
     def _task_receive_cid(self, task) -> str:
+        if str(getattr(task, "source_type", "") or "").strip() == "cloud_download":
+            return (
+                str(task.metadata.get("cloud_target_cid") or "").strip()
+                or str(task.metadata.get("receive_target_cid") or "").strip()
+                or self._configured_receive_cid()
+            )
         return (
             str(task.metadata.get("receive_target_cid") or "").strip()
             or str(task.metadata.get("cloud_target_cid") or "").strip()
@@ -714,7 +720,7 @@ class BridgeSelfShareTaskWorkflow:
                 existing = self.store.find_by_id(int(existing["id"])) or existing
                 reprocess_reset = True
         if self._should_reuse_received_self_share_state(existing, task.metadata):
-            metadata = self._received_metadata(existing)
+            metadata = self._received_metadata(existing, task.metadata)
             if reprocess_reset:
                 metadata["self_share_reprocess_reset"] = True
             if reprocess_started_at:
@@ -730,6 +736,15 @@ class BridgeSelfShareTaskWorkflow:
                     {"share_code": task.share_code},
                 )
             raise
+        patch_claimed_metadata = getattr(self.task_store, "patch_claimed_metadata", None)
+        if callable(patch_claimed_metadata) and str(getattr(task, "claimed_by", "") or "").strip():
+            patch_claimed_metadata(
+                int(task.id),
+                expected_claimed_by=str(task.claimed_by),
+                expected_claimed_at=float(task.claimed_at),
+                expected_updated_at=float(task.updated_at),
+                patch={"receive_target_cid": receive_cid},
+            )
         title = str(received.get("title") or task.title or task.share_code).strip()
         row = self.store.upsert_submission(
             _ShareKey(task.share_code, task.receive_code),
@@ -2185,12 +2200,16 @@ class BridgeSelfShareTaskWorkflow:
             )
         )
 
-    def _received_metadata(self, row: dict[str, Any]) -> dict[str, Any]:
-        return {
+    def _received_metadata(self, row: dict[str, Any], task_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        metadata = {
             "submission_id": int(row["id"]),
             "received_title": str(row.get("title") or ""),
             "received_file_ids": [],
         }
+        receive_target_cid = str((task_metadata or {}).get("receive_target_cid") or "").strip()
+        if receive_target_cid:
+            metadata["receive_target_cid"] = receive_target_cid
+        return metadata
 
     def _has_persisted_category_suggestion(self, recognition: dict[str, Any]) -> bool:
         status = str(recognition.get("category_status") or "").strip()

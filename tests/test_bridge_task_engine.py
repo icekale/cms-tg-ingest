@@ -323,6 +323,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(row["workflow_mode"], "self_share_sync")
             self.assertEqual(result.metadata["submission_id"], row["id"])
             self.assertFalse(result.metadata["tmdb_hint_normalized"])
+            self.assertEqual(self.tasks.find_task(task.id).metadata["receive_target_cid"], "pending-cid")
 
     def test_receive_cid_is_pinned_after_receive(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -378,7 +379,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 workflow_mode="self_share_sync",
                 workflow_phase="received_to_pending",
             ) or row
-            task = self._claim_task("abc", "1234", TaskStage.RECEIVED)
+            task = self._claim_task("abc", "1234", TaskStage.RECEIVED, {"receive_target_cid": "pinned-cid"})
 
             result = workflow.run_stage(task)
 
@@ -386,6 +387,21 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.p115.received, [])
             self.assertEqual(result.metadata["submission_id"], row["id"])
             self.assertEqual(result.metadata["received_title"], "received title")
+            self.assertEqual(result.metadata["receive_target_cid"], "pinned-cid")
+
+    def test_cloud_task_receive_cid_prefers_cloud_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="configured-cid")
+            task = self.tasks.upsert_cloud_task("btih:cloud-cid", "magnet:?xt=urn:btih:cloud-cid")
+            task = self.tasks.record_event(
+                task.id,
+                TaskStage.CLOUD_DOWNLOADING,
+                TaskStatus.RUNNING,
+                "metadata",
+                metadata_patch={"cloud_target_cid": "cloud-cid", "receive_target_cid": "ordinary-cid"},
+            )
+
+            self.assertEqual(workflow._task_receive_cid(task), "cloud-cid")
 
     def test_force_reprocess_receives_again_when_existing_row_has_no_downstream_state(self):
         with tempfile.TemporaryDirectory() as tmp:

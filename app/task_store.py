@@ -939,6 +939,37 @@ class TaskStore:
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return self._snapshot(row)
 
+    def patch_claimed_metadata(
+        self,
+        task_id: int,
+        expected_claimed_by: str,
+        expected_claimed_at: float,
+        expected_updated_at: float,
+        patch: dict[str, Any],
+    ) -> TaskSnapshot | None:
+        """Merge metadata without changing task version while the worker claim is current."""
+        worker_id = str(expected_claimed_by or "").strip()
+        if not worker_id:
+            return None
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+            if current is None or not self._claim_matches(
+                current,
+                TaskStage(str(current["current_stage"])),
+                worker_id,
+                float(expected_claimed_at),
+                float(expected_updated_at),
+            ):
+                return None
+            merged_metadata = self._merge_metadata(current["metadata_json"], patch)
+            conn.execute(
+                "UPDATE tasks SET metadata_json = ? WHERE id = ?",
+                (merged_metadata, int(task_id)),
+            )
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+        return self._snapshot(row) if row else None
+
     def claim_task_lock(
         self,
         task_id: int,

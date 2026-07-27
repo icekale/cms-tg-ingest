@@ -27,6 +27,35 @@ class TaskStoreTests(unittest.TestCase):
             store.clear_self_share_receive_cid_override()
             self.assertIsNone(store.get_self_share_receive_cid_override())
 
+    def test_patch_claimed_metadata_preserves_claim_version_and_rejects_stale_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("claimed-metadata", "", "https://115cdn.com/s/claimed-metadata")
+            store.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+            claimed = store.claim_next_runnable("worker-a", now=100)
+
+            patched = store.patch_claimed_metadata(
+                claimed.id,
+                expected_claimed_by="worker-a",
+                expected_claimed_at=claimed.claimed_at,
+                expected_updated_at=claimed.updated_at,
+                patch={"receive_target_cid": "111"},
+            )
+            stale = store.patch_claimed_metadata(
+                claimed.id,
+                expected_claimed_by="worker-a",
+                expected_claimed_at=claimed.claimed_at,
+                expected_updated_at=claimed.updated_at + 1,
+                patch={"receive_target_cid": "222"},
+            )
+
+            self.assertIsNotNone(patched)
+            self.assertEqual(patched.metadata["receive_target_cid"], "111")
+            self.assertEqual(patched.updated_at, claimed.updated_at)
+            self.assertEqual(patched.claimed_by, "worker-a")
+            self.assertIsNone(stale)
+            self.assertEqual(store.find_task(claimed.id).metadata["receive_target_cid"], "111")
+
     def test_quality_state_has_non_persisting_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
