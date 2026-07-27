@@ -450,7 +450,7 @@ class CmsPlaybackProbeTests(unittest.TestCase):
 
         self.assertEqual(share["receive_code"], "Z9Y8")
 
-    def test_create_long_share_does_not_ignore_115_warning(self):
+    def test_create_long_share_confirms_115_warning(self):
         class FakeHttp:
             def __init__(self):
                 self.calls = []
@@ -466,7 +466,7 @@ class CmsPlaybackProbeTests(unittest.TestCase):
         http = FakeHttp()
         bridge.P115WebClient("UID=1", http=http, timeout=3).create_long_share("folder-id")
 
-        self.assertEqual(http.calls[0][2]["ignore_warn"], 0)
+        self.assertEqual(http.calls[0][2]["ignore_warn"], 1)
 
     def test_create_long_share_reports_success_without_share_code_as_pending(self):
         from app.clients.p115 import P115SharePendingError

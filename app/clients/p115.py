@@ -1250,7 +1250,7 @@ class P115WebClient:
         resp = self._request(
             "https://webapi.115.com/share/send",
             method="POST",
-            data={"file_ids": str(file_id), "ignore_warn": 0},
+            data={"file_ids": str(file_id), "ignore_warn": 1},
         )
         self._ensure_state(resp, "115 create share failed")
         data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
