@@ -409,6 +409,11 @@ class BridgeSelfShareTaskWorkflow:
         self.cms_cloud_index = cms_cloud_index
         self._now = time.time
 
+    def _configured_receive_cid(self) -> str:
+        getter = getattr(self.task_store, "get_self_share_receive_cid_override", None)
+        override = str(getter() or "").strip() if callable(getter) else ""
+        return override or self.receive_cid
+
     @staticmethod
     def _shared_only_stage(stage: TaskStage) -> bool:
         return stage in {
@@ -458,7 +463,8 @@ class BridgeSelfShareTaskWorkflow:
     def _stage_cloud_downloading(self, task):
         if not self.self_share_config.enabled:
             return StageResult.failed("自分享工作流未启用", error_type="self_share_disabled")
-        if not self.receive_cid:
+        receive_cid = self._configured_receive_cid()
+        if not receive_cid:
             return StageResult.failed("缺少 115 接收目录 ID", error_type="missing_receive_cid")
 
         metadata = dict(task.metadata)
@@ -466,7 +472,7 @@ class BridgeSelfShareTaskWorkflow:
         task_id = str(metadata.get("cloud_task_id") or "").strip()
         started_at = float(metadata.get("cloud_started_at") or 0)
         if not info_hash and not task_id:
-            submitted = self.p115.cloud_download_add(task.url, self.receive_cid)
+            submitted = self.p115.cloud_download_add(task.url, receive_cid)
             info_hash = str(submitted.get("info_hash") or "").strip()
             task_id = str(submitted.get("task_id") or "").strip()
             started_at = self._now()
@@ -475,7 +481,7 @@ class BridgeSelfShareTaskWorkflow:
                     "cloud_info_hash": info_hash,
                     "cloud_task_id": task_id,
                     "cloud_started_at": started_at,
-                    "cloud_target_cid": self.receive_cid,
+                    "cloud_target_cid": receive_cid,
                     "cloud_status": normalize_cloud_status(submitted),
                 }
             )
@@ -515,7 +521,7 @@ class BridgeSelfShareTaskWorkflow:
                 metadata,
             )
 
-        output = validate_cloud_output(status, self.receive_cid)
+        output = validate_cloud_output(status, receive_cid)
         row = self.store.upsert_submission(
             _ShareKey(task.share_code, task.receive_code),
             task.url,
@@ -537,7 +543,7 @@ class BridgeSelfShareTaskWorkflow:
                         "file_id": output["file_id"],
                         "file_name": output.get("file_name") or task.title or task.share_code,
                         "is_folder": False,
-                        "parent_id": output.get("parent_id") or self.receive_cid,
+                        "parent_id": output.get("parent_id") or receive_cid,
                         "received_item_verified": True,
                     }
                 ],
@@ -590,7 +596,8 @@ class BridgeSelfShareTaskWorkflow:
     def _stage_received(self, task):
         if not self.self_share_config.enabled:
             return StageResult.failed("自分享工作流未启用", error_type="self_share_disabled")
-        if not self.receive_cid:
+        receive_cid = self._configured_receive_cid()
+        if not receive_cid:
             return StageResult.failed("缺少 115 接收目录 ID", error_type="missing_receive_cid")
 
         reprocess_started_at = as_float(task.metadata.get("reprocess_started_at"), 0)
@@ -627,7 +634,7 @@ class BridgeSelfShareTaskWorkflow:
             return StageResult.complete("已接收 115 分享到待整理", metadata)
 
         try:
-            received = self.p115.receive_share_to_cid(task.share_code, task.receive_code, self.receive_cid)
+            received = self.p115.receive_share_to_cid(task.share_code, task.receive_code, receive_cid)
         except RuntimeError as exc:
             if is_115_receive_restricted_error(exc):
                 return StageResult.needs_action(
@@ -715,9 +722,10 @@ class BridgeSelfShareTaskWorkflow:
         hint_id: str,
         expected_count: int = 1,
     ) -> list[dict[str, Any]]:
+        receive_cid = self._configured_receive_cid()
         if (
             not hint_id
-            or not self.receive_cid
+            or not receive_cid
             or not hasattr(self.p115, "list_files")
             or task.metadata.get("received_snapshot_complete") is not True
         ):
@@ -728,7 +736,7 @@ class BridgeSelfShareTaskWorkflow:
             if str(value).strip()
         }
         try:
-            items = self.p115.list_files(self.receive_cid, limit=500)
+            items = self.p115.list_files(receive_cid, limit=500)
         except Exception:
             LOG.debug("Failed to recover received item for explicit TMDB hint", exc_info=True)
             return []
@@ -741,7 +749,7 @@ class BridgeSelfShareTaskWorkflow:
                 continue
             if file_id in existing_ids:
                 continue
-            if parent_id and parent_id != self.receive_cid:
+            if parent_id and parent_id != receive_cid:
                 continue
             if extract_tmdb_id_from_name(file_name) != hint_id:
                 continue
@@ -750,7 +758,7 @@ class BridgeSelfShareTaskWorkflow:
                     "file_id": file_id,
                     "file_name": file_name,
                     "is_folder": p115_is_folder(item),
-                    "parent_id": parent_id or self.receive_cid,
+                    "parent_id": parent_id or receive_cid,
                     "received_item_verified": True,
                 }
             )
@@ -947,8 +955,9 @@ class BridgeSelfShareTaskWorkflow:
             self.cms.run_auto_organize()
             row = self.store.update_self_share(int(row["id"]), workflow_phase="auto_organize_submitted") or row
         excluded_parent_ids = set(self.self_share_config.excluded_parent_ids or set())
-        if self.receive_cid:
-            excluded_parent_ids.add(self.receive_cid)
+        receive_cid = self._configured_receive_cid()
+        if receive_cid:
+            excluded_parent_ids.add(receive_cid)
         min_update_time = float(row.get("created_at") or 0)
         stage_metadata = dict(task.metadata)
         stage_metadata.update(hint_metadata)
@@ -1065,7 +1074,7 @@ class BridgeSelfShareTaskWorkflow:
                     folder.get("file_name"),
                 )
                 folder = None
-        if folder and is_unverified_received_source(folder, stage_metadata, self.receive_cid):
+        if folder and is_unverified_received_source(folder, stage_metadata, receive_cid):
             folder = None
         if not folder:
             tmdb_resolved, tmdb_should_prompt = apply_tmdb_search_resolution(recognition, title, self.tmdb_resolver)
@@ -1079,7 +1088,7 @@ class BridgeSelfShareTaskWorkflow:
                     max_requests=lookup_budget,
                 )
                 lookup_budget = max(0, lookup_budget - lookup_requests)
-                if folder and is_unverified_received_source(folder, stage_metadata, self.receive_cid):
+                if folder and is_unverified_received_source(folder, stage_metadata, receive_cid):
                     folder = None
                 if folder and has_tmdb_folder_mismatch(folder, recognition, row, title):
                     folder = None
@@ -1159,7 +1168,7 @@ class BridgeSelfShareTaskWorkflow:
         file_id = str(folder.get("file_id") or "").strip()
         folder_name = str(folder.get("file_name") or row.get("own_share_file_name") or task.title or "").strip()
         share_name = str(row.get("title") or task.title or folder_name or task.share_code).strip()
-        if is_unverified_received_source(folder, task.metadata, self.receive_cid):
+        if is_unverified_received_source(folder, task.metadata, self._configured_receive_cid()):
             return StageResult.needs_action(
                 "等待可验证的 CMS 整理后源目录，当前 115 ID 仍是接收/分享快照，拒绝继续创建自有分享",
                 {"submission_id": int(row["id"]), "own_share_file_id": ""},
@@ -1346,7 +1355,7 @@ class BridgeSelfShareTaskWorkflow:
                 self._own_share_metadata(row) | {"own_share_file_id": ""},
             )
         folder = task.metadata.get("organized_folder")
-        if isinstance(folder, dict) and is_unverified_received_source(folder, task.metadata, self.receive_cid):
+        if isinstance(folder, dict) and is_unverified_received_source(folder, task.metadata, self._configured_receive_cid()):
             return StageResult.needs_action(
                 "等待可验证的 CMS 整理后源目录，当前 115 ID 仍是接收/分享快照，拒绝创建自有分享",
                 self._own_share_metadata(row) | {"own_share_file_id": ""},

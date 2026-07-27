@@ -434,6 +434,7 @@ def maybe_start_web_server(
         supports_self_share_config = True
     if supports_self_share_config:
         kwargs["self_share_config"] = SelfShareConfig(
+            receive_cid=str(getattr(config, "self_share_receive_cid", "")),
             own_share_receive_code=str(getattr(config, "self_share_own_share_password", "")),
             cms_state_db_path=Path(getattr(config, "cms_state_db_path", "/cms/cms-online.db")),
         )
@@ -3307,6 +3308,12 @@ def handle_update(
             hdhive_subscription_scheduler=hdhive_subscription_scheduler,
         )
         return
+
+    receive_cid_getter = getattr(task_store, "get_self_share_receive_cid_override", None)
+    if callable(receive_cid_getter):
+        receive_cid_override = str(receive_cid_getter() or "").strip()
+        if receive_cid_override:
+            self_share_receive_cid = receive_cid_override
 
     message = update.get("message") or {}
     chat = message.get("chat") or {}

@@ -12,11 +12,13 @@ from typing import Any, Callable
 
 from .models import TaskSnapshot, TaskStage, TaskStatus
 from .quality_rules import quality_attempt_count
+from .self_share_settings import normalize_receive_cid
 from .strm_mode import is_strm_mode_locked, normalize_strm_mode
 
 
 STRM_DEFAULT_MODE_KEY = "strm_default_mode"
 OWN_SHARE_RECEIVE_CODE_KEY = "own_share_receive_code_override"
+SELF_SHARE_RECEIVE_CID_KEY = "self_share_receive_cid_override"
 REPROCESS_METADATA_DELETE_KEYS = (
     "_defer_stage",
     "_defer_message",
@@ -335,6 +337,23 @@ class TaskStore:
 
     def clear_own_share_receive_code_override(self) -> None:
         self.delete_runtime_state(OWN_SHARE_RECEIVE_CODE_KEY)
+
+    def get_self_share_receive_cid_override(self) -> str | None:
+        state = self.get_runtime_state(SELF_SHARE_RECEIVE_CID_KEY)
+        if state is None:
+            return None
+        value = normalize_receive_cid(state["value"])
+        return value or None
+
+    def set_self_share_receive_cid_override(self, receive_cid: str) -> str:
+        value = normalize_receive_cid(receive_cid)
+        if not value:
+            raise ValueError("待整理目录 ID 必须是大于 0 的数字")
+        self.set_runtime_state(SELF_SHARE_RECEIVE_CID_KEY, value)
+        return value
+
+    def clear_self_share_receive_cid_override(self) -> None:
+        self.delete_runtime_state(SELF_SHARE_RECEIVE_CID_KEY)
 
     def set_task_strm_mode(self, task_id: int, mode: str) -> TaskSnapshot:
         normalized = normalize_strm_mode(mode)

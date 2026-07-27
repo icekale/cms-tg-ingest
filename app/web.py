@@ -27,7 +27,7 @@ from .task_diagnostics import (
 from .task_engine import decide_retry, stage_display_name
 from .task_health import build_task_health, format_task_health
 from .task_store import REPROCESS_METADATA_DELETE_KEYS, TaskStore, build_reprocess_metadata
-from .self_share_settings import resolve_own_share_receive_code
+from .self_share_settings import resolve_own_share_receive_code, resolve_self_share_receive_cid
 from .strm_mode import STRM_MODE_LABELS
 from .web_api import (
     api_response,
@@ -1368,6 +1368,10 @@ class WebApp:
         resolved = resolve_own_share_receive_code(self.store, self.self_share_config)
         return {"configured": True, "masked": resolved.masked, "source": resolved.source}
 
+    def _self_share_receive_cid_payload(self) -> dict[str, Any]:
+        resolved = resolve_self_share_receive_cid(self.store, self.self_share_config)
+        return {"value": resolved.value, "source": resolved.source}
+
     def _authorization_source(self, path: str, headers: dict[str, str]) -> str:
         if not self.web_token:
             return "anonymous"
@@ -1737,6 +1741,7 @@ class WebApp:
                     for value in ("shared", "direct", "source_shared")
                 ],
                 "own_share_receive_code": self._own_share_receive_code_payload(),
+                "self_share_receive_cid": self._self_share_receive_cid_payload(),
             }
             status, response_headers, response_body = api_response(payload)
             return status, {**response_headers, **auth_headers}, response_body
@@ -1792,6 +1797,21 @@ class WebApp:
                 return status, {**response_headers, **auth_headers}, response_body
             status, response_headers, response_body = api_response(
                 {"own_share_receive_code": self._own_share_receive_code_payload()}
+            )
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path == "/api/v1/settings/self-share-receive-cid":
+            try:
+                values = self._api_body(body, headers)
+                clear = values.get("clear") is True or str(values.get("clear") or "").lower() in {"1", "true", "yes"}
+                if clear:
+                    self.store.clear_self_share_receive_cid_override()
+                else:
+                    self.store.set_self_share_receive_cid_override(str(values.get("receive_cid") or ""))
+            except (UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+                status, response_headers, response_body = api_response({"error": str(exc)}, status=400)
+                return status, {**response_headers, **auth_headers}, response_body
+            status, response_headers, response_body = api_response(
+                {"self_share_receive_cid": self._self_share_receive_cid_payload()}
             )
             return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path.startswith("/api/v1/tasks/") and path.endswith("/strm-mode"):

@@ -21,6 +21,15 @@ spec.loader.exec_module(bridge)
 
 
 class P115WebClientTests(unittest.TestCase):
+    def test_task_workflow_uses_persisted_receive_cid_override(self):
+        workflow = bridge.BridgeSelfShareTaskWorkflow.__new__(bridge.BridgeSelfShareTaskWorkflow)
+        workflow.receive_cid = "3298928530653445613"
+        workflow.task_store = SimpleNamespace(
+            get_self_share_receive_cid_override=lambda: "3481694068122059860"
+        )
+
+        self.assertEqual(workflow._configured_receive_cid(), "3481694068122059860")
+
     def test_share_snap_raises_unavailable_for_permanently_invalid_share(self):
         class FakeHttp:
             def request(self, url, method="GET", data=None, headers=None, params=None):

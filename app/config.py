@@ -305,6 +305,7 @@ class MovePlan:
 @dataclass
 class SelfShareConfig:
     enabled: bool = False
+    receive_cid: str = ""
     strm_root: Path = Path("/mnt/user/Unraid/strm/share")
     cms_local_path: str = "/media/share"
     cms_cid: str = "0"
@@ -338,6 +339,7 @@ class SelfShareConfig:
                     LOG.debug("Failed to load CMS organized scan folders", exc_info=True)
         return cls(
             enabled=config.workflow_mode == "self_share_sync",
+            receive_cid=str(config.self_share_receive_cid or "").strip(),
             strm_root=Path(config.self_share_strm_root).expanduser(),
             cms_local_path=config.self_share_cms_local_path,
             cms_cid=config.self_share_cms_cid,

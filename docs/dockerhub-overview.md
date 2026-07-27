@@ -24,7 +24,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 固定版本镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.2.36
+docker pull icekale/cms-tg-ingest:0.2.37
 ```
 
 ### 完整 Docker Compose
@@ -34,7 +34,7 @@ docker pull icekale/cms-tg-ingest:0.2.36
 ```yaml
 services:
   cms-tg-ingest:
-    image: icekale/cms-tg-ingest:0.2.36
+    image: icekale/cms-tg-ingest:0.2.37
     container_name: cms-tg-ingest
     restart: unless-stopped
     env_file:
@@ -88,6 +88,8 @@ EMBY_API_KEY=你的Emby_API_Key
 `TG_BOT_TOKEN` 和密码只放在 `.env`，不要写进 Compose、Dockerfile 或公开 issue。`TG_ALLOWED_CHAT_ID` 用于限制只有指定 Telegram 用户可以操作 Bot。
 
 自有分享访问码可在 Web“当前任务”页设置。新任务按“Web 设置 -> CMS `share_115_sync` 配置 -> `SELF_SHARE_OWN_SHARE_PASSWORD` -> `1212`”解析；读取接口只显示掩码和来源，已有分享不会被批量修改。
+
+待整理目录可在新版 Web UI“设置”中修改。Web 保存值优先于 `SELF_SHARE_RECEIVE_CID`，写入 TaskStore 并在重启后保留；点击“使用环境配置”可恢复 `.env` 值。它同时控制 115 转存和云下载的目标目录。
 
 启动和查看日志：
 

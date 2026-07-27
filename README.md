@@ -33,7 +33,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.2.36`。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.2.37`。
 4. 拉取固定版本并启动：
 
 ```sh
@@ -124,6 +124,8 @@ EMBY_API_KEY=你的 Emby API Key
 ```
 
 敏感信息只放在 `.env` 或挂载文件中，不要提交到 GitHub、Docker Hub、截图或 issue。
+
+待整理目录也可以在新版 Web UI 的“设置”中查看和修改。Web 保存值写入 TaskStore，优先于 `SELF_SHARE_RECEIVE_CID`，重启后仍保留；点击“使用环境配置”可清除 Web 覆盖并恢复 `.env` 值。该设置同时用于 115 转存和云下载目标目录。
 
 ### 首次启动检查
 
@@ -430,8 +432,8 @@ python3 -m unittest discover -s tests -q
 发布版本通过 GitHub Actions 构建并推送 GHCR 和 Docker Hub：
 
 ```sh
-git tag v0.2.36
-git push origin v0.2.36
+git tag v0.2.37
+git push origin v0.2.37
 ```
 
 如果 fork 后要发布自己的 Docker Hub 镜像，在 GitHub Secrets 中配置：
@@ -442,7 +444,7 @@ git push origin v0.2.36
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.2.36
+docker pull icekale/cms-tg-ingest:0.2.37
 docker pull icekale/cms-tg-ingest:latest
 ```
 

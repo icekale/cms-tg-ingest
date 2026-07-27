@@ -9,12 +9,14 @@ const saving = ref(false)
 const settings = ref(null)
 const mode = ref('shared')
 const receiveCode = ref('')
+const receiveCid = ref('')
 
 async function load() {
   loading.value = true
   try {
     settings.value = await api.settings()
     mode.value = settings.value.strm_default_mode
+    receiveCid.value = ''
   } catch (err) { message.error(err.message) } finally { loading.value = false }
 }
 
@@ -46,6 +48,24 @@ async function clearReceiveCode() {
   } catch (err) { message.error(err.message) }
 }
 
+async function saveReceiveCid() {
+  try {
+    const result = await api.setSelfShareReceiveCid(receiveCid.value)
+    settings.value.self_share_receive_cid = result.self_share_receive_cid
+    receiveCid.value = ''
+    message.success('待整理目录已保存，后续任务立即使用新目录')
+  } catch (err) { message.error(err.message) }
+}
+
+async function clearReceiveCid() {
+  try {
+    const result = await api.clearSelfShareReceiveCid()
+    settings.value.self_share_receive_cid = result.self_share_receive_cid
+    receiveCid.value = ''
+    message.success('已恢复环境中的待整理目录')
+  } catch (err) { message.error(err.message) }
+}
+
 onMounted(load)
 </script>
 
@@ -67,6 +87,17 @@ onMounted(load)
         <n-button type="primary" :disabled="!receiveCode" @click="saveReceiveCode">保存</n-button>
         <n-button secondary @click="clearReceiveCode">使用 CMS 配置</n-button>
       </n-space>
+    </n-space>
+  </n-card>
+  <n-card v-if="settings" title="待整理目录" class="section-card">
+    <n-space vertical :size="12">
+      <n-text depth="3">当前：{{ settings.self_share_receive_cid.value || '未配置' }}（来源：{{ settings.self_share_receive_cid.source }}）</n-text>
+      <n-space>
+        <n-input v-model:value="receiveCid" placeholder="例如 3481694068122059860" style="width: 260px" />
+        <n-button type="primary" :disabled="!receiveCid" @click="saveReceiveCid">保存</n-button>
+        <n-button secondary @click="clearReceiveCid">使用环境配置</n-button>
+      </n-space>
+      <n-text depth="3">用于 115 转存和云下载的目标目录。Web 保存值写入 TaskStore，重启后仍保留。</n-text>
     </n-space>
   </n-card>
 </template>

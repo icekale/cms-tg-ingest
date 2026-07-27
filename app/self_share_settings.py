@@ -21,11 +21,37 @@ class OwnShareReceiveCode:
         return "****"
 
 
+@dataclass(frozen=True)
+class SelfShareReceiveCid:
+    value: str
+    source: str
+
+
 def _valid_receive_code(value: Any) -> str:
     normalized = str(value or "").strip()
     if normalized and normalized.isascii() and normalized.isalnum():
         return normalized
     return ""
+
+
+def normalize_receive_cid(value: Any) -> str:
+    normalized = str(value or "").strip()
+    if normalized and normalized.isascii() and normalized.isdigit() and int(normalized) > 0:
+        return normalized
+    return ""
+
+
+def resolve_self_share_receive_cid(store: Any, config: Any) -> SelfShareReceiveCid:
+    getter = getattr(store, "get_self_share_receive_cid_override", None)
+    web_value = normalize_receive_cid(getter() if callable(getter) else "")
+    if web_value:
+        return SelfShareReceiveCid(web_value, "web")
+    env_value = normalize_receive_cid(
+        getattr(config, "receive_cid", getattr(config, "self_share_receive_cid", ""))
+    )
+    if env_value:
+        return SelfShareReceiveCid(env_value, "env")
+    return SelfShareReceiveCid("", "unset")
 
 
 def _cms_receive_code(db_path: str | Path) -> str:

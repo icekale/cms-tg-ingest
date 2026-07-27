@@ -456,6 +456,46 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("字母和数字", json.loads(body)["error"])
 
+    def test_self_share_receive_cid_api_reads_env_and_updates_runtime_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            app = WebApp(
+                store,
+                self_share_config=SimpleNamespace(self_share_receive_cid="3298928530653445613"),
+            )
+
+            initial_status, _headers, initial_body = app.handle_request("GET", "/api/v1/settings", {}, b"")
+            set_status, _headers, set_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/self-share-receive-cid",
+                {"Content-Type": "application/json"},
+                b'{"receive_cid":"3481694068122059860"}',
+            )
+            updated_status, _headers, updated_body = app.handle_request("GET", "/api/v1/settings", {}, b"")
+
+        initial = json.loads(initial_body)["self_share_receive_cid"]
+        updated = json.loads(updated_body)["self_share_receive_cid"]
+        self.assertEqual(initial_status, 200)
+        self.assertEqual(initial, {"value": "3298928530653445613", "source": "env"})
+        self.assertEqual(set_status, 200)
+        self.assertEqual(json.loads(set_body)["self_share_receive_cid"]["value"], "3481694068122059860")
+        self.assertEqual(updated_status, 200)
+        self.assertEqual(updated, {"value": "3481694068122059860", "source": "web"})
+
+    def test_self_share_receive_cid_api_rejects_invalid_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = WebApp(TaskStore(Path(tmp) / "tasks.db"))
+
+            status, _headers, body = app.handle_request(
+                "POST",
+                "/api/v1/settings/self-share-receive-cid",
+                {"Content-Type": "application/json"},
+                b'{"receive_cid":"3481x"}',
+            )
+
+        self.assertEqual(status, 400)
+        self.assertIn("目录 ID", json.loads(body)["error"])
+
     def test_frontend_history_route_falls_back_to_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             dist = Path(tmp) / "dist"

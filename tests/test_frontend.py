@@ -33,6 +33,8 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("clearHistory", overview)
         self.assertIn("setOwnShareReceiveCode", api)
         self.assertIn("clearOwnShareReceiveCode", api)
+        self.assertIn("setSelfShareReceiveCid", api)
+        self.assertIn("待整理目录", settings)
         self.assertIn("分享访问码", settings)
         self.assertIn('type="password"', settings)
         for control in ("fix", "run", "settings", "reset"):

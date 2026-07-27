@@ -12,6 +12,20 @@ from app.task_store import TaskStore
 
 
 class TaskStoreTests(unittest.TestCase):
+    def test_self_share_receive_cid_override_round_trip_and_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            self.assertIsNone(store.get_self_share_receive_cid_override())
+            self.assertEqual(store.set_self_share_receive_cid_override("3481694068122059860"), "3481694068122059860")
+            self.assertEqual(store.get_self_share_receive_cid_override(), "3481694068122059860")
+
+            with self.assertRaisesRegex(ValueError, "目录 ID"):
+                store.set_self_share_receive_cid_override("not-a-cid")
+
+            store.clear_self_share_receive_cid_override()
+            self.assertIsNone(store.get_self_share_receive_cid_override())
+
     def test_quality_state_has_non_persisting_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
