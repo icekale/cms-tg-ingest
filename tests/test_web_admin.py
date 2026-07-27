@@ -1153,13 +1153,27 @@ class WebAdminTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
             task = store.upsert_task("limited-html", "", "https://115cdn.com/s/limited-html")
-            store.record_event(task.id, TaskStage.STRM_READY, TaskStatus.FAILED, "failed")
-            app = WebApp(store, web_token="", max_retries=0)
+            for _ in range(3):
+                task = store.record_event(task.id, TaskStage.STRM_READY, TaskStatus.FAILED, "failed", increment_retry=True)
+            app = WebApp(store, web_token="", max_retries=3)
 
             status, _headers, body = app.handle_request("GET", f"/task/{task.id}", {}, b"")
 
         self.assertEqual(status, 200)
         self.assertNotIn(f'action="/task/{task.id}/retry"', body.decode("utf-8"))
+
+    def test_task_detail_shows_retry_when_configured_limit_is_higher(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("allowed-html", "", "https://115cdn.com/s/allowed-html")
+            for _ in range(3):
+                task = store.record_event(task.id, TaskStage.STRM_READY, TaskStatus.FAILED, "failed", increment_retry=True)
+            app = WebApp(store, web_token="", max_retries=5)
+
+            status, _headers, body = app.handle_request("GET", f"/task/{task.id}", {}, b"")
+
+        self.assertEqual(status, 200)
+        self.assertIn(f'action="/task/{task.id}/retry"', body.decode("utf-8"))
 
     def test_concurrent_retry_requests_apply_once(self):
         with tempfile.TemporaryDirectory() as tmp:

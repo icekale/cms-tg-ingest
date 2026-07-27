@@ -54,6 +54,15 @@ class BridgeV02IntegrationTests(unittest.TestCase):
 
             self.assertTrue(cfg.task_engine_enabled)
 
+    def test_config_normalizes_invalid_task_max_retries(self):
+        for raw_value in ("0", "-1", "not-a-number"):
+            with self.subTest(raw_value=raw_value), tempfile.TemporaryDirectory() as tmp, patch.dict(
+                os.environ,
+                {**self.required_env(tmp), "TASK_MAX_RETRIES": raw_value},
+                clear=True,
+            ):
+                self.assertEqual(bridge.Config.from_env().task_max_retries, 3)
+
     def test_config_reads_invalid_self_share_cleanup_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = self.required_env(tmp)
@@ -1389,6 +1398,44 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(claimed.id, task.id)
             self.assertEqual(telegram.answers[-1][1], "已重新入队")
             self.assertIn("已重新入队", telegram.messages[-1][1])
+
+    def test_task_retry_callback_honors_configured_retry_limit(self):
+        def make_task(task_store, key):
+            task = task_store.upsert_task(key, "", f"https://115cdn.com/s/{key}")
+            for index in range(3):
+                task = task_store.record_event(
+                    task.id,
+                    TaskStage.STRM_READY,
+                    TaskStatus.FAILED,
+                    f"failed {index}",
+                    increment_retry=True,
+                )
+            return task
+
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            limited = make_task(task_store, "limited")
+            telegram = FakeTelegram()
+            update = {
+                "callback_query": {
+                    "id": "task-retry-limited",
+                    "from": {"id": 464100862},
+                    "message": {"chat": {"id": 464100862}},
+                    "data": f"task_retry:{limited.id}",
+                }
+            }
+
+            bridge.handle_update(update, FakeCmsSubmit(), telegram, "464100862", submission_store, task_store=task_store, task_engine_enabled=True, max_retries=3)
+            self.assertIn("超过限制", telegram.answers[-1][1])
+            self.assertNotIn("task_retry", str(bridge.task_action_keyboard([limited], max_retries=3)))
+
+            allowed = make_task(task_store, "allowed")
+            update["callback_query"]["id"] = "task-retry-allowed"
+            update["callback_query"]["data"] = f"task_retry:{allowed.id}"
+            bridge.handle_update(update, FakeCmsSubmit(), telegram, "464100862", submission_store, task_store=task_store, task_engine_enabled=True, max_retries=5)
+            self.assertEqual(task_store.find_task(allowed.id).status, TaskStatus.PENDING)
+            self.assertIn("已重新入队", telegram.answers[-1][1])
 
     def test_task_reprocess_callback_requeues_from_received_stage(self):
         with tempfile.TemporaryDirectory() as tmp:

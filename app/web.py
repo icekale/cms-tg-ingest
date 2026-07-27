@@ -25,6 +25,7 @@ from .task_diagnostics import (
     is_unscheduled_active_task,
 )
 from .task_actions import TASK_ACTIONS, apply_task_action, available_task_actions
+from .config import normalize_task_max_retries
 from .task_engine import decide_retry, stage_display_name
 from .task_health import build_task_health, format_task_health
 from .task_store import TaskStore
@@ -1275,7 +1276,7 @@ class WebApp:
         self.hdhive_scheduler = hdhive_scheduler
         self.self_share_config = self_share_config or SelfShareConfig()
         self.frontend_dist_path = Path(frontend_dist_path)
-        self.max_retries = max(0, int(max_retries))
+        self.max_retries = normalize_task_max_retries(max_retries)
 
     def _own_share_receive_code_payload(self) -> dict[str, Any]:
         resolved = resolve_own_share_receive_code(self.store, self.self_share_config)

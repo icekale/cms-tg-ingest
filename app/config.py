@@ -57,6 +57,15 @@ def positive_int_env(name: str, default: int) -> int:
     return value
 
 
+def normalize_task_max_retries(value: Any, default: int = 3) -> int:
+    """Normalize the task retry limit to a positive integer."""
+    try:
+        normalized = int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    return normalized if normalized > 0 else default
+
+
 def parse_review_checkpoints(value: str, grace_seconds: int) -> tuple[int, ...]:
     try:
         checkpoints = tuple(int(part.strip()) for part in str(value or "").split(",") if part.strip())
@@ -152,6 +161,9 @@ class Config:
     backup_retention_days: int = 14
     strm_default_mode: str = "shared"
     frontend_dist_path: str = "/app/frontend/dist"
+
+    def __post_init__(self) -> None:
+        self.task_max_retries = normalize_task_max_retries(self.task_max_retries)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -255,7 +267,7 @@ class Config:
             web_port=int(os.environ.get("WEB_PORT", "8787")),
             web_token=os.environ.get("WEB_TOKEN", ""),
             task_worker_interval_seconds=int(os.environ.get("TASK_WORKER_INTERVAL_SECONDS", "5")),
-            task_max_retries=int(os.environ.get("TASK_MAX_RETRIES", "3")),
+            task_max_retries=normalize_task_max_retries(os.environ.get("TASK_MAX_RETRIES", "3")),
             quality_auto_enabled=parse_bool_env(os.environ.get("QUALITY_AUTO_ENABLED"), False),
             quality_auto_time=parse_quality_auto_time(os.environ.get("QUALITY_AUTO_TIME", "02:50")),
             quality_auto_timezone=parse_quality_auto_timezone(

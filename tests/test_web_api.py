@@ -542,13 +542,27 @@ class WebApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
             task = store.upsert_task("limited", "", "https://115cdn.com/s/limited")
-            store.record_event(task.id, TaskStage.STRM_READY, TaskStatus.FAILED, "failed")
-            app = WebApp(store, max_retries=0)
+            for _ in range(3):
+                task = store.record_event(task.id, TaskStage.STRM_READY, TaskStatus.FAILED, "failed", increment_retry=True)
+            app = WebApp(store, max_retries=3)
 
             status, _headers, body = app.handle_request("POST", f"/api/v1/tasks/{task.id}/actions/retry", {}, b"")
 
         self.assertEqual(status, 409)
         self.assertIn("重试次数超过限制", json.loads(body)["reason"])
+
+    def test_task_action_api_allows_retry_when_configured_limit_is_higher(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("allowed", "", "https://115cdn.com/s/allowed")
+            for _ in range(3):
+                task = store.record_event(task.id, TaskStage.STRM_READY, TaskStatus.FAILED, "failed", increment_retry=True)
+            app = WebApp(store, max_retries=5)
+
+            status, _headers, body = app.handle_request("POST", f"/api/v1/tasks/{task.id}/actions/retry", {}, b"")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["status"], "pending")
 
     def test_history_and_quality_action_api(self):
         with tempfile.TemporaryDirectory() as tmp:
