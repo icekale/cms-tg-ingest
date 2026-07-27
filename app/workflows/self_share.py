@@ -520,7 +520,8 @@ class BridgeSelfShareTaskWorkflow:
                 metadata,
             )
 
-        output = validate_cloud_output(status, receive_cid)
+        resolver = getattr(self.p115, "resolve_cloud_download_output", None)
+        output = resolver(status, receive_cid) if callable(resolver) else validate_cloud_output(status, receive_cid)
         row = self.store.upsert_submission(
             _ShareKey(task.share_code, task.receive_code),
             task.url,

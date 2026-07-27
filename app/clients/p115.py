@@ -106,6 +106,17 @@ def p115_residue_parent_id(item: dict[str, Any]) -> str:
     return str(item.get("cid") or item.get("pid") or item.get("parent_id") or "").strip()
 
 
+def p115_item_id(item: dict[str, Any]) -> str:
+    """Return the local ID for either a file record or a folder record."""
+    return p115_residue_file_id(item) if item.get("fid") else p115_file_id(item)
+
+
+def p115_item_parent_id(item: dict[str, Any]) -> str:
+    if item.get("fid"):
+        return str(item.get("cid") or item.get("pid") or item.get("parent_id") or "").strip()
+    return p115_parent_id(item)
+
+
 def normalize_cloud_status(item: dict[str, Any]) -> str:
     raw = item.get("status", item.get("stat", item.get("state", "")))
     value = str(raw).strip().lower()
@@ -909,7 +920,48 @@ class P115WebClient:
         status = self.cloud_download_status(identity)
         if status["status"] != "completed":
             raise RuntimeError(f"115 cloud download is not completed: {status['status']}")
-        return validate_cloud_output(status, target_cid)
+        return self.resolve_cloud_download_output(status, target_cid)
+
+    def resolve_cloud_download_output(self, status: dict[str, Any], target_cid: str) -> dict[str, str]:
+        """Locate the media inside 115's cloud-download container and move it to target."""
+        target = str(target_cid or "").strip()
+        output_id = p115_file_id(status)
+        output_name = p115_file_name(status)
+        if not output_id:
+            raise RuntimeError("115 cloud download completed without an output file id")
+        if not target:
+            raise RuntimeError("115 cloud download output target CID is empty")
+
+        item = dict(status)
+        try:
+            children = self.list_files(output_id, limit=500)
+        except P115RiskControlError:
+            raise
+        except Exception:
+            LOG.debug("Cloud output is not a readable container id=%s", output_id, exc_info=True)
+            children = []
+        if children:
+            normalized_name = normalize_text(output_name)
+            matches = [
+                child
+                for child in children
+                if normalized_name and normalize_text(p115_file_name(child)) == normalized_name
+            ]
+            if not matches and len(children) == 1:
+                matches = children
+            if len(matches) != 1:
+                raise RuntimeError("115 cloud download output contains no unique media item")
+            item = dict(matches[0])
+
+        file_id = p115_item_id(item)
+        parent_id = p115_item_parent_id(item) or p115_parent_id(status)
+        file_name = p115_file_name(item) or output_name
+        if not file_id or not file_name:
+            raise RuntimeError("115 cloud download output is missing media identity")
+        if parent_id != target:
+            self.move_file(file_id, target)
+            parent_id = target
+        return {"file_id": file_id, "parent_id": parent_id, "file_name": file_name}
 
     def list_files(self, parent_id: str, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         resp = self._request(
@@ -1186,6 +1238,14 @@ class P115WebClient:
             data={"fid": str(file_id), "file_name": str(file_name)},
         )
         return self._ensure_state(resp, "115 rename failed")
+
+    def move_file(self, file_id: str, target_cid: str) -> dict:
+        resp = self._request(
+            "https://webapi.115.com/files/move",
+            method="POST",
+            data={"fid": str(file_id), "pid": str(target_cid)},
+        )
+        return self._ensure_state(resp, "115 move failed")
 
     def delete_file(self, file_id: str) -> dict:
         resp = self._request(

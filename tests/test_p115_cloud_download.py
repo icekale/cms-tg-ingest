@@ -122,6 +122,37 @@ class P115CloudDownloadTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             validate_cloud_output({"file_id": "folder", "parent_id": "999"}, TARGET_CID)
 
+    def test_cloud_download_output_moves_media_out_of_cloud_download_folder(self):
+        http = FakeHttp(
+            [
+                {
+                    "state": True,
+                    "tasks": [
+                        {
+                            "status": 2,
+                            "info_hash": "HASH",
+                            "file_id": "cloud-folder",
+                            "wp_path_id": TARGET_CID,
+                            "name": "Example.mkv",
+                        }
+                    ],
+                },
+                {
+                    "state": True,
+                    "data": [{"cid": "cloud-folder", "fid": "media-file", "n": "Example.mkv"}],
+                },
+                {"state": True},
+            ]
+        )
+        client = P115WebClient("UID=1", http=http, timeout=3)
+
+        result = client.cloud_download_output({"info_hash": "HASH"}, TARGET_CID)
+
+        self.assertEqual(result["file_id"], "media-file")
+        self.assertEqual(result["parent_id"], TARGET_CID)
+        self.assertEqual(http.calls[2]["url"], "https://webapi.115.com/files/move")
+        self.assertEqual(http.calls[2]["data"], {"fid": "media-file", "pid": TARGET_CID})
+
 
 if __name__ == "__main__":
     unittest.main()
