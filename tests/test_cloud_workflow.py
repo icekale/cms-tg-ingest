@@ -2,12 +2,15 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import bridge
 from app.config import MoveConfig, SelfShareConfig
 from app.models import TaskStage, TaskStatus
+from app.strm_mode import effective_task_strm_mode
 from app.task_runner import TaskRunner
 from app.task_store import TaskStore
+from app.workflows.direct import ModeRoutingWorkflow
 from app.workflows.self_share import BridgeSelfShareTaskWorkflow
 
 
@@ -203,6 +206,19 @@ def make_workflow(p115, store, task_store=None, cms=None):
 
 
 class CloudWorkflowTests(unittest.TestCase):
+    def test_cloud_tasks_route_to_shared_workflow_even_with_direct_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_cloud_task("btih:abc", "magnet:?xt=urn:btih:abc")
+            calls = []
+            shared = SimpleNamespace(run_stage=lambda received: calls.append(received))
+            workflow = ModeRoutingWorkflow(direct=object(), shared=shared, default_mode="direct")
+
+            self.assertEqual(effective_task_strm_mode(task), "shared")
+            workflow.run_stage(task)
+
+            self.assertEqual([received.current_stage for received in calls], [TaskStage.CLOUD_DOWNLOADING])
+
     def test_existing_cloud_job_keeps_original_target_after_receive_cid_change(self):
         with tempfile.TemporaryDirectory() as tmp:
             task_store = TaskStore(Path(tmp) / "tasks.db")

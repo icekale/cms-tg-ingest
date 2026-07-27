@@ -457,6 +457,19 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(second.source_key, "ed2k:hash:10")
             self.assertEqual(second.current_stage, TaskStage.CLOUD_DOWNLOADING)
 
+    def test_upsert_cloud_task_does_not_mutate_active_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_cloud_task("btih:abc", "magnet:?xt=urn:btih:abc", chat_id="464100862")
+            store.enqueue_task(task.id, TaskStage.CLOUD_DOWNLOADING, next_run_at=0)
+            claimed = store.claim_next_runnable("worker-1", now=100)
+
+            duplicate = store.upsert_cloud_task("btih:abc", "magnet:?xt=urn:btih:abc", chat_id="464100862")
+
+            self.assertEqual(duplicate.updated_at, claimed.updated_at)
+            self.assertEqual(duplicate.claimed_by, "worker-1")
+            self.assertEqual(duplicate.metadata["strm_mode"], "shared")
+
     def test_find_task_by_source_returns_cloud_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

@@ -607,14 +607,20 @@ class TaskStore:
                 """
                 INSERT INTO tasks (
                     share_code, receive_code, source_type, source_key, url, title, chat_id,
-                    current_stage, status, created_at, updated_at
+                    current_stage, status, metadata_json, created_at, updated_at
                 )
-                VALUES (?, '', 'cloud_download', ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, '', 'cloud_download', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_type, source_key) DO UPDATE SET
-                    url = excluded.url,
-                    title = COALESCE(NULLIF(excluded.title, ''), tasks.title),
-                    chat_id = COALESCE(NULLIF(excluded.chat_id, ''), tasks.chat_id),
-                    updated_at = excluded.updated_at
+                    url = CASE WHEN tasks.claimed_by = '' THEN excluded.url ELSE tasks.url END,
+                    title = CASE
+                        WHEN tasks.claimed_by = '' THEN COALESCE(NULLIF(excluded.title, ''), tasks.title)
+                        ELSE tasks.title
+                    END,
+                    chat_id = CASE
+                        WHEN tasks.claimed_by = '' THEN COALESCE(NULLIF(excluded.chat_id, ''), tasks.chat_id)
+                        ELSE tasks.chat_id
+                    END,
+                    updated_at = CASE WHEN tasks.claimed_by = '' THEN excluded.updated_at ELSE tasks.updated_at END
                 """,
                 (
                     internal_share_code,
@@ -624,6 +630,7 @@ class TaskStore:
                     chat_id,
                     TaskStage.CLOUD_DOWNLOADING.value,
                     TaskStatus.PENDING.value,
+                    json.dumps({"strm_mode": "shared"}, ensure_ascii=False, sort_keys=True),
                     now,
                     now,
                 ),
