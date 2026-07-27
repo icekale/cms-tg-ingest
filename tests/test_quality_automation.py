@@ -552,6 +552,44 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertEqual(reprocess["status"], "queued")
             self.assertEqual(service.store.find_task(task.id).current_stage, TaskStage.RECEIVED)
 
+    def test_manual_cloud_reprocess_returns_to_cloud_downloading_and_clears_attempt_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            task = service.store.upsert_cloud_task(
+                "btih:quality-manual-cloud",
+                "magnet:?xt=urn:btih:quality-manual-cloud",
+            )
+            task = service.store.record_event(
+                task.id,
+                TaskStage.CLOUD_DOWNLOADING,
+                TaskStatus.PENDING,
+                "云下载失败",
+                metadata_patch={
+                    "dest_path": str(library / "cloud"),
+                    "own_share_code": "own",
+                    "own_share_receive_code": "1212",
+                    "cloud_task_id": "old-task",
+                    "cloud_output_items": [{"file_id": "old-file"}],
+                    "auto_organize_pending": True,
+                },
+            )
+
+            descriptor = {
+                "rule_id": "strm_mode_mismatch",
+                "available_actions": ["reprocess"],
+            }
+            with patch.object(service, "quality_descriptor", return_value=descriptor):
+                result = service.manual_action(task.id, "strm_mode_mismatch", "reprocess", "tester")
+
+            updated = service.store.find_task(task.id)
+            self.assertEqual(result["status"], "queued")
+            self.assertEqual(updated.current_stage, TaskStage.CLOUD_DOWNLOADING)
+            self.assertEqual(updated.metadata["strm_mode"], "shared")
+            self.assertTrue(updated.metadata["quality_repair_queued"])
+            self.assertNotIn("cloud_task_id", updated.metadata)
+            self.assertNotIn("cloud_output_items", updated.metadata)
+            self.assertNotIn("auto_organize_pending", updated.metadata)
+
     def test_real_rule_descriptors_expose_manual_and_gated_actions(self):
         with tempfile.TemporaryDirectory() as tmp:
             service, library = self.make_service(tmp)
@@ -1195,6 +1233,48 @@ class QualityRepairExecutionTests(unittest.TestCase):
                 sorted(call[0] for call in adapter.calls),
                 ["reprocess"],
             )
+
+    def test_automatic_cloud_reprocess_returns_to_cloud_downloading_and_clears_attempt_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = FakeQualityRepairAdapter()
+            service, library = self.make_service(tmp, adapter)
+            task = service.store.upsert_cloud_task(
+                "btih:quality-auto-cloud",
+                "magnet:?xt=urn:btih:quality-auto-cloud",
+            )
+            task = service.store.record_event(
+                task.id,
+                TaskStage.CLOUD_DOWNLOADING,
+                TaskStatus.PENDING,
+                "云下载失败",
+                metadata_patch={
+                    "dest_path": str(library / "cloud"),
+                    "own_share_code": "own",
+                    "own_share_receive_code": "1212",
+                    "cloud_task_id": "old-task",
+                    "cloud_output_items": [{"file_id": "old-file"}],
+                    "auto_organize_pending": True,
+                },
+            )
+            plan = QualityRepairPlan(
+                task.id,
+                "reprocess",
+                "strm_mode_mismatch",
+                ("direct_strm",),
+                planned_updated_at=task.updated_at,
+            )
+
+            result = service.execute_plan(plan, "quality-auto-cloud-run")
+
+            updated = service.store.find_task(task.id)
+            self.assertEqual(result.execution_status, "queued")
+            self.assertEqual(updated.current_stage, TaskStage.CLOUD_DOWNLOADING)
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.metadata["strm_mode"], "shared")
+            self.assertTrue(updated.metadata["quality_repair_queued"])
+            self.assertNotIn("cloud_task_id", updated.metadata)
+            self.assertNotIn("cloud_output_items", updated.metadata)
+            self.assertNotIn("auto_organize_pending", updated.metadata)
 
     def test_invalid_share_requires_explicit_invalid_status_and_risk_is_not_rebuilt(self):
         with tempfile.TemporaryDirectory() as tmp:

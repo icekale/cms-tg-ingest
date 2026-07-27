@@ -21,7 +21,12 @@ from .quality_rules import (
     risk_cooldown_is_active,
     rule_config,
 )
-from .task_store import REPROCESS_METADATA_DELETE_KEYS, TaskStore, build_reprocess_metadata
+from .task_store import (
+    TaskStore,
+    build_reprocess_metadata,
+    reprocess_delete_keys_for,
+    reprocess_stage_for,
+)
 from .task_runner import QUALITY_REPAIR_WAIT_SECONDS
 
 
@@ -608,12 +613,13 @@ class QualityAutomation:
                 "quality_next_eligible_at": started_at + int(self.rule_config["cooldown_seconds"]),
             },
         )
+        target_stage = reprocess_stage_for(task)
         updated = self.store.compare_and_set_transition(
             task.id,
             task.current_stage,
             {TaskStatus.PENDING, TaskStatus.SUCCEEDED},
             require_unclaimed=True,
-            target_stage=TaskStage.RECEIVED,
+            target_stage=target_stage,
             target_status=TaskStatus.PENDING,
             target_event_message=(
                 f"人工质量操作已入队：{normalized_action}"
@@ -621,7 +627,7 @@ class QualityAutomation:
             ),
             metadata_patch=metadata,
             metadata_delete_keys=tuple(
-                key for key in REPROCESS_METADATA_DELETE_KEYS if key != "quality_repair_queued"
+                key for key in reprocess_delete_keys_for(task) if key != "quality_repair_queued"
             ),
             next_run_at=0,
             clear_errors=True,
@@ -892,7 +898,7 @@ class QualityAutomation:
         if stored_version and stored_version != str(plan.rule_version or QUALITY_RULE_VERSION):
             return replace(plan, execution_status="skipped", reason="rule_version_changed")
 
-        target_stage = TaskStage.RECEIVED
+        target_stage = reprocess_stage_for(task)
         metadata = {
             "quality_run_id": str(run_id),
             "quality_repair_action": plan.action,
@@ -916,7 +922,7 @@ class QualityAutomation:
             }
         )
         metadata = build_reprocess_metadata(task, metadata)
-        metadata_delete_keys = REPROCESS_METADATA_DELETE_KEYS
+        metadata_delete_keys = reprocess_delete_keys_for(task)
         reserved = self.store.compare_and_set_transition(
             task.id,
             task.current_stage,

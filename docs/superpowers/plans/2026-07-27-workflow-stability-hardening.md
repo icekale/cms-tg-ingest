@@ -283,14 +283,18 @@ git commit -m "fix: pin receive cid and bound cms trigger waits"
 **Files:**
 - Modify: `app/task_store.py:22`
 - Modify: `app/task_store.py:1700`
+- Modify: `app/quality_automation.py:611`
+- Modify: `app/quality_automation.py:895`
 - Test: `tests/test_task_store.py`
 - Test: `tests/test_web_admin.py`
+- Test: `tests/test_quality_automation.py`
 
 **Interfaces:**
 - Produces: `reprocess_stage_for(task: TaskSnapshot) -> TaskStage`.
 - Produces: `reprocess_delete_keys_for(task: TaskSnapshot) -> tuple[str, ...]`.
 - Ordinary shares still return to `TaskStage.RECEIVED`.
 - Cloud sources return to `TaskStage.CLOUD_DOWNLOADING` and clear all attempt-specific cloud metadata.
+- Quality manual and automatic reprocess actions use the same source-aware stage and cleanup APIs while preserving `quality_repair_queued`.
 
 - [ ] **Step 1: Add source-aware reprocess tests**
 
