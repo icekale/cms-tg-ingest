@@ -1,9 +1,10 @@
 import http.client
 import unittest
+from io import BytesIO
 from unittest.mock import patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
-from app.clients.http import FormHttp, HttpJson
+from app.clients.http import FormHttp, HttpJson, _redact_url
 
 
 class FakeResponse:
@@ -104,6 +105,62 @@ class HttpClientTests(unittest.TestCase):
         self.assertNotIn("SECRET", message)
         self.assertIn("access_token=%3Credacted%3E", message)
         self.assertTrue(message.endswith(": " + ("!" * 300)))
+
+    def test_redact_url_hides_password_and_sensitive_fragment(self):
+        redacted = _redact_url(
+            "https://example.test/share?name=movie&password=URL_SECRET#sessdata=FRAGMENT_SECRET"
+        )
+
+        self.assertIn("name=movie", redacted)
+        self.assertIn("password=%3Credacted%3E", redacted)
+        self.assertIn("sessdata=%3Credacted%3E", redacted)
+        self.assertNotIn("URL_SECRET", redacted)
+        self.assertNotIn("FRAGMENT_SECRET", redacted)
+
+    def test_http_error_redacts_sensitive_response_body(self):
+        body = (
+            "bad gateway "
+            "https://api.telegram.org/botBOT_SECRET/getMe?api_key=API_SECRET "
+            "cookie=COOKIE_SECRET"
+        )
+        error = HTTPError(
+            "https://example.test/status?password=URL_SECRET#token=FRAGMENT_SECRET",
+            400,
+            "bad gateway",
+            {},
+            BytesIO(body.encode("utf-8")),
+        )
+
+        with patch("app.clients.http.urllib.request.urlopen", side_effect=error):
+            with self.assertRaises(RuntimeError) as raised:
+                HttpJson(timeout=1).request(
+                    "https://example.test/status?password=URL_SECRET#token=FRAGMENT_SECRET"
+                )
+
+        message = str(raised.exception)
+        for secret in ("BOT_SECRET", "API_SECRET", "COOKIE_SECRET", "URL_SECRET", "FRAGMENT_SECRET"):
+            self.assertNotIn(secret, message)
+        self.assertIn("bad gateway", message)
+
+    def test_non_json_response_redacts_sensitive_body_before_truncation(self):
+        body = (
+            'upstream url=https://example.test/status?secret=URL_SECRET '
+            'api_key="API_SECRET" access_token="ACCESS_SECRET" cookie="COOKIE_SECRET" '
+            'https://api.telegram.org/botBOT_SECRET/getMe '
+            + ("!" * 400)
+        )
+        with patch(
+            "app.clients.http.urllib.request.urlopen",
+            return_value=FakeResponse(body),
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                FormHttp(timeout=1).request("https://example.test/status")
+
+        message = str(raised.exception)
+        for secret in ("BOT_SECRET", "API_SECRET", "ACCESS_SECRET", "COOKIE_SECRET", "URL_SECRET"):
+            self.assertNotIn(secret, message)
+        self.assertIn("upstream url=https://example.test/status?secret=%3Credacted%3E", message)
+        self.assertEqual(len(message.split(": ", 1)[1]), 300)
 
 
 if __name__ == "__main__":

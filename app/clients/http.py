@@ -13,6 +13,97 @@ from pathlib import Path
 _RETRYABLE_HTTP_STATUS = {408, 425, 429}
 _MAX_SAFE_GET_ATTEMPTS = 2
 _TRANSIENT_NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, http.client.RemoteDisconnected)
+_SENSITIVE_URL_KEYS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "access_token",
+    "auth_token",
+    "bearer_token",
+    "cookie",
+    "csrf_token",
+    "hdhive_token",
+    "key",
+    "password",
+    "passwd",
+    "p115_cookie",
+    "pwd",
+    "refresh_token",
+    "secret",
+    "session_token",
+    "sessdata",
+    "share_password",
+    "share_pwd",
+    "token",
+}
+_SENSITIVE_KEY_PATTERN = "|".join(
+    sorted(
+        {
+            "api[_-]?key",
+            "apikey",
+            "access[_-]?token",
+            "auth(?:orization|[_-]?token)?",
+            "bearer[_-]?token",
+            "cookie",
+            "csrf[_-]?token",
+            "hdhive[_-]?token",
+            "key",
+            "password",
+            "passwd",
+            "p115[_-]?cookie",
+            "pwd",
+            "refresh[_-]?token",
+            "secret",
+            "session[_-]?token",
+            "sessdata",
+            "share[_-]?(?:password|pwd)",
+            "token",
+        },
+        key=len,
+        reverse=True,
+    )
+)
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    rf"(?<![\w-])(?P<key_quote>['\"]?)(?P<key>{_SENSITIVE_KEY_PATTERN})"
+    rf"(?P=key_quote)\s*[:=]\s*"
+    rf"(?:(?P<value_quote>['\"])(?P<quoted_value>.*?)(?P=value_quote)|"
+    rf"(?P<bare_value>[^,;&\s}}]+))",
+    re.IGNORECASE,
+)
+_URL_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
+
+
+def _normalized_url_key(key: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(key or "").lower()).strip("_")
+
+
+def _is_sensitive_url_key(key: str) -> bool:
+    return _normalized_url_key(key) in _SENSITIVE_URL_KEYS
+
+
+def _redact_assignments(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        matched = match.group(0)
+        value_name = "quoted_value" if match.group("quoted_value") is not None else "bare_value"
+        start = match.start(value_name) - match.start()
+        end = match.end(value_name) - match.start()
+        return matched[:start] + "<redacted>" + matched[end:]
+
+    return _SENSITIVE_ASSIGNMENT_RE.sub(replace, str(value or ""))
+
+
+def _redact_fragment(fragment: str) -> str:
+    decoded = urllib.parse.unquote(str(fragment or ""))
+    pairs = urllib.parse.parse_qsl(decoded, keep_blank_values=True)
+    if pairs and any(_is_sensitive_url_key(key) for key, _value in pairs):
+        return urllib.parse.urlencode(
+            [
+                (key, "<redacted>" if _is_sensitive_url_key(key) else value)
+                for key, value in pairs
+            ]
+        )
+    redacted = _redact_assignments(decoded)
+    return redacted if redacted != decoded else fragment
 
 
 def _redact_url(url: str) -> str:
@@ -22,12 +113,24 @@ def _redact_url(url: str) -> str:
         path = re.sub(r"^/bot[^/]+(?=/|$)", "/bot<redacted>", path, count=1)
     query = []
     for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
-        if key.lower() in {"api_key", "apikey", "token", "access_token", "authorization"}:
+        if _is_sensitive_url_key(key):
             value = "<redacted>"
         query.append((key, value))
     return urllib.parse.urlunsplit(
-        (parsed.scheme, parsed.netloc, path, urllib.parse.urlencode(query), parsed.fragment)
+        (parsed.scheme, parsed.netloc, path, urllib.parse.urlencode(query), _redact_fragment(parsed.fragment))
     )
+
+
+def _redact_text(value: str) -> str:
+    def replace_url(match: re.Match[str]) -> str:
+        raw_url = match.group(0)
+        suffix = ""
+        while raw_url and raw_url[-1] in ".,;:)]}":
+            suffix = raw_url[-1] + suffix
+            raw_url = raw_url[:-1]
+        return _redact_url(raw_url) + suffix
+
+    return _URL_RE.sub(replace_url, _redact_assignments(str(value or "")))
 
 
 def _safe_get_retryable(req: urllib.request.Request, error: BaseException) -> bool:
@@ -73,20 +176,21 @@ class HttpJson:
         try:
             raw = _read_response(req, self.timeout)
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", "replace")
+            body = _redact_text(exc.read().decode("utf-8", "replace"))[:300]
             raise RuntimeError(f"HTTP {exc.code} from {_redact_url(url)}: {body[:300]}") from exc
         except urllib.error.URLError as exc:
-            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {exc.reason}") from exc
+            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {_redact_text(str(exc.reason))}") from exc
         except TimeoutError as exc:
-            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {exc}") from exc
+            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {_redact_text(str(exc))}") from exc
         except http.client.RemoteDisconnected as exc:
-            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {exc}") from exc
+            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {_redact_text(str(exc))}") from exc
         if not raw.strip():
             return {}
         try:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Non-JSON response from {_redact_url(url)}: {raw[:300]}") from exc
+            body = _redact_text(raw)[:300]
+            raise RuntimeError(f"Non-JSON response from {_redact_url(url)}: {body}") from exc
 
 
 class FormHttp:
@@ -113,18 +217,19 @@ class FormHttp:
         try:
             raw = _read_response(req, self.timeout)
         except urllib.error.HTTPError as exc:
-            body_text = exc.read().decode("utf-8", "replace")
-            raise RuntimeError(f"HTTP {exc.code} from {_redact_url(url)}: {body_text[:300]}") from exc
+            body_text = _redact_text(exc.read().decode("utf-8", "replace"))[:300]
+            raise RuntimeError(f"HTTP {exc.code} from {_redact_url(url)}: {body_text}") from exc
         except urllib.error.URLError as exc:
-            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {exc.reason}") from exc
+            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {_redact_text(str(exc.reason))}") from exc
         except TimeoutError as exc:
-            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {exc}") from exc
+            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {_redact_text(str(exc))}") from exc
         except http.client.RemoteDisconnected as exc:
-            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {exc}") from exc
+            raise RuntimeError(f"Cannot reach {_redact_url(url)}: {_redact_text(str(exc))}") from exc
         try:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Non-JSON response from {_redact_url(url)}: {raw[:300]}") from exc
+            body_text = _redact_text(raw)[:300]
+            raise RuntimeError(f"Non-JSON response from {_redact_url(url)}: {body_text}") from exc
 
 
 def load_cookie_value(value_or_path: str) -> str:
