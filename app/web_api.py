@@ -13,6 +13,7 @@ from .quality_rules import QUALITY_RULE_VERSION, QualityRuleEngine, quality_atte
 from .task_diagnostics import explain_task_slowness, format_stage_observability
 from .task_health import build_task_health
 from .quality import redact_quality_detail, scan_task_quality
+from .strm_mode import effective_task_strm_mode
 from .task_store import TaskStore
 
 
@@ -118,7 +119,7 @@ def serialize_task(task: TaskSnapshot, *, now: float | None = None) -> dict[str,
         "source_type": task.source_type,
         "stage": _enum_value(task.current_stage),
         "status": _enum_value(task.status),
-        "strm_mode": str(task.metadata.get("strm_mode") or "shared"),
+        "strm_mode": effective_task_strm_mode(task),
         "category": task.category or task.metadata.get("category") or "",
         "tmdb_id": task.tmdb_id or task.metadata.get("tmdb_id") or "",
         "safe_url": _safe_url(task.url),

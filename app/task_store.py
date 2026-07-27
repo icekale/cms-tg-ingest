@@ -362,6 +362,8 @@ class TaskStore:
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
             if row is None:
                 raise KeyError(f"task not found: {task_id}")
+            if row["source_type"] == "cloud_download" and normalized != "shared":
+                raise ValueError("云任务只支持 shared STRM 模式")
             if is_strm_mode_locked(row["current_stage"]):
                 raise RuntimeError("STRM 模式已锁定，不能修改")
             merged_metadata = self._merge_metadata(row["metadata_json"], {"strm_mode": normalized})
@@ -640,8 +642,14 @@ class TaskStore:
                 ("cloud_download", source_key),
             ).fetchone()
             if row is not None and not str(row["claimed_by"] or "").strip():
-                merged_metadata = self._merge_metadata(row["metadata_json"], {"strm_mode": "shared"})
-                if merged_metadata != str(row["metadata_json"] or "{}"):
+                try:
+                    metadata = json.loads(row["metadata_json"] or "{}")
+                except Exception:
+                    metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                if "strm_mode" not in metadata:
+                    merged_metadata = self._merge_metadata(row["metadata_json"], {"strm_mode": "shared"})
                     conn.execute(
                         "UPDATE tasks SET metadata_json = ? WHERE id = ?",
                         (merged_metadata, int(row["id"])),

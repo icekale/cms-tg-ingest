@@ -633,6 +633,20 @@ class WebApiTests(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(payload, ensure_ascii=False))
         self.assertEqual(payload["metadata"]["source_path"], "/safe")
 
+    def test_serialize_task_reports_effective_shared_mode_for_cloud_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db", default_strm_mode="direct")
+            task = store.upsert_cloud_task("btih:web", "magnet:?xt=urn:btih:web")
+            with store._connection() as conn:
+                conn.execute(
+                    "UPDATE tasks SET metadata_json = ? WHERE id = ?",
+                    ('{"strm_mode":"direct"}', task.id),
+                )
+
+            payload = serialize_task(store.find_task(task.id))
+
+        self.assertEqual(payload["strm_mode"], "shared")
+
 
 if __name__ == "__main__":
     unittest.main()

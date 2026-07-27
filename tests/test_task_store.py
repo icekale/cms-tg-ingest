@@ -475,6 +475,34 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(upserted.metadata["strm_mode"], "shared")
             self.assertEqual(upserted.metadata["legacy_marker"], "keep")
 
+    def test_cloud_upsert_preserves_explicit_mode_but_runtime_mode_stays_shared(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_cloud_task("btih:explicit", "magnet:?xt=urn:btih:explicit")
+            with store._connection() as conn:
+                conn.execute(
+                    "UPDATE tasks SET metadata_json = ? WHERE id = ?",
+                    ('{"strm_mode":"direct","custom":"keep"}', task.id),
+                )
+
+            upserted = store.upsert_cloud_task("btih:explicit", "magnet:?xt=urn:btih:explicit")
+
+            self.assertEqual(upserted.metadata["strm_mode"], "direct")
+            self.assertEqual(upserted.metadata["custom"], "keep")
+            self.assertEqual(effective_task_strm_mode(upserted), "shared")
+
+    def test_cloud_task_only_accepts_shared_strm_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_cloud_task("btih:mode", "magnet:?xt=urn:btih:mode")
+
+            for mode in ("direct", "source_shared"):
+                with self.subTest(mode=mode), self.assertRaises(ValueError):
+                    store.set_task_strm_mode(task.id, mode)
+
+            updated = store.set_task_strm_mode(task.id, "shared")
+            self.assertEqual(updated.metadata["strm_mode"], "shared")
+
     def test_upsert_cloud_task_does_not_mutate_active_claim(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
