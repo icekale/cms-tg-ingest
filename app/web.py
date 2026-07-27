@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
 from .config import SelfShareConfig
-from .models import RetryAction, TaskStage, TaskStatus
+from .models import TaskStage, TaskStatus
 from .quality import QualityIssue, format_task_quality_report, scan_task_quality
 from .quality_automation import QualityAutomation
 from .task_bridge import sync_task_from_submission
@@ -24,14 +24,10 @@ from .task_diagnostics import (
     is_dispatchable_active_task,
     is_unscheduled_active_task,
 )
+from .task_actions import TASK_ACTIONS, apply_task_action, available_task_actions
 from .task_engine import decide_retry, stage_display_name
 from .task_health import build_task_health, format_task_health
-from .task_store import (
-    TaskStore,
-    build_reprocess_metadata,
-    reprocess_delete_keys_for,
-    reprocess_stage_for,
-)
+from .task_store import TaskStore
 from .self_share_settings import resolve_own_share_receive_code, resolve_self_share_receive_cid
 from .strm_mode import STRM_MODE_LABELS
 from .web_api import (
@@ -65,11 +61,6 @@ _TASK_PHASES = (
     ("Emby 确认", {TaskStage.EMBY_CONFIRMED}),
     ("清理完成", {TaskStage.CLEANED}),
 )
-
-_DOWNSTREAM_RECOVERY_STAGES = {TaskStage.MOVED, TaskStage.EMBY_CONFIRMED, TaskStage.CLEANED}
-_TERMINAL_ACTION_STATUSES = {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION, TaskStatus.SUCCEEDED}
-_TASK_ACTIONS = {"retry", "emby", "restore", "reprocess"}
-
 
 def _navigation(active: str) -> str:
     links = []
@@ -362,7 +353,7 @@ def parse_task_id_from_path(path: str) -> int | None:
 
 def parse_task_action_path(path: str) -> tuple[int, str] | None:
     parts = str(path or "").split("/")
-    if len(parts) != 4 or parts[0] or parts[1] != "task" or parts[3] not in _TASK_ACTIONS:
+    if len(parts) != 4 or parts[0] or parts[1] != "task" or parts[3] not in TASK_ACTIONS:
         return None
     try:
         return int(parts[2]), parts[3]
@@ -370,30 +361,8 @@ def parse_task_action_path(path: str) -> tuple[int, str] | None:
         return None
 
 
-def _task_can_retry(task: Any, decision: Any | None = None) -> bool:
-    if str(task.claimed_by or "").strip():
-        return False
-    retry_decision = decision or decide_retry(task)
-    return task.status == TaskStatus.FAILED and retry_decision.action == RetryAction.RETRY_CURRENT_STAGE
-
-
-def _task_can_use_downstream_actions(task: Any) -> bool:
-    if str(task.claimed_by or "").strip():
-        return False
-    return task.current_stage in _DOWNSTREAM_RECOVERY_STAGES and task.status in _TERMINAL_ACTION_STATUSES
-
-
 def _task_is_unscheduled_legacy(task: Any) -> bool:
     return task.current_stage != TaskStage.RECEIVED and is_unscheduled_active_task(task)
-
-
-def _task_can_reprocess(task: Any) -> bool:
-    if str(task.claimed_by or "").strip():
-        return False
-    if task.status in _TERMINAL_ACTION_STATUSES:
-        return True
-    return _task_is_unscheduled_legacy(task)
-
 
 
 def _status_class(status: TaskStatus | str) -> str:
@@ -578,7 +547,12 @@ def render_task_list(store: TaskStore, *, task_engine_enabled: bool = True) -> s
 """
     return _page("运行概览", body, active="overview")
 
-def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | None = None) -> str:
+def render_task_detail(
+    store: TaskStore,
+    task_id: int,
+    submission_store: Any | None = None,
+    max_retries: int = 3,
+) -> str:
     task = store.find_task(task_id)
     if not task and submission_store is not None and hasattr(submission_store, "find_by_id"):
         row = submission_store.find_by_id(task_id)
@@ -615,10 +589,11 @@ def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | N
             '<details class="older-events"><summary>查看更早事件</summary>'
             f'<ul class="timeline">{older_event_items}</ul></details>'
         )
-    decision = decide_retry(task)
-    retry_eligible = _task_can_retry(task, decision)
-    downstream_actions_eligible = _task_can_use_downstream_actions(task)
-    reprocess_eligible = _task_can_reprocess(task)
+    decision = decide_retry(task, max_retries=max_retries)
+    actions = available_task_actions(task, max_retries=max_retries)
+    retry_eligible = "retry" in actions
+    downstream_actions_eligible = "emby" in actions or "restore" in actions
+    reprocess_eligible = "reprocess" in actions
     retry_form = ""
     if retry_eligible:
         retry_form = f'<form method="post" action="/task/{task.id}/retry"><button class="button button-primary" type="submit">重试当前阶段</button></form>'
@@ -656,7 +631,7 @@ def render_task_detail(store: TaskStore, task_id: int, submission_store: Any | N
     normal_active = task.status in {TaskStatus.PENDING, TaskStatus.RUNNING} and not error_summary and not wait_label and not unscheduled
     if error_summary:
         incident_summary = error_summary
-        recommendation = decision.reason if retry_eligible or task.status in _TERMINAL_ACTION_STATUSES else "请关注当前任务状态"
+        recommendation = decision.reason if retry_eligible or task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION, TaskStatus.SUCCEEDED} else "请关注当前任务状态"
         incident_tone = "failed" if task.status == TaskStatus.FAILED else "attention"
     elif wait_label:
         incident_summary = wait_label
@@ -759,96 +734,22 @@ def _group_quality_issues(issues: list[QualityIssue]) -> list[dict[str, Any]]:
     return list(grouped.values())
 
 
-def _quality_repair_action(issue: QualityIssue, task: Any | None) -> str | None:
+def _quality_repair_action(issue: QualityIssue, task: Any | None, max_retries: int = 3) -> str | None:
     if task is None:
         return None
-    if issue.code in {"missing_dest", "missing_strm"} and _task_can_use_downstream_actions(task):
+    actions = available_task_actions(task, max_retries=max_retries)
+    if issue.code in {"missing_dest", "missing_strm"} and "restore" in actions:
         return "restore"
-    if issue.code in {"direct_strm", "unexpected_strm"} and _task_can_reprocess(task):
+    if issue.code in {"direct_strm", "unexpected_strm"} and "reprocess" in actions:
         return "reprocess"
     return None
 
 
-def _apply_web_transition(
+def render_quality_page(
     store: TaskStore,
-    task: Any,
-    *,
-    target_stage: TaskStage,
-    target_event_message: str,
-    initial_event_message: str | None = None,
-    initial_event_stage: TaskStage | None = None,
-    increment_retry: bool = False,
-    metadata_patch: dict[str, Any] | None = None,
-    metadata_delete_keys: tuple[str, ...] = ("_defer_stage", "_defer_message", "_defer_count"),
-) -> bool:
-    updated = store.compare_and_set_transition(
-        task.id,
-        task.current_stage,
-        {task.status},
-        require_unclaimed=True,
-        target_stage=target_stage,
-        target_status=TaskStatus.PENDING,
-        target_event_message=target_event_message,
-        initial_event_message=initial_event_message,
-        initial_event_stage=initial_event_stage,
-        increment_retry=increment_retry,
-        metadata_patch=metadata_patch,
-        metadata_delete_keys=metadata_delete_keys,
-        next_run_at=0,
-        clear_errors=True,
-        clear_claim=True,
-    )
-    return updated is not None
-
-
-def _apply_task_action(store: TaskStore, task: Any, action: str) -> bool:
-    """Apply the same guarded task transition used by HTML and JSON controls."""
-    if action == "emby" and _task_can_use_downstream_actions(task):
-        return _apply_web_transition(
-            store,
-            task,
-            target_stage=TaskStage.EMBY_CONFIRMED,
-            target_event_message="Web 触发 Emby 检查",
-        )
-    if action == "restore" and _task_can_use_downstream_actions(task):
-        return _apply_web_transition(
-            store,
-            task,
-            target_stage=TaskStage.EMBY_CONFIRMED,
-            target_event_message="Web STRM 恢复已入队",
-            initial_event_message="Web 触发 STRM 恢复",
-            initial_event_stage=TaskStage.EMBY_CONFIRMED,
-            metadata_patch={
-                "retry_from_stage": task.current_stage.value,
-                "retry_stage": TaskStage.EMBY_CONFIRMED.value,
-            },
-        )
-    if action == "reprocess" and _task_can_reprocess(task):
-        return _apply_web_transition(
-            store,
-            task,
-            target_stage=reprocess_stage_for(task),
-            target_event_message="Web 触发从头重跑",
-            metadata_patch=build_reprocess_metadata(task),
-            metadata_delete_keys=reprocess_delete_keys_for(task),
-        )
-    if action == "retry":
-        decision = decide_retry(task)
-        if _task_can_retry(task, decision):
-            target_stage = decision.stage or task.current_stage
-            if target_stage in {TaskStage.NEEDS_ACTION, TaskStage.FAILED}:
-                target_stage = TaskStage.RECEIVED
-            return _apply_web_transition(
-                store,
-                task,
-                target_stage=target_stage,
-                target_event_message="手动重试已入队",
-                initial_event_message="手动触发重试",
-            )
-    return False
-
-
-def render_quality_page(store: TaskStore, quality_automation: QualityAutomation | None = None) -> str:
+    quality_automation: QualityAutomation | None = None,
+    max_retries: int = 3,
+) -> str:
     allowed_roots = quality_automation.allowed_roots if quality_automation is not None else ()
     issues = scan_task_quality(store, allowed_roots=allowed_roots)
     report = format_task_quality_report(issues)
@@ -880,7 +781,12 @@ def render_quality_page(store: TaskStore, quality_automation: QualityAutomation 
             actionable_task_ids.add(task_id)
         elif quality_automation is None:
             descriptor_for_row = row["items"][0] if row["items"] else None
-            if descriptor_for_row and descriptor_for_row.get("rule_id") in {"strm_mode_mismatch", "unexpected_strm"} and _task_can_reprocess(tasks[task_id]):
+            if (
+                descriptor_for_row
+                and descriptor_for_row.get("rule_id") in {"strm_mode_mismatch", "unexpected_strm"}
+                and tasks[task_id] is not None
+                and "reprocess" in available_task_actions(tasks[task_id], max_retries)
+            ):
                 actionable_task_ids.add(task_id)
     category_counts = {
         "目标目录缺失": sum(issue.code == "missing_dest" for issue in issues),
@@ -1358,6 +1264,7 @@ class WebApp:
         hdhive_scheduler: Any | None = None,
         self_share_config: SelfShareConfig | None = None,
         frontend_dist_path: str | Path = "/app/frontend/dist",
+        max_retries: int = 3,
     ):
         self.store = store
         self.web_token = web_token
@@ -1368,6 +1275,7 @@ class WebApp:
         self.hdhive_scheduler = hdhive_scheduler
         self.self_share_config = self_share_config or SelfShareConfig()
         self.frontend_dist_path = Path(frontend_dist_path)
+        self.max_retries = max(0, int(max_retries))
 
     def _own_share_receive_code_payload(self) -> dict[str, Any]:
         resolved = resolve_own_share_receive_code(self.store, self.self_share_config)
@@ -1424,7 +1332,7 @@ class WebApp:
             page = render_task_list(self.store, task_engine_enabled=self.task_engine_enabled)
             return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, page.encode("utf-8")
         if method == "GET" and parsed.path == "/quality":
-            return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, render_quality_page(self.store, self.quality_automation).encode("utf-8")
+            return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, render_quality_page(self.store, self.quality_automation, self.max_retries).encode("utf-8")
         if method == "POST" and parsed.path in {
             "/quality/action/execute",
             "/quality/action/reprocess",
@@ -1551,7 +1459,7 @@ class WebApp:
             task_id, action = task_action
             task = self.store.find_task(task_id)
             if task:
-                _apply_task_action(self.store, task, action)
+                apply_task_action(self.store, task_id, action, max_retries=self.max_retries, actor="Web")
             return 303, {"Location": f"/task/{task_id}", **auth_headers}, b""
         if parsed.path.startswith("/task/"):
             return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
@@ -1598,9 +1506,15 @@ class WebApp:
                 if task is None:
                     status, response_headers, response_body = api_response({"error": "task_not_found"}, status=404)
                     return status, {**response_headers, **auth_headers}, response_body
-                if action not in _TASK_ACTIONS or not _apply_task_action(self.store, task, action):
+                result = apply_task_action(self.store, task_id, action, max_retries=self.max_retries, actor="Web") if action in TASK_ACTIONS else None
+                if result is None or not result.applied:
                     status, response_headers, response_body = api_response(
-                        {"error": "action_not_allowed", "action": action}, status=409
+                        {
+                            "error": "action_not_allowed",
+                            "action": action,
+                            "reason": result.reason if result is not None else "不支持的任务操作",
+                        },
+                        status=409,
                     )
                     return status, {**response_headers, **auth_headers}, response_body
                 status, response_headers, response_body = api_response(api_task_detail(self.store, task_id))
@@ -1849,6 +1763,7 @@ def start_web_server(
     hdhive_scheduler: Any | None = None,
     self_share_config: SelfShareConfig | None = None,
     frontend_dist_path: str | Path = "/app/frontend/dist",
+    max_retries: int = 3,
 ) -> ThreadingHTTPServer:
     app = WebApp(
         store,
@@ -1860,6 +1775,7 @@ def start_web_server(
         hdhive_scheduler=hdhive_scheduler,
         self_share_config=self_share_config,
         frontend_dist_path=frontend_dist_path,
+        max_retries=max_retries,
     )
 
     class Handler(BaseHTTPRequestHandler):

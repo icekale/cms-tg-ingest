@@ -1129,9 +1129,9 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             buttons = [button for row in reply_markup["inline_keyboard"] for button in row]
             self.assertIn({"text": "详情 #1", "callback_data": "task_detail:1"}, buttons)
             self.assertIn({"text": "重试 #1", "callback_data": "task_retry:1"}, buttons)
-            self.assertIn({"text": "查 Emby #1", "callback_data": "task_emby:1"}, buttons)
-            self.assertIn({"text": "恢复 STRM #1", "callback_data": "task_restore:1"}, buttons)
             self.assertIn({"text": "从头重跑 #1", "callback_data": "task_reprocess:1"}, buttons)
+            self.assertNotIn({"text": "查 Emby #1", "callback_data": "task_emby:1"}, buttons)
+            self.assertNotIn({"text": "恢复 STRM #1", "callback_data": "task_restore:1"}, buttons)
 
     def test_start_series_update_task_requeues_completed_series(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1419,8 +1419,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 submission_id=int(row["id"]),
                 metadata_patch={"own_share_code": "ownabc"},
             )
-            task_store.enqueue_task(task.id, TaskStage.CLEANED, next_run_at=1.0)
-            task_store.claim_next_runnable("stale-worker", now=1.0)
             telegram = FakeTelegram()
 
             bridge.handle_update(

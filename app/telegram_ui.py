@@ -10,6 +10,7 @@ from typing import Any
 from app.media.classify import expected_task_tmdb_id, extract_tmdb_id_from_name, normalize_text, parse_recognition_json
 from app.models import TaskStage, TaskStatus
 from app.task_diagnostics import describe_task_wait, format_task_observability
+from app.task_actions import available_task_actions
 from app.task_engine import stage_display_name
 from app.workflows.self_share import format_task_label
 
@@ -256,17 +257,21 @@ def format_taskstore_status(tasks: list[Any]) -> str:
     return "\n".join(lines)
 
 
-def task_action_keyboard(tasks: list[Any], limit: int = 5) -> dict[str, Any] | None:
+def task_action_keyboard(tasks: list[Any], limit: int = 5, max_retries: int = 3) -> dict[str, Any] | None:
     buttons: list[list[dict[str, str]]] = []
     for task in tasks[:limit]:
+        actions = available_task_actions(task, max_retries=max_retries)
         row = [
             {"text": f"详情 #{task.id}", "callback_data": f"task_detail:{task.id}"},
-            {"text": f"查 Emby #{task.id}", "callback_data": f"task_emby:{task.id}"},
         ]
-        if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {TaskStage.FAILED, TaskStage.NEEDS_ACTION}:
+        if "emby" in actions:
+            row.append({"text": f"查 Emby #{task.id}", "callback_data": f"task_emby:{task.id}"})
+        if "retry" in actions:
             row.append({"text": f"重试 #{task.id}", "callback_data": f"task_retry:{task.id}"})
-        row.append({"text": f"恢复 STRM #{task.id}", "callback_data": f"task_restore:{task.id}"})
-        row.append({"text": f"从头重跑 #{task.id}", "callback_data": f"task_reprocess:{task.id}"})
+        if "restore" in actions:
+            row.append({"text": f"恢复 STRM #{task.id}", "callback_data": f"task_restore:{task.id}"})
+        if "reprocess" in actions:
+            row.append({"text": f"从头重跑 #{task.id}", "callback_data": f"task_reprocess:{task.id}"})
         category = str(task.category or task.metadata.get("category") or task.metadata.get("category_final") or "").strip()
         submission_id = task.submission_id or task.metadata.get("submission_id")
         if (

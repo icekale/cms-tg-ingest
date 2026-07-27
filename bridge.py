@@ -145,6 +145,7 @@ from app.task_bridge import (
     sync_task_from_submission,
 )
 from app.task_engine import decide_retry, stage_display_name
+from app.task_actions import apply_task_action
 from app.task_health import format_taskstore_health
 from app.self_share_health import start_invalid_self_share_probe_loop
 from app.telegram_ui import (
@@ -415,6 +416,7 @@ def maybe_start_web_server(
     kwargs = {
         "web_token": config.web_token,
         "task_engine_enabled": config.task_engine_enabled,
+        "max_retries": int(getattr(config, "task_max_retries", 3)),
         "frontend_dist_path": frontend_dist_path or getattr(config, "frontend_dist_path", "/app/frontend/dist"),
     }
     if submission_store is not None:
@@ -447,6 +449,15 @@ def maybe_start_web_server(
         supports_frontend = True
     if not supports_frontend:
         kwargs.pop("frontend_dist_path", None)
+    try:
+        starter_parameters = inspect.signature(starter).parameters
+        supports_max_retries = "max_retries" in starter_parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in starter_parameters.values()
+        )
+    except (TypeError, ValueError):
+        supports_max_retries = True
+    if not supports_max_retries:
+        kwargs.pop("max_retries", None)
     server = starter(task_store, config.web_host, config.web_port, **kwargs)
     LOG.info("v0.2 web admin started host=%s port=%s", config.web_host, config.web_port)
     return server
@@ -480,7 +491,10 @@ def call_maybe_start_web_server(
     supports_frontend_dist_path = "frontend_dist_path" in parameters or any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     )
-    if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler or supports_frontend_dist_path:
+    supports_max_retries = "max_retries" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler or supports_frontend_dist_path or supports_max_retries:
         return maybe_start_web_server(
             config,
             task_store,
@@ -2190,6 +2204,7 @@ def handle_callback_query(
     quality_automation: QualityAutomation | None = None,
     hdhive_subscription_service: HdhiveSubscriptionService | None = None,
     hdhive_subscription_scheduler: HdhiveSubscriptionScheduler | None = None,
+    max_retries: int = 3,
 ) -> None:
     sender_id = ((callback_query.get("from") or {}).get("id"))
     message = callback_query.get("message") or {}
@@ -2241,7 +2256,16 @@ def handle_callback_query(
     task_action = parse_task_action_callback(data)
     if task_action:
         action, task_id = task_action
-        if handle_task_action_callback(action, task_id, callback_id, chat_id, telegram, task_store, store):
+        if handle_task_action_callback(
+            action,
+            task_id,
+            callback_id,
+            chat_id,
+            telegram,
+            task_store,
+            store,
+            max_retries=max_retries,
+        ):
             return
     recheck_row_id = parse_emby_recheck_callback(data)
     if recheck_row_id is not None:
@@ -2922,6 +2946,8 @@ def handle_task_action_callback(
     telegram: Any,
     task_store: TaskStore | None,
     store: SubmissionStore | None = None,
+    *,
+    max_retries: int = 3,
 ) -> bool:
     if task_store is None:
         telegram.answer_callback_query(callback_id, "任务引擎未启用", show_alert=True)
@@ -2937,49 +2963,34 @@ def handle_task_action_callback(
         if event_lines:
             text += "\n最近事件：\n" + "\n".join(event_lines)
         telegram.answer_callback_query(callback_id, "已发送任务详情", show_alert=False)
-        telegram.send_message(chat_id, text, reply_markup=task_action_keyboard([task]))
+        telegram.send_message(chat_id, text, reply_markup=task_action_keyboard([task], max_retries=max_retries))
         return True
-    if action == "task_retry":
-        decision = decide_retry(task)
-        target_stage = decision.stage or retry_stage_for_intake(task)
-        task_store.record_event(
+    task_action = {
+        "task_retry": "retry",
+        "task_emby": "emby",
+        "task_restore": "restore",
+        "task_reprocess": "reprocess",
+    }.get(action)
+    if task_action:
+        result = apply_task_action(
+            task_store,
             task_id,
-            target_stage,
-            TaskStatus.PENDING,
-            "TG 按钮触发重试",
-            metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": target_stage.value},
-            clear_claim=True,
+            task_action,
+            max_retries=max_retries,
+            actor="TG",
         )
-        updated = task_store.enqueue_task(task_id, target_stage, message="TG 按钮重试已入队", next_run_at=0)
-        telegram.answer_callback_query(callback_id, "已重新入队", show_alert=False)
-        telegram.send_message(chat_id, f"已重新入队：{format_task_snapshot(updated)}")
-        return True
-    if action == "task_emby":
-        updated = task_store.enqueue_task(task_id, TaskStage.EMBY_CONFIRMED, message="TG 按钮触发 Emby 检查", next_run_at=0)
-        telegram.answer_callback_query(callback_id, "已加入 Emby 检查队列", show_alert=False)
-        telegram.send_message(chat_id, f"已加入 Emby 检查队列：{format_task_snapshot(updated)}")
-        return True
-    if action == "task_restore":
-        task_store.record_event(
-            task_id,
-            TaskStage.EMBY_CONFIRMED,
-            TaskStatus.PENDING,
-            "TG 按钮触发 STRM 恢复",
-            metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": TaskStage.EMBY_CONFIRMED.value},
-            clear_claim=True,
-        )
-        updated = task_store.enqueue_task(task_id, TaskStage.EMBY_CONFIRMED, message="TG 按钮 STRM 恢复已入队", next_run_at=0)
-        telegram.answer_callback_query(callback_id, "已加入 STRM 恢复队列", show_alert=False)
-        telegram.send_message(chat_id, f"已加入 STRM 恢复队列：{format_task_snapshot(updated)}")
-        return True
-    if action == "task_reprocess":
-        updated = task_store.reprocess_task(
-            task_id,
-            message="TG 按钮触发从头重跑",
-            next_run_at=0,
-        )
-        telegram.answer_callback_query(callback_id, "已从头重跑", show_alert=False)
-        telegram.send_message(chat_id, f"已从头重跑：{format_task_snapshot(updated)}")
+        if not result.applied:
+            telegram.answer_callback_query(callback_id, result.reason, show_alert=True)
+            return True
+        updated = result.task
+        confirmation = {
+            "retry": "已重新入队",
+            "emby": "已加入 Emby 检查队列",
+            "restore": "已加入 STRM 恢复队列",
+            "reprocess": "已从头重跑",
+        }[task_action]
+        telegram.answer_callback_query(callback_id, confirmation, show_alert=False)
+        telegram.send_message(chat_id, f"{confirmation}：{format_task_snapshot(updated)}")
         return True
     if action == "task_update":
         if task.status != TaskStatus.SUCCEEDED or task.current_stage != TaskStage.CLEANED:
@@ -3292,6 +3303,7 @@ def handle_update(
     quality_automation: QualityAutomation | None = None,
     hdhive_subscription_service: HdhiveSubscriptionService | None = None,
     hdhive_subscription_scheduler: HdhiveSubscriptionScheduler | None = None,
+    max_retries: int = 3,
 ) -> None:
     if update.get("callback_query"):
         handle_callback_query(
@@ -3306,6 +3318,7 @@ def handle_update(
             quality_automation=quality_automation,
             hdhive_subscription_service=hdhive_subscription_service,
             hdhive_subscription_scheduler=hdhive_subscription_scheduler,
+            max_retries=max_retries,
         )
         return
 
@@ -3383,7 +3396,7 @@ def handle_update(
             tasks = task_store.list_recent_tasks(limit=8)
             taskstore_status = format_taskstore_status(tasks)
             if taskstore_status:
-                telegram.send_message(chat_id, taskstore_status, reply_markup=task_action_keyboard(tasks))
+                telegram.send_message(chat_id, taskstore_status, reply_markup=task_action_keyboard(tasks, max_retries=max_retries))
                 return
         telegram.send_message(chat_id, format_status(store.recent(limit=8)))
         return
@@ -3896,6 +3909,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
             enqueue_unlocked_links=enqueue_hdhive_links,
             hdhive_subscription_service=hdhive_subscription_service,
             hdhive_subscription_scheduler=hdhive_subscription_scheduler,
+            max_retries=config.task_max_retries,
         )
         if task_store is not None:
             try:
@@ -3985,6 +3999,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
                         quality_automation=quality_automation,
                         hdhive_subscription_service=hdhive_subscription_service,
                         hdhive_subscription_scheduler=hdhive_subscription_scheduler,
+                        max_retries=config.task_max_retries,
                     )
             except Exception as exc:
                 if stop_event.is_set():
