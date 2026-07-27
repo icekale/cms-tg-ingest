@@ -27,6 +27,39 @@ class SelfShareReceiveCid:
     source: str
 
 
+@dataclass(frozen=True)
+class SelfShareReviewPolicy:
+    mode: str
+    seconds: int
+    source: str
+    checkpoints: tuple[int, ...]
+
+
+def normalize_self_share_review_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized not in {"ten_minutes", "off"}:
+        raise ValueError("分享审核观察只能设置为 10 分钟或关闭")
+    return normalized
+
+
+def resolve_self_share_review_policy(store: Any, config: Any) -> SelfShareReviewPolicy:
+    getter = getattr(store, "get_self_share_review_mode_override", None)
+    override = str(getter() or "").strip().lower() if callable(getter) else ""
+    if override == "ten_minutes":
+        return SelfShareReviewPolicy("ten_minutes", 600, "web", (600,))
+    if override == "off":
+        return SelfShareReviewPolicy("off", 0, "web", ())
+
+    configured = tuple(
+        int(value)
+        for value in getattr(config, "review_checkpoints_seconds", ())
+        if int(value) > 0
+    )
+    grace_seconds = max(1, int(getattr(config, "review_grace_seconds", 86400)))
+    checkpoints = configured or (grace_seconds,)
+    return SelfShareReviewPolicy("env", checkpoints[-1], "env", checkpoints)
+
+
 def _valid_receive_code(value: Any) -> str:
     normalized = str(value or "").strip()
     if normalized and normalized.isascii() and normalized.isalnum():

@@ -22,6 +22,7 @@ export const api = {
   clearOwnShareReceiveCode: () => request('settings/own-share-receive-code', { method: 'POST', body: JSON.stringify({ clear: true }) }),
   setSelfShareReceiveCid: (receive_cid) => request('settings/self-share-receive-cid', { method: 'POST', body: JSON.stringify({ receive_cid }) }),
   clearSelfShareReceiveCid: () => request('settings/self-share-receive-cid', { method: 'POST', body: JSON.stringify({ clear: true }) }),
+  setSelfShareReview: (mode) => request('settings/self-share-review', { method: 'POST', body: JSON.stringify({ mode }) }),
   setTaskMode: (id, mode) => request(`tasks/${id}/strm-mode`, { method: 'POST', body: JSON.stringify({ mode }) }),
   taskAction: (id, action) => request(`tasks/${id}/actions/${action}`, { method: 'POST' }),
   clearHistory: () => request('history/clear', { method: 'POST' }),

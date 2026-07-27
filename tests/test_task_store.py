@@ -13,6 +13,49 @@ from app.task_store import TaskStore
 
 
 class TaskStoreTests(unittest.TestCase):
+    def test_self_share_review_mode_override_round_trip_and_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            self.assertIsNone(store.get_self_share_review_mode_override())
+            self.assertEqual(store.set_self_share_review_mode_override("ten_minutes"), "ten_minutes")
+            self.assertEqual(store.get_self_share_review_mode_override(), "ten_minutes")
+            self.assertEqual(store.set_self_share_review_mode_override("off"), "off")
+            self.assertEqual(store.get_self_share_review_mode_override(), "off")
+
+            with self.assertRaisesRegex(ValueError, "审核观察"):
+                store.set_self_share_review_mode_override("invalid")
+
+            store.clear_self_share_review_mode_override()
+            self.assertIsNone(store.get_self_share_review_mode_override())
+
+    def test_wake_self_share_review_tasks_only_reschedules_review_waiters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            waiting = store.upsert_task("waiting", "", "https://115cdn.com/s/waiting")
+            unrelated = store.upsert_task("unrelated", "", "https://115cdn.com/s/unrelated")
+            store.record_event(
+                waiting.id,
+                TaskStage.CLEANED,
+                TaskStatus.RUNNING,
+                "等待分享审核",
+                metadata_patch={"share_review_status": "pending"},
+                next_run_at=1000.0,
+            )
+            store.record_event(
+                unrelated.id,
+                TaskStage.CLEANED,
+                TaskStatus.RUNNING,
+                "等待其他清理条件",
+                next_run_at=1000.0,
+            )
+
+            count = store.wake_self_share_review_tasks(now=100.0)
+
+            self.assertEqual(count, 1)
+            self.assertEqual(store.find_task(waiting.id).next_run_at, 100.0)
+            self.assertEqual(store.find_task(unrelated.id).next_run_at, 1000.0)
+
     def test_self_share_receive_cid_override_round_trip_and_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

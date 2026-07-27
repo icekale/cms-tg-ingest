@@ -1816,6 +1816,77 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(after_final.outcome, StageOutcome.COMPLETE)
             self.assertEqual(cleanup.deleted, ["folder-id"])
 
+    def test_cleaned_stage_skips_review_when_web_setting_is_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = FakeCleanupClient()
+            workflow = self._workflow(tmp, cleanup_client=cleanup)
+            self.tasks.set_self_share_review_mode_override("off")
+            row = self._self_share_row()
+            dest = Path(tmp) / "library" / row["own_share_file_name"]
+            self._write_strm(dest)
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path="/share/source",
+                dest_path=str(dest),
+                category_final="华语电影",
+            ) or row
+            row = self.submissions.update_emby(int(row["id"]), "confirmed") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.CLEANED,
+                {"submission_id": row["id"], "share_created_at": 100.0},
+                row["id"],
+            )
+            workflow._now = lambda: 100.0
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["share_review_status"], "passed")
+            self.assertEqual(cleanup.deleted, ["folder-id"])
+
+    def test_cleaned_stage_uses_ten_minute_web_setting_over_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = FakeCleanupClient()
+            config = bridge.SelfShareConfig(
+                enabled=True,
+                strm_root=Path(tmp) / "share-strm",
+                cms_cid="0",
+                cms_local_path="/media/share",
+                review_grace_seconds=86400,
+                review_checkpoints_seconds=(600, 3600, 21600, 86400),
+                review_list_cache_seconds=300,
+            )
+            workflow = self._workflow(tmp, cleanup_client=cleanup, self_share_config=config)
+            self.tasks.set_self_share_review_mode_override("ten_minutes")
+            row = self._self_share_row()
+            dest = Path(tmp) / "library" / row["own_share_file_name"]
+            self._write_strm(dest)
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path="/share/source",
+                dest_path=str(dest),
+                category_final="华语电影",
+            ) or row
+            row = self.submissions.update_emby(int(row["id"]), "confirmed") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.CLEANED,
+                {"submission_id": row["id"], "share_created_at": 100.0},
+                row["id"],
+            )
+            workflow._now = lambda: 700.0
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["share_review_checks"], [600])
+            self.assertEqual(cleanup.deleted, ["folder-id"])
+
     def test_cleaned_stage_keeps_source_when_async_review_marks_share_invalid(self):
         with tempfile.TemporaryDirectory() as tmp:
             cleanup = FakeCleanupClient()

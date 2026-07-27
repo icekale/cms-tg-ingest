@@ -14,7 +14,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 - **CMS 优先**：整理、改名、TMDB 匹配和分类由 CMS 完成，外挂不会用低准确率模型覆盖 CMS 结果。
 - **两种 STRM 模式**：shared 模式继续“只入库自有分享 STRM”，使用自己的 115 分享链接生成 STRM 并保留分享；`direct` 使用 CMS 普通同步生成的直链 STRM，不创建自有分享，也不清理源文件。
 - **保留 CMS 目录名**：新建分享直接使用 CMS 整理后的规范目录名；历史 `asset-*` 别名任务继续兼容。
-- **异步审核防损失**：自有永久分享先经过即时验证，再按 10 分钟、1 小时、6 小时、24 小时检查点观察 115 异步审核；全部通过后才删除转存源，不取消永久分享。
+- **审核观察可配置**：Web 设置可选择推荐的 10 分钟单检查点、关闭观察或使用环境配置；观察通过后才删除转存源，不取消永久分享。
 - **违规保留源文件**：确认分享不可用或命中风险标记时进入人工处理，不自动改名、重建或重复分享，避免误删源文件和触发风控。
 - **Emby 结果确认**：刷新后检查媒体是否入库，并返回命中的媒体库名称。
 - **任务可追踪**：TaskStore 记录接收、整理、识别、建分享、STRM、移动、Emby、清理等阶段。
@@ -33,7 +33,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.2.42`。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.2.43`。
 4. 拉取固定版本并启动：
 
 ```sh
@@ -437,8 +437,8 @@ python3 -m unittest discover -s tests -q
 发布版本通过 GitHub Actions 构建并推送 GHCR 和 Docker Hub：
 
 ```sh
-git tag v0.2.42
-git push origin v0.2.42
+git tag v0.2.43
+git push origin v0.2.43
 ```
 
 如果 fork 后要发布自己的 Docker Hub 镜像，在 GitHub Secrets 中配置：
@@ -449,7 +449,7 @@ git push origin v0.2.42
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.2.42
+docker pull icekale/cms-tg-ingest:0.2.43
 docker pull icekale/cms-tg-ingest:latest
 ```
 
@@ -460,7 +460,7 @@ docker pull icekale/cms-tg-ingest:latest
 - HDHive 当前使用 CMS 已授权的单个账号，不要把 OAuth 配置文件复制到公共目录。
 - 生产环境固定版本号，不建议盲目使用 `latest`。
 - 批量操作前先用一个小体量资源测试完整链路。
-- `SELF_SHARE_CLEANUP_AFTER_EMBY=true` 的安全清理依赖 TaskStore authoritative runner，并默认等待 24 小时异步审核观察期；旧回滚路径不会自动删除源文件。
+- `SELF_SHARE_CLEANUP_AFTER_EMBY=true` 的安全清理依赖 TaskStore authoritative runner；Web 未设置覆盖时按环境配置执行，关闭观察后会在 Emby 入库确认完成时直接删除源文件。
 
 ## 相关链接
 

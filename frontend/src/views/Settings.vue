@@ -10,12 +10,15 @@ const settings = ref(null)
 const mode = ref('shared')
 const receiveCode = ref('')
 const receiveCid = ref('')
+const reviewMode = ref('env')
+const savingReview = ref(false)
 
 async function load() {
   loading.value = true
   try {
     settings.value = await api.settings()
     mode.value = settings.value.strm_default_mode
+    reviewMode.value = settings.value.self_share_review.mode
     receiveCid.value = ''
   } catch (err) { message.error(err.message) } finally { loading.value = false }
 }
@@ -66,6 +69,17 @@ async function clearReceiveCid() {
   } catch (err) { message.error(err.message) }
 }
 
+async function saveReviewMode(value) {
+  if (value === 'off' && !window.confirm('关闭后，Emby 入库确认完成即清理 115 源文件。确定关闭分享审核观察？')) return
+  savingReview.value = true
+  try {
+    const result = await api.setSelfShareReview(value)
+    settings.value.self_share_review = result.self_share_review
+    reviewMode.value = result.self_share_review.mode
+    message.success('分享审核观察设置已保存')
+  } catch (err) { message.error(err.message) } finally { savingReview.value = false }
+}
+
 onMounted(load)
 </script>
 
@@ -77,6 +91,14 @@ onMounted(load)
       <n-text depth="3" v-if="mode === 'shared'">接收并由 CMS 整理，创建自己的永久分享后生成 STRM；Emby 入库确认后按配置清理源文件。</n-text>
       <n-text depth="3" v-if="mode === 'direct'">由 CMS 普通同步直接生成直链 STRM，不创建 115 分享。</n-text>
       <n-text depth="3" v-if="mode === 'source_shared'">直接使用收到的第三方 115 分享生成 STRM，跳过转存、整理、自有分享和 115 源文件清理。</n-text>
+    </n-space>
+  </n-card>
+  <n-card v-if="settings" title="分享审核观察" class="section-card">
+    <n-space vertical :size="12">
+      <n-select style="max-width: 320px" :value="reviewMode" :options="settings.self_share_review_modes" :loading="savingReview" @update:value="saveReviewMode" />
+      <n-text depth="3" v-if="reviewMode === 'ten_minutes'">分享创建后观察 10 分钟并复检一次，通过后清理 115 源文件。</n-text>
+      <n-text depth="3" v-if="reviewMode === 'off'">已关闭观察；Emby 入库确认后将直接清理 115 源文件。</n-text>
+      <n-text depth="3" v-if="reviewMode === 'env'">当前使用环境配置：{{ Math.round(settings.self_share_review.seconds / 60) }} 分钟。</n-text>
     </n-space>
   </n-card>
   <n-card v-if="settings" title="自有分享访问码" class="section-card">

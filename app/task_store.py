@@ -12,13 +12,14 @@ from typing import Any, Callable
 
 from .models import TaskSnapshot, TaskStage, TaskStatus
 from .quality_rules import quality_attempt_count
-from .self_share_settings import normalize_receive_cid
+from .self_share_settings import normalize_receive_cid, normalize_self_share_review_mode
 from .strm_mode import is_strm_mode_locked, normalize_strm_mode
 
 
 STRM_DEFAULT_MODE_KEY = "strm_default_mode"
 OWN_SHARE_RECEIVE_CODE_KEY = "own_share_receive_code_override"
 SELF_SHARE_RECEIVE_CID_KEY = "self_share_receive_cid_override"
+SELF_SHARE_REVIEW_MODE_KEY = "self_share_review_mode_override"
 REPROCESS_METADATA_DELETE_KEYS = (
     "_defer_stage",
     "_defer_message",
@@ -386,6 +387,48 @@ class TaskStore:
 
     def clear_self_share_receive_cid_override(self) -> None:
         self.delete_runtime_state(SELF_SHARE_RECEIVE_CID_KEY)
+
+    def get_self_share_review_mode_override(self) -> str | None:
+        state = self.get_runtime_state(SELF_SHARE_REVIEW_MODE_KEY)
+        if state is None:
+            return None
+        try:
+            return normalize_self_share_review_mode(state["value"])
+        except ValueError:
+            return None
+
+    def set_self_share_review_mode_override(self, mode: str) -> str:
+        normalized = normalize_self_share_review_mode(mode)
+        self.set_runtime_state(SELF_SHARE_REVIEW_MODE_KEY, normalized)
+        return normalized
+
+    def clear_self_share_review_mode_override(self) -> None:
+        self.delete_runtime_state(SELF_SHARE_REVIEW_MODE_KEY)
+
+    def wake_self_share_review_tasks(self, now: float | None = None) -> int:
+        current_time = time.time() if now is None else float(now)
+        with self._lock, self._connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE tasks
+                SET next_run_at = ?, updated_at = ?
+                WHERE current_stage = ?
+                  AND status IN (?, ?)
+                  AND next_run_at > ?
+                  AND TRIM(claimed_by) = ''
+                  AND json_valid(metadata_json)
+                  AND COALESCE(json_extract(metadata_json, '$.share_review_status'), '') IN ('pending', 'unknown')
+                """,
+                (
+                    current_time,
+                    current_time,
+                    TaskStage.CLEANED.value,
+                    TaskStatus.PENDING.value,
+                    TaskStatus.RUNNING.value,
+                    current_time,
+                ),
+            )
+        return int(cursor.rowcount or 0)
 
     def set_task_strm_mode(self, task_id: int, mode: str) -> TaskSnapshot:
         normalized = normalize_strm_mode(mode)

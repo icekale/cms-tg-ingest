@@ -56,7 +56,7 @@ from app.media.strm import (
     validate_self_share_strm_source,
 )
 from app.models import TaskStage, TaskStatus
-from app.self_share_settings import resolve_own_share_receive_code
+from app.self_share_settings import resolve_own_share_receive_code, resolve_self_share_review_policy
 from app.task_bridge import reset_self_share_submission_for_reprocess
 from app.strm_mode import effective_task_strm_mode
 from app.task_runner import StageOutcome, StageResult
@@ -1976,6 +1976,18 @@ class BridgeSelfShareTaskWorkflow:
         return self.p115.inspect_share(own_code, own_pwd)
 
     def _advance_share_review(self, task, row: dict[str, Any]) -> tuple[str, dict[str, Any], str, float]:
+        policy = resolve_self_share_review_policy(self.task_store, self.self_share_config)
+        if policy.mode == "off":
+            metadata = self._share_review_metadata(
+                task,
+                row,
+                "passed",
+                checks=[],
+                next_at=0,
+                error="",
+            )
+            return "passed", metadata, "115 异步审核观察已关闭", 0
+
         created_at = self._positive_timestamp(task.metadata.get("share_created_at"))
         if not created_at:
             metadata = self._share_review_metadata(
@@ -1986,9 +1998,7 @@ class BridgeSelfShareTaskWorkflow:
             )
             return "invalid", metadata, "缺少自有分享创建时间，拒绝自动清理历史源文件", 0
 
-        configured = tuple(int(value) for value in self.self_share_config.review_checkpoints_seconds if int(value) > 0)
-        if not configured:
-            configured = (max(1, int(self.self_share_config.review_grace_seconds)),)
+        configured = policy.checkpoints
         checks = self._review_checkpoints(task.metadata.get("share_review_checks"))
         checks = [checkpoint for checkpoint in configured if checkpoint in checks]
         next_checkpoint = next((checkpoint for checkpoint in configured if checkpoint not in checks), None)

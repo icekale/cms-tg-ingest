@@ -406,6 +406,76 @@ class WebApiTests(unittest.TestCase):
             ["shared", "direct", "source_shared"],
         )
 
+    def test_self_share_review_api_supports_ten_minutes_off_and_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            app = WebApp(
+                store,
+                self_share_config=SimpleNamespace(
+                    review_grace_seconds=86400,
+                    review_checkpoints_seconds=(600, 3600, 21600, 86400),
+                ),
+            )
+            waiting = store.upsert_task("review-wait", "", "https://115cdn.com/s/review-wait")
+            store.record_event(
+                waiting.id,
+                TaskStage.CLEANED,
+                TaskStatus.RUNNING,
+                "等待分享审核",
+                metadata_patch={"share_review_status": "pending"},
+                next_run_at=9999999999.0,
+            )
+
+            initial_status, _headers, initial_body = app.handle_request("GET", "/api/v1/settings", {}, b"")
+            ten_status, _headers, ten_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/self-share-review",
+                {"Content-Type": "application/json"},
+                b'{"mode":"ten_minutes"}',
+            )
+            woken_next_run_at = store.find_task(waiting.id).next_run_at
+            off_status, _headers, off_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/self-share-review",
+                {"Content-Type": "application/json"},
+                b'{"mode":"off"}',
+            )
+            env_status, _headers, env_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/self-share-review",
+                {"Content-Type": "application/json"},
+                b'{"mode":"env"}',
+            )
+
+        initial = json.loads(initial_body)["self_share_review"]
+        ten_minutes = json.loads(ten_body)["self_share_review"]
+        off = json.loads(off_body)["self_share_review"]
+        env = json.loads(env_body)["self_share_review"]
+        self.assertEqual(initial_status, 200)
+        self.assertEqual(initial["mode"], "env")
+        self.assertEqual(initial["seconds"], 86400)
+        self.assertEqual(ten_status, 200)
+        self.assertEqual(ten_minutes, {"mode": "ten_minutes", "seconds": 600, "source": "web"})
+        self.assertLess(woken_next_run_at, 9999999999.0)
+        self.assertEqual(off_status, 200)
+        self.assertEqual(off, {"mode": "off", "seconds": 0, "source": "web"})
+        self.assertEqual(env_status, 200)
+        self.assertEqual(env, {"mode": "env", "seconds": 86400, "source": "env"})
+
+    def test_self_share_review_api_rejects_invalid_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = WebApp(TaskStore(Path(tmp) / "tasks.db"))
+
+            status, _headers, body = app.handle_request(
+                "POST",
+                "/api/v1/settings/self-share-review",
+                {"Content-Type": "application/json"},
+                b'{"mode":"invalid"}',
+            )
+
+        self.assertEqual(status, 400)
+        self.assertIn("审核观察", json.loads(body)["error"])
+
     def test_own_share_receive_code_api_masks_reads_and_supports_clear(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
