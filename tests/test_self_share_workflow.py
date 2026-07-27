@@ -529,6 +529,41 @@ class CmsPlaybackProbeTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(http.calls, 1)
 
+    def test_find_own_share_by_title_returns_the_latest_exact_match(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                assert url == "https://webapi.115.com/share/slist"
+                return {
+                    "state": True,
+                    "data": {
+                        "list": [
+                            {"share_code": "other", "share_title": "其他", "create_time": 30},
+                            {
+                                "share_code": "older",
+                                "share_title": "H-后天(2024)[tmdbid=435]",
+                                "receive_code": "0000",
+                                "share_url": "https://115cdn.com/s/older",
+                                "create_time": 40,
+                            },
+                            {
+                                "share_code": "latest",
+                                "share_title": "H-后天(2024)[tmdbid=435]",
+                                "receive_code": "1212",
+                                "share_url": "https://115cdn.com/s/latest",
+                                "create_time": 50,
+                            },
+                        ]
+                    },
+                }
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3, share_list_cache_ttl_seconds=0)
+
+        result = client.find_own_share_by_title("H-后天(2024)[tmdbid=435]")
+
+        self.assertEqual(result["share_code"], "latest")
+        self.assertEqual(result["receive_code"], "1212")
+
+
     def test_receive_share_to_cid_gets_snap_file_ids_then_receives_to_target_cid(self):
         class FakeHttp:
             def __init__(self):

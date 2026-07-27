@@ -1373,6 +1373,47 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertIn("等待 115 完成分享创建", result.message)
             self.assertEqual(result.metadata["share_create_status"], "pending")
 
+    def test_own_share_stage_recovers_share_code_after_async_creation(self):
+        class RecoveringP115(FakeP115):
+            def find_own_share_by_title(self, title, min_create_time=0):
+                self.recovery_query = (title, min_create_time)
+                return {
+                    "share_code": "recovered",
+                    "receive_code": "1212",
+                    "share_url": "https://115cdn.com/s/recovered",
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            workflow.p115 = RecoveringP115()
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="S-双喜-2025-[tmdb=123456]",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {
+                    "submission_id": row["id"],
+                    "share_create_status": "pending",
+                    "share_create_requested_at": 100.0,
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(stored["own_share_code"], "recovered")
+            self.assertEqual(stored["own_share_receive_code"], "1212")
+            self.assertEqual(workflow.p115.created_shares, [])
+            self.assertEqual(workflow.p115.recovery_query[0], "S-双喜-2025-[tmdb=123456]")
+
     def test_share_sync_stage_waits_for_another_task_to_finish_cms_share_sync(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)

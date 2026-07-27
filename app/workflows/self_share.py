@@ -1359,6 +1359,32 @@ class BridgeSelfShareTaskWorkflow:
         created = False
         direct_file_share = False
         direct_relative_path = ""
+        share_creation_pending = str(task.metadata.get("share_create_status") or "").strip().lower() == "pending"
+        if share_creation_pending and not row.get("own_share_code"):
+            recover = getattr(self.p115, "find_own_share_by_title", None)
+            if callable(recover):
+                recovered = recover(
+                    str(row.get("own_share_file_name") or task.title or "").strip(),
+                    min_create_time=self._positive_timestamp(task.metadata.get("share_create_requested_at")),
+                )
+                if recovered:
+                    row = self.store.update_self_share(
+                        int(row["id"]),
+                        workflow_phase="own_share_created",
+                        own_share_code=recovered.get("share_code"),
+                        own_share_receive_code=recovered.get("receive_code"),
+                        own_share_url=recovered.get("share_url"),
+                    ) or row
+            if not row.get("own_share_code"):
+                return StageResult.defer(
+                    "等待 115 完成分享创建",
+                    1800,
+                    self._own_share_metadata(row)
+                    | {
+                        "share_create_status": "pending",
+                        "share_create_requested_at": task.metadata.get("share_create_requested_at") or self._now(),
+                    },
+                )
         if not row.get("own_share_code"):
             receive_code = resolve_own_share_receive_code(self.task_store, self.self_share_config).value
             try:
@@ -1367,7 +1393,11 @@ class BridgeSelfShareTaskWorkflow:
                 return StageResult.defer(
                     "等待 115 完成分享创建",
                     1800,
-                    self._own_share_metadata(row) | {"share_create_status": "pending"},
+                    self._own_share_metadata(row)
+                    | {
+                        "share_create_status": "pending",
+                        "share_create_requested_at": self._now(),
+                    },
                 )
             except RuntimeError as exc:
                 direct_file_id, direct_relative_path = self._direct_file_share_details(task)

@@ -607,6 +607,56 @@ class P115WebClient:
         self._share_list_cache = (now + self.share_list_cache_ttl_seconds, deepcopy(states))
         return states
 
+    def find_own_share_by_title(
+        self,
+        share_title: str,
+        *,
+        min_create_time: float = 0,
+        limit: int = 100,
+    ) -> dict[str, str] | None:
+        expected_title = str(share_title or "").strip()
+        if not expected_title:
+            return None
+        resp = self._request(
+            "https://webapi.115.com/share/slist",
+            params={
+                "limit": max(1, min(int(limit), 100)),
+                "offset": 0,
+                "order": "create_time",
+                "asc": 0,
+                "show_cancel_share": 1,
+            },
+        )
+        self._ensure_state(resp, "115 share list failed")
+        data = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+        matches: list[tuple[float, dict[str, Any]]] = []
+        for item in iter_items(data):
+            title = str(item.get("share_title") or item.get("title") or item.get("name") or "").strip()
+            if title != expected_title:
+                continue
+            create_time = as_float(item.get("create_time") or item.get("share_time"), 0.0)
+            if min_create_time and create_time and create_time < float(min_create_time):
+                continue
+            share_code = str(item.get("share_code") or item.get("sharecode") or "").strip()
+            if not share_code:
+                continue
+            receive_code = str(item.get("receive_code") or item.get("receivecode") or "").strip()
+            share_url = str(item.get("share_url") or "").strip() or f"https://115cdn.com/s/{share_code}"
+            matches.append(
+                (
+                    create_time,
+                    {
+                        "share_code": share_code,
+                        "receive_code": receive_code,
+                        "share_url": share_url,
+                    },
+                )
+            )
+        if not matches:
+            return None
+        matches.sort(key=lambda value: value[0], reverse=True)
+        return matches[0][1]
+
     def receive_share_to_cid(self, share_code: str, receive_code: str, target_cid: str) -> dict[str, Any]:
         # Serialize the snapshot/receive/resolve transaction across client
         # instances so concurrent same-name receives cannot cross-match.
