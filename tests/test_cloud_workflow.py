@@ -169,7 +169,7 @@ class PipelineEmby:
         return item.get("LibraryName")
 
 
-def make_workflow(p115, store):
+def make_workflow(p115, store, task_store=None):
     config = SelfShareConfig(
         enabled=True,
         strm_root=Path(tempfile.gettempdir()) / "cms-tg-ingest-cloud-test",
@@ -184,7 +184,7 @@ def make_workflow(p115, store):
         telegram=FakeTelegram(),
         chat_id="464100862",
         store=store,
-        task_store=None,
+        task_store=task_store,
         p115=p115,
         self_share_config=config,
         move_config=MoveConfig(source_roots=[], library_roots={}),
@@ -196,6 +196,42 @@ def make_workflow(p115, store):
 
 
 class CloudWorkflowTests(unittest.TestCase):
+    def test_existing_cloud_job_keeps_original_target_after_receive_cid_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task_store.set_self_share_receive_cid_override("3481694068122059860")
+            task = task_store.upsert_cloud_task("ed2k:hash:10", ED2K, title="Example.mkv")
+            task = task_store.record_event(
+                task.id,
+                TaskStage.CLOUD_DOWNLOADING,
+                TaskStatus.RUNNING,
+                "等待云下载",
+                metadata_patch={
+                    "cloud_info_hash": "hash",
+                    "cloud_task_id": "task-1",
+                    "cloud_started_at": time.time(),
+                    "cloud_target_cid": TARGET_CID,
+                },
+            )
+            p115 = FakeCloudP115(
+                [
+                    {
+                        "status": 11,
+                        "file_id": "folder-1",
+                        "parent_id": TARGET_CID,
+                        "file_name": "Example",
+                    },
+                ]
+            )
+            submissions = FakeSubmissionStore()
+            workflow = make_workflow(p115, submissions, task_store=task_store)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome.value, "complete")
+            self.assertEqual(p115.status_calls, [{"info_hash": "hash", "task_id": "task-1"}])
+            self.assertEqual(result.metadata["cloud_output_parent_id"], TARGET_CID)
+
     def test_cloud_input_is_submitted_once_then_creates_submission_without_receiving(self):
         with tempfile.TemporaryDirectory() as tmp:
             task_store = TaskStore(Path(tmp) / "tasks.db")

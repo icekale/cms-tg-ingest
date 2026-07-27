@@ -463,11 +463,10 @@ class BridgeSelfShareTaskWorkflow:
     def _stage_cloud_downloading(self, task):
         if not self.self_share_config.enabled:
             return StageResult.failed("自分享工作流未启用", error_type="self_share_disabled")
-        receive_cid = self._configured_receive_cid()
+        metadata = dict(task.metadata)
+        receive_cid = str(metadata.get("cloud_target_cid") or "").strip() or self._configured_receive_cid()
         if not receive_cid:
             return StageResult.failed("缺少 115 接收目录 ID", error_type="missing_receive_cid")
-
-        metadata = dict(task.metadata)
         info_hash = str(metadata.get("cloud_info_hash") or "").strip()
         task_id = str(metadata.get("cloud_task_id") or "").strip()
         started_at = float(metadata.get("cloud_started_at") or 0)
