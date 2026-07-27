@@ -9,6 +9,32 @@ from app.task_store import TaskStore
 
 
 class TaskQualityTests(unittest.TestCase):
+    def test_direct_mode_accepts_direct_strm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "Movie"
+            dest.mkdir()
+            (dest / "movie.strm").write_text("http://cms/d/direct-file.mkv", encoding="utf-8")
+            store = TaskStore(root / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+
+            issues = inspect_task_files(task, dest_path=dest, own_share_code="ownshare", expected_mode="direct")
+
+            self.assertEqual(issues, [])
+
+    def test_direct_mode_flags_share_strm_as_unexpected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "Movie"
+            dest.mkdir()
+            (dest / "movie.strm").write_text("http://cms/s/ownshare_1212_fileid.mkv", encoding="utf-8")
+            store = TaskStore(root / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+
+            issues = inspect_task_files(task, dest_path=dest, own_share_code="ownshare", expected_mode="direct")
+
+            self.assertEqual([issue.code for issue in issues], ["unexpected_strm"])
+
     def test_flags_direct_strm_url(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

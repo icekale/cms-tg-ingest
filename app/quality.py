@@ -8,6 +8,7 @@ from typing import Iterable
 from .config import is_under_any_root
 from .media.strm import UnsafeMediaPathError, iter_strm_files
 from .models import TaskSnapshot
+from .strm_mode import effective_task_strm_mode, normalize_strm_mode
 from .task_store import TaskStore
 
 
@@ -24,11 +25,13 @@ def inspect_task_files(
     task: TaskSnapshot,
     *,
     dest_path: str | Path,
+    expected_mode: str = "shared",
     own_share_code: str = "",
     own_share_receive_code: str = "1212",
     allowed_roots: Iterable[str | Path] | None = None,
 ) -> list[QualityIssue]:
     del task
+    expected_mode = normalize_strm_mode(expected_mode)
     dest = Path(dest_path)
     if allowed_roots is not None and not is_under_any_root(dest, list(allowed_roots)):
         return [QualityIssue("unsafe_metadata", "目标路径不在允许根目录", str(dest))]
@@ -46,8 +49,9 @@ def inspect_task_files(
     for path in files:
         text = path.read_text(encoding="utf-8", errors="replace").strip()
         if "/d/" in text:
-            issues.append(QualityIssue("direct_strm", "发现直链 STRM", str(path)))
-        elif expected_marker not in text:
+            if expected_mode != "direct":
+                issues.append(QualityIssue("direct_strm", "发现直链 STRM", str(path)))
+        elif expected_mode == "direct" or expected_marker not in text:
             issues.append(QualityIssue("unexpected_strm", "STRM 不是预期的分享链接", str(path)))
     return issues
 
@@ -71,6 +75,7 @@ def scan_task_quality(
         for issue in inspect_task_files(
             task,
             dest_path=dest_path,
+            expected_mode=effective_task_strm_mode(task),
             own_share_code=own_share_code,
             own_share_receive_code=own_share_receive_code,
             allowed_roots=allowed_roots,
