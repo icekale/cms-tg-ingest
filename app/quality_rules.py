@@ -4,12 +4,14 @@ import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .config import is_under_any_root
 from .models import TaskSnapshot
-from .quality import QualityIssue
 from .strm_mode import effective_task_strm_mode
+
+if TYPE_CHECKING:
+    from .quality import QualityIssue
 
 
 QUALITY_RULE_VERSION = "1"
@@ -62,13 +64,13 @@ def rule_config(config: object | None = None) -> dict[str, bool | int]:
     raw_cooldown = _config_value(config, "cooldown_seconds")
     try:
         max_attempts = int(raw_attempts) if raw_attempts is not None and not isinstance(raw_attempts, bool) else 3
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         max_attempts = 3
     try:
         cooldown_seconds = (
             int(raw_cooldown) if raw_cooldown is not None and not isinstance(raw_cooldown, bool) else 0
         )
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         cooldown_seconds = 0
     return {
         "allow_auto_reprocess": _bool_value(_config_value(config, "allow_auto_reprocess")),
@@ -88,7 +90,7 @@ def is_path_within_allowed_roots(path: str | Path, allowed_roots: Iterable[str |
 
 def is_rule_enabled(config: object | None, rule_id: str) -> bool:
     controls = rule_config(config)
-    if rule_id in {"reprocess", "strm_mode_mismatch"}:
+    if rule_id in {"reprocess", "strm_mode_mismatch", "unexpected_strm"}:
         return bool(controls["allow_auto_reprocess"])
     return False
 
@@ -210,7 +212,19 @@ class QualityRuleEngine:
                 evidence=(issue.detail for issue in issue_list if issue.detail),
             )
 
-        mode = effective_task_strm_mode(task)
+        try:
+            mode = effective_task_strm_mode(task)
+        except ValueError as exc:
+            raw_mode = str(task.metadata.get("strm_mode") or "").strip()
+            invalid_codes = ("invalid_strm_mode", *issue_codes)
+            return _match(
+                "manual_required",
+                "high",
+                "task STRM mode is invalid and requires manual review",
+                invalid_codes,
+                manual_actions=_MANUAL_ACTIONS,
+                evidence=(raw_mode or str(exc),),
+            )
         mismatch_issues = tuple(
             issue for issue in issue_list if mode_rule_for_issue(mode, issue.code) == "strm_mode_mismatch"
         )

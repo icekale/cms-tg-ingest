@@ -5,9 +5,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Iterable
 
-from .config import is_under_any_root
 from .media.strm import UnsafeMediaPathError, iter_strm_files
 from .models import TaskSnapshot
+from .quality_rules import is_path_within_allowed_roots
 from .strm_mode import effective_task_strm_mode, normalize_strm_mode
 from .task_store import TaskStore
 
@@ -33,7 +33,7 @@ def inspect_task_files(
     del task
     expected_mode = normalize_strm_mode(expected_mode)
     dest = Path(dest_path)
-    if allowed_roots is not None and not is_under_any_root(dest, list(allowed_roots)):
+    if not is_path_within_allowed_roots(dest, allowed_roots):
         return [QualityIssue("unsafe_metadata", "目标路径不在允许根目录", str(dest))]
     if not dest.exists():
         return [QualityIssue("missing_dest", "目标目录不存在", str(dest))]
@@ -69,16 +69,22 @@ def scan_task_quality(
     issues: list[QualityIssue] = []
     task_rows = list(tasks) if tasks is not None else store.list_recent_tasks(limit=limit)
     for task in task_rows:
+        title = task.title or str(task.metadata.get("received_title") or "") or task.share_code
+        try:
+            expected_mode = effective_task_strm_mode(task)
+        except ValueError as exc:
+            raw_mode = str(task.metadata.get("strm_mode") or "").strip()
+            issues.append(QualityIssue("invalid_strm_mode", "任务 STRM 模式无效", raw_mode or str(exc), task.id, title))
+            continue
         dest_path = str(task.metadata.get("dest_path") or "").strip()
         if not dest_path:
             continue
         own_share_code = str(task.metadata.get("own_share_code") or "").strip()
         own_share_receive_code = str(task.metadata.get("own_share_receive_code") or "1212").strip() or "1212"
-        title = task.title or str(task.metadata.get("received_title") or "") or task.share_code
         for issue in inspect_task_files(
             task,
             dest_path=dest_path,
-            expected_mode=effective_task_strm_mode(task),
+            expected_mode=expected_mode,
             own_share_code=own_share_code,
             own_share_receive_code=own_share_receive_code,
             allowed_roots=allowed_roots,

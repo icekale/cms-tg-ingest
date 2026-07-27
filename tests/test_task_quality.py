@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -52,6 +53,25 @@ class TaskQualityTests(unittest.TestCase):
             )
 
             self.assertEqual(issues, [])
+
+    def test_scan_task_quality_reports_invalid_persisted_strm_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "Movie"
+            dest.mkdir()
+            (dest / "movie.strm").write_text("http://cms/s/sourcecode_7788_fileid.mkv", encoding="utf-8")
+            store = TaskStore(root / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            invalid_task = replace(
+                task,
+                title="Invalid mode",
+                metadata={"dest_path": str(dest), "strm_mode": "not-a-mode"},
+            )
+
+            issues = scan_task_quality(store, tasks=[invalid_task])
+
+            self.assertEqual([issue.code for issue in issues], ["invalid_strm_mode"])
+            self.assertEqual(issues[0].task_id, task.id)
 
     def test_flags_direct_strm_url(self):
         with tempfile.TemporaryDirectory() as tmp:

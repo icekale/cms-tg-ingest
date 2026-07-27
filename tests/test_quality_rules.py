@@ -2,7 +2,7 @@ import unittest
 
 from app.models import TaskStage, TaskStatus, TaskSnapshot
 from app.quality import QualityIssue
-from app.quality_rules import QUALITY_RULE_VERSION, QualityRuleEngine, is_rule_enabled
+from app.quality_rules import QUALITY_RULE_VERSION, QualityRuleEngine, is_rule_enabled, rule_config
 
 
 def task(**metadata):
@@ -33,7 +33,23 @@ class QualityRuleEngineTests(unittest.TestCase):
     def test_reprocess_rule_switch_is_read_from_the_built_in_config(self):
         self.assertTrue(is_rule_enabled({"allow_auto_reprocess": True}, "reprocess"))
         self.assertTrue(is_rule_enabled({"allow_auto_reprocess": True, "max_attempts": 3}, "strm_mode_mismatch"))
+        self.assertTrue(is_rule_enabled({"allow_auto_reprocess": True}, "unexpected_strm"))
         self.assertFalse(is_rule_enabled({"allow_auto_reprocess": False}, "reprocess"))
+
+    def test_rule_config_handles_overflowing_integer_values(self):
+        controls = rule_config({"max_attempts": float("inf"), "cooldown_seconds": float("inf")})
+
+        self.assertEqual(controls["max_attempts"], 3)
+        self.assertEqual(controls["cooldown_seconds"], 0)
+
+    def test_invalid_task_strm_mode_requires_manual_review(self):
+        match = self.engine.evaluate(
+            task(strm_mode="not-a-mode"),
+            [QualityIssue("direct_strm", "direct", "/library/movie.strm")],
+        )
+
+        self.assertEqual(match.rule_id, "manual_required")
+        self.assertIn("invalid_strm_mode", match.issue_codes)
 
     def test_direct_strm_is_valid_for_direct_mode(self):
         match = self.engine.evaluate(
