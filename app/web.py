@@ -1453,7 +1453,12 @@ class WebApp:
             task_id = parse_task_id_from_path(parsed.path)
             if task_id is None:
                 return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
-            return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, render_task_detail(self.store, task_id, self.submission_store).encode("utf-8")
+            return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, render_task_detail(
+                self.store,
+                task_id,
+                self.submission_store,
+                self.max_retries,
+            ).encode("utf-8")
         task_action = parse_task_action_path(parsed.path) if method == "POST" else None
         if task_action is not None:
             task_id, action = task_action

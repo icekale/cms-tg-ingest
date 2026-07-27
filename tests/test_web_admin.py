@@ -1149,6 +1149,18 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(claimed.current_stage, TaskStage.STRM_READY)
             self.assertEqual(body, b"")
 
+    def test_task_detail_uses_injected_retry_limit_for_html_actions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("limited-html", "", "https://115cdn.com/s/limited-html")
+            store.record_event(task.id, TaskStage.STRM_READY, TaskStatus.FAILED, "failed")
+            app = WebApp(store, web_token="", max_retries=0)
+
+            status, _headers, body = app.handle_request("GET", f"/task/{task.id}", {}, b"")
+
+        self.assertEqual(status, 200)
+        self.assertNotIn(f'action="/task/{task.id}/retry"', body.decode("utf-8"))
+
     def test_concurrent_retry_requests_apply_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
