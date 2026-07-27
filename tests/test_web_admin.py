@@ -1374,6 +1374,46 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(queued_submission["own_share_file_id"], "old-folder")
             self.assertEqual(queued_submission["own_share_code"], "old-share")
 
+    def test_reprocess_endpoint_requeues_cloud_task_from_cloud_downloading_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_cloud_task(
+                "btih:web-cloud-reprocess",
+                "magnet:?xt=urn:btih:web-cloud-reprocess",
+                title="云下载重跑",
+            )
+            store.record_event(
+                task.id,
+                TaskStage.FAILED,
+                TaskStatus.FAILED,
+                "云任务失败",
+                metadata_patch={
+                    "cloud_task_id": "old-task",
+                    "cloud_output_items": [{"file_id": "old-file"}],
+                    "auto_organize_pending": True,
+                },
+            )
+            app = WebApp(store, web_token="")
+
+            status, headers, body = app.handle_request("POST", f"/task/{task.id}/reprocess", {}, b"")
+            updated = store.find_task(task.id)
+            events = store.list_events(task.id)
+            claimed = store.claim_next_runnable("worker", now=0)
+
+            self.assertEqual(status, 303)
+            self.assertEqual(headers["Location"], f"/task/{task.id}")
+            self.assertEqual(body, b"")
+            self.assertEqual(updated.current_stage, TaskStage.CLOUD_DOWNLOADING)
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.metadata["retry_stage"], TaskStage.CLOUD_DOWNLOADING.value)
+            self.assertEqual(updated.metadata["strm_mode"], "shared")
+            self.assertNotIn("cloud_task_id", updated.metadata)
+            self.assertNotIn("cloud_output_items", updated.metadata)
+            self.assertNotIn("auto_organize_pending", updated.metadata)
+            self.assertTrue(any(event["message"] == "Web 触发从头重跑" for event in events))
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed.current_stage, TaskStage.CLOUD_DOWNLOADING)
+
     def test_emby_endpoint_enqueues_emby_confirmation_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

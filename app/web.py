@@ -26,7 +26,12 @@ from .task_diagnostics import (
 )
 from .task_engine import decide_retry, stage_display_name
 from .task_health import build_task_health, format_task_health
-from .task_store import REPROCESS_METADATA_DELETE_KEYS, TaskStore, build_reprocess_metadata
+from .task_store import (
+    TaskStore,
+    build_reprocess_metadata,
+    reprocess_delete_keys_for,
+    reprocess_stage_for,
+)
 from .self_share_settings import resolve_own_share_receive_code, resolve_self_share_receive_cid
 from .strm_mode import STRM_MODE_LABELS
 from .web_api import (
@@ -822,10 +827,10 @@ def _apply_task_action(store: TaskStore, task: Any, action: str) -> bool:
         return _apply_web_transition(
             store,
             task,
-            target_stage=TaskStage.RECEIVED,
+            target_stage=reprocess_stage_for(task),
             target_event_message="Web 触发从头重跑",
             metadata_patch=build_reprocess_metadata(task),
-            metadata_delete_keys=REPROCESS_METADATA_DELETE_KEYS,
+            metadata_delete_keys=reprocess_delete_keys_for(task),
         )
     if action == "retry":
         decision = decide_retry(task)

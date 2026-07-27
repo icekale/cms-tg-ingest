@@ -450,6 +450,74 @@ class TaskStoreTests(unittest.TestCase):
             self.assertGreater(updated.metadata["reprocess_started_at"], 0)
             self.assertTrue(updated.metadata["keep_for_retry"])
 
+    def test_cloud_reprocess_returns_to_cloud_downloading_and_clears_attempt_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db", default_strm_mode="direct")
+            task = store.upsert_cloud_task(
+                "btih:reprocess-cloud",
+                "magnet:?xt=urn:btih:reprocess-cloud",
+                chat_id="464100862",
+                title="云下载电影",
+            )
+            task = store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.FAILED,
+                "清理失败",
+                metadata_patch={
+                    "cloud_info_hash": "abc",
+                    "cloud_task_id": "task-1",
+                    "cloud_started_at": 100,
+                    "cloud_target_cid": "old",
+                    "cloud_status": "completed",
+                    "cloud_output_file_id": "file-1",
+                    "cloud_output_parent_id": "parent-1",
+                    "cloud_output_name": "电影.mkv",
+                    "cloud_output_items": [{"file_id": "file-1"}],
+                    "auto_organize_pending": True,
+                    "auto_organize_last_error": "旧错误",
+                    "auto_organize_submitted_at": 200,
+                    "custom": "keep",
+                },
+            )
+
+            updated = store.reprocess_task(task.id, next_run_at=0)
+
+            self.assertEqual(updated.source_type, "cloud_download")
+            self.assertEqual(updated.source_key, "btih:reprocess-cloud")
+            self.assertEqual(updated.url, "magnet:?xt=urn:btih:reprocess-cloud")
+            self.assertEqual(updated.current_stage, TaskStage.CLOUD_DOWNLOADING)
+            self.assertEqual(updated.metadata["strm_mode"], "shared")
+            self.assertEqual(updated.metadata["retry_stage"], TaskStage.CLOUD_DOWNLOADING.value)
+            for key in (
+                "cloud_info_hash",
+                "cloud_task_id",
+                "cloud_started_at",
+                "cloud_target_cid",
+                "cloud_status",
+                "cloud_output_file_id",
+                "cloud_output_parent_id",
+                "cloud_output_name",
+                "cloud_output_items",
+                "auto_organize_pending",
+                "auto_organize_last_error",
+                "auto_organize_submitted_at",
+            ):
+                self.assertNotIn(key, updated.metadata)
+            self.assertEqual(updated.metadata["custom"], "keep")
+
+    def test_share_reprocess_still_returns_to_received(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("reprocess-share", "", "https://115cdn.com/s/reprocess-share")
+            task = store.record_event(task.id, TaskStage.CLEANED, TaskStatus.FAILED, "失败")
+
+            updated = store.reprocess_task(task.id, next_run_at=0)
+
+            self.assertEqual(updated.source_type, "share")
+            self.assertEqual(updated.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(updated.metadata["retry_stage"], TaskStage.RECEIVED.value)
+
     def test_explicit_mode_does_not_backfill_active_legacy_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

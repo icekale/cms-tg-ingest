@@ -96,6 +96,20 @@ REPROCESS_METADATA_DELETE_KEYS = (
     "quality_success_event",
     "quality_repair_queued",
 )
+CLOUD_REPROCESS_METADATA_DELETE_KEYS = REPROCESS_METADATA_DELETE_KEYS + (
+    "cloud_info_hash",
+    "cloud_task_id",
+    "cloud_started_at",
+    "cloud_target_cid",
+    "cloud_status",
+    "cloud_output_file_id",
+    "cloud_output_parent_id",
+    "cloud_output_name",
+    "cloud_output_items",
+    "auto_organize_pending",
+    "auto_organize_last_error",
+    "auto_organize_submitted_at",
+)
 
 QUALITY_STATE_DEFAULTS: dict[str, Any] = {
     "quality_manual_status": "open",
@@ -124,18 +138,36 @@ def _quality_bool(value: Any) -> bool:
     return str(value or "").strip().lower() in _QUALITY_TRUE_VALUES
 
 
+def reprocess_stage_for(task: TaskSnapshot) -> TaskStage:
+    """Return the first stage appropriate for the task's source type."""
+    if str(task.source_type or "").strip().lower() == "cloud_download":
+        return TaskStage.CLOUD_DOWNLOADING
+    return TaskStage.RECEIVED
+
+
+def reprocess_delete_keys_for(task: TaskSnapshot) -> tuple[str, ...]:
+    """Return attempt metadata that must not survive a source reprocess."""
+    if str(task.source_type or "").strip().lower() == "cloud_download":
+        return CLOUD_REPROCESS_METADATA_DELETE_KEYS
+    return REPROCESS_METADATA_DELETE_KEYS
+
+
 def build_reprocess_metadata(
     task: TaskSnapshot,
     metadata_patch: dict[str, Any] | None = None,
     *,
     started_at: float | None = None,
 ) -> dict[str, Any]:
+    target_stage = reprocess_stage_for(task)
+    patch = dict(metadata_patch or {})
+    if target_stage == TaskStage.CLOUD_DOWNLOADING:
+        patch["strm_mode"] = "shared"
     return {
         "retry_from_stage": task.current_stage.value,
-        "retry_stage": TaskStage.RECEIVED.value,
+        "retry_stage": target_stage.value,
         "force_reprocess": True,
         "reprocess_started_at": time.time() if started_at is None else float(started_at),
-        **(metadata_patch or {}),
+        **patch,
     }
 
 
@@ -1761,13 +1793,14 @@ class TaskStore:
         task = self.find_task(task_id)
         if task is None:
             raise KeyError(f"task not found: {task_id}")
+        target_stage = reprocess_stage_for(task)
         return self.record_event(
             task_id,
-            TaskStage.RECEIVED,
+            target_stage,
             TaskStatus.PENDING,
             message,
             metadata_patch=build_reprocess_metadata(task, metadata_patch),
-            metadata_delete_keys=REPROCESS_METADATA_DELETE_KEYS,
+            metadata_delete_keys=reprocess_delete_keys_for(task),
             next_run_at=next_run_at,
             clear_claim=True,
         )
