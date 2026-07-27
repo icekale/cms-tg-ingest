@@ -36,7 +36,14 @@ class FakeCloudP115:
 
 
 class FakeCms:
+    def __init__(self, fail_auto_organize=False):
+        self.auto_organize_calls = 0
+        self.fail_auto_organize = fail_auto_organize
+
     def run_auto_organize(self):
+        self.auto_organize_calls += 1
+        if self.fail_auto_organize:
+            raise RuntimeError("CMS auto organize temporarily unavailable")
         return {"code": 200}
 
 
@@ -169,7 +176,7 @@ class PipelineEmby:
         return item.get("LibraryName")
 
 
-def make_workflow(p115, store, task_store=None):
+def make_workflow(p115, store, task_store=None, cms=None):
     config = SelfShareConfig(
         enabled=True,
         strm_root=Path(tempfile.gettempdir()) / "cms-tg-ingest-cloud-test",
@@ -180,7 +187,7 @@ def make_workflow(p115, store, task_store=None):
     config.cloud_poll_seconds = 30
     config.cloud_timeout_seconds = 3600
     return BridgeSelfShareTaskWorkflow(
-        cms=FakeCms(),
+        cms=cms or FakeCms(),
         telegram=FakeTelegram(),
         chat_id="464100862",
         store=store,
@@ -247,7 +254,8 @@ class CloudWorkflowTests(unittest.TestCase):
                 ]
             )
             submissions = FakeSubmissionStore()
-            workflow = make_workflow(p115, submissions)
+            cms = FakeCms()
+            workflow = make_workflow(p115, submissions, cms=cms)
 
             first = workflow.run_stage(task)
             self.assertEqual(first.outcome.value, "defer")
@@ -268,6 +276,62 @@ class CloudWorkflowTests(unittest.TestCase):
             self.assertEqual(len(submissions.rows), 1)
             self.assertEqual(second.metadata["submission_id"], 1)
             self.assertEqual(second.metadata["cloud_output_file_id"], "folder-1")
+            self.assertEqual(cms.auto_organize_calls, 1)
+            self.assertEqual(next(iter(submissions.rows.values()))["workflow_phase"], "auto_organize_submitted")
+
+    def test_cloud_stage_defers_cms_failure_without_resubmitting_cloud_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_cloud_task("ed2k:hash:10", ED2K, title="Example.mkv")
+            p115 = FakeCloudP115(
+                [
+                    {
+                        "status": 11,
+                        "file_id": "folder-1",
+                        "parent_id": TARGET_CID,
+                        "file_name": "Example",
+                    },
+                ]
+            )
+            submissions = FakeSubmissionStore()
+            cms = FakeCms(fail_auto_organize=True)
+            workflow = make_workflow(p115, submissions, cms=cms)
+
+            first = workflow.run_stage(task)
+            task = task_store.record_event(
+                task.id,
+                TaskStage.CLOUD_DOWNLOADING,
+                TaskStatus.RUNNING,
+                first.message,
+                metadata_patch=first.metadata,
+            )
+
+            try:
+                second = workflow.run_stage(task)
+            except Exception as exc:
+                self.fail(f"CMS failure should defer instead of raising: {exc}")
+
+            self.assertEqual(second.outcome.value, "defer")
+            self.assertIn("CMS", second.message)
+            self.assertEqual(len(p115.add_calls), 1)
+            self.assertEqual(cms.auto_organize_calls, 1)
+            self.assertEqual(second.metadata["cloud_output_file_id"], "folder-1")
+
+            cms.fail_auto_organize = False
+            task = task_store.record_event(
+                task.id,
+                TaskStage.CLOUD_DOWNLOADING,
+                TaskStatus.RUNNING,
+                second.message,
+                metadata_patch=second.metadata,
+            )
+            third = workflow.run_stage(task)
+
+            self.assertEqual(third.outcome.value, "complete")
+            self.assertEqual(len(p115.add_calls), 1)
+            self.assertEqual(len(p115.status_calls), 1)
+            self.assertEqual(cms.auto_organize_calls, 2)
+            self.assertFalse(third.metadata["auto_organize_pending"])
 
     def test_cloud_timeout_fails_before_any_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:

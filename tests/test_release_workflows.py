@@ -32,13 +32,13 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("GHCR", readme)
         self.assertIn("DOCKERHUB_USERNAME", readme)
         self.assertIn("DOCKERHUB_TOKEN", readme)
-        self.assertIn("git tag v0.2.39", readme)
+        self.assertIn("git tag v0.2.40", readme)
 
     def test_dockerhub_overview_contains_complete_compose(self):
         overview = (ROOT / "docs/dockerhub-overview.md").read_text(encoding="utf-8")
 
         for term in (
-            "image: icekale/cms-tg-ingest:0.2.39",
+            "image: icekale/cms-tg-ingest:0.2.40",
             "env_file:",
             "./data:/data",
             "115-cookies.txt:/config/115-cookies.txt:ro",

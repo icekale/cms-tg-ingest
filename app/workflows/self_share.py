@@ -460,6 +460,24 @@ class BridgeSelfShareTaskWorkflow:
             return self._stage_cleaned(task)
         return StageResult.failed("阶段尚未实现", error_type="unsupported_stage")
 
+    def _trigger_cloud_auto_organize(self, row_id: int, metadata: dict[str, Any]) -> StageResult:
+        try:
+            self.cms.run_auto_organize()
+        except Exception as exc:
+            metadata["auto_organize_pending"] = True
+            metadata["auto_organize_last_error"] = str(exc)[:500]
+            LOG.warning("CMS auto-organize trigger failed after cloud download row_id=%s", row_id, exc_info=True)
+            return StageResult.defer(
+                "文件已移动到待整理目录，等待 CMS 自动整理触发成功",
+                self.self_share_config.auto_organize_retry_seconds or 30,
+                metadata,
+            )
+        self.store.update_self_share(row_id, workflow_phase="auto_organize_submitted")
+        metadata["auto_organize_pending"] = False
+        metadata["auto_organize_submitted_at"] = self._now()
+        metadata.pop("auto_organize_last_error", None)
+        return StageResult.complete("115 云下载完成，已移动到待整理目录并触发 CMS 整理", metadata)
+
     def _stage_cloud_downloading(self, task):
         if not self.self_share_config.enabled:
             return StageResult.failed("自分享工作流未启用", error_type="self_share_disabled")
@@ -467,6 +485,11 @@ class BridgeSelfShareTaskWorkflow:
         receive_cid = str(metadata.get("cloud_target_cid") or "").strip() or self._configured_receive_cid()
         if not receive_cid:
             return StageResult.failed("缺少 115 接收目录 ID", error_type="missing_receive_cid")
+        if metadata.get("auto_organize_pending") and metadata.get("cloud_output_file_id"):
+            row = self._submission_row(task)
+            if not row:
+                return StageResult.failed("找不到云下载提交记录", error_type="submission_missing")
+            return self._trigger_cloud_auto_organize(int(row["id"]), metadata)
         info_hash = str(metadata.get("cloud_info_hash") or "").strip()
         task_id = str(metadata.get("cloud_task_id") or "").strip()
         started_at = float(metadata.get("cloud_started_at") or 0)
@@ -554,9 +577,10 @@ class BridgeSelfShareTaskWorkflow:
                 "cloud_output_file_id": output["file_id"],
                 "cloud_output_parent_id": output["parent_id"],
                 "cloud_output_name": output.get("file_name") or "",
+                "auto_organize_pending": True,
             }
         )
-        return StageResult.complete("115 云下载完成，已进入 CMS 整理", metadata)
+        return self._trigger_cloud_auto_organize(int(row["id"]), metadata)
 
     def _submission_row(self, task) -> dict[str, Any] | None:
         submission_id = task.metadata.get("submission_id") or task.submission_id
