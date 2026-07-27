@@ -26,5 +26,9 @@ body { margin: 0; min-width: 320px; background: #f5f7fb; }
 .health-list h3 { margin: 0 0 8px; font-size: 15px; }
 .error-text { color: #c0392b; margin-bottom: 12px; }
 .detail-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: #526075; font-size: 12px; }
+.stat-card { padding: 16px 18px; background: #fff; border: 1px solid #e7ebf2; border-radius: 8px; }
+.stat-label { color: #748096; font-size: 12px; }
+.stat-value { margin-top: 5px; color: #172033; font-size: 24px; font-weight: 700; }
+.quality-evidence { max-width: 260px; white-space: pre-wrap; overflow-wrap: anywhere; color: #526075; font-size: 12px; line-height: 1.5; }
 @media (max-width: 860px) { .content-wrap { padding: 18px; } .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .section-grid { grid-template-columns: 1fr; } .header-note { display: none; } }
 @media (max-width: 520px) { .metric-grid { grid-template-columns: 1fr; } .top-header { padding: 0 14px; } }

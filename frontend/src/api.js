@@ -15,6 +15,7 @@ export const api = {
   task: (id) => request(`tasks/${id}`),
   health: () => request('health'),
   quality: () => request('quality'),
+  qualityAction: (action, payload) => request(`quality/action/${action}`, { method: 'POST', body: JSON.stringify(payload) }),
   hdhive: () => request('hdhive'),
   setDefaultMode: (mode) => request('settings/strm-mode', { method: 'POST', body: JSON.stringify({ mode }) }),
   setOwnShareReceiveCode: (receive_code) => request('settings/own-share-receive-code', { method: 'POST', body: JSON.stringify({ receive_code }) }),

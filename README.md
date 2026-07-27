@@ -22,6 +22,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 - **HDHive 搜索与解锁**：复用 CMS 已授权的单个 HDHive 账号，按 TMDB 匹配影片/剧集、筛选网盘、单条或批量解锁。
 - **HDHive 剧集订阅**：用 `/订阅 <HDHive剧集链接>` 创建订阅，按计划检查新集，费用未知或较高时等待确认。
 - **Web 运维台**：查看队列、阶段耗时、健康状态、质量巡检和 HDHive 订阅。
+- **质量人工队列**：Web 和 Telegram 展示规则、风险、尝试次数和脱敏证据；支持确认后执行、重跑、暂缓、忽略和恢复评估。
 - **Vue 管理台**：访问根路径 `/` 默认进入 `/app/`；旧 Python 页面和 POST 路由继续保留，旧版概览可从 `/legacy` 回退访问。
 
 > 当前 HDHive 使用 CMS 中的一个 OAuth 授权账号。它支持该账号的免费次数/积分查询和扣费，但尚未实现多个 Telegram 用户分别绑定不同 HDHive 账号。
@@ -32,7 +33,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.2.35`。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.2.36`。
 4. 拉取固定版本并启动：
 
 ```sh
@@ -429,8 +430,8 @@ python3 -m unittest discover -s tests -q
 发布版本通过 GitHub Actions 构建并推送 GHCR 和 Docker Hub：
 
 ```sh
-git tag v0.2.35
-git push origin v0.2.35
+git tag v0.2.36
+git push origin v0.2.36
 ```
 
 如果 fork 后要发布自己的 Docker Hub 镜像，在 GitHub Secrets 中配置：
@@ -441,7 +442,7 @@ git push origin v0.2.35
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.2.35
+docker pull icekale/cms-tg-ingest:0.2.36
 docker pull icekale/cms-tg-ingest:latest
 ```
 

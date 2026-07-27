@@ -158,6 +158,7 @@ from app.telegram_ui import (
     format_status,
     format_taskstore_history,
     format_taskstore_status,
+    format_quality_manual_report,
     hdhive_candidate_keyboard,
     hdhive_confirmation_keyboard,
     hdhive_resource_keyboard,
@@ -167,12 +168,14 @@ from app.telegram_ui import (
     quality_issue_for_row,
     quality_issue_rows,
     quality_keyboard,
+    quality_manual_keyboard,
     task_action_keyboard,
     truncate_text,
 )
 from app.task_runner import StageResult, TaskRunner
 from app.task_store import TaskStore
 from app.web import start_web_server
+from app.web_api import quality_items
 from app.workflows.direct import DirectTaskWorkflow, ModeRoutingWorkflow, SourceShareTaskWorkflow
 from app.workflows.self_share import (
     BridgeSelfShareTaskWorkflow,
@@ -286,7 +289,12 @@ def start_quality_automation_loop(
             try:
                 summary = automation.run_if_due()
                 if summary and (summary.failed_count or any(plan.execution_status in {"failed", "skipped"} for plan in summary.plans)):
-                    telegram.send_message(chat_id, _quality_attention_message(summary))
+                    rows = _quality_rows_for_telegram(automation)
+                    telegram.send_message(
+                        chat_id,
+                        _quality_attention_message(summary),
+                        reply_markup=quality_manual_keyboard(rows),
+                    )
             except Exception:
                 LOG.exception("Quality automation loop failed")
 
@@ -1458,6 +1466,22 @@ class TelegramClient:
             payload=payload,
         )
 
+    def edit_message_text(
+        self,
+        chat_id: int | str,
+        message_id: int | str,
+        text: str,
+        reply_markup: dict | None = None,
+    ) -> None:
+        payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "disable_web_page_preview": True}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        self.http.request(
+            self.base_url + "/editMessageText",
+            method="POST",
+            payload=payload,
+        )
+
     def send_photo(self, chat_id: int | str, photo: str, caption: str, reply_markup: dict | None = None) -> None:
         payload = {"chat_id": chat_id, "photo": photo, "caption": caption}
         if reply_markup is not None:
@@ -2162,6 +2186,7 @@ def handle_callback_query(
     task_store: TaskStore | None = None,
     hdhive_workflow: HdhiveWorkflow | None = None,
     enqueue_unlocked_links: Any | None = None,
+    quality_automation: QualityAutomation | None = None,
     hdhive_subscription_service: HdhiveSubscriptionService | None = None,
     hdhive_subscription_scheduler: HdhiveSubscriptionScheduler | None = None,
 ) -> None:
@@ -2181,6 +2206,16 @@ def handle_callback_query(
         write_metrics_snapshot(store, metrics_path_for_store(store))
         telegram.answer_callback_query(callback_id, f"已清理 {removed} 条", show_alert=False)
         telegram.send_message(chat_id, f"已清理 {removed} 条已结束历史记录。正在处理中的任务已保留。")
+        return
+    quality_action = parse_quality_callback(data)
+    if quality_action:
+        handle_quality_action_callback(
+            *quality_action,
+            callback_query,
+            telegram,
+            chat_id,
+            quality_automation,
+        )
         return
     if handle_hdhive_subscription_callback(
         data,
@@ -2675,6 +2710,99 @@ def parse_task_action_callback(data: str) -> tuple[str, int] | None:
         return None
 
 
+def parse_quality_callback(data: str) -> tuple[str, int, str, str] | None:
+    value = str(data or "")
+    parts = value.split(":")
+    if len(value) > 64 or len(parts) != 5 or parts[0] != "quality":
+        return None
+    if parts[1] not in {"execute", "reprocess", "snooze", "ignore", "resume"}:
+        return None
+    if not re.fullmatch(r"[a-z0-9_]+", parts[3]) or not re.fullmatch(r"[0-9]+", parts[4]):
+        return None
+    try:
+        task_id = int(parts[2])
+    except (TypeError, ValueError):
+        return None
+    return (parts[1], task_id, parts[3], parts[4]) if task_id > 0 else None
+
+
+def _quality_rows_for_telegram(quality_automation: QualityAutomation | None) -> list[dict[str, Any]]:
+    if quality_automation is None:
+        return []
+    try:
+        return quality_items(
+            quality_automation.store,
+            limit=100,
+            quality_automation=quality_automation,
+        )
+    except Exception:
+        LOG.exception("Failed to build Telegram quality queue")
+        return []
+
+
+def send_quality_manual_queue(
+    telegram: Any,
+    chat_id: int | str,
+    quality_automation: QualityAutomation | None,
+    *,
+    message_id: int | str | None = None,
+) -> None:
+    rows = _quality_rows_for_telegram(quality_automation)
+    text = format_quality_manual_report(rows)
+    keyboard = quality_manual_keyboard(rows)
+    if message_id is not None and hasattr(telegram, "edit_message_text"):
+        try:
+            telegram.edit_message_text(chat_id, message_id, text, reply_markup=keyboard)
+            return
+        except Exception:
+            LOG.warning("Failed to refresh Telegram quality message", exc_info=True)
+    telegram.send_message(chat_id, text, reply_markup=keyboard)
+
+
+def handle_quality_action_callback(
+    action: str,
+    task_id: int,
+    rule_id: str,
+    rule_version: str,
+    callback_query: dict[str, Any],
+    telegram: Any,
+    chat_id: int | str,
+    quality_automation: QualityAutomation | None,
+) -> bool:
+    callback_id = str(callback_query.get("id") or "")
+    if quality_automation is None:
+        safe_answer_callback_query(telegram, callback_id, "质量巡检未启用", show_alert=True)
+        return True
+    result = quality_automation.manual_action(
+        task_id,
+        rule_id,
+        action,
+        f"telegram:{chat_id}",
+        rule_version=rule_version,
+    )
+    status = str(result.get("status") or "")
+    messages = {
+        "queued": "已入队",
+        "snoozed": "已暂缓 24 小时",
+        "ignored": "已忽略",
+        "resumed": "已恢复评估",
+        "viewed": "已查看",
+        "conflict": "任务状态已变化，请重新发送 /quality",
+        "rejected": "规则或操作已过期，请重新发送 /quality",
+        "not_found": "任务不存在或已过期",
+        "invalid": "操作参数无效",
+    }
+    feedback = messages.get(status, "质量操作未完成")
+    safe_answer_callback_query(telegram, callback_id, feedback, show_alert=status not in {"queued", "snoozed", "ignored", "resumed", "viewed"})
+    send_quality_manual_queue(
+        telegram,
+        chat_id,
+        quality_automation,
+        message_id=((callback_query.get("message") or {}).get("message_id")),
+    )
+    return True
+
+
 def start_series_update_task(
     task: Any | None,
     store: SubmissionStore | None,
@@ -3160,6 +3288,7 @@ def handle_update(
     task_engine_enabled: bool = False,
     hdhive_workflow: HdhiveWorkflow | None = None,
     enqueue_unlocked_links: Any | None = None,
+    quality_automation: QualityAutomation | None = None,
     hdhive_subscription_service: HdhiveSubscriptionService | None = None,
     hdhive_subscription_scheduler: HdhiveSubscriptionScheduler | None = None,
 ) -> None:
@@ -3173,6 +3302,7 @@ def handle_update(
             task_store=task_store,
             hdhive_workflow=hdhive_workflow,
             enqueue_unlocked_links=enqueue_unlocked_links,
+            quality_automation=quality_automation,
             hdhive_subscription_service=hdhive_subscription_service,
             hdhive_subscription_scheduler=hdhive_subscription_scheduler,
         )
@@ -3265,6 +3395,9 @@ def handle_update(
         return
     if command == "/quality":
         if task_engine_enabled and task_store is not None:
+            if quality_automation is not None:
+                send_quality_manual_queue(telegram, chat_id, quality_automation)
+                return
             issues = scan_task_quality(task_store)
             if issues:
                 telegram.send_message(chat_id, format_task_quality_report(issues))
@@ -3842,6 +3975,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
                         task_engine_enabled=config.task_engine_enabled,
                         hdhive_workflow=hdhive_workflow,
                         enqueue_unlocked_links=enqueue_hdhive_links if hdhive_workflow is not None else None,
+                        quality_automation=quality_automation,
                         hdhive_subscription_service=hdhive_subscription_service,
                         hdhive_subscription_scheduler=hdhive_subscription_scheduler,
                     )

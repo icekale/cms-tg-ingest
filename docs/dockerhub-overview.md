@@ -17,13 +17,14 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 - 支持磁力、ED2K 云下载，随后按 STRM 模式进入对应流程；direct 模式不会创建分享或清理源文件。
 - 支持 Emby 刷新、入库确认和媒体库名称反馈。
 - 支持 HDHive 搜索、网盘筛选、单条/批量解锁和剧集订阅。
+- 质量巡检支持 Web/Telegram 人工队列，展示规则、风险、尝试次数和脱敏证据，并支持确认后执行、重跑、暂缓、忽略和恢复评估。
 
 ## 5 分钟部署
 
 固定版本镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.2.35
+docker pull icekale/cms-tg-ingest:0.2.36
 ```
 
 ### 完整 Docker Compose
@@ -33,7 +34,7 @@ docker pull icekale/cms-tg-ingest:0.2.35
 ```yaml
 services:
   cms-tg-ingest:
-    image: icekale/cms-tg-ingest:0.2.35
+    image: icekale/cms-tg-ingest:0.2.36
     container_name: cms-tg-ingest
     restart: unless-stopped
     env_file:

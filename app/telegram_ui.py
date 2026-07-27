@@ -126,6 +126,74 @@ def quality_keyboard(rows: list[dict[str, Any]], limit: int = 8) -> dict[str, An
     return {"inline_keyboard": buttons} if buttons else None
 
 
+_QUALITY_ACTION_LABELS = {
+    "execute": "执行重跑",
+    "reprocess": "人工重跑",
+    "snooze": "暂缓 24 小时",
+    "ignore": "忽略",
+    "resume": "恢复评估",
+}
+
+
+def quality_manual_rows(rows: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+    """Keep the Telegram queue focused on actionable quality decisions."""
+    selected: list[dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+    for row in rows:
+        try:
+            task_id = int(row.get("task_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        rule_id = str(row.get("rule_id") or "").strip()
+        status = str(row.get("manual_status") or "open").strip().lower()
+        if task_id <= 0 or not rule_id or (not row.get("auto_allowed") and status not in {"manual_required", "snoozed", "ignored"}):
+            continue
+        key = (task_id, rule_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(row)
+        if len(selected) >= max(1, int(limit)):
+            break
+    return selected
+
+
+def format_quality_manual_report(rows: list[dict[str, Any]]) -> str:
+    rows = quality_manual_rows(rows)
+    if not rows:
+        return "质量巡检：当前没有需要人工处理的问题。"
+    lines = [f"质量巡检：{len(rows)} 项需要关注"]
+    for index, row in enumerate(rows, 1):
+        title = truncate_text(str(row.get("title") or f"任务 #{row.get('task_id')}"), 70)
+        reason = truncate_text(str(row.get("rule_reason") or row.get("message") or "需要人工确认"), 120)
+        lines.append(
+            f"{index}. #{row.get('task_id')} {title}｜规则：{row.get('rule_id') or '-'}｜"
+            f"风险：{row.get('risk_level') or '-'}｜状态：{row.get('manual_status') or 'open'}"
+        )
+        lines.append(f"   原因：{reason}｜尝试：{row.get('attempts', 0)}")
+    return "\n".join(lines)
+
+
+def quality_manual_keyboard(rows: list[dict[str, Any]], limit: int = 8) -> dict[str, Any] | None:
+    buttons: list[list[dict[str, str]]] = []
+    for row in quality_manual_rows(rows, limit=limit):
+        task_id = int(row["task_id"])
+        rule_id = str(row["rule_id"])
+        version = str(row.get("rule_version") or "1")
+        actions = [str(action).strip().lower() for action in row.get("available_actions", [])]
+        visible = [action for action in ("execute", "reprocess", "snooze", "ignore", "resume") if action in actions]
+        row_buttons = [
+            {
+                "text": _QUALITY_ACTION_LABELS[action],
+                "callback_data": f"quality:{action}:{task_id}:{rule_id}:{version}",
+            }
+            for action in visible
+        ]
+        if row_buttons:
+            buttons.append(row_buttons)
+    return {"inline_keyboard": buttons} if buttons else None
+
+
 def format_counts(counts: dict[str, int]) -> str:
     if not counts:
         return "-"
