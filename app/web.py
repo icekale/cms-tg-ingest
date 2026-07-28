@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import html
 import json
 import mimetypes
@@ -54,6 +55,10 @@ REQUEST_BODY_READ_TIMEOUT_SECONDS = 2
 
 
 class RequestBodyTooLarge(ValueError):
+    pass
+
+
+class RequestBodyDisconnected(Exception):
     pass
 
 
@@ -1902,6 +1907,9 @@ def start_web_server(
                 return
             try:
                 body = self._read_request_body(length) if length else b""
+            except RequestBodyDisconnected:
+                self.close_connection = True
+                return
             except ValueError:
                 self._request_body_error(400, b"Incomplete request body")
                 return
@@ -1925,6 +1933,12 @@ def start_web_server(
                     remaining -= len(chunk)
             except TimeoutError as exc:
                 raise ValueError("request body read timed out") from exc
+            except (ConnectionResetError, BrokenPipeError) as exc:
+                raise RequestBodyDisconnected from exc
+            except OSError as exc:
+                if exc.errno in {errno.ECONNABORTED, errno.ECONNRESET, errno.ENOTCONN, errno.EPIPE}:
+                    raise RequestBodyDisconnected from exc
+                raise
             finally:
                 self.connection.settimeout(previous_timeout)
             body = b"".join(chunks)

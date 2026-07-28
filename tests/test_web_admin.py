@@ -1,11 +1,13 @@
+import io
 import re
 import socket
 import sqlite3
+import struct
 import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, redirect_stderr
 from pathlib import Path
 from threading import Barrier
 from unittest.mock import patch
@@ -113,6 +115,48 @@ class WebAdminTests(unittest.TestCase):
                         self.assertLess(elapsed, 0.25)
                         response, _elapsed = post(server, 0)
                         self.assertTrue(response.startswith(b"HTTP/1.0 303"))
+            finally:
+                bridge.stop_web_server(server)
+
+    def test_content_length_handler_ignores_reset_during_body_read(self):
+        def post_empty_body(server):
+            request = b"\r\n".join(
+                [b"POST /history/clear HTTP/1.0", b"Host: localhost", b"Content-Length: 0", b"", b""]
+            )
+            with socket.create_connection(server.server_address, timeout=1) as client:
+                client.settimeout(1)
+                client.sendall(request)
+                client.shutdown(socket.SHUT_WR)
+                return client.recv(4096)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            server = start_web_server(store, "127.0.0.1", 0)
+            stderr = io.StringIO()
+            try:
+                with redirect_stderr(stderr), patch.object(server, "handle_error", wraps=server.handle_error) as handle_error:
+                    client = socket.create_connection(server.server_address, timeout=1)
+                    try:
+                        client.sendall(
+                            b"\r\n".join(
+                                [
+                                    b"POST /history/clear HTTP/1.0",
+                                    b"Host: localhost",
+                                    b"Content-Length: 5",
+                                    b"",
+                                    b"abc",
+                                ]
+                            )
+                        )
+                        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    finally:
+                        client.close()
+                    time.sleep(0.1)
+                    response = post_empty_body(server)
+
+                self.assertFalse(handle_error.called)
+                self.assertEqual(stderr.getvalue(), "")
+                self.assertTrue(response.startswith(b"HTTP/1.0 303"))
             finally:
                 bridge.stop_web_server(server)
 
