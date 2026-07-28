@@ -828,6 +828,44 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(found.id, expected.id)
             self.assertIsNone(store.find_task_by_share_key("missing", "pass"))
 
+    def test_list_tasks_by_own_share_file_id_returns_exact_other_owners(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            first = store.upsert_task("first", "", "https://115cdn.com/s/first")
+            second = store.upsert_task("second", "", "https://115cdn.com/s/second")
+            third = store.upsert_task("third", "", "https://115cdn.com/s/third")
+
+            store.record_event(
+                first.id,
+                TaskStage.RECEIVED,
+                TaskStatus.PENDING,
+                "first owner",
+                metadata_patch={"own_share_file_id": "folder-1"},
+            )
+            store.record_event(
+                second.id,
+                TaskStage.RECEIVED,
+                TaskStatus.PENDING,
+                "second owner",
+                metadata_patch={"own_share_file_id": "folder-1"},
+            )
+            store.record_event(
+                third.id,
+                TaskStage.RECEIVED,
+                TaskStatus.PENDING,
+                "different owner",
+                metadata_patch={"own_share_file_id": "folder-2"},
+            )
+
+            owners = store.list_tasks_by_own_share_file_id("folder-1")
+
+            self.assertEqual([task.id for task in owners], [second.id, first.id])
+            self.assertEqual(
+                [task.id for task in store.list_tasks_by_own_share_file_id("folder-1", exclude_task_id=second.id)],
+                [first.id],
+            )
+            self.assertEqual(store.list_tasks_by_own_share_file_id(""), [])
+
     def test_record_stage_event_updates_current_task_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

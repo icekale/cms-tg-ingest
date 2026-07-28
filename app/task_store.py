@@ -926,6 +926,33 @@ class TaskStore:
             ).fetchone()
         return self._snapshot(row) if row else None
 
+    def list_tasks_by_own_share_file_id(
+        self,
+        file_id: str,
+        *,
+        exclude_task_id: int | None = None,
+    ) -> list[TaskSnapshot]:
+        normalized = str(file_id or "").strip()
+        if not normalized:
+            return []
+        params: list[Any] = [normalized]
+        exclude_clause = ""
+        if exclude_task_id is not None:
+            exclude_clause = " AND id <> ?"
+            params.append(int(exclude_task_id))
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM tasks
+                WHERE json_valid(metadata_json)
+                  AND CAST(json_extract(metadata_json, '$.own_share_file_id') AS TEXT) = ?
+                  {exclude_clause}
+                ORDER BY updated_at DESC, id DESC
+                """,
+                params,
+            ).fetchall()
+        return [self._snapshot(row) for row in rows]
+
     def find_task_by_source(self, source_type: str, source_key: str) -> TaskSnapshot | None:
         with self._lock, self._connection() as conn:
             row = conn.execute(
