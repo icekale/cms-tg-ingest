@@ -177,3 +177,53 @@ after this report is added.
 - Same-title recovery intentionally requires manual intervention until 115 exposes a stable, verified source-file/share correlation in the API contract.
 - A CMS mutation whose outcome cannot be recovered from a persisted result or the existing direct read-only lookup intentionally stops for manual inspection. It is never retried automatically.
 - No production-like external CMS or 115 calls were made; verification used the repository's fake clients and complete local test suite.
+
+## Scoped Re-review Adjudication
+
+The scoped re-review confirmed the CMS replay and ambiguous 115 recovery findings
+were closed. It found one valid remaining P1: a quoted structured credential that
+contained `,`, `}`, or `]` was terminated at that delimiter, leaving the suffix
+visible in logs, snapshots, runtime state, callbacks, and the Web API.
+
+The controller treated this as a load-bearing part of the original credential
+safety requirement and applied one surgical TDD correction in commit
+`56f4975b` (`fix: redact complete quoted credentials`). No new review scope or
+unrelated cleanup was opened.
+
+RED command:
+
+```bash
+python3 -m unittest -v tests.test_background_jobs.BackgroundJobCoordinatorTests.test_redacts_basic_and_quoted_credential_families_everywhere
+```
+
+Result before the correction: three failing subtests for ordinary JSON, escaped
+JSON, and a quoted secret containing closing delimiters.
+
+GREEN evidence:
+
+- Exact delimiter regressions and diagnostic-preservation test: 2 passed.
+- `tests.test_background_jobs tests.test_web_api`: 47 passed with
+  `ResourceWarning` promoted to an error.
+- The reviewer reproduction now maps the complete quoted value to `[redacted]`
+  for ordinary and escaped forms.
+
+## Final Controller Gate
+
+- Complete Python suite: 1,084/1,084 passed under
+  `-W error::ResourceWarning`.
+- Recovery matrix: `tests.test_runtime_recovery` passed five consecutive runs.
+- `compileall`, `git diff --check`, and repository secret hygiene: passed.
+- Frontend clean install: 57 packages, zero reported vulnerabilities.
+- Frontend tests: 2/2 passed.
+- Frontend production build: passed; the existing 647.86 kB Vite chunk advisory
+  remains non-blocking.
+- A final offline image was built by layering the frozen application sources on
+  the previously verified `cms-tg-ingest:runtime-stability-check` image, and a
+  synthetic non-secret `doctor.py --quiet` run exited 0.
+
+The unchanged standard multi-stage Dockerfile was also invoked. Docker Hub
+metadata resolution for `node:22-alpine` and `python:3.12-alpine` produced no
+progress for about eight minutes and was canceled. This was an external registry
+availability limitation, not a Dockerfile or build-step failure. The frontend
+stage and final Python image content were verified independently as described
+above. No production service, Unraid container, CMS, or 115 endpoint was touched.
