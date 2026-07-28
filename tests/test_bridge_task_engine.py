@@ -4929,7 +4929,7 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
         self.assertIsNotNone(task)
         self.assertEqual(task.metadata["strm_mode"], "direct")
 
-    def test_direct_task_engine_run_forever_constructs_without_p115(self):
+    def test_direct_task_engine_run_forever_constructs_runtime_dependencies_once(self):
         captured = {}
 
         class FakeCmsClient:
@@ -4948,8 +4948,7 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
                 pass
 
             def get_updates(self, **_kwargs):
-                stop_event.set()
-                return []
+                return [{"update_id": 1}]
 
         class FakeTaskRunner:
             def __init__(self, _store, workflow, **kwargs):
@@ -4962,6 +4961,14 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
 
             def stop(self, **_kwargs):
                 captured["stopped"] = True
+
+        def capture_web_server(*_args, **kwargs):
+            captured["web_background_jobs"] = kwargs["background_jobs"]
+            return None
+
+        def capture_update(*_args, **kwargs):
+            captured["update_background_jobs"] = kwargs["background_jobs"]
+            stop_event.set()
 
         with tempfile.TemporaryDirectory() as tmp:
             stop_event = __import__("threading").Event()
@@ -4985,7 +4992,9 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
                 bridge, "TaskRunner", FakeTaskRunner
             ), patch.object(bridge, "normalize_emby_parents", lambda *_args, **_kwargs: 0), patch.object(
                 bridge, "write_metrics_snapshot", lambda *_args, **_kwargs: None
-            ), patch.object(bridge, "call_maybe_start_web_server", lambda *_args, **_kwargs: None), patch.object(
+            ), patch.object(bridge, "call_maybe_start_web_server", capture_web_server), patch.object(
+                bridge, "handle_update", capture_update
+            ), patch.object(
                 bridge, "start_status_repair_loop", lambda *_args, **_kwargs: None
             ):
                 bridge.run_forever(config, stop_event=stop_event)
@@ -4993,6 +5002,11 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
         self.assertTrue(captured["started"])
         self.assertTrue(captured["stopped"])
         self.assertIsNone(captured["p115_client"])
+        self.assertIs(captured["web_background_jobs"], captured["update_background_jobs"])
+        self.assertEqual(
+            captured["update_background_jobs"].submit("after-shutdown", lambda: None).outcome,
+            "closed",
+        )
         worker_parts = captured["worker_id"].split(":")
         self.assertGreaterEqual(len(worker_parts), 3)
         self.assertEqual(worker_parts[-2], str(os.getpid()))
