@@ -43,10 +43,15 @@ _AUTHORIZATION_VALUE = re.compile(r"(?i)\b(authorization)\s*[=:]\s*(?:bearer\s+)
 _API_KEY_VALUE = re.compile(r"(?i)\b(x-api-key|api[-_ ]?key)\s*[=:]\s*[^\s,;]+")
 _BEARER_VALUE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 _COMPOUND_SECRET_VALUE = re.compile(
-    r"(?i)\b([a-z][a-z0-9_-]*(?:token|api[_-]?key|password|secret|[_-]key))\s*[=:]\s*[^\s,;]+"
+    r"(?i)\b([a-z][a-z0-9_-]*(?:token|password|secret|cookie))\s*[=:]\s*[^\s,;]+"
+)
+_EXPLICIT_CREDENTIAL_KEY_VALUE = re.compile(
+    r"(?i)\b(aws_access_key_id|aws_secret_access_key|[a-z0-9_-]*api[_-]?key(?:[_-]?id)?|"
+    r"[a-z0-9_-]*access[_-]?key(?:[_-]?id)?|[a-z0-9_-]*secret[_-]?key|"
+    r"[a-z0-9_-]*private[_-]?key)\s*[=:]\s*[^\s,;]+"
 )
 _COOKIE_HEADER_VALUE = re.compile(
-    r"(?i)\b(cookie)\s*[:=]\s*((?:[^\s;=,]+=[^\s;,]+)(?:\s*;\s*[^\s;=,]+=[^\s;,]+)*)"
+    r"(?i)\b(cookie)\s*[:=]\s*((?:[^\s;=,]+=[^\s;,]*)(?:\s*;\s*[^\s;=,]+=[^\s;,]*)*)"
 )
 _SENSITIVE_VALUE = re.compile(r"(?i)\b(token|cookie|password|secret)\s*[=:]\s*[^\s,;]+")
 _URL = re.compile(r"https?://\S+")
@@ -59,6 +64,7 @@ def redact_background_text(value: object) -> str:
     text = _API_KEY_VALUE.sub(r"\1=[redacted]", text)
     text = _BEARER_VALUE.sub("Bearer [redacted]", text)
     text = _COMPOUND_SECRET_VALUE.sub(r"\1=[redacted]", text)
+    text = _EXPLICIT_CREDENTIAL_KEY_VALUE.sub(r"\1=[redacted]", text)
     return _SENSITIVE_VALUE.sub(r"\1=[redacted]", text)
 
 

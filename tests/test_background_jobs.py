@@ -5,7 +5,7 @@ import threading
 import time
 import unittest
 
-from app.background_jobs import BackgroundJobCoordinator, LOG
+from app.background_jobs import BackgroundJobCoordinator, LOG, redact_background_text
 
 
 class BackgroundJobCoordinatorTests(unittest.TestCase):
@@ -81,6 +81,59 @@ class BackgroundJobCoordinatorTests(unittest.TestCase):
         finally:
             LOG.removeHandler(handler)
             coordinator.shutdown(wait=True)
+
+    def test_redacts_explicit_key_families_and_empty_cookie_segments_everywhere(self):
+        class StateStore:
+            def __init__(self):
+                self.values = {}
+
+            def set_runtime_state(self, key, value):
+                self.values[key] = value
+
+        state_store = StateStore()
+        coordinator = BackgroundJobCoordinator(state_store=state_store)
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        LOG.addHandler(handler)
+        description = "AWS_ACCESS_KEY_ID=DESCA API_ACCESS_KEY=DESCB SECRET_KEY=DESCC PRIVATE_KEY=DESCD"
+        error = (
+            "request failed Cookie: first=; session=ZZ1; middle=; csrf=ZZ2 "
+            "AWS_ACCESS_KEY_ID=ZZ3 API_ACCESS_KEY=ZZ4 SECRET_KEY=ZZ5 PRIVATE_KEY=ZZ6"
+        )
+        try:
+            coordinator.submit(
+                "quality:run",
+                lambda: (_ for _ in ()).throw(RuntimeError(error)),
+                description=description,
+            )
+            coordinator.shutdown(wait=True)
+            from app.web_api import api_quality
+            from app.task_store import TaskStore
+            from pathlib import Path
+            import tempfile
+
+            with tempfile.TemporaryDirectory() as tmp:
+                api_payload = json.dumps(api_quality(TaskStore(Path(tmp) / "tasks.db"), background_jobs=coordinator))
+            snapshot = coordinator.snapshot("quality:run")
+            values = [
+                snapshot.description,
+                snapshot.error,
+                state_store.values["background_job:quality:run"],
+                api_payload,
+                stream.getvalue(),
+            ]
+            for secret in ("DESCA", "DESCB", "DESCC", "DESCD", "ZZ1", "ZZ2", "ZZ3", "ZZ4", "ZZ5", "ZZ6"):
+                self.assertTrue(all(secret not in value for value in values))
+            self.assertIn("request failed", snapshot.error)
+            self.assertLessEqual(len(snapshot.error), 160)
+        finally:
+            LOG.removeHandler(handler)
+            coordinator.shutdown(wait=True)
+
+    def test_redactor_preserves_ordinary_diagnostic_key_names(self):
+        text = "task_key=task operation_key=operation primary_key=primary sort_key=sort monkey=banana"
+
+        self.assertEqual(redact_background_text(text), text)
 
     def test_state_persistence_exception_does_not_log_its_credential(self):
         class FailingStateStore:
