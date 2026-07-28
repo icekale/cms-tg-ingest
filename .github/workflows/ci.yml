@@ -14,9 +14,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Compile
         run: python -m py_compile bridge.py doctor.py
       - name: Unit tests
         run: python -W error::ResourceWarning -m unittest discover -s tests -v
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+      - name: Frontend tests
+        run: npm test --prefix frontend
+      - name: Frontend build
+        run: npm run build --prefix frontend
       - name: Docker build
         run: docker build -t cms-tg-ingest:test .
