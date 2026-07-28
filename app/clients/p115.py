@@ -655,7 +655,7 @@ class P115WebClient:
             if title != expected_title:
                 continue
             create_time = as_float(item.get("create_time") or item.get("share_time"), 0.0)
-            if min_create_time and create_time and create_time < float(min_create_time):
+            if min_create_time and create_time < float(min_create_time):
                 continue
             share_code = str(item.get("share_code") or item.get("sharecode") or "").strip()
             if not share_code:
@@ -1117,6 +1117,19 @@ class P115WebClient:
         self._ensure_state(resp, "115 list files failed")
         return iter_items(resp.get("data") or resp)
 
+    def file_exists_in_parent(self, file_id: str, parent_id: str) -> bool:
+        expected_id = str(file_id or "").strip()
+        offset = 0
+        limit = 500
+        while offset < 5000:
+            page = self.list_files(parent_id, limit=limit, offset=offset, use_cache=False)
+            if any(p115_item_id(item) == expected_id for item in page):
+                return True
+            if len(page) < limit:
+                return False
+            offset += len(page)
+        raise RuntimeError("115 parent directory exceeds 5000 entries")
+
     def scan_organized_folders(
         self,
         parent_ids: set[str],
@@ -1335,7 +1348,7 @@ class P115WebClient:
             )
         return result(None, None, True, request_count)
 
-    def create_long_share(self, file_id: str, preferred_receive_code: str = "") -> dict[str, str]:
+    def create_share(self, file_id: str) -> dict[str, str]:
         resp = self._request(
             "https://webapi.115.com/share/send",
             method="POST",
@@ -1351,7 +1364,14 @@ class P115WebClient:
             share_code = match.group(1) if match else ""
         if not share_code:
             raise P115SharePendingError("115 create share did not return share_code")
-        actual_receive_code = str(preferred_receive_code or receive_code or "1212").strip() or "1212"
+        return {
+            "share_code": share_code,
+            "receive_code": receive_code,
+            "share_url": share_url,
+        }
+
+    def ensure_share_settings(self, share_code: str, receive_code: str) -> dict[str, str]:
+        actual_receive_code = str(receive_code or "1212").strip() or "1212"
         update = self._request(
             "https://webapi.115.com/share/updateshare",
             method="POST",
@@ -1374,8 +1394,15 @@ class P115WebClient:
         return {
             "share_code": share_code,
             "receive_code": returned_receive_code or actual_receive_code,
-            "share_url": share_url,
         }
+
+    def create_long_share(self, file_id: str, preferred_receive_code: str = "") -> dict[str, str]:
+        created = self.create_share(file_id)
+        settings = self.ensure_share_settings(
+            created["share_code"],
+            preferred_receive_code or created.get("receive_code") or "1212",
+        )
+        return {**created, **settings}
 
     def rename_file(self, file_id: str, file_name: str) -> dict:
         resp = self._request(

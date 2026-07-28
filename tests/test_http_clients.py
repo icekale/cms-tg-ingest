@@ -34,6 +34,107 @@ class TrackingHTTPError(HTTPError):
 
 
 class HttpClientTests(unittest.TestCase):
+    def test_create_share_only_sends_share_request(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, method, dict(data or {})))
+                if url.endswith("/share/send"):
+                    return {
+                        "state": True,
+                        "data": {
+                            "share_code": "created-code",
+                            "receive_code": "generated-code",
+                            "share_url": "https://115cdn.com/s/created-code",
+                        },
+                    }
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = P115WebClient("UID=1", http=http, timeout=3)
+
+        result = client.create_share("folder-id")
+
+        self.assertEqual(
+            result,
+            {
+                "share_code": "created-code",
+                "receive_code": "generated-code",
+                "share_url": "https://115cdn.com/s/created-code",
+            },
+        )
+        self.assertEqual(
+            http.calls,
+            [
+                (
+                    "https://webapi.115.com/share/send",
+                    "POST",
+                    {"file_ids": "folder-id", "ignore_warn": 1},
+                )
+            ],
+        )
+
+    def test_ensure_share_settings_sets_receive_code_and_unlimited_duration(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, method, dict(data or {})))
+                if url.endswith("/share/updateshare"):
+                    return {
+                        "state": True,
+                        "data": {"created-code": {"receive_code": "saved-code"}},
+                    }
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = P115WebClient("UID=1", http=http, timeout=3)
+
+        result = client.ensure_share_settings("created-code", "requested-code")
+
+        self.assertEqual(result["share_code"], "created-code")
+        self.assertEqual(result["receive_code"], "saved-code")
+        self.assertEqual(
+            http.calls,
+            [
+                (
+                    "https://webapi.115.com/share/updateshare",
+                    "POST",
+                    {
+                        "share_code": "created-code",
+                        "receive_code": "requested-code",
+                        "share_duration": -1,
+                        "auto_fill_recvcode": 1,
+                    },
+                )
+            ],
+        )
+
+    def test_file_exists_in_parent_uses_fresh_parent_listing(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+                self.items = [{"cid": "stale-id", "pid": "parent-id", "n": "Old"}]
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, dict(params or {})))
+                if url.endswith("/files"):
+                    return {"state": True, "data": list(self.items)}
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = P115WebClient("UID=1", http=http, timeout=3, cache_ttl_seconds=60, clock=lambda: 100)
+        client.list_files("parent-id")
+        http.items = [{"fid": "target-id", "cid": "parent-id", "n": "Target.mkv"}]
+
+        exists = client.file_exists_in_parent("target-id", "parent-id")
+
+        self.assertTrue(exists)
+        self.assertEqual(len(http.calls), 2)
+
     def test_prepare_share_receive_reads_and_serializes_exact_snapshot(self):
         class FakeHttp:
             def __init__(self):
