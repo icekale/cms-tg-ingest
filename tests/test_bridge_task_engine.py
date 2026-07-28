@@ -10,8 +10,8 @@ from unittest.mock import Mock, patch
 import bridge
 from app.clients import cms as cms_client
 from app.models import TaskStage, TaskStatus
-from app.task_runner import StageOutcome
-from app.task_store import TaskStore
+from app.task_runner import StageOutcome, TaskRunner
+from app.task_store import TaskStore, operation_scope
 
 
 class FakeCms:
@@ -42,6 +42,9 @@ class FakeCms:
 class FakeP115:
     def __init__(self):
         self.received = []
+        self.receive_preparations = []
+        self.receive_reconciliations = []
+        self.received_target_visible = False
         self.folder = None
         self.created_shares = []
         self.find_organized_calls = []
@@ -51,8 +54,57 @@ class FakeP115:
         self.files_by_parent = {}
 
     def receive_share_to_cid(self, share_code, receive_code, receive_cid):
-        self.received.append((share_code, receive_code, receive_cid))
-        return {"title": "received title", "file_ids": ["file-a", "file-b"]}
+        intent = self.prepare_share_receive(share_code, receive_code, receive_cid)
+        return self.execute_prepared_share_receive(intent)
+
+    def prepare_share_receive(self, share_code, receive_code, receive_cid):
+        self.receive_preparations.append((share_code, receive_code, receive_cid))
+        return {
+            "share_code": share_code,
+            "receive_code": receive_code,
+            "target_cid": receive_cid,
+            "source_file_ids": ["file-a", "file-b"],
+            "source_file_names": ["Root A", "Root B"],
+            "title": "received title",
+            "target_pre_call_file_ids": ["old-file"],
+            "target_snapshot_complete": True,
+        }
+
+    def _receive_result(self, intent):
+        return {
+            "title": intent["title"],
+            "file_ids": list(intent["source_file_ids"]),
+            "received_items": [
+                {
+                    "file_id": "received-a",
+                    "file_name": "Root A",
+                    "parent_id": intent["target_cid"],
+                    "is_folder": True,
+                    "received_item_verified": True,
+                },
+                {
+                    "file_id": "received-b",
+                    "file_name": "Root B",
+                    "parent_id": intent["target_cid"],
+                    "is_folder": True,
+                    "received_item_verified": True,
+                },
+            ],
+            "received_items_complete": True,
+            "received_expected_item_count": 2,
+            "received_existing_file_ids": ["old-file"],
+            "received_snapshot_complete": True,
+            "response": {"state": True},
+        }
+
+    def execute_prepared_share_receive(self, intent):
+        self.received.append((intent["share_code"], intent["receive_code"], intent["target_cid"]))
+        self.received_target_visible = True
+        return self._receive_result(intent)
+
+    def reconcile_prepared_share_receive(self, intent):
+        self.receive_reconciliations.append(dict(intent))
+        return self._receive_result(intent) if self.received_target_visible else None
 
     def find_organized_folder(self, recognition, title, excluded_parent_ids=None, min_update_time=0, **kwargs):
         self.find_organized_calls.append((dict(recognition), title, excluded_parent_ids, min_update_time, kwargs))
@@ -309,6 +361,120 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
         folder.mkdir(parents=True, exist_ok=True)
         (folder / name).write_text(content, encoding="utf-8")
 
+    @staticmethod
+    def _receive_operation_key(task, receive_cid="pending-cid"):
+        return f"{operation_scope(task)}:receive_share:{task.share_code}:{receive_cid}"
+
+    def test_receive_started_before_post_never_posts_and_times_out_to_needs_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            intent = self.p115.prepare_share_receive("abc", "1234", "pending-cid")
+            operation_key = self._receive_operation_key(task)
+            self.tasks.prepare_operation(task.id, operation_key, "receive_share", intent)
+            started = self.tasks.start_operation(task.id, operation_key)
+            self.tasks.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+            clock = [started.started_at + 1]
+            workflow._now = lambda: clock[0]
+            runner = TaskRunner(self.tasks, workflow, worker_id="receive-recovery", now=lambda: clock[0])
+
+            runner.run_once()
+
+            waiting = self.tasks.find_task(task.id)
+            self.assertEqual(waiting.status, TaskStatus.RUNNING)
+            self.assertEqual(self.p115.received, [])
+            self.assertEqual(len(self.p115.receive_reconciliations), 1)
+
+            clock[0] = started.started_at + 3600
+            runner.run_once()
+
+            timed_out = self.tasks.find_task(task.id)
+            self.assertEqual(timed_out.status, TaskStatus.NEEDS_ACTION)
+            self.assertEqual(self.p115.received, [])
+
+    def test_receive_crash_reconciles_without_second_receive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            self.tasks.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+            clock = [time.time()]
+            workflow._now = lambda: clock[0]
+            runner = TaskRunner(self.tasks, workflow, worker_id="receive-crash", now=lambda: clock[0])
+            complete_operation = self.tasks.complete_operation
+            save_attempts = 0
+
+            def fail_first_result_save(*args, **kwargs):
+                nonlocal save_attempts
+                save_attempts += 1
+                if save_attempts == 1:
+                    raise RuntimeError("simulated crash while saving receive result")
+                return complete_operation(*args, **kwargs)
+
+            with patch.object(self.tasks, "complete_operation", side_effect=fail_first_result_save):
+                runner.run_once()
+                interrupted = self.tasks.find_task(task.id)
+                self.assertEqual(interrupted.status, TaskStatus.FAILED)
+                self.tasks.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+                runner.run_once()
+
+            recovered = self.tasks.find_task(task.id)
+            operation = self.tasks.find_operation(task.id, self._receive_operation_key(task))
+            self.assertEqual(recovered.current_stage, TaskStage.ORGANIZING)
+            self.assertEqual(operation.status, "succeeded")
+            self.assertEqual(len(self.p115.received), 1)
+            self.assertEqual(len(self.p115.receive_reconciliations), 1)
+
+    def test_receive_saved_result_survives_discarded_taskrunner_stage_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            self.tasks.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+            clock = [time.time()]
+            workflow._now = lambda: clock[0]
+            runner = TaskRunner(self.tasks, workflow, worker_id="receive-discard", now=lambda: clock[0])
+            complete_stage = self.tasks.complete_claimed_stage
+            stage_save_attempts = 0
+
+            def discard_first_stage_result(*args, **kwargs):
+                nonlocal stage_save_attempts
+                stage_save_attempts += 1
+                if stage_save_attempts == 1:
+                    return None
+                return complete_stage(*args, **kwargs)
+
+            with patch.object(self.tasks, "complete_claimed_stage", side_effect=discard_first_stage_result):
+                runner.run_once()
+                operation = self.tasks.find_operation(task.id, self._receive_operation_key(task))
+                self.assertEqual(operation.status, "succeeded")
+                self.tasks.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+                runner.run_once()
+
+            recovered = self.tasks.find_task(task.id)
+            self.assertEqual(recovered.current_stage, TaskStage.ORGANIZING)
+            self.assertEqual(len(self.p115.received), 1)
+            self.assertEqual(self.p115.receive_reconciliations, [])
+
+    def test_receive_restart_from_started_reconciles_visible_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            intent = self.p115.prepare_share_receive("abc", "1234", "pending-cid")
+            operation_key = self._receive_operation_key(task)
+            self.tasks.prepare_operation(task.id, operation_key, "receive_share", intent)
+            self.tasks.start_operation(task.id, operation_key)
+            self.p115.execute_prepared_share_receive(intent)
+            self.tasks.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+            runner = TaskRunner(self.tasks, workflow, worker_id="receive-restart", now=time.time)
+
+            runner.run_once()
+
+            recovered = self.tasks.find_task(task.id)
+            operation = self.tasks.find_operation(task.id, operation_key)
+            self.assertEqual(recovered.current_stage, TaskStage.ORGANIZING)
+            self.assertEqual(operation.status, "succeeded")
+            self.assertEqual(len(self.p115.received), 1)
+            self.assertEqual(len(self.p115.receive_reconciliations), 1)
+
     def test_received_stage_receives_share_and_creates_submission_row(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp, receive_cid="pending-cid")
@@ -367,7 +533,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertIn("claim 已失效", result.message)
             self.assertEqual(result.metadata["receive_target_cid"], "pending-cid")
             self.assertEqual(result.metadata["receive_cid_persist_status"], "stale_claim")
-            self.assertEqual(self.p115.received, [("abc", "1234", "pending-cid")])
+            self.assertEqual(self.p115.received, [])
             self.assertIsNone(self.submissions.find_by_key(bridge.ShareKey("abc", "1234")))
             persist.assert_called_once_with(
                 task.id,
@@ -380,7 +546,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
 
     def test_received_stage_stops_when_115_receive_is_restricted(self):
         class RestrictedP115(FakeP115):
-            def receive_share_to_cid(self, share_code, receive_code, receive_cid):
+            def execute_prepared_share_receive(self, intent):
                 raise RuntimeError("你已被限制接收，如有疑问请联系客服")
 
         with tempfile.TemporaryDirectory() as tmp:

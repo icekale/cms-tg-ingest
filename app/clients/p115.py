@@ -680,13 +680,26 @@ class P115WebClient:
             return self._receive_share_to_cid(share_code, receive_code, target_cid)
 
     def _receive_share_to_cid(self, share_code: str, receive_code: str, target_cid: str) -> dict[str, Any]:
+        intent = self._prepare_share_receive(share_code, receive_code, target_cid, snapshot_all_targets=False)
+        return self.execute_prepared_share_receive(intent)
+
+    def prepare_share_receive(self, share_code: str, receive_code: str, target_cid: str) -> dict[str, Any]:
+        return self._prepare_share_receive(share_code, receive_code, target_cid, snapshot_all_targets=True)
+
+    def _prepare_share_receive(
+        self,
+        share_code: str,
+        receive_code: str,
+        target_cid: str,
+        *,
+        snapshot_all_targets: bool,
+    ) -> dict[str, Any]:
         items, snap = self.share_root_items(share_code, receive_code, cid="0", limit=100)
         data = snap.get("data") if isinstance(snap.get("data"), dict) else {}
         file_ids = [p115_share_item_id(item) for item in items]
         if not file_ids:
             raise RuntimeError("115 share snap did not return file ids")
         info = data.get("shareinfo") if isinstance(data.get("shareinfo"), dict) else {}
-        receive_data = {}
         title = str(
             info.get("share_title")
             or (p115_file_name(items[0]) if items else "")
@@ -697,7 +710,7 @@ class P115WebClient:
         )
         existing_file_ids: list[str] = []
         snapshot_complete = False
-        if has_tmdb_hint:
+        if snapshot_all_targets or has_tmdb_hint:
             # A share snapshot ID is not a local file ID. Capture the target
             # root before receiving so a later same-name lookup cannot select
             # an older file already waiting in the pending directory.
@@ -708,44 +721,101 @@ class P115WebClient:
                 if file_id
             ]
             snapshot_complete = len(existing_items) < 500
+        return {
+            "share_code": str(share_code),
+            "receive_code": str(receive_code),
+            "target_cid": str(target_cid),
+            "source_file_ids": file_ids,
+            "source_file_names": [p115_file_name(item) for item in items],
+            "title": title,
+            "target_pre_call_file_ids": existing_file_ids,
+            "target_snapshot_complete": snapshot_complete,
+        }
+
+    @staticmethod
+    def _prepared_share_source_items(intent: dict[str, Any]) -> list[dict[str, str]]:
+        file_ids = [str(value).strip() for value in intent.get("source_file_ids") or []]
+        file_names = [str(value).strip() for value in intent.get("source_file_names") or []]
+        return [
+            {"fid": file_id, "n": file_names[index] if index < len(file_names) else ""}
+            for index, file_id in enumerate(file_ids)
+            if file_id
+        ]
+
+    def _prepared_share_receive_result(
+        self,
+        intent: dict[str, Any],
+        response: dict[str, Any],
+        received_items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        source_items = self._prepared_share_source_items(intent)
+        receive_data = response.get("data") if isinstance(response.get("data"), dict) else {}
+        title = str(
+            receive_data.get("receive_title")
+            or intent.get("title")
+            or (p115_file_name(source_items[0]) if source_items else "")
+            or ""
+        ).strip()
+        file_ids = [p115_share_item_id(item) for item in source_items]
+        return {
+            "title": title,
+            "file_ids": file_ids,
+            "received_items": received_items,
+            "received_items_complete": len(received_items) == len(source_items),
+            "received_expected_item_count": len(source_items),
+            "received_existing_file_ids": [
+                str(value).strip()
+                for value in intent.get("target_pre_call_file_ids") or []
+                if str(value).strip()
+            ],
+            "received_snapshot_complete": bool(intent.get("target_snapshot_complete")),
+            "response": response,
+        }
+
+    def execute_prepared_share_receive(self, intent: dict[str, Any]) -> dict[str, Any]:
+        source_items = self._prepared_share_source_items(intent)
+        file_ids = [p115_share_item_id(item) for item in source_items]
+        if not file_ids:
+            raise RuntimeError("115 prepared share receive did not contain file ids")
+        target_cid = str(intent.get("target_cid") or "").strip()
         resp = self._request(
             "https://webapi.115.com/share/receive",
             method="POST",
             data={
-                "share_code": share_code,
-                "receive_code": receive_code,
+                "share_code": str(intent.get("share_code") or ""),
+                "receive_code": str(intent.get("receive_code") or ""),
                 "file_id": ",".join(file_ids),
-                "cid": str(target_cid),
+                "cid": target_cid,
             },
         )
         self._ensure_state(resp, "115 receive share failed")
-        receive_data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
-        title = str(
-            receive_data.get("receive_title")
-            or info.get("share_title")
-            or (p115_file_name(items[0]) if items else "")
-            or ""
-        ).strip()
         received_items = self._resolve_received_root_items(
-            items,
+            source_items,
             resp,
             target_cid,
-            title,
-            excluded_file_ids=set(existing_file_ids),
-            require_new=snapshot_complete,
+            str(intent.get("title") or ""),
+            excluded_file_ids=set(intent.get("target_pre_call_file_ids") or []),
+            require_new=bool(intent.get("target_snapshot_complete")),
         )
-        return {
-            "title": title,
-            # These are the IDs accepted by /share/receive and are retained
-            # only as provenance; they are not trusted as local output IDs.
-            "file_ids": file_ids,
-            "received_items": received_items,
-            "received_items_complete": len(received_items) == len(items),
-            "received_expected_item_count": len(items),
-            "received_existing_file_ids": existing_file_ids,
-            "received_snapshot_complete": snapshot_complete,
-            "response": resp,
-        }
+        return self._prepared_share_receive_result(intent, resp, received_items)
+
+    def reconcile_prepared_share_receive(self, intent: dict[str, Any]) -> dict[str, Any] | None:
+        if not intent.get("target_snapshot_complete"):
+            return None
+        source_items = self._prepared_share_source_items(intent)
+        target_cid = str(intent.get("target_cid") or "").strip()
+        current_items = self.list_files(target_cid, limit=500)
+        received_items = self._resolve_received_root_items(
+            source_items,
+            {"data": current_items},
+            target_cid,
+            str(intent.get("title") or ""),
+            excluded_file_ids=set(intent.get("target_pre_call_file_ids") or []),
+            require_new=True,
+        )
+        if not received_items:
+            return None
+        return self._prepared_share_receive_result(intent, {}, received_items)
 
     @staticmethod
     def _nested_response_dicts(value: Any, depth: int = 0):
@@ -811,7 +881,7 @@ class P115WebClient:
             # is no pre-receive baseline with which to prove a local ID is
             # new. Do not guess from a same-name pending file.
             return []
-        if not candidates and has_tmdb_hint:
+        if not candidates and (has_tmdb_hint or require_new):
             try:
                 for item in self.list_files(str(target_cid), limit=500):
                     normalized = self._normalized_received_item(item, target_cid)

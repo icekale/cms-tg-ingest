@@ -58,11 +58,14 @@ from app.media.strm import (
 from app.models import TaskStage, TaskStatus
 from app.self_share_settings import resolve_own_share_receive_code, resolve_self_share_review_policy
 from app.task_bridge import reset_self_share_submission_for_reprocess
+from app.task_store import operation_scope
 from app.strm_mode import effective_task_strm_mode
 from app.task_runner import StageOutcome, StageResult
 
 LOG = logging.getLogger("cms-tg-ingest")
 OPENAI_CATEGORY_LABELS = ["华语电影", "欧美电影", "亚洲电影", "动漫电影", "国产电视", "外国电视", "番剧", "纪录片"]
+_RECEIVE_RECOVERY_RETRY_SECONDS = 30
+_RECEIVE_RECOVERY_WINDOW_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -719,25 +722,18 @@ class BridgeSelfShareTaskWorkflow:
                     )
                 existing = self.store.find_by_id(int(existing["id"])) or existing
                 reprocess_reset = True
-        if self._should_reuse_received_self_share_state(existing, task.metadata):
-            metadata = self._received_metadata(existing, task.metadata)
-            if reprocess_reset:
-                metadata["self_share_reprocess_reset"] = True
-            if reprocess_started_at:
-                metadata["reprocess_started_at"] = reprocess_started_at
-            return StageResult.complete("已接收 115 分享到待整理", metadata)
-
-        try:
-            received = self.p115.receive_share_to_cid(task.share_code, task.receive_code, receive_cid)
-        except RuntimeError as exc:
-            if is_115_receive_restricted_error(exc):
-                return StageResult.needs_action(
-                    "115 接收被限制，已停止自动重试；请稍后恢复后手动重试或先手动转存。",
-                    {"share_code": task.share_code},
-                )
-            raise
         patch_claimed_metadata = getattr(self.task_store, "patch_claimed_metadata", None)
-        if callable(patch_claimed_metadata) and str(getattr(task, "claimed_by", "") or "").strip():
+        if str(getattr(task, "claimed_by", "") or "").strip():
+            if not callable(patch_claimed_metadata):
+                return StageResult(
+                    StageOutcome.NEEDS_ACTION,
+                    "当前任务不支持原子持久化接收目录 CID，已在接收前停止",
+                    {
+                        "receive_target_cid": receive_cid,
+                        "receive_cid_persist_status": "unsupported",
+                    },
+                    error_type="receive_cid_persistence_unsupported",
+                )
             persisted = patch_claimed_metadata(
                 int(task.id),
                 expected_claimed_by=str(task.claimed_by),
@@ -749,23 +745,104 @@ class BridgeSelfShareTaskWorkflow:
             if persisted is None:
                 return StageResult(
                     StageOutcome.NEEDS_ACTION,
-                    "115 接收成功，但接收目录 CID 未能持久化，任务 claim 已失效；已停止后续处理，请重试",
+                    "接收目录 CID 未能持久化，任务 claim 已失效；已在接收前停止",
                     {
                         "receive_target_cid": receive_cid,
                         "receive_cid_persist_status": "stale_claim",
                     },
                     error_type="receive_cid_persistence_stale_claim",
                 )
-        elif str(getattr(task, "claimed_by", "") or "").strip():
-            return StageResult(
-                StageOutcome.NEEDS_ACTION,
-                "115 接收成功，但当前任务不支持原子持久化接收目录 CID，已停止后续处理",
+            task = persisted
+
+        operation_key = f"{operation_scope(task)}:receive_share:{task.share_code}:{receive_cid}"
+        operation = self.task_store.find_operation(int(task.id), operation_key)
+        if operation is None and self._should_reuse_received_self_share_state(existing, task.metadata):
+            metadata = self._received_metadata(existing, task.metadata)
+            if reprocess_reset:
+                metadata["self_share_reprocess_reset"] = True
+            if reprocess_started_at:
+                metadata["reprocess_started_at"] = reprocess_started_at
+            return StageResult.complete("已接收 115 分享到待整理", metadata)
+
+        if operation is None:
+            intent = self.p115.prepare_share_receive(task.share_code, task.receive_code, receive_cid)
+            operation = self.task_store.prepare_operation(
+                int(task.id),
+                operation_key,
+                "receive_share",
+                intent,
+            )
+
+        execute_authorized = False
+        if operation.status == "prepared":
+            started = self.task_store.start_operation(int(task.id), operation_key)
+            if started is not None:
+                operation = started
+                execute_authorized = True
+            else:
+                operation = self.task_store.find_operation(int(task.id), operation_key)
+
+        if execute_authorized:
+            try:
+                received = self.p115.execute_prepared_share_receive(operation.request)
+            except RuntimeError as exc:
+                if is_115_receive_restricted_error(exc):
+                    self.task_store.mark_operation_failed(int(task.id), operation_key, str(exc))
+                    return StageResult.needs_action(
+                        "115 接收被限制，已停止自动重试；请稍后恢复后手动重试或先手动转存。",
+                        {"share_code": task.share_code, "receive_target_cid": receive_cid},
+                    )
+                self.task_store.mark_operation_uncertain(int(task.id), operation_key, str(exc))
+                raise
+            except Exception as exc:
+                self.task_store.mark_operation_uncertain(int(task.id), operation_key, str(exc))
+                raise
+            completed = self.task_store.complete_operation(int(task.id), operation_key, received)
+            if completed is None:
+                completed = self.task_store.find_operation(int(task.id), operation_key)
+            operation = completed
+
+        if operation is None:
+            return StageResult.needs_action(
+                "115 接收操作记录丢失，请人工检查后重试",
+                {"receive_target_cid": receive_cid, "receive_operation_key": operation_key},
+            )
+        if operation.status == "succeeded":
+            received = operation.result
+        elif operation.status in {"started", "uncertain"}:
+            received = self.p115.reconcile_prepared_share_receive(operation.request)
+            if received and bool(received.get("received_items_complete")):
+                if operation.status == "started":
+                    completed = self.task_store.complete_operation(int(task.id), operation_key, received)
+                    if completed is not None:
+                        received = completed.result
+            else:
+                recovery_age = max(0.0, self._now() - float(operation.started_at or operation.created_at))
+                recovery_metadata = {
+                    "receive_target_cid": receive_cid,
+                    "receive_operation_key": operation_key,
+                    "receive_recovery_started_at": float(operation.started_at or operation.created_at),
+                }
+                if recovery_age >= _RECEIVE_RECOVERY_WINDOW_SECONDS:
+                    return StageResult.needs_action(
+                        "无法确认 115 分享接收结果，已停止自动处理以避免重复接收",
+                        recovery_metadata,
+                    )
+                return StageResult.defer(
+                    "等待确认 115 分享接收结果",
+                    _RECEIVE_RECOVERY_RETRY_SECONDS,
+                    recovery_metadata,
+                )
+        else:
+            return StageResult.needs_action(
+                "115 分享接收操作未成功，已停止自动重试",
                 {
                     "receive_target_cid": receive_cid,
-                    "receive_cid_persist_status": "unsupported",
+                    "receive_operation_key": operation_key,
+                    "receive_operation_status": operation.status,
                 },
-                error_type="receive_cid_persistence_unsupported",
             )
+
         title = str(received.get("title") or task.title or task.share_code).strip()
         row = self.store.upsert_submission(
             _ShareKey(task.share_code, task.receive_code),
