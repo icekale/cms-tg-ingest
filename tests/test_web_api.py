@@ -13,13 +13,35 @@ from app.hdhive_subscription_store import HdhiveSubscriptionStore
 from app.series_rules import parse_episode_filter
 from app.task_store import TaskStore
 from app.config import Config
-from app.background_jobs import BackgroundJobCoordinator
+from app.background_jobs import BackgroundJobCoordinator, BackgroundJobSnapshot
 from app.quality_automation import QualityAutomation
 from app.web import WebApp
-from app.web_api import _safe_error, _safe_url, serialize_health, serialize_task
+from app.web_api import _safe_error, _safe_url, api_quality, serialize_hdhive, serialize_health, serialize_task
 
 
 class WebApiTests(unittest.TestCase):
+    def test_background_job_status_api_exposes_only_latest_safe_fields(self):
+        snapshots = (
+            BackgroundJobSnapshot("quality:run", "old quality", "succeeded", 1, 2, 3, ""),
+            BackgroundJobSnapshot("quality:run", "latest quality", "failed", 4, 5, 6, "Authorization: Bearer api-secret"),
+            BackgroundJobSnapshot("hdhive:run", "old HDHive", "succeeded", 7, 8, 9, ""),
+            BackgroundJobSnapshot("hdhive:item:7", "latest HDHive", "failed", 10, 11, 12, "X-API-Key: hdhive-secret"),
+        )
+
+        class SnapshotSource:
+            def list_snapshots(self):
+                return snapshots
+
+        with tempfile.TemporaryDirectory() as tmp:
+            quality = api_quality(TaskStore(Path(tmp) / "tasks.db"), background_jobs=SnapshotSource())
+        hdhive = serialize_hdhive(SimpleNamespace(list=lambda: []), background_jobs=SnapshotSource())
+
+        for payload, description in ((quality["background_job"], "latest quality"), (hdhive["background_job"], "latest HDHive")):
+            self.assertEqual(payload["description"], description)
+            self.assertEqual(set(payload), {"description", "state", "started_at", "finished_at", "error"})
+            self.assertNotIn("secret", json.dumps(payload))
+        self.assertNotIn("background_jobs", hdhive)
+
     def _quality_service(self, tmp, store):
         root = Path(tmp) / "library"
         config = Config(

@@ -432,8 +432,9 @@ def maybe_start_web_server(
     hdhive_service: HdhiveSubscriptionService | None = None,
     hdhive_scheduler: HdhiveSubscriptionScheduler | None = None,
     frontend_dist_path: str | None = None,
-    background_jobs: BackgroundJobCoordinator | None = None,
     starter=start_web_server,
+    *,
+    background_jobs: BackgroundJobCoordinator | None = None,
 ):
     if not config.web_enabled:
         return None
@@ -559,6 +560,11 @@ def stop_web_server(server: Any | None, join_timeout: float = 5) -> None:
     thread = getattr(server, "_cms_thread", None)
     if isinstance(thread, threading.Thread) and thread is not threading.current_thread():
         thread.join(max(0.0, float(join_timeout)))
+    if getattr(server, "_cms_owns_background_jobs", False):
+        background_jobs = getattr(server, "_cms_background_jobs", None)
+        shutdown = getattr(background_jobs, "shutdown", None)
+        if callable(shutdown):
+            shutdown(wait=True)
 
 
 def best_effort_task_sync(action: str, func, *args, **kwargs):

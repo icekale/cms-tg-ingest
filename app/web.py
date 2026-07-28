@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
-from .background_jobs import BackgroundJobCoordinator, JobSubmission
+from .background_jobs import BackgroundJobCoordinator, JobSubmission, redact_background_text
 from .config import SelfShareConfig
 from .models import TaskStage, TaskStatus
 from .quality import QualityIssue, format_task_quality_report, scan_task_quality
@@ -85,7 +85,7 @@ def _background_job_status_markup(background_jobs: BackgroundJobCoordinator | No
     if snapshot.finished_at:
         values.append(html.escape(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(snapshot.finished_at))))
     if snapshot.error:
-        values.append(html.escape(snapshot.error))
+        values.append(html.escape(redact_background_text(snapshot.error)))
     return f'<p class="task-message">后台任务：{" · ".join(values)}</p>'
 
 def _navigation(active: str) -> str:
@@ -1306,6 +1306,7 @@ class WebApp:
         self.self_share_config = self_share_config or SelfShareConfig()
         self.frontend_dist_path = Path(frontend_dist_path)
         self.max_retries = normalize_task_max_retries(max_retries)
+        self._owns_background_jobs = background_jobs is None
         self.background_jobs = background_jobs or BackgroundJobCoordinator()
 
     def _submit_background(self, key: str, callable: Any, *, description: str) -> JobSubmission:
@@ -1885,6 +1886,8 @@ def start_web_server(
             return
 
     server = ThreadingHTTPServer((host, port), Handler)
+    server._cms_background_jobs = app.background_jobs
+    server._cms_owns_background_jobs = app._owns_background_jobs
     thread = Thread(target=server.serve_forever, daemon=True)
     server._cms_thread = thread
     thread.start()

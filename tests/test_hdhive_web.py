@@ -9,7 +9,7 @@ from app.hdhive_subscription_store import HdhiveSubscriptionStore
 from app.background_jobs import BackgroundJobCoordinator
 from app.series_rules import parse_episode_filter
 from app.task_store import TaskStore
-from app.web import WebApp
+from app.web import WebApp, start_web_server
 
 
 class FakeHdhiveScheduler:
@@ -75,6 +75,50 @@ class FakeHdhiveService:
 
 
 class HdhiveWebTests(unittest.TestCase):
+    def test_stop_web_server_shuts_down_only_internally_owned_coordinator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            owned_server = start_web_server(store, "127.0.0.1", 0)
+            owned_coordinator = getattr(owned_server, "_cms_background_jobs", None)
+            try:
+                self.assertIsNotNone(owned_coordinator)
+                bridge.stop_web_server(owned_server)
+                self.assertEqual(owned_coordinator.submit("quality:run", lambda: None).outcome, "closed")
+            finally:
+                bridge.stop_web_server(owned_server)
+
+            injected_coordinator = BackgroundJobCoordinator()
+            injected_server = start_web_server(store, "127.0.0.1", 0, background_jobs=injected_coordinator)
+            try:
+                bridge.stop_web_server(injected_server)
+                self.assertEqual(injected_coordinator.submit("quality:run", lambda: None).outcome, "accepted")
+            finally:
+                injected_coordinator.shutdown(wait=True)
+                bridge.stop_web_server(injected_server)
+
+    def test_maybe_start_web_server_keeps_legacy_positional_starter_slot(self):
+        calls = []
+        config = SimpleNamespace(
+            web_enabled=True,
+            web_token="secret",
+            task_engine_enabled=True,
+            task_max_retries=3,
+            web_host="127.0.0.1",
+            web_port=0,
+            frontend_dist_path="/tmp/frontend",
+            self_share_receive_cid="",
+            self_share_own_share_password="",
+            cms_state_db_path="/tmp/cms.db",
+        )
+
+        def legacy_starter(*args, **kwargs):
+            calls.append((args, kwargs))
+            return "legacy-server"
+
+        result = bridge.maybe_start_web_server(config, object(), None, None, None, None, None, legacy_starter)
+
+        self.assertEqual(result, "legacy-server")
+        self.assertEqual(len(calls), 1)
     def make_app(self, *, background_jobs=None):
         directory = tempfile.TemporaryDirectory()
         store = HdhiveSubscriptionStore(Path(directory.name) / "tasks.db")

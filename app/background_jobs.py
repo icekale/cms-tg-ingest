@@ -39,12 +39,18 @@ class JobSubmission:
         }
 
 
-_SENSITIVE_VALUE = re.compile(r"(?i)(token|cookie|password|authorization|secret)\s*[=:]\s*[^\s,;]+")
+_AUTHORIZATION_VALUE = re.compile(r"(?i)\b(authorization)\s*[=:]\s*(?:bearer\s+)?[^\s,;]+")
+_API_KEY_VALUE = re.compile(r"(?i)\b(x-api-key|api[-_ ]?key)\s*[=:]\s*[^\s,;]+")
+_BEARER_VALUE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
+_SENSITIVE_VALUE = re.compile(r"(?i)\b(token|cookie|password|secret)\s*[=:]\s*[^\s,;]+")
 _URL = re.compile(r"https?://\S+")
 
 
-def _redact(value: object) -> str:
+def redact_background_text(value: object) -> str:
     text = _URL.sub("[redacted-url]", str(value))
+    text = _AUTHORIZATION_VALUE.sub(r"\1=[redacted]", text)
+    text = _API_KEY_VALUE.sub(r"\1=[redacted]", text)
+    text = _BEARER_VALUE.sub("Bearer [redacted]", text)
     return _SENSITIVE_VALUE.sub(r"\1=[redacted]", text)
 
 
@@ -79,7 +85,7 @@ class BackgroundJobCoordinator:
                 return JobSubmission("capacity_rejected", existing)
             snapshot = BackgroundJobSnapshot(
                 key=normalized_key,
-                description=_redact(description)[:160],
+                description=redact_background_text(description)[:160],
                 status="queued",
                 queued_at=time.time(),
             )
@@ -119,24 +125,26 @@ class BackgroundJobCoordinator:
         try:
             callable()
         except Exception as exc:
-            LOG.exception("Background job failed key=%s", key)
+            error = redact_background_text(f"{type(exc).__name__}: {exc}")[:160]
+            LOG.error("Background job failed key=%s error=%s", key, error)
             snapshot = self._replace_snapshot(
                 key,
                 status="failed",
                 finished_at=time.time(),
-                error=_redact(f"{type(exc).__name__}: {exc}")[:160],
+                error=error,
             )
         else:
             snapshot = self._replace_snapshot(key, status="succeeded", finished_at=time.time())
+        try:
+            if on_complete is not None:
+                on_complete(snapshot)
+        except Exception as exc:
+            error = redact_background_text(f"{type(exc).__name__}: {exc}")[:160]
+            LOG.error("Background job completion callback failed key=%s error=%s", key, error)
         finally:
             with self._lock:
                 self._active_keys.discard(key)
                 self._capacity.release()
-        if on_complete is not None:
-            try:
-                on_complete(snapshot)
-            except Exception:
-                LOG.exception("Background job completion callback failed key=%s", key)
 
     def _replace_snapshot(self, key: str, **changes: Any) -> BackgroundJobSnapshot:
         with self._lock:
@@ -154,4 +162,4 @@ class BackgroundJobCoordinator:
                 json.dumps(snapshot.payload(), ensure_ascii=True, separators=(",", ":")),
             )
         except Exception:
-            LOG.warning("Unable to persist background job state key=%s", snapshot.key, exc_info=True)
+            LOG.warning("Unable to persist background job state key=%s", snapshot.key)

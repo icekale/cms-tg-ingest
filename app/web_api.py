@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
+from .background_jobs import redact_background_text
 from .models import TaskSnapshot
 from .quality_rules import QUALITY_RULE_VERSION, QualityRuleEngine, quality_attempt_count
 from .task_diagnostics import explain_task_slowness, format_stage_observability
@@ -185,11 +186,21 @@ def serialize_health(store: TaskStore, *, enabled: bool = True, now: float | Non
     }
 
 
-def serialize_background_jobs(background_jobs: Any | None, *, prefix: str = "") -> list[dict[str, Any]]:
+def serialize_background_job(background_jobs: Any | None, *, prefix: str = "") -> dict[str, Any] | None:
     if background_jobs is None:
-        return []
+        return None
     snapshots = getattr(background_jobs, "list_snapshots", lambda: ())()
-    return [snapshot.payload() for snapshot in snapshots if str(getattr(snapshot, "key", "")).startswith(prefix)]
+    matches = [snapshot for snapshot in snapshots if str(getattr(snapshot, "key", "")).startswith(prefix)]
+    if not matches:
+        return None
+    snapshot = max(matches, key=lambda item: float(getattr(item, "finished_at", 0) or getattr(item, "started_at", 0) or getattr(item, "queued_at", 0)))
+    return {
+        "description": str(getattr(snapshot, "description", "")),
+        "state": str(getattr(snapshot, "status", "")),
+        "started_at": getattr(snapshot, "started_at", None),
+        "finished_at": getattr(snapshot, "finished_at", None),
+        "error": redact_background_text(getattr(snapshot, "error", "")),
+    }
 
 
 def serialize_hdhive(
@@ -198,7 +209,7 @@ def serialize_hdhive(
     background_jobs: Any | None = None,
 ) -> dict[str, Any]:
     if service is None:
-        return {"enabled": False, "subscriptions": [], "account": None, "schedule": {}, "background_jobs": []}
+        return {"enabled": False, "subscriptions": [], "account": None, "schedule": {}, "background_job": None}
     subscriptions = []
     for subscription in service.list():
         item_rows = []
@@ -247,7 +258,7 @@ def serialize_hdhive(
         "subscriptions": subscriptions,
         "account": account,
         "schedule": schedule,
-        "background_jobs": serialize_background_jobs(background_jobs, prefix="hdhive:"),
+        "background_job": serialize_background_job(background_jobs, prefix="hdhive:"),
     }
 
 
@@ -406,5 +417,5 @@ def api_quality(
     if quality_automation is not None:
         snapshot = quality_automation.status_snapshot()
         payload["automation"] = snapshot if isinstance(snapshot, dict) else {}
-    payload["background_job"] = next(iter(serialize_background_jobs(background_jobs, prefix="quality:run")), None)
+    payload["background_job"] = serialize_background_job(background_jobs, prefix="quality:run")
     return payload

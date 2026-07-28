@@ -1,11 +1,97 @@
+import io
+import json
+import logging
 import threading
 import time
 import unittest
 
-from app.background_jobs import BackgroundJobCoordinator
+from app.background_jobs import BackgroundJobCoordinator, LOG
 
 
 class BackgroundJobCoordinatorTests(unittest.TestCase):
+    def test_failure_redacts_bearer_and_api_key_from_state_and_logs(self):
+        class StateStore:
+            def __init__(self):
+                self.values = {}
+
+            def set_runtime_state(self, key, value):
+                self.values[key] = value
+
+        state_store = StateStore()
+        coordinator = BackgroundJobCoordinator(state_store=state_store)
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        LOG.addHandler(handler)
+        try:
+            coordinator.submit(
+                "quality:run",
+                lambda: (_ for _ in ()).throw(
+                    RuntimeError("Authorization: Bearer bearer-secret X-API-Key: api-key-secret token=legacy-secret")
+                ),
+            )
+            coordinator.shutdown(wait=True)
+
+            values = [coordinator.snapshot("quality:run").error, state_store.values["background_job:quality:run"], stream.getvalue()]
+            self.assertTrue(all("bearer-secret" not in value for value in values))
+            self.assertTrue(all("api-key-secret" not in value for value in values))
+            self.assertTrue(all("legacy-secret" not in value for value in values))
+            self.assertIn("[redacted]", json.loads(state_store.values["background_job:quality:run"])["error"])
+        finally:
+            LOG.removeHandler(handler)
+            coordinator.shutdown(wait=True)
+
+    def test_state_persistence_exception_does_not_log_its_credential(self):
+        class FailingStateStore:
+            def set_runtime_state(self, _key, _value):
+                raise RuntimeError("Authorization: Bearer state-store-secret")
+
+        coordinator = BackgroundJobCoordinator(state_store=FailingStateStore())
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        LOG.addHandler(handler)
+        try:
+            self.assertEqual(coordinator.submit("quality:run", lambda: None).outcome, "accepted")
+            coordinator.shutdown(wait=True)
+            self.assertNotIn("state-store-secret", stream.getvalue())
+        finally:
+            LOG.removeHandler(handler)
+            coordinator.shutdown(wait=True)
+
+    def test_completion_callback_keeps_key_and_capacity_reserved_until_it_returns(self):
+        coordinator = BackgroundJobCoordinator(max_in_flight=1)
+        callback_started = threading.Event()
+        release_callback = threading.Event()
+
+        def on_complete(_snapshot):
+            callback_started.set()
+            release_callback.wait(1)
+
+        try:
+            self.assertEqual(coordinator.submit("quality:run", lambda: None, on_complete=on_complete).outcome, "accepted")
+            self.assertTrue(callback_started.wait(1))
+            self.assertEqual(coordinator.submit("quality:run", lambda: None).outcome, "already_running")
+            self.assertEqual(coordinator.submit("hdhive:run", lambda: None).outcome, "capacity_rejected")
+        finally:
+            release_callback.set()
+            coordinator.shutdown(wait=True)
+
+    def test_completion_callback_error_does_not_leak_reservation_or_kill_worker(self):
+        coordinator = BackgroundJobCoordinator(max_in_flight=1)
+        callback_finished = threading.Event()
+        second_job_finished = threading.Event()
+
+        def broken_callback(_snapshot):
+            callback_finished.set()
+            raise RuntimeError("callback failure")
+
+        try:
+            coordinator.submit("quality:run", lambda: None, on_complete=broken_callback)
+            self.assertTrue(callback_finished.wait(1))
+            self.assertEqual(coordinator.submit("quality:run", second_job_finished.set).outcome, "accepted")
+            self.assertTrue(second_job_finished.wait(1))
+        finally:
+            coordinator.shutdown(wait=True)
+
     def test_duplicate_submissions_execute_once(self):
         coordinator = BackgroundJobCoordinator()
         started = threading.Event()
