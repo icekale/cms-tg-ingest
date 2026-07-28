@@ -268,7 +268,10 @@ class TaskRunner:
                 self._safe_runtime_state("task_runner", "error")
                 return
             self._record_heartbeat()
-            self._renew_active_claim()
+            try:
+                self._renew_active_claim()
+            except Exception:
+                LOG.warning("Failed to renew active task claim; will retry", exc_info=True)
             self._stop.wait(_HEARTBEAT_INTERVAL_SECONDS)
 
     def _renew_active_claim(self) -> None:
@@ -456,10 +459,23 @@ class TaskRunner:
             task.id,
             lock_metadata,
             conflicts_with_holder,
+            expected_stage=task.current_stage,
+            expected_claimed_by=self.worker_id,
+            expected_claimed_at=task.claimed_at,
+            expected_claim_token=task.claim_token,
+            expected_updated_at=task.updated_at,
             wait_message=wait_message,
             next_run_at=self.now() + self.interval_seconds,
             now=self.now(),
         )
+        if result.stale:
+            LOG.warning(
+                "Discarded stale task lock preparation task_id=%s stage=%s worker_id=%s",
+                task.id,
+                task.current_stage.value,
+                self.worker_id,
+            )
+            return None
         if result.holder:
             return None
         return result.task

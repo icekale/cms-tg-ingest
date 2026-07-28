@@ -206,6 +206,7 @@ class TaskHealthAggregate:
 class TaskLockClaimResult:
     task: TaskSnapshot | None = None
     holder: TaskSnapshot | None = None
+    stale: bool = False
 
 
 class TaskStore:
@@ -1073,6 +1074,11 @@ class TaskStore:
         lock_metadata: dict[str, Any],
         conflicts_with_holder: Callable[[TaskSnapshot], bool],
         *,
+        expected_stage: TaskStage,
+        expected_claimed_by: str,
+        expected_claimed_at: float,
+        expected_claim_token: str,
+        expected_updated_at: float,
         wait_message: str,
         next_run_at: float,
         now: float | None = None,
@@ -1107,6 +1113,15 @@ class TaskStore:
             current = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if current is None:
                 raise KeyError(f"task not found: {task_id}")
+            if not self._claim_matches(
+                current,
+                expected_stage,
+                expected_claimed_by,
+                expected_claimed_at,
+                expected_claim_token,
+                expected_updated_at,
+            ):
+                return TaskLockClaimResult(stale=True)
             metadata_patch = dict(lock_metadata)
             if holder is not None:
                 metadata_patch.update({"_lock_waiting": True, "_lock_owner_task_id": holder.id})
@@ -1998,12 +2013,11 @@ class TaskStore:
                 """
                 UPDATE tasks
                 SET claim_heartbeat_at = ?
-                WHERE id = ? AND status = ? AND claimed_by = ? AND claim_token = ?
+                WHERE id = ? AND claimed_by = ? AND claim_token = ?
                 """,
                 (
                     current_time,
                     int(task_id),
-                    TaskStatus.RUNNING.value,
                     str(expected_claimed_by),
                     str(expected_claim_token),
                 ),

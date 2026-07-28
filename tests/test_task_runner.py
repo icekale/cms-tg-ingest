@@ -231,6 +231,53 @@ class TaskRunnerTests(unittest.TestCase):
                     workflow.release.set()
                     runner.stop(join_timeout=1)
 
+    def test_heartbeat_retries_claim_renewal_after_transient_store_error(self):
+        class TransientRenewStore:
+            def __init__(self, delegate):
+                self.delegate = delegate
+                self.renew_calls = 0
+                self.retried = threading.Event()
+
+            def __getattr__(self, name):
+                return getattr(self.delegate, name)
+
+            def renew_claim(self, *args, **kwargs):
+                self.renew_calls += 1
+                if self.renew_calls == 1:
+                    raise sqlite3.OperationalError("database is temporarily locked")
+                self.retried.set()
+                return self.delegate.renew_claim(*args, **kwargs)
+
+        class BlockingWorkflow:
+            def __init__(self):
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def run_stage(self, _task):
+                self.entered.set()
+                if not self.release.wait(timeout=2):
+                    raise AssertionError("workflow was not released")
+                return StageResult.complete("done")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            real_store = TaskStore(Path(tmp) / "tasks.db")
+            task = real_store.upsert_task("retry-heartbeat", "", "https://115cdn.com/s/retry-heartbeat")
+            real_store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            store = TransientRenewStore(real_store)
+            workflow = BlockingWorkflow()
+            runner = TaskRunner(store, workflow, interval_seconds=60)
+
+            with patch("app.task_runner._HEARTBEAT_INTERVAL_SECONDS", 0.01):
+                runner.start()
+                try:
+                    self.assertTrue(workflow.entered.wait(timeout=1))
+                    self.assertTrue(store.retried.wait(timeout=1))
+                    self.assertGreaterEqual(store.renew_calls, 2)
+                finally:
+                    runner.stop(join_timeout=0)
+                    workflow.release.set()
+                    runner.stop(join_timeout=1)
+
     def test_start_records_task_runner_heartbeat(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
@@ -602,6 +649,34 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.metadata["_lock_key"], "115:global")
             self.assertTrue(updated.metadata["_lock_waiting"])
             self.assertEqual(updated.metadata["_lock_owner_task_id"], holder.id)
+
+    def test_run_once_does_not_execute_after_claim_changes_during_lock_prepare(self):
+        class ReclaimBeforeLockStore(TaskStore):
+            def __init__(self, db_path):
+                super().__init__(db_path)
+                self.reclaimed = None
+
+            def claim_task_lock(self, task_id, *args, **kwargs):
+                if self.reclaimed is None:
+                    current = self.find_task(task_id)
+                    self.clear_worker_claims(current.claimed_by, now=1.0)
+                    self.reclaimed = self.claim_next_runnable("worker-2", now=1.0)
+                return super().claim_task_lock(task_id, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ReclaimBeforeLockStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("lock-race", "", "https://115cdn.com/s/lock-race")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            workflow = FakeWorkflow([StageResult.complete("must not execute")])
+            runner = TaskRunner(store, workflow, worker_id="worker-1", now=lambda: 1.0)
+
+            self.assertTrue(runner.run_once())
+            current = store.find_task(task.id)
+
+            self.assertEqual(workflow.calls, [])
+            self.assertEqual(current.claimed_by, "worker-2")
+            self.assertEqual(current.claim_token, store.reclaimed.claim_token)
+            self.assertNotIn("_lock_key", current.metadata)
 
     def test_second_runner_does_not_clear_live_claim(self):
         class BlockingWorkflow:

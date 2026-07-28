@@ -1290,6 +1290,90 @@ class TaskStoreTests(unittest.TestCase):
             self.assertIsNotNone(active)
             self.assertEqual(active.id, holder.id)
 
+    def test_claim_task_lock_rejects_stale_owner_before_metadata_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("stale-lock", "", "https://115cdn.com/s/stale-lock")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            stale = store.claim_next_runnable("worker-1", now=100.0)
+            replacement = store.compare_and_set_transition(
+                task.id,
+                stale.current_stage,
+                {TaskStatus.RUNNING},
+                require_unclaimed=False,
+                target_stage=stale.current_stage,
+                target_status=TaskStatus.RUNNING,
+                target_event_message="replacement claim",
+                claim_by="worker-2",
+            )
+            events_before = store.list_events(task.id)
+
+            result = store.claim_task_lock(
+                task.id,
+                {"_lock_key": "115:global"},
+                lambda _holder: False,
+                expected_stage=stale.current_stage,
+                expected_claimed_by=stale.claimed_by,
+                expected_claimed_at=stale.claimed_at,
+                expected_claim_token=stale.claim_token,
+                expected_updated_at=stale.updated_at,
+                wait_message="waiting",
+                next_run_at=200.0,
+                now=101.0,
+            )
+            current = store.find_task(task.id)
+
+            self.assertTrue(result.stale)
+            self.assertIsNone(result.task)
+            self.assertEqual(current.claimed_by, replacement.claimed_by)
+            self.assertEqual(current.claim_token, replacement.claim_token)
+            self.assertNotIn("_lock_key", current.metadata)
+            self.assertEqual(store.list_events(task.id), events_before)
+
+    def test_claim_task_lock_rejects_stale_owner_before_wait_clear(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            holder = store.upsert_task("holder", "", "https://115cdn.com/s/holder")
+            store.patch_metadata(holder.id, {"_lock_key": "115:global"})
+            store.enqueue_task(holder.id, TaskStage.ORGANIZING, next_run_at=0)
+            store.claim_next_runnable("holder-worker", now=100.0)
+            task = store.upsert_task("stale-wait", "", "https://115cdn.com/s/stale-wait")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            stale = store.claim_next_runnable("worker-1", now=100.0)
+            replacement = store.compare_and_set_transition(
+                task.id,
+                stale.current_stage,
+                {TaskStatus.RUNNING},
+                require_unclaimed=False,
+                target_stage=stale.current_stage,
+                target_status=TaskStatus.RUNNING,
+                target_event_message="replacement claim",
+                claim_by="worker-2",
+            )
+            events_before = store.list_events(task.id)
+
+            result = store.claim_task_lock(
+                task.id,
+                {"_lock_key": "115:global"},
+                lambda candidate: candidate.id == holder.id,
+                expected_stage=stale.current_stage,
+                expected_claimed_by=stale.claimed_by,
+                expected_claimed_at=stale.claimed_at,
+                expected_claim_token=stale.claim_token,
+                expected_updated_at=stale.updated_at,
+                wait_message="waiting",
+                next_run_at=200.0,
+                now=101.0,
+            )
+            current = store.find_task(task.id)
+
+            self.assertTrue(result.stale)
+            self.assertIsNone(result.holder)
+            self.assertEqual(current.claimed_by, replacement.claimed_by)
+            self.assertEqual(current.claim_token, replacement.claim_token)
+            self.assertNotIn("_lock_waiting", current.metadata)
+            self.assertEqual(store.list_events(task.id), events_before)
+
     def test_record_event_preserves_claim_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

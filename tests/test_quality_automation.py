@@ -1152,6 +1152,32 @@ class CleanupMetadataUpdatingAdapter(FakeQualityRepairAdapter):
         return True
 
 
+class RenewingCleanupAdapter(FakeQualityRepairAdapter):
+    def __init__(self, store):
+        super().__init__()
+        self.store = store
+        self.renewed = False
+        self.wrong_token_renewed = False
+        self.renewed_claim = None
+
+    def cleanup(self, task, run_id):
+        self.calls.append(("cleanup", task.id, run_id))
+        self.wrong_token_renewed = self.store.renew_claim(
+            task.id,
+            task.claimed_by,
+            "wrong-token",
+            now=task.claimed_at + 1,
+        )
+        self.renewed = self.store.renew_claim(
+            task.id,
+            task.claimed_by,
+            task.claim_token,
+            now=task.claimed_at + 2,
+        )
+        self.renewed_claim = self.store.find_task(task.id)
+        return self.renewed
+
+
 class QualityRepairExecutionTests(unittest.TestCase):
     def make_service(self, tmp, adapter=None):
         library = Path(tmp) / "library"
@@ -1515,6 +1541,36 @@ class QualityRepairExecutionTests(unittest.TestCase):
             self.assertTrue(adapter.assert_taken_over)
             self.assertEqual(final.claimed_by, "worker:cleanup-takeover")
             self.assertFalse(final.metadata.get("quality_cleanup_completed", False))
+
+    def test_quality_cleanup_terminal_claim_can_be_renewed_by_token_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            adapter = RenewingCleanupAdapter(service.store)
+            service.repair_adapter = adapter
+            destination = library / "cleanup-renewal"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/s/own_1212_movie.mkv", encoding="utf-8")
+            task = self.add_task(
+                service.store,
+                "cleanup-renewal",
+                destination,
+                own_share_available=True,
+                own_share_receive_code="1212",
+                emby_status="confirmed",
+                emby_match_count=1,
+                share_review_status="passed",
+            )
+            service.store.patch_metadata(task.id, {"quality_success_event": True})
+            service.store.record_event(task.id, TaskStage.EMBY_CONFIRMED, TaskStatus.SUCCEEDED, "Emby confirmed")
+            current = service.store.find_task(task.id)
+
+            result = service.cleanup_if_safe(current, "cleanup-renewal")
+
+            self.assertEqual(result.status, "cleaned")
+            self.assertFalse(adapter.wrong_token_renewed)
+            self.assertTrue(adapter.renewed)
+            self.assertEqual(adapter.renewed_claim.status, TaskStatus.SUCCEEDED)
+            self.assertEqual(adapter.renewed_claim.claim_heartbeat_at, adapter.renewed_claim.claimed_at + 2)
 
     def test_cleanup_completion_rejects_metadata_update_during_adapter_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
