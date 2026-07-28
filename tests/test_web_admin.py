@@ -9,7 +9,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, redirect_stderr
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 from unittest.mock import patch
 
 import bridge
@@ -133,8 +133,21 @@ class WebAdminTests(unittest.TestCase):
             store = TaskStore(Path(tmp) / "tasks.db")
             server = start_web_server(store, "127.0.0.1", 0)
             stderr = io.StringIO()
+            reset_request_finished = Event()
+            original_shutdown_request = server.shutdown_request
+
+            def shutdown_request(request):
+                try:
+                    return original_shutdown_request(request)
+                finally:
+                    reset_request_finished.set()
+
             try:
-                with redirect_stderr(stderr), patch.object(server, "handle_error", wraps=server.handle_error) as handle_error:
+                with (
+                    redirect_stderr(stderr),
+                    patch.object(server, "handle_error", wraps=server.handle_error) as handle_error,
+                    patch.object(server, "shutdown_request", side_effect=shutdown_request),
+                ):
                     client = socket.create_connection(server.server_address, timeout=1)
                     try:
                         client.sendall(
@@ -151,11 +164,12 @@ class WebAdminTests(unittest.TestCase):
                         client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
                     finally:
                         client.close()
-                    time.sleep(0.1)
+
+                    self.assertTrue(reset_request_finished.wait(1))
+                    self.assertFalse(handle_error.called)
+                    self.assertEqual(stderr.getvalue(), "")
                     response = post_empty_body(server)
 
-                self.assertFalse(handle_error.called)
-                self.assertEqual(stderr.getvalue(), "")
                 self.assertTrue(response.startswith(b"HTTP/1.0 303"))
             finally:
                 bridge.stop_web_server(server)
