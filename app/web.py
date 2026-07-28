@@ -49,6 +49,24 @@ from .web_api import (
 )
 
 
+MAX_REQUEST_BODY_BYTES = 64 * 1024
+
+
+class RequestBodyTooLarge(ValueError):
+    pass
+
+
+def parse_content_length(value: str | None, limit: int = MAX_REQUEST_BODY_BYTES) -> int:
+    if value in (None, ""):
+        return 0
+    if not value.isascii() or not value.isdecimal():
+        raise ValueError("invalid content length")
+    length = int(value, 10)
+    if length > limit:
+        raise RequestBodyTooLarge("content length exceeds request body limit")
+    return length
+
+
 _NAV_ITEMS = (
     ("overview", "/", "运行概览"),
     ("quality", "/quality", "质量巡检"),
@@ -1364,6 +1382,8 @@ class WebApp:
         headers: dict[str, str],
         body: bytes,
     ) -> tuple[int, dict[str, str], bytes]:
+        if len(body) > MAX_REQUEST_BODY_BYTES:
+            return 413, {"Content-Type": "text/plain; charset=utf-8"}, b"Payload Too Large"
         authorization_source = self._authorization_source(path, headers)
         if not authorization_source:
             return 403, {"Content-Type": "text/plain; charset=utf-8"}, b"Forbidden"
@@ -1871,8 +1891,22 @@ def start_web_server(
             self._serve()
 
         def do_POST(self):
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = parse_content_length(self.headers.get("Content-Length"))
+            except RequestBodyTooLarge:
+                self._request_body_error(413, b"Payload Too Large")
+                return
+            except ValueError:
+                self._request_body_error(400, b"Invalid Content-Length")
+                return
             self._serve(self.rfile.read(length) if length else b"")
+
+        def _request_body_error(self, status: int, payload: bytes) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
 
         def _serve(self, body: bytes = b""):
             status, headers, payload = app.handle_request(self.command, self.path, dict(self.headers), body)

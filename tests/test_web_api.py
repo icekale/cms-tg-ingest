@@ -20,6 +20,16 @@ from app.web_api import _safe_error, _safe_url, api_quality, serialize_hdhive, s
 
 
 class WebApiTests(unittest.TestCase):
+    def test_body_limit_rejects_oversized_direct_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = WebApp(TaskStore(Path(tmp) / "tasks.db"), web_token="")
+
+            accepted_status, _headers, _body = app.handle_request("POST", "/history/clear", {}, b"x" * 65536)
+            rejected_status, _headers, _body = app.handle_request("POST", "/history/clear", {}, b"x" * 65537)
+
+        self.assertEqual(accepted_status, 303)
+        self.assertEqual(rejected_status, 413)
+
     def test_background_job_status_api_exposes_only_latest_safe_fields(self):
         snapshots = (
             BackgroundJobSnapshot("quality:run", "old quality", "succeeded", 1, 2, 3, ""),

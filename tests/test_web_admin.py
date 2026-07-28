@@ -1,4 +1,5 @@
 import re
+import socket
 import sqlite3
 import tempfile
 import time
@@ -27,6 +28,7 @@ from app.web import (
     render_quality_page,
     render_task_detail,
     render_task_list,
+    start_web_server,
 )
 
 
@@ -44,6 +46,36 @@ class _ManualActionRuleEngine:
 
 
 class WebAdminTests(unittest.TestCase):
+    def test_content_length_handler_boundary_returns_deterministic_responses(self):
+        def post(server, content_length, body=b""):
+            headers = [b"POST /history/clear HTTP/1.0", b"Host: localhost"]
+            if content_length is not None:
+                headers.append(f"Content-Length: {content_length}".encode("ascii"))
+            request = b"\r\n".join([*headers, b"", body])
+            with socket.create_connection(server.server_address, timeout=1) as client:
+                client.settimeout(1)
+                client.sendall(request)
+                client.shutdown(socket.SHUT_WR)
+                response = client.recv(4096)
+            return int(response.split(b" ", 2)[1]) if response else 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            server = start_web_server(store, "127.0.0.1", 0)
+            try:
+                for content_length, body, expected_status in (
+                    (None, b"", 303),
+                    ("0", b"", 303),
+                    ("-1", b"", 400),
+                    ("invalid", b"", 400),
+                    ("65536", b"x" * 65536, 303),
+                    ("65537", b"x" * 65537, 413),
+                ):
+                    with self.subTest(content_length=content_length):
+                        self.assertEqual(post(server, content_length, body), expected_status)
+            finally:
+                bridge.stop_web_server(server)
+
     def test_quality_page_reprocess_action_is_registered_and_orphan_is_not_linked(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
