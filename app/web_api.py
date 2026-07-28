@@ -194,6 +194,7 @@ def serialize_hdhive(service: Any | None, scheduler: Any | None = None) -> dict[
         for item in service.store.list_items(subscription.id):
             if is_dataclass(item):
                 item_row = asdict(item)
+                item_row.pop("unlocked_url", None)
                 item_row["last_error"] = _safe_error(item_row.get("last_error"))
                 item_rows.append(item_row)
         row = asdict(subscription) if is_dataclass(subscription) else {"id": subscription.id}

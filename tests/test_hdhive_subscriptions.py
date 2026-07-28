@@ -1,3 +1,4 @@
+import logging
 import unittest
 import tempfile
 import threading
@@ -243,6 +244,139 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(current.last_error, "解锁结果未知，禁止自动重复扣分")
         self.assertEqual(proxy.unlock_calls, [])
         self.assertEqual(intake_calls, [])
+
+    def test_unlock_dispatch_exception_requires_confirmation_without_replay(self):
+        directory, store, subscription, proxy, service, intake_calls = self.make_service(
+            [resource("ambiguous", points=8)]
+        )
+
+        def ambiguous_unlock(slugs):
+            proxy.unlock_calls.append(list(slugs))
+            raise RuntimeError("timeout after unlock dispatch")
+
+        proxy.unlock = ambiguous_unlock
+        try:
+            first = service.check(subscription.id)
+            second = service.check(subscription.id)
+            item = store.list_items(subscription.id)[0]
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(first.pending_confirmation, 1)
+        self.assertEqual(second.pending_confirmation, 1)
+        self.assertEqual(item.status, "pending_confirmation")
+        self.assertEqual(item.skip_reason, "unlock_outcome_unknown")
+        self.assertEqual(proxy.unlock_calls, [["ambiguous"]])
+        self.assertEqual(intake_calls, [])
+
+    def test_stale_unlocking_is_reconciled_before_filter_skip(self):
+        directory, store, subscription, proxy, service, intake_calls = self.make_service(
+            [resource("stale-filtered", episode_key="s01e01", points=8)]
+        )
+        try:
+            stored = store.upsert_item(subscription.id, "S01E01", "stale-filtered", "valid", 1080, 8)
+            store.mark_item_unlocking(stored.id)
+            with store._lock, store._connection() as connection:
+                connection.execute(
+                    "UPDATE hdhive_subscription_items SET unlock_requested_at = ?, updated_at = ? WHERE id = ?",
+                    (1.0, 1.0, stored.id),
+                )
+            store.update_episode_filter(subscription.id, "S02")
+
+            result = service.check(subscription.id)
+            item = store.get_item(stored.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.pending_confirmation, 1)
+        self.assertEqual(item.status, "pending_confirmation")
+        self.assertEqual(item.skip_reason, "unlock_outcome_unknown")
+        self.assertEqual(proxy.unlock_calls, [])
+        self.assertEqual(intake_calls, [])
+
+    def test_saved_unlock_is_enqueued_before_emby_skip(self):
+        full_url = "https://115cdn.com/s/saved-emby?password=abcd"
+        directory, store, subscription, proxy, service, intake_calls = self.make_service(
+            [resource("saved-emby", points=8)],
+            emby=FakeEmby({"S01E01"}),
+        )
+        try:
+            item = store.upsert_item(subscription.id, "S01E01", "saved-emby", "valid", 1080, 8)
+            store.mark_item_unlocked(item.id, full_url, 8, "actual", 1700000000)
+
+            result = service.check(subscription.id)
+            saved = store.get_item(item.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.enqueued, 1)
+        self.assertEqual(saved.status, "enqueued")
+        self.assertEqual(proxy.unlock_calls, [])
+        self.assertEqual(intake_calls, [([full_url], "464100862")])
+
+    def test_saved_unlock_wins_when_ranking_changes_after_intake_failure(self):
+        saved_url = "https://115cdn.com/s/saved-ranked?password=abcd"
+        better_url = "https://115cdn.com/s/better-ranked?password=efgh"
+        unlock_items = [HdhiveUnlockItem("saved-ranked", True, saved_url, "", "", False, points_spent=6)]
+        directory, store, subscription, proxy, service, _intake_calls = self.make_service(
+            [resource("saved-ranked", resolution="1080P", points=8)],
+            unlock_items,
+        )
+        intake_calls = []
+
+        def enqueue(urls, chat_id):
+            intake_calls.append((list(urls), str(chat_id)))
+            if len(intake_calls) == 1:
+                raise RuntimeError("injected intake failure")
+            return 42
+
+        service.enqueue_links = enqueue
+        try:
+            first = service.check(subscription.id)
+            proxy.resource_items = [resource("better-ranked", resolution="2160P", points=1)]
+            proxy.unlock_items = [
+                *unlock_items,
+                HdhiveUnlockItem("better-ranked", True, better_url, "", "", False, points_spent=1),
+            ]
+
+            second = service.check(subscription.id)
+            items = {item.resource_slug: item for item in store.list_items(subscription.id)}
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(first.failed, 1)
+        self.assertEqual(second.enqueued, 1)
+        self.assertEqual(proxy.unlock_calls, [["saved-ranked"]])
+        self.assertEqual(intake_calls[-1], ([saved_url], "464100862"))
+        self.assertEqual(items["saved-ranked"].status, "enqueued")
+        self.assertEqual(items["saved-ranked"].task_id, 42)
+        self.assertEqual(items["better-ranked"].status, "discovered")
+
+    def test_intake_error_redacts_persisted_url_from_repr_and_logs(self):
+        secret_url = "https://115cdn.com/s/url-secret-code?password=hidden"
+        unlock_items = [HdhiveUnlockItem("redacted-error", True, secret_url, "", "", False)]
+        directory, store, subscription, _proxy, service, _intake_calls = self.make_service(
+            [resource("redacted-error", points=8)],
+            unlock_items,
+        )
+
+        def reject(urls, _chat_id):
+            raise RuntimeError(f"intake rejected {urls[0]}")
+
+        service.enqueue_links = reject
+        try:
+            service.check(subscription.id)
+            saved = store.list_items(subscription.id)[0]
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(saved.status, "unlocked")
+        self.assertNotIn("url-secret-code", saved.last_error)
+        self.assertNotIn("hidden", saved.last_error)
+        self.assertNotIn("url-secret-code", repr(saved))
+        with self.assertLogs("hdhive-error-test", level=logging.INFO) as captured:
+            logging.getLogger("hdhive-error-test").info("saved item: %r", saved)
+        self.assertNotIn("url-secret-code", "\n".join(captured.output))
 
     def test_saved_unlock_resumes_intake_after_restart_without_second_charge(self):
         with tempfile.TemporaryDirectory() as directory:

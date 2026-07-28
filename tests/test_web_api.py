@@ -274,6 +274,14 @@ class WebApiTests(unittest.TestCase):
             subscription_store.record_check(subscription.id, "password=subscription-secret token=subscription-token")
             error_item = subscription_store.upsert_item(subscription.id, "S01E02", "resource-2", "valid", 1080, 8)
             subscription_store.mark_item_failed(error_item.id, "password=item-secret token=item-token")
+            unlocked_item = subscription_store.upsert_item(subscription.id, "S01E03", "resource-3", "valid", 1080, 8)
+            subscription_store.mark_item_unlocked(
+                unlocked_item.id,
+                "https://115cdn.com/s/api-secret?password=api-password",
+                8,
+                "actual",
+                1700000000,
+            )
 
             class Service:
                 store = subscription_store
@@ -303,6 +311,8 @@ class WebApiTests(unittest.TestCase):
         self.assertNotIn("source_url", row)
         self.assertNotIn("subscription-secret", json.dumps(row, ensure_ascii=False))
         self.assertNotIn("item-secret", json.dumps(row, ensure_ascii=False))
+        self.assertNotIn("api-secret", json.dumps(row, ensure_ascii=False))
+        self.assertTrue(all("unlocked_url" not in item for item in row["items"]))
         self.assertIn("password=***", row["last_error"])
 
     def test_hdhive_filter_api_rejects_invalid_filter_without_changing_value(self):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -8,6 +9,15 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from .clients.http import _redact_text
+
+
+_URL_IN_ERROR_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
+
+
+def _redact_persisted_error(value: str) -> str:
+    return _redact_text(_URL_IN_ERROR_RE.sub("<redacted-url>", str(value or "")))
 
 
 @dataclass(frozen=True)
@@ -618,7 +628,15 @@ class HdhiveSubscriptionStore:
         )
 
     def mark_item_intake_failed(self, item_id: int, error: str) -> HdhiveSubscriptionItem:
-        return self._update_unlocked_intake(item_id, last_error=str(error or ""))
+        return self._update_unlocked_intake(item_id, last_error=_redact_persisted_error(error))
+
+    def mark_item_unlock_unknown(self, item_id: int) -> HdhiveSubscriptionItem:
+        return self._update_item(
+            item_id,
+            status="pending_confirmation",
+            last_error="解锁结果未知，禁止自动重复扣分",
+            skip_reason="unlock_outcome_unknown",
+        )
 
     def _update_unlocked_intake(
         self,
@@ -666,6 +684,53 @@ class HdhiveSubscriptionStore:
         if row is None:
             raise KeyError(f"HDHive subscription item {item_id} does not exist")
         return HdhiveSubscriptionItem.from_row(row)
+
+    def reconcile_stale_unlocking(
+        self,
+        item_id: int,
+        *,
+        now: float | None = None,
+        stale_after_seconds: int = 3600,
+    ) -> HdhiveSubscriptionItem | None:
+        current_time = time.time() if now is None else float(now)
+        stale_before = current_time - max(1, int(stale_after_seconds))
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM hdhive_subscription_items WHERE id = ?",
+                (int(item_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            if str(row["status"] or "") != "unlocking":
+                return HdhiveSubscriptionItem.from_row(row)
+            if str(row["unlocked_url"] or ""):
+                connection.execute(
+                    """
+                    UPDATE hdhive_subscription_items
+                    SET status = 'unlocked', unlock_state = 'unlocked', updated_at = ?
+                    WHERE id = ? AND status = 'unlocking'
+                    """,
+                    (current_time, int(item_id)),
+                )
+            else:
+                requested_at = float(row["unlock_requested_at"] or row["updated_at"] or 0)
+                if requested_at > stale_before:
+                    return HdhiveSubscriptionItem.from_row(row)
+                connection.execute(
+                    """
+                    UPDATE hdhive_subscription_items
+                    SET status = 'pending_confirmation', unlock_state = 'unknown',
+                        last_error = ?, skip_reason = 'unlock_outcome_unknown', updated_at = ?
+                    WHERE id = ? AND status = 'unlocking'
+                    """,
+                    ("解锁结果未知，禁止自动重复扣分", current_time, int(item_id)),
+                )
+            updated = connection.execute(
+                "SELECT * FROM hdhive_subscription_items WHERE id = ?",
+                (int(item_id),),
+            ).fetchone()
+        return HdhiveSubscriptionItem.from_row(updated) if updated is not None else None
 
     def claim_item_unlocking(
         self,
