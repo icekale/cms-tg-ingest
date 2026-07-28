@@ -173,7 +173,7 @@ from app.telegram_ui import (
     task_action_keyboard,
     truncate_text,
 )
-from app.task_runner import StageResult, TaskRunner
+from app.task_runner import StageResult, TaskRunner, new_worker_id
 from app.task_store import TaskStore
 from app.web import start_web_server
 from app.web_api import quality_items
@@ -3782,6 +3782,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         task_runner = TaskRunner(
             task_store,
             task_workflow,
+            worker_id=new_worker_id(),
             interval_seconds=config.task_worker_interval_seconds,
             risk_cooldown_seconds=config.p115_risk_cooldown_seconds,
             p115_client=p115 if shared_workflow is not None else None,

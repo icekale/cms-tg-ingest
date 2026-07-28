@@ -742,6 +742,7 @@ class BridgeSelfShareTaskWorkflow:
                 int(task.id),
                 expected_claimed_by=str(task.claimed_by),
                 expected_claimed_at=float(task.claimed_at),
+                expected_claim_token=str(task.claim_token),
                 expected_updated_at=float(task.updated_at),
                 patch={"receive_target_cid": receive_cid},
             )

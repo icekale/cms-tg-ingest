@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import logging
+import os
+import socket
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Protocol
@@ -55,8 +58,12 @@ _QUALITY_REPAIR_WAIT_STAGES = {
     TaskStage.EMBY_CONFIRMED,
 }
 _DEFER_METADATA_KEYS = ("_defer_stage", "_defer_message", "_defer_count")
-_HEARTBEAT_INTERVAL_SECONDS = 30.0
+_HEARTBEAT_INTERVAL_SECONDS = 15.0
 _P115_RISK_COOLDOWN_STATE_KEY = "115:risk_cooldown_until"
+
+
+def new_worker_id() -> str:
+    return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
 
 
 def _without_defer_metadata(metadata: dict[str, object]) -> dict[str, object]:
@@ -202,7 +209,7 @@ class TaskRunner:
         store: TaskStore,
         workflow: TaskWorkflow,
         *,
-        worker_id: str = "task-runner",
+        worker_id: str | None = None,
         interval_seconds: float = 5,
         risk_cooldown_seconds: float = 900,
         p115_client: object | None = None,
@@ -210,7 +217,7 @@ class TaskRunner:
     ):
         self.store = store
         self.workflow = workflow
-        self.worker_id = worker_id
+        self.worker_id = str(worker_id or new_worker_id())
         self.interval_seconds = max(0.1, float(interval_seconds))
         self.risk_cooldown_seconds = max(1.0, float(risk_cooldown_seconds))
         self.p115_client = p115_client
@@ -218,7 +225,9 @@ class TaskRunner:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._heartbeat_thread: threading.Thread | None = None
-        self._startup_claims_cleared = False
+        self._active_claim_lock = threading.Lock()
+        self._active_claim: TaskSnapshot | None = None
+        self._active_claim_renewal_failed = False
         self._p115_risk_cooldown_until = self._load_p115_risk_cooldown()
         self._last_heartbeat_at = 0.0
 
@@ -259,10 +268,47 @@ class TaskRunner:
                 self._safe_runtime_state("task_runner", "error")
                 return
             self._record_heartbeat()
+            self._renew_active_claim()
             self._stop.wait(_HEARTBEAT_INTERVAL_SECONDS)
 
+    def _renew_active_claim(self) -> None:
+        with self._active_claim_lock:
+            task = self._active_claim
+        if task is None:
+            return
+        renewed = self.store.renew_claim(
+            task.id,
+            self.worker_id,
+            task.claim_token,
+            now=self.now(),
+        )
+        if renewed:
+            return
+        with self._active_claim_lock:
+            if self._active_claim is None or self._active_claim.claim_token != task.claim_token:
+                return
+            if self._active_claim_renewal_failed:
+                return
+            self._active_claim_renewal_failed = True
+        LOG.warning(
+            "Failed to renew active task claim task_id=%s stage=%s worker_id=%s",
+            task.id,
+            task.current_stage.value,
+            self.worker_id,
+        )
+
+    def _set_active_claim(self, task: TaskSnapshot) -> None:
+        with self._active_claim_lock:
+            self._active_claim = task
+            self._active_claim_renewal_failed = False
+
+    def _clear_active_claim(self, task: TaskSnapshot) -> None:
+        with self._active_claim_lock:
+            if self._active_claim is not None and self._active_claim.claim_token == task.claim_token:
+                self._active_claim = None
+                self._active_claim_renewal_failed = False
+
     def run_once(self) -> bool:
-        self._clear_startup_claims_once()
         task = self.store.claim_next_runnable(self.worker_id, now=self.now())
         if task is None:
             return False
@@ -272,6 +318,7 @@ class TaskRunner:
         if task is None:
             return True
         p115_before = _p115_request_count(self.p115_client)
+        self._set_active_claim(task)
         try:
             result = self.workflow.run_stage(task)
         except P115RiskControlError as exc:
@@ -334,6 +381,8 @@ class TaskRunner:
                 clear_claim=True,
             )
             return True
+        finally:
+            self._clear_active_claim(task)
         self._apply_result(task, result, p115_before=p115_before, p115_after=_p115_request_count(self.p115_client))
         return True
 
@@ -378,6 +427,7 @@ class TaskRunner:
             expected_status=TaskStatus.RUNNING,
             expected_claimed_by=self.worker_id,
             expected_claimed_at=task.claimed_at,
+            expected_claim_token=task.claim_token,
             expected_updated_at=task.updated_at,
             **kwargs,
         )
@@ -389,14 +439,6 @@ class TaskRunner:
                 self.worker_id,
             )
         return recorded
-
-    def _clear_startup_claims_once(self) -> None:
-        if self._startup_claims_cleared:
-            return
-        self._startup_claims_cleared = True
-        released = self.store.clear_worker_claims(self.worker_id, now=self.now())
-        if released:
-            LOG.warning("Released %s stale task claims for worker_id=%s", released, self.worker_id)
 
     def _prepare_lock(self, task: TaskSnapshot) -> TaskSnapshot | None:
         lock_metadata = _lock_metadata_for_task(task)
@@ -455,6 +497,7 @@ class TaskRunner:
                 expected_stage=task.current_stage,
                 expected_claimed_by=self.worker_id,
                 expected_claimed_at=task.claimed_at,
+                expected_claim_token=task.claim_token,
                 expected_updated_at=task.updated_at,
                 success_message=result.message,
                 success_metadata=_without_defer_metadata(

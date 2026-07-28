@@ -369,7 +369,14 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["receive_cid_persist_status"], "stale_claim")
             self.assertEqual(self.p115.received, [("abc", "1234", "pending-cid")])
             self.assertIsNone(self.submissions.find_by_key(bridge.ShareKey("abc", "1234")))
-            persist.assert_called_once()
+            persist.assert_called_once_with(
+                task.id,
+                expected_claimed_by=task.claimed_by,
+                expected_claimed_at=task.claimed_at,
+                expected_claim_token=task.claim_token,
+                expected_updated_at=task.updated_at,
+                patch={"receive_target_cid": "pending-cid"},
+            )
 
     def test_received_stage_stops_when_115_receive_is_restricted(self):
         class RestrictedP115(FakeP115):
@@ -3393,6 +3400,7 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
             def __init__(self, _store, workflow, **kwargs):
                 captured["workflow"] = workflow
                 captured["p115_client"] = kwargs.get("p115_client")
+                captured["worker_id"] = kwargs.get("worker_id")
 
             def start(self):
                 captured["started"] = True
@@ -3430,6 +3438,10 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
         self.assertTrue(captured["started"])
         self.assertTrue(captured["stopped"])
         self.assertIsNone(captured["p115_client"])
+        worker_parts = captured["worker_id"].split(":")
+        self.assertGreaterEqual(len(worker_parts), 3)
+        self.assertEqual(worker_parts[-2], str(os.getpid()))
+        self.assertEqual(len(worker_parts[-1]), 12)
 
 
 if __name__ == "__main__":

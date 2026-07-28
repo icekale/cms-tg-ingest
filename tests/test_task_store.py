@@ -81,6 +81,7 @@ class TaskStoreTests(unittest.TestCase):
                 claimed.id,
                 expected_claimed_by="worker-a",
                 expected_claimed_at=claimed.claimed_at,
+                expected_claim_token=claimed.claim_token,
                 expected_updated_at=claimed.updated_at,
                 patch={"receive_target_cid": "111"},
             )
@@ -88,6 +89,7 @@ class TaskStoreTests(unittest.TestCase):
                 claimed.id,
                 expected_claimed_by="worker-a",
                 expected_claimed_at=claimed.claimed_at,
+                expected_claim_token=claimed.claim_token,
                 expected_updated_at=claimed.updated_at + 1,
                 patch={"receive_target_cid": "222"},
             )
@@ -229,6 +231,7 @@ class TaskStoreTests(unittest.TestCase):
                     TaskStatus.SUCCEEDED,
                     "stale completion",
                     expected_claimed_at=reserved.claimed_at,
+                    expected_claim_token=reserved.claim_token,
                     expected_updated_at=reserved.updated_at + 1,
                 )
             )
@@ -239,6 +242,7 @@ class TaskStoreTests(unittest.TestCase):
                     task.id,
                     "cleanup-run",
                     expected_claimed_at=reserved.claimed_at,
+                    expected_claim_token=reserved.claim_token,
                     expected_updated_at=reserved.updated_at + 1,
                 )
             )
@@ -247,6 +251,7 @@ class TaskStoreTests(unittest.TestCase):
                     task.id,
                     "cleanup-run",
                     expected_claimed_at=reserved.claimed_at,
+                    expected_claim_token=reserved.claim_token,
                     expected_updated_at=reserved.updated_at,
                 )
             )
@@ -756,6 +761,7 @@ class TaskStoreTests(unittest.TestCase):
                 expected_stage=claimed.current_stage,
                 expected_claimed_by="worker-a",
                 expected_claimed_at=claimed.claimed_at,
+                expected_claim_token=claimed.claim_token,
                 expected_updated_at=claimed.updated_at,
                 success_message="整理完成",
                 success_metadata={"organized": True},
@@ -785,6 +791,7 @@ class TaskStoreTests(unittest.TestCase):
                 expected_stage=claimed.current_stage,
                 expected_claimed_by="worker-a",
                 expected_claimed_at=claimed.claimed_at,
+                expected_claim_token=claimed.claim_token,
                 expected_updated_at=claimed.updated_at + 1,
                 success_message="整理完成",
                 success_metadata={"organized": True},
@@ -1185,6 +1192,104 @@ class TaskStoreTests(unittest.TestCase):
             self.assertIsNotNone(first_claim)
             self.assertIsNone(second_claim)
 
+    def test_claims_by_same_worker_at_same_timestamp_receive_different_tokens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("same-worker", "", "https://115cdn.com/s/same-worker")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+
+            first = store.claim_next_runnable("worker-1", now=100.0)
+            store.clear_worker_claims("worker-1", now=100.0)
+            second = store.claim_next_runnable("worker-1", now=100.0)
+
+            self.assertTrue(first.claim_token)
+            self.assertTrue(second.claim_token)
+            self.assertNotEqual(first.claim_token, second.claim_token)
+            self.assertEqual(first.claimed_at, second.claimed_at)
+            self.assertEqual(first.updated_at, second.updated_at)
+
+    def test_stale_claim_token_cannot_commit_after_same_worker_reclaims(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("stale-token", "", "https://115cdn.com/s/stale-token")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            first = store.claim_next_runnable("worker-1", now=100.0)
+            store.clear_worker_claims("worker-1", now=100.0)
+            second = store.claim_next_runnable("worker-1", now=100.0)
+            events_before = store.list_events(task.id)
+
+            stale = store.complete_claimed_stage(
+                task.id,
+                expected_stage=first.current_stage,
+                expected_claimed_by=first.claimed_by,
+                expected_claimed_at=first.claimed_at,
+                expected_claim_token=first.claim_token,
+                expected_updated_at=first.updated_at,
+                success_message="stale result",
+                success_metadata={},
+                next_stage=TaskStage.RECOGNIZING,
+                next_run_at=100.0,
+            )
+
+            self.assertIsNone(stale)
+            self.assertEqual(store.find_task(task.id).claim_token, second.claim_token)
+            self.assertEqual(store.list_events(task.id), events_before)
+
+    def test_renew_claim_only_changes_heartbeat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("renew", "", "https://115cdn.com/s/renew")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            claimed = store.claim_next_runnable("worker-1", now=100.0)
+
+            renewed = store.renew_claim(
+                claimed.id,
+                claimed.claimed_by,
+                claimed.claim_token,
+                now=150.0,
+            )
+            current = store.find_task(task.id)
+
+            self.assertTrue(renewed)
+            self.assertEqual(current.claim_heartbeat_at, 150.0)
+            self.assertEqual(current.claimed_at, claimed.claimed_at)
+            self.assertEqual(current.claim_token, claimed.claim_token)
+            self.assertEqual(current.updated_at, claimed.updated_at)
+
+    def test_claim_heartbeat_prevents_live_claim_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("heartbeat", "", "https://115cdn.com/s/heartbeat")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            claimed = store.claim_next_runnable("worker-1", now=100.0, stale_after_seconds=60)
+
+            self.assertTrue(store.renew_claim(task.id, "worker-1", claimed.claim_token, now=150.0))
+            self.assertIsNone(store.claim_next_runnable("worker-2", now=200.0, stale_after_seconds=60))
+
+            recovered = store.claim_next_runnable("worker-2", now=211.0, stale_after_seconds=60)
+            self.assertIsNotNone(recovered)
+            self.assertEqual(recovered.claimed_by, "worker-2")
+            self.assertNotEqual(recovered.claim_token, claimed.claim_token)
+
+    def test_active_lock_holder_liveness_uses_claim_heartbeat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            holder = store.upsert_task("lock-holder", "", "https://115cdn.com/s/lock-holder")
+            store.patch_metadata(holder.id, {"_lock_key": "115:global"})
+            store.enqueue_task(holder.id, TaskStage.ORGANIZING, next_run_at=0)
+            claimed = store.claim_next_runnable("worker-1", now=100.0)
+            self.assertTrue(store.renew_claim(holder.id, "worker-1", claimed.claim_token, now=150.0))
+
+            active = store.find_active_lock_holder(
+                "115:global",
+                exclude_task_id=999,
+                now=200.0,
+                stale_after_seconds=60,
+            )
+
+            self.assertIsNotNone(active)
+            self.assertEqual(active.id, holder.id)
+
     def test_record_event_preserves_claim_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
@@ -1330,9 +1435,78 @@ class TaskStoreTests(unittest.TestCase):
             task = store.upsert_task("abc", "", "https://115cdn.com/s/abc", chat_id="464100862")
             updated = store.record_event(task.id, TaskStage.RECEIVED, TaskStatus.RUNNING, "收到", submission_id=7)
 
-            self.assertTrue({"chat_id", "submission_id", "next_run_at", "claimed_by", "claimed_at", "metadata_json", "source_type", "source_key"} <= columns)
+            self.assertTrue({"chat_id", "submission_id", "next_run_at", "claimed_by", "claimed_at", "claim_token", "claim_heartbeat_at", "metadata_json", "source_type", "source_key"} <= columns)
             self.assertIsNone(legacy_claim)
             self.assertEqual(updated.chat_id, "464100862")
             self.assertEqual(updated.submission_id, 7)
             self.assertEqual(store.find_task_by_share_key("legacy", "").source_key, "share:legacy:")
             self.assertEqual(store.find_task_by_share_key("legacy", "").source_type, "share")
+
+    def test_active_legacy_claim_migration_backfills_renewable_lease(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "tasks.db"
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE tasks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        share_code TEXT NOT NULL,
+                        receive_code TEXT NOT NULL DEFAULT '',
+                        source_type TEXT NOT NULL DEFAULT 'share',
+                        source_key TEXT NOT NULL DEFAULT '',
+                        url TEXT NOT NULL,
+                        title TEXT NOT NULL DEFAULT '',
+                        tmdb_id TEXT NOT NULL DEFAULT '',
+                        category TEXT NOT NULL DEFAULT '',
+                        current_stage TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        error_type TEXT NOT NULL DEFAULT '',
+                        error_summary TEXT NOT NULL DEFAULT '',
+                        retry_count INTEGER NOT NULL DEFAULT 0,
+                        chat_id TEXT NOT NULL DEFAULT '',
+                        submission_id INTEGER,
+                        next_run_at REAL NOT NULL DEFAULT -1,
+                        claimed_by TEXT NOT NULL DEFAULT '',
+                        claimed_at REAL NOT NULL DEFAULT 0,
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        UNIQUE(share_code, receive_code)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO tasks (
+                        share_code, source_key, url, current_stage, status, next_run_at,
+                        claimed_by, claimed_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "legacy-active",
+                        "share:legacy-active:",
+                        "https://115cdn.com/s/legacy-active",
+                        TaskStage.ORGANIZING.value,
+                        TaskStatus.RUNNING.value,
+                        0.0,
+                        "legacy-worker",
+                        42.0,
+                        1.0,
+                        42.0,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            first_store = TaskStore(db_path)
+            migrated = first_store.find_task_by_share_key("legacy-active", "")
+            first_token = migrated.claim_token
+            second_store = TaskStore(db_path)
+            reopened = second_store.find_task_by_share_key("legacy-active", "")
+
+            self.assertEqual(migrated.claim_heartbeat_at, 42.0)
+            self.assertTrue(first_token)
+            self.assertEqual(reopened.claim_token, first_token)
+            self.assertEqual(reopened.claimed_by, "legacy-worker")

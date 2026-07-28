@@ -1,4 +1,6 @@
 import sqlite3
+import os
+import socket
 import threading
 import tempfile
 import time
@@ -85,6 +87,20 @@ class TimeAdvancingCountingWorkflow:
 
 
 class TaskRunnerTests(unittest.TestCase):
+    def test_default_worker_ids_are_unique_and_process_scoped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            first = TaskRunner(store, FakeWorkflow([]))
+            second = TaskRunner(store, FakeWorkflow([]))
+
+            prefix = f"{socket.gethostname()}:{os.getpid()}:"
+            self.assertTrue(first.worker_id.startswith(prefix))
+            self.assertTrue(second.worker_id.startswith(prefix))
+            self.assertEqual(len(first.worker_id.removeprefix(prefix)), 12)
+            self.assertEqual(len(second.worker_id.removeprefix(prefix)), 12)
+            self.assertNotEqual(first.worker_id, second.worker_id)
+
     def test_heartbeat_does_not_overwrite_concurrent_runner_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             real_store = TaskStore(Path(tmp) / "tasks.db")
@@ -172,6 +188,47 @@ class TaskRunnerTests(unittest.TestCase):
                         time.sleep(0.005)
                     self.assertGreater(refreshed["updated_at"], first_updated_at)
                 finally:
+                    runner.stop(join_timeout=1)
+
+    def test_heartbeat_renews_active_claim_without_changing_claim_version(self):
+        class BlockingWorkflow:
+            def __init__(self):
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def run_stage(self, _task):
+                self.entered.set()
+                if not self.release.wait(timeout=2):
+                    raise AssertionError("workflow was not released")
+                return StageResult.complete("done")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("active-heartbeat", "", "https://115cdn.com/s/active-heartbeat")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            workflow = BlockingWorkflow()
+            runner = TaskRunner(store, workflow, interval_seconds=60)
+
+            with patch("app.task_runner._HEARTBEAT_INTERVAL_SECONDS", 0.01):
+                runner.start()
+                try:
+                    self.assertTrue(workflow.entered.wait(timeout=1))
+                    claimed = store.find_task(task.id)
+                    deadline = time.time() + 1
+                    renewed = claimed
+                    while time.time() < deadline:
+                        renewed = store.find_task(task.id)
+                        if renewed.claim_heartbeat_at > claimed.claim_heartbeat_at:
+                            break
+                        time.sleep(0.005)
+
+                    self.assertGreater(renewed.claim_heartbeat_at, claimed.claim_heartbeat_at)
+                    self.assertEqual(renewed.claimed_at, claimed.claimed_at)
+                    self.assertEqual(renewed.claim_token, claimed.claim_token)
+                    self.assertEqual(renewed.updated_at, claimed.updated_at)
+                finally:
+                    runner.stop(join_timeout=0)
+                    workflow.release.set()
                     runner.stop(join_timeout=1)
 
     def test_start_records_task_runner_heartbeat(self):
@@ -546,23 +603,53 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertTrue(updated.metadata["_lock_waiting"])
             self.assertEqual(updated.metadata["_lock_owner_task_id"], holder.id)
 
-    def test_run_once_releases_previous_same_worker_claim_before_claiming(self):
+    def test_second_runner_does_not_clear_live_claim(self):
+        class BlockingWorkflow:
+            def __init__(self):
+                self.calls = 0
+                self.entered = threading.Event()
+                self.second_entered = threading.Event()
+                self.release = threading.Event()
+                self.lock = threading.Lock()
+
+            def run_stage(self, _task):
+                with self.lock:
+                    self.calls += 1
+                    call_number = self.calls
+                if call_number == 1:
+                    self.entered.set()
+                else:
+                    self.second_entered.set()
+                if not self.release.wait(timeout=2):
+                    raise AssertionError("workflow was not released")
+                return StageResult.complete("organized")
+
         with tempfile.TemporaryDirectory() as tmp:
-            store = TaskStore(Path(tmp) / "tasks.db")
-            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
-            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
-            claimed = store.claim_next_runnable("task-runner", now=1.0)
-            self.assertEqual(claimed.claimed_by, "task-runner")
-            workflow = FakeWorkflow([StageResult.defer("等待 CMS 整理完成", delay_seconds=15)])
-            runner = TaskRunner(store, workflow, worker_id="task-runner", now=lambda: 10.0)
+            db_path = Path(tmp) / "tasks.db"
+            first_store = TaskStore(db_path)
+            second_store = TaskStore(db_path)
+            task = first_store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            first_store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            workflow = BlockingWorkflow()
+            first_runner = TaskRunner(first_store, workflow, worker_id="shared-worker", now=lambda: 1.0)
+            second_runner = TaskRunner(second_store, workflow, worker_id="shared-worker", now=lambda: 1.0)
 
-            self.assertTrue(runner.run_once())
-            updated = store.find_task(task.id)
+            first_thread = threading.Thread(target=first_runner.run_once)
+            second_thread = threading.Thread(target=second_runner.run_once)
+            first_thread.start()
+            self.assertTrue(workflow.entered.wait(timeout=1))
+            second_thread.start()
+            workflow.second_entered.wait(timeout=0.25)
+            workflow.release.set()
+            first_thread.join(timeout=1)
+            second_thread.join(timeout=1)
 
-            self.assertEqual(workflow.calls, [(task.id, TaskStage.ORGANIZING)])
-            self.assertEqual(updated.claimed_by, "")
-            self.assertEqual(updated.status, TaskStatus.RUNNING)
-            self.assertEqual(updated.next_run_at, 25.0)
+            self.assertFalse(first_thread.is_alive())
+            self.assertFalse(second_thread.is_alive())
+            self.assertEqual(workflow.calls, 1)
+            updated = first_store.find_task(task.id)
+            self.assertEqual(updated.current_stage, TaskStage.RECOGNIZING)
+            self.assertEqual(updated.status, TaskStatus.PENDING)
 
     def test_run_once_discards_result_when_task_was_requeued_to_different_stage(self):
         class RequeueDuringWorkflow(FakeWorkflow):
