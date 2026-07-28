@@ -14,6 +14,7 @@ from typing import Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .task_store import TaskStore
+from .sqlite_utils import sqlite_connection
 
 
 LOG = logging.getLogger("cms-tg-ingest")
@@ -109,7 +110,7 @@ def backup_sqlite_databases(
         target = destination_path / f"{stem}-{timestamp}.db"
         temporary = destination_path / f".{stem}-{timestamp}.db.tmp"
         try:
-            with sqlite3.connect(source) as source_connection, sqlite3.connect(temporary) as target_connection:
+            with sqlite_connection(source) as source_connection, sqlite_connection(temporary) as target_connection:
                 source_connection.backup(target_connection)
             os.chmod(temporary, 0o600)
             os.replace(temporary, target)

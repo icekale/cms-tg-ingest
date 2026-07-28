@@ -1,19 +1,100 @@
+import gc
 import sqlite3
 import tempfile
 import unittest
+import warnings
+from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 import bridge
 from app.backup import BackupScheduler, backup_sqlite_databases
 from app.config import Config
+from app.cms_cloud_index import CmsCloudDataIndex
+from app.hdhive_cards import TmdbDetailCache
 from app.task_store import TaskStore
+
+
+class _TrackingConnection:
+    def __init__(self, path: str | Path, *, fail_backup: bool = False):
+        self.path = Path(path)
+        self.closed = False
+        self.fail_backup = fail_backup
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+    def backup(self, target):
+        if self.fail_backup:
+            raise sqlite3.DatabaseError("forced backup failure")
+        target.path.write_bytes(b"backup")
+
+    def commit(self):
+        return None
+
+    def rollback(self):
+        return None
+
+    def close(self):
+        self.closed = True
 
 
 class BackupTests(unittest.TestCase):
     def _make_database(self, path: Path, value: str = "ok") -> None:
-        with sqlite3.connect(path) as connection:
+        with closing(sqlite3.connect(path)) as connection:
             connection.execute("CREATE TABLE values_table (value TEXT NOT NULL)")
             connection.execute("INSERT INTO values_table (value) VALUES (?)", (value,))
+            connection.commit()
+
+    def test_backup_closes_source_and_target_on_success_and_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "tasks.db"
+            destination = root / "backups"
+            self._make_database(source)
+            connections = []
+            fail_backup = False
+
+            def connect(path, *args, **kwargs):
+                tracked = _TrackingConnection(path, fail_backup=fail_backup)
+                connections.append(tracked)
+                return tracked
+
+            with patch("app.backup.sqlite3.connect", side_effect=connect):
+                succeeded = backup_sqlite_databases([source], destination, now=1_735_689_600.0)
+                fail_backup = True
+                failed = backup_sqlite_databases([source], destination, now=1_735_689_601.0)
+
+            self.assertEqual(succeeded.status, "succeeded")
+            self.assertEqual(failed.status, "failed")
+            self.assertEqual(len(connections), 4)
+            closed = [connection.closed for connection in connections]
+            self.assertTrue(all(closed))
+
+    def test_repeated_short_lived_sqlite_calls_do_not_warn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cms_db = root / "cms-online.db"
+            with closing(sqlite3.connect(cms_db)) as connection:
+                connection.execute(
+                    "CREATE TABLE cloud_data (fid TEXT PRIMARY KEY, pid TEXT, name TEXT, is_dir INTEGER)"
+                )
+                connection.commit()
+            source = root / "tasks.db"
+            self._make_database(source)
+            index = CmsCloudDataIndex(cms_db)
+            cache = TmdbDetailCache(root / "cache.db")
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", ResourceWarning)
+                for _ in range(25):
+                    index.has_file_id("missing")
+                    cache.get("tv", "1416", lambda: {"id": 1416})
+                    backup_sqlite_databases([source], root / "backups", now=1_735_689_600.0)
+                gc.collect()
 
     def test_backup_creates_readable_online_sqlite_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -33,7 +114,7 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(len(result.files), 1)
             backup_path = Path(result.files[0])
             self.assertTrue(backup_path.exists())
-            with sqlite3.connect(backup_path) as connection:
+            with closing(sqlite3.connect(backup_path)) as connection:
                 value = connection.execute("SELECT value FROM values_table").fetchone()[0]
             self.assertEqual(value, "snapshot")
 
