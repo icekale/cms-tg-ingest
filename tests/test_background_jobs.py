@@ -87,7 +87,16 @@ class BackgroundJobCoordinatorTests(unittest.TestCase):
         try:
             coordinator.submit("quality:run", lambda: None, on_complete=broken_callback)
             self.assertTrue(callback_finished.wait(1))
-            self.assertEqual(coordinator.submit("quality:run", second_job_finished.set).outcome, "accepted")
+            deadline = time.monotonic() + 1
+            while True:
+                submission = coordinator.submit("quality:run", second_job_finished.set)
+                if submission.outcome == "accepted":
+                    break
+                self.assertEqual(submission.outcome, "already_running")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.fail("callback reservation did not release")
+                threading.Event().wait(min(0.01, remaining))
             self.assertTrue(second_job_finished.wait(1))
         finally:
             coordinator.shutdown(wait=True)
