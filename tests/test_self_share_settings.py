@@ -2,6 +2,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,7 +12,7 @@ from app.task_store import TaskStore
 class OwnShareReceiveCodeResolutionTests(unittest.TestCase):
     def _cms_db(self, root: str, receive_code: str) -> Path:
         path = Path(root) / "cms.db"
-        with sqlite3.connect(path) as conn:
+        with closing(sqlite3.connect(path)) as conn, conn:
             conn.execute("CREATE TABLE cms_config (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             conn.execute(
                 "INSERT INTO cms_config (key, value) VALUES (?, ?)",

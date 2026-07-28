@@ -4,6 +4,7 @@ import os
 import sqlite3
 import time
 import unittest
+from contextlib import closing
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -3612,7 +3613,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "cms-online.db"
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 conn.execute(
                     """
                     CREATE TABLE cloud_data (

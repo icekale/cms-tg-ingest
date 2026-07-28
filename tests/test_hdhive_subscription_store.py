@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
@@ -13,7 +14,7 @@ class HdhiveSubscriptionStoreTests(unittest.TestCase):
     def test_pre_feature_database_migrates_without_losing_existing_records(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "legacy.db"
-            with sqlite3.connect(path) as connection:
+            with closing(sqlite3.connect(path)) as connection, connection:
                 connection.executescript(
                     """
                     CREATE TABLE hdhive_subscriptions (
@@ -69,7 +70,7 @@ class HdhiveSubscriptionStoreTests(unittest.TestCase):
             subscription = store.get_subscription(1)
             item = store.get_item(1)
 
-            with sqlite3.connect(path) as connection:
+            with closing(sqlite3.connect(path)) as connection:
                 item_columns = {row[1] for row in connection.execute("PRAGMA table_info(hdhive_subscription_items)")}
 
             self.assertEqual(subscription.title, "旧订阅")

@@ -124,6 +124,7 @@ class PipelineP115(FakeCloudP115):
             "category": "华语电影",
         }
         self.created_shares = []
+        self.own_share = None
         self.deleted = []
         self.renamed = []
 
@@ -143,13 +144,36 @@ class PipelineP115(FakeCloudP115):
         self.renamed.append((str(file_id), str(file_name)))
         return {"state": True}
 
-    def create_long_share(self, file_id, preferred_receive_code=""):
+    def create_share(self, file_id):
         self.created_shares.append(str(file_id))
-        return {
+        self.own_share = {
             "share_code": "owncode",
             "receive_code": "ownpwd",
             "share_url": "https://115.com/s/owncode?password=ownpwd",
+            "share_title": self.folder["file_name"],
         }
+        return dict(self.own_share)
+
+    def ensure_share_settings(self, share_code, receive_code):
+        if not self.own_share or share_code != self.own_share["share_code"]:
+            raise AssertionError("share settings require the created share")
+        return {
+            "share_code": share_code,
+            "receive_code": self.own_share["receive_code"],
+        }
+
+    def find_own_share_by_title(self, title, min_create_time=0):
+        if not self.own_share or title != self.own_share["share_title"]:
+            return None
+        return dict(self.own_share)
+
+    def create_long_share(self, file_id, preferred_receive_code=""):
+        created = self.create_share(file_id)
+        settings = self.ensure_share_settings(
+            created["share_code"],
+            preferred_receive_code or created["receive_code"],
+        )
+        return {**created, **settings}
 
     def inspect_share(self, share_code, receive_code):
         return {"available": True, "share_state": "0", "have_vio_file": False}
