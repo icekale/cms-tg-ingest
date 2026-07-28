@@ -3115,6 +3115,35 @@ def _series_update_target_identity(
     return target_row, canonical_recognition, title, tmdb_id, category
 
 
+def _park_series_update_checkpoint(
+    task: Any | None,
+    task_store: TaskStore,
+    *,
+    source: str,
+) -> Any | None:
+    if (
+        task is None
+        or task.current_stage != TaskStage.RECEIVED
+        or task.status not in {TaskStatus.PENDING, TaskStatus.RUNNING}
+        or task.next_run_at >= 0
+    ):
+        return None
+    if str(task.claimed_by or "").strip() or str(task.claim_token or "").strip():
+        return None
+    return task_store.compare_and_set_transition(
+        task.id,
+        task.current_stage,
+        {task.status},
+        require_unclaimed=True,
+        target_stage=TaskStage.NEEDS_ACTION,
+        target_status=TaskStatus.NEEDS_ACTION,
+        target_event_message=f"{source}追更准备中断，请重新发起",
+        next_run_at=-1,
+        clear_claim=True,
+        expected_updated_at=task.updated_at,
+    )
+
+
 def start_series_update_from_link(
     target_task: Any | None,
     key: ShareKey,
@@ -3132,14 +3161,12 @@ def start_series_update_from_link(
         return None, "not_eligible"
     target_row, recognition, title, tmdb_id, category = target_identity
 
-    child = task_store.find_task_by_share_key(key.share_code, key.receive_code)
-    if child is None:
-        child = task_store.upsert_task(
-            key.share_code,
-            key.receive_code,
-            link,
-            chat_id=str(chat_id or ""),
-        )
+    child = task_store.get_or_create_share_task(
+        key.share_code,
+        key.receive_code,
+        link,
+        chat_id=str(chat_id or ""),
+    )
     parent_value = child.metadata.get("series_update_parent_task_id")
     if parent_value not in (None, ""):
         try:
@@ -3152,13 +3179,16 @@ def start_series_update_from_link(
         same_parent = False
     if str(child.claimed_by or "").strip() or str(child.claim_token or "").strip():
         return None, "source_busy"
+    if same_parent and child.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+        if child.next_run_at >= 0:
+            return child, "already_started"
+        parked = _park_series_update_checkpoint(child, task_store, source=source)
+        return parked or task_store.find_task(child.id), "failed"
     child_row = store.find_by_key(key) if store is not None else None
     if str(child.metadata.get("own_share_code") or "").strip() or str(
         (child_row or {}).get("own_share_code") or ""
     ).strip():
         return None, "source_conflict"
-    if same_parent and child.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
-        return child, "already_started"
 
     try:
         previous_requested = int(child.metadata.get("update_requested_run") or 0)
@@ -3210,7 +3240,10 @@ def start_series_update_from_link(
             TaskStatus.PENDING,
             TaskStatus.RUNNING,
         }:
-            return current, "already_started"
+            if current.next_run_at >= 0:
+                return current, "already_started"
+            parked = _park_series_update_checkpoint(current, task_store, source=source)
+            return parked or task_store.find_task(current.id), "failed"
         return current, "failed"
 
     preparation_error = ""
@@ -3231,7 +3264,7 @@ def start_series_update_from_link(
         )
     except SeriesUpdateSourceConflict as exc:
         preparation_conflict = str(exc)
-    except Exception as exc:
+    except BaseException as exc:
         preparation_error = str(exc)
         LOG.exception("Failed to prepare explicit series update child")
     if preparation_conflict:
@@ -3290,7 +3323,8 @@ def start_series_update_from_link(
         expected_updated_at=frozen.updated_at,
     )
     if activated is None:
-        return task_store.find_task(frozen.id), "failed"
+        parked = _park_series_update_checkpoint(frozen, task_store, source=source)
+        return parked or task_store.find_task(frozen.id), "failed"
     return activated, "started"
 
 

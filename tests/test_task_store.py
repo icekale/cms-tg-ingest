@@ -799,6 +799,49 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(second.current_stage, TaskStage.RECEIVED)
             self.assertEqual(second.status, TaskStatus.PENDING)
 
+    def test_get_or_create_share_task_creates_once_and_preserves_existing_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            created = store.get_or_create_share_task(
+                "atomic-share",
+                "1212",
+                "https://115cdn.com/s/atomic-share?password=1212",
+                chat_id="winner-chat",
+            )
+            frozen = store.record_event(
+                created.id,
+                TaskStage.RECEIVED,
+                TaskStatus.PENDING,
+                "winner frozen checkpoint",
+                metadata_patch={
+                    "series_update_parent_task_id": 328,
+                    "update_requested_run": 1,
+                },
+                next_run_at=-1,
+                expected_stage=TaskStage.RECEIVED,
+                expected_status=TaskStatus.PENDING,
+                expected_updated_at=created.updated_at,
+            )
+
+            existing = store.get_or_create_share_task(
+                "atomic-share",
+                "1212",
+                "https://115cdn.com/s/loser-url?password=9999",
+                chat_id="loser-chat",
+            )
+
+            self.assertEqual(existing, frozen)
+            self.assertEqual(existing.url, "https://115cdn.com/s/atomic-share?password=1212")
+            self.assertEqual(existing.chat_id, "winner-chat")
+            self.assertEqual(existing.metadata, frozen.metadata)
+            self.assertEqual(existing.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(existing.status, TaskStatus.PENDING)
+            self.assertEqual(existing.claimed_by, frozen.claimed_by)
+            self.assertEqual(existing.claim_token, frozen.claim_token)
+            self.assertEqual(existing.next_run_at, -1)
+            self.assertEqual(existing.updated_at, frozen.updated_at)
+            self.assertEqual(store.find_task(created.id), frozen)
+
     def test_duplicate_upsert_does_not_change_active_claim_version(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

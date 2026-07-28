@@ -1,7 +1,9 @@
 import json
 import os
+import threading
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1668,6 +1670,289 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(result, "already_started")
             self.assertEqual(repeated, first)
             self.assertEqual(repeated.metadata["update_requested_run"], 1)
+
+    def test_explicit_new_link_series_update_keeps_active_same_parent_started_with_stale_share_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            key = bridge.ShareKey("new", "1212")
+            first, first_result = bridge.start_series_update_from_link(
+                target,
+                key,
+                "https://115cdn.com/s/new?password=1212",
+                "464100862",
+                submission_store,
+                task_store,
+                source="首次请求",
+            )
+            submission_store.update_self_share(
+                int(first.submission_id),
+                own_share_code="stale-share",
+                share_sync_status="submitted",
+            )
+
+            repeated, repeated_result = bridge.start_series_update_from_link(
+                target,
+                key,
+                "https://115cdn.com/s/new?password=1212",
+                "464100862",
+                submission_store,
+                task_store,
+                source="重复请求",
+            )
+
+            self.assertEqual(first_result, "started")
+            self.assertEqual(repeated_result, "already_started")
+            self.assertEqual(repeated, first)
+
+    def test_explicit_new_link_series_update_atomic_source_creation_preserves_race_winner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_db_path = Path(tmp) / "tasks.db"
+            winner_store = TaskStore(task_db_path)
+            _target_row, target, _recognition = self.make_completed_target(submission_store, winner_store)
+            loser_waiting_to_create = threading.Event()
+            winner_created_source = threading.Event()
+
+            class PausingTaskStore(TaskStore):
+                def get_or_create_share_task(self, share_code, receive_code, url, chat_id=""):
+                    loser_waiting_to_create.set()
+                    if not winner_created_source.wait(5):
+                        raise AssertionError("winner did not create the source task")
+                    return super().get_or_create_share_task(share_code, receive_code, url, chat_id=chat_id)
+
+            loser_store = PausingTaskStore(task_db_path)
+            key = bridge.ShareKey("new", "1212")
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                losing = executor.submit(
+                    bridge.start_series_update_from_link,
+                    target,
+                    key,
+                    "https://115cdn.com/s/loser?password=9999",
+                    "loser-chat",
+                    submission_store,
+                    loser_store,
+                    source="并发败方",
+                )
+                self.assertTrue(loser_waiting_to_create.wait(5), "loser did not reach source creation")
+                try:
+                    winner, winner_result = bridge.start_series_update_from_link(
+                        target,
+                        key,
+                        "https://115cdn.com/s/new?password=1212",
+                        "winner-chat",
+                        submission_store,
+                        winner_store,
+                        source="并发胜方",
+                    )
+                finally:
+                    winner_created_source.set()
+                repeated, loser_result = losing.result(timeout=5)
+
+            current = winner_store.find_task(winner.id)
+            self.assertEqual(winner_result, "started")
+            self.assertEqual(loser_result, "already_started")
+            self.assertEqual(repeated, winner)
+            self.assertEqual(current, winner)
+            self.assertEqual(current.url, "https://115cdn.com/s/new?password=1212")
+            self.assertEqual(current.chat_id, "winner-chat")
+            self.assertEqual(current.updated_at, winner.updated_at)
+            self.assertEqual(current.metadata, winner.metadata)
+            self.assertEqual(current.metadata["series_update_parent_task_id"], target.id)
+            self.assertEqual(current.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(current.status, TaskStatus.PENDING)
+            self.assertEqual(current.next_run_at, 0)
+
+    def test_explicit_new_link_series_update_parks_preparation_checkpoint_after_preparation_interruption(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            key = bridge.ShareKey("new", "1212")
+
+            with patch.object(
+                submission_store,
+                "prepare_series_update_child",
+                side_effect=KeyboardInterrupt("process exit before preparation"),
+            ), patch.object(bridge.LOG, "exception"):
+                try:
+                    parked, result = bridge.start_series_update_from_link(
+                        target,
+                        key,
+                        "https://115cdn.com/s/new?password=1212",
+                        "464100862",
+                        submission_store,
+                        task_store,
+                        source="中断恢复",
+                    )
+                except KeyboardInterrupt:
+                    self.fail("preparation interruption escaped without parking the checkpoint")
+
+            self.assertEqual(result, "failed")
+            self.assertEqual(parked.current_stage, TaskStage.NEEDS_ACTION)
+            self.assertEqual(parked.status, TaskStatus.NEEDS_ACTION)
+            self.assertEqual(parked.next_run_at, -1)
+            self.assertIsNone(submission_store.find_by_key(key))
+
+            restarted, retry_result = bridge.start_series_update_from_link(
+                target,
+                key,
+                "https://115cdn.com/s/new?password=1212",
+                "464100862",
+                submission_store,
+                task_store,
+                source="显式重试",
+            )
+            self.assertEqual(retry_result, "started")
+            self.assertEqual(restarted.metadata["update_requested_run"], 2)
+            self.assertEqual(restarted.next_run_at, 0)
+
+    def test_explicit_new_link_series_update_parks_checkpoint_after_submission_commit_interruption(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            key = bridge.ShareKey("new", "1212")
+            real_prepare = submission_store.prepare_series_update_child
+
+            def prepare_then_interrupt(*args, **kwargs):
+                real_prepare(*args, **kwargs)
+                raise KeyboardInterrupt("process exit after submission commit")
+
+            with patch.object(
+                submission_store,
+                "prepare_series_update_child",
+                side_effect=prepare_then_interrupt,
+            ), patch.object(bridge.LOG, "exception"):
+                try:
+                    parked, result = bridge.start_series_update_from_link(
+                        target,
+                        key,
+                        "https://115cdn.com/s/new?password=1212",
+                        "464100862",
+                        submission_store,
+                        task_store,
+                        source="提交后中断",
+                    )
+                except KeyboardInterrupt:
+                    self.fail("post-commit interruption escaped without parking the checkpoint")
+
+            prepared = submission_store.find_by_key(key)
+            self.assertEqual(result, "failed")
+            self.assertEqual(parked.current_stage, TaskStage.NEEDS_ACTION)
+            self.assertEqual(parked.status, TaskStatus.NEEDS_ACTION)
+            self.assertEqual(parked.next_run_at, -1)
+            self.assertEqual(prepared["workflow_phase"], "update_requested")
+
+    def test_explicit_new_link_series_update_parks_exact_checkpoint_after_activation_cas_loss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            real_record_event = task_store.record_event
+            activation_lost = False
+
+            def lose_activation(task_id, stage, status, message, **kwargs):
+                nonlocal activation_lost
+                if stage == TaskStage.RECEIVED and kwargs.get("next_run_at") == 0:
+                    activation_lost = True
+                    return None
+                return real_record_event(task_id, stage, status, message, **kwargs)
+
+            with patch.object(task_store, "record_event", side_effect=lose_activation):
+                parked, result = bridge.start_series_update_from_link(
+                    target,
+                    bridge.ShareKey("new", "1212"),
+                    "https://115cdn.com/s/new?password=1212",
+                    "464100862",
+                    submission_store,
+                    task_store,
+                    source="激活丢失",
+                )
+
+            self.assertTrue(activation_lost)
+            self.assertEqual(result, "failed")
+            self.assertEqual(parked.current_stage, TaskStage.NEEDS_ACTION)
+            self.assertEqual(parked.status, TaskStatus.NEEDS_ACTION)
+            self.assertEqual(parked.next_run_at, -1)
+            self.assertEqual(task_store.find_task(parked.id), parked)
+
+    def test_explicit_new_link_series_update_does_not_park_a_changed_activation_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            real_record_event = task_store.record_event
+            competing_snapshot = None
+
+            def lose_activation_after_competing_update(task_id, stage, status, message, **kwargs):
+                nonlocal competing_snapshot
+                if stage == TaskStage.RECEIVED and kwargs.get("next_run_at") == 0:
+                    competing_snapshot = real_record_event(
+                        task_id,
+                        TaskStage.NEEDS_ACTION,
+                        TaskStatus.NEEDS_ACTION,
+                        "其他写入者已接管追更检查点",
+                        metadata_patch={"competing_writer": True},
+                        next_run_at=-1,
+                        expected_stage=TaskStage.RECEIVED,
+                        expected_status=TaskStatus.PENDING,
+                        expected_updated_at=kwargs["expected_updated_at"],
+                    )
+                    return None
+                return real_record_event(task_id, stage, status, message, **kwargs)
+
+            with patch.object(task_store, "record_event", side_effect=lose_activation_after_competing_update):
+                updated, result = bridge.start_series_update_from_link(
+                    target,
+                    bridge.ShareKey("new", "1212"),
+                    "https://115cdn.com/s/new?password=1212",
+                    "464100862",
+                    submission_store,
+                    task_store,
+                    source="激活竞争",
+                )
+
+            self.assertEqual(result, "failed")
+            self.assertIsNotNone(competing_snapshot)
+            self.assertEqual(updated, competing_snapshot)
+            self.assertEqual(updated.current_stage, TaskStage.NEEDS_ACTION)
+            self.assertEqual(updated.status, TaskStatus.NEEDS_ACTION)
+            self.assertTrue(updated.metadata["competing_writer"])
+            self.assertEqual(task_store.find_task(updated.id), competing_snapshot)
+
+    def test_explicit_new_link_series_update_leaves_non_checkpoint_same_parent_task_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            child = task_store.upsert_task("new", "1212", "https://115cdn.com/s/new?password=1212")
+            paused = task_store.record_event(
+                child.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "其他流程暂停",
+                metadata_patch={"series_update_parent_task_id": target.id},
+                next_run_at=-1,
+                expected_stage=TaskStage.RECEIVED,
+                expected_status=TaskStatus.PENDING,
+                expected_updated_at=child.updated_at,
+            )
+
+            updated, result = bridge.start_series_update_from_link(
+                target,
+                bridge.ShareKey("new", "1212"),
+                "https://115cdn.com/s/new?password=1212",
+                "464100862",
+                submission_store,
+                task_store,
+                source="错误恢复保护",
+            )
+
+            self.assertEqual(result, "failed")
+            self.assertEqual(updated, paused)
+            self.assertEqual(task_store.find_task(child.id), paused)
 
     def test_explicit_new_link_series_update_preparation_failure_stays_frozen(self):
         failures = [None, RuntimeError("prepare failed")]

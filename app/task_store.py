@@ -848,6 +848,51 @@ class TaskStore:
             ).fetchone()
         return self._snapshot(row)
 
+    def get_or_create_share_task(
+        self,
+        share_code: str,
+        receive_code: str,
+        url: str,
+        chat_id: str = "",
+    ) -> TaskSnapshot:
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            default_mode_row = conn.execute(
+                "SELECT value FROM runtime_state WHERE key = ?",
+                (STRM_DEFAULT_MODE_KEY,),
+            ).fetchone()
+            effective_mode = normalize_strm_mode(
+                default_mode_row["value"] if default_mode_row else self.default_strm_mode
+            )
+            now = time.time()
+            conn.execute(
+                """
+                INSERT INTO tasks (
+                    share_code, receive_code, source_type, source_key, url, chat_id,
+                    current_stage, status, metadata_json, created_at, updated_at
+                )
+                VALUES (?, ?, 'share', ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(share_code, receive_code) DO NOTHING
+                """,
+                (
+                    share_code,
+                    receive_code,
+                    f"share:{share_code}:{receive_code}",
+                    url,
+                    chat_id,
+                    TaskStage.RECEIVED.value,
+                    TaskStatus.PENDING.value,
+                    json.dumps({"strm_mode": effective_mode}, ensure_ascii=False, sort_keys=True),
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM tasks WHERE share_code = ? AND receive_code = ?",
+                (share_code, receive_code),
+            ).fetchone()
+        return self._snapshot(row)
+
     def upsert_cloud_task(
         self,
         source_key: str,
