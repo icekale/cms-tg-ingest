@@ -416,8 +416,8 @@ docker compose exec cms-tg-ingest python /app/doctor.py --quiet
 
 ```sh
 docker compose down
-docker pull icekale/cms-tg-ingest:0.2.11
-# 将 compose 的 image 改为 0.2.11
+docker pull icekale/cms-tg-ingest:0.2.43
+# 将 compose 的 image 改为 0.2.43
 docker compose up -d
 ```
 
