@@ -3266,7 +3266,7 @@ def _start_series_update_from_link_locked(
             "tmdb_id": tmdb_id,
             "category": category,
         },
-        metadata_delete_keys=reprocess_delete_keys_for(child),
+        metadata_delete_keys=reprocess_delete_keys_for(child) + ("series_update_checkpoint",),
         next_run_at=-1,
         clear_errors=True,
         clear_claim=True,
@@ -3384,18 +3384,58 @@ def start_series_update_task(
 ) -> tuple[Any | None, str]:
     if task is None or store is None or task_store is None:
         return None, "not_eligible"
-    if task.status != TaskStatus.SUCCEEDED or task.current_stage != TaskStage.CLEANED:
-        return None, "not_eligible"
     if str(task.claimed_by or "").strip() or str(task.claim_token or "").strip():
+        return None, "not_eligible"
+    metadata = task.metadata
+    checkpoint_submission_id = None
+    if (
+        task.current_stage == TaskStage.RECEIVED
+        and task.status == TaskStatus.PENDING
+        and task.next_run_at == -1
+        and metadata.get("force_reprocess") is True
+        and "previous_own_share_code" in metadata
+    ):
+        try:
+            candidate_submission_id = int(metadata.get("submission_id"))
+            requested_run = int(metadata.get("update_requested_run"))
+            received_run = int(metadata.get("update_received_run"))
+            update_started_at = float(metadata.get("update_started_at"))
+            reprocess_started_at = float(metadata.get("reprocess_started_at"))
+        except (TypeError, ValueError):
+            pass
+        else:
+            checkpoint_kind = str(metadata.get("series_update_checkpoint") or "").strip()
+            has_explicit_parent = any(
+                metadata.get(key) not in (None, "")
+                for key in ("series_update_parent_task_id", "series_update_parent_submission_id")
+            )
+            if (
+                candidate_submission_id > 0
+                and (task.submission_id is None or task.submission_id == candidate_submission_id)
+                and requested_run > 0
+                and received_run >= 0
+                and requested_run == received_run + 1
+                and update_started_at > 0
+                and reprocess_started_at == update_started_at
+                and (
+                    checkpoint_kind == "same_link"
+                    or (not checkpoint_kind and not has_explicit_parent)
+                )
+            ):
+                checkpoint_submission_id = candidate_submission_id
+    completed = task.status == TaskStatus.SUCCEEDED and task.current_stage == TaskStage.CLEANED
+    if not completed and checkpoint_submission_id is None:
         return None, "not_eligible"
     category = str(task.category or task.metadata.get("category") or task.metadata.get("category_final") or "").strip()
     if category not in {"国产电视", "外国电视", "番剧"}:
         return None, "not_eligible"
-    submission_id = task.submission_id or task.metadata.get("submission_id")
+    submission_id = checkpoint_submission_id or task.submission_id or task.metadata.get("submission_id")
     if submission_id in (None, ""):
         return None, "not_eligible"
     row = store.find_by_id(int(submission_id))
     if not row:
+        if checkpoint_submission_id is not None:
+            return None, "not_eligible"
         failed = task_store.record_event(
             task.id,
             TaskStage.FAILED,
@@ -3410,38 +3450,47 @@ def start_series_update_task(
         return failed, "failed"
     if str(row.get("workflow_mode") or "") != "self_share_sync":
         return None, "not_eligible"
-    try:
-        previous_requested = int(task.metadata.get("update_requested_run") or 0)
-        previous_received = int(task.metadata.get("update_received_run") or 0)
-    except (TypeError, ValueError):
-        previous_requested = previous_received = 0
-    update_run = max(previous_requested, previous_received) + 1
-    started_at = time.time()
-    frozen = task_store.compare_and_set_transition(
-        task.id,
-        TaskStage.CLEANED,
-        {TaskStatus.SUCCEEDED},
-        require_unclaimed=True,
-        target_stage=TaskStage.RECEIVED,
-        target_status=TaskStatus.PENDING,
-        target_event_message=f"{source}开始追更，准备重置提交记录",
-        metadata_patch={
-            "submission_id": int(row["id"]),
-            "update_requested_run": update_run,
-            "update_received_run": update_run - 1,
-            "update_started_at": started_at,
-            "previous_own_share_code": str(row.get("own_share_code") or "").strip(),
-            "force_reprocess": True,
-            "reprocess_started_at": started_at,
-        },
-        metadata_delete_keys=reprocess_delete_keys_for(task),
-        next_run_at=-1,
-        clear_errors=True,
-        clear_claim=True,
-        expected_updated_at=task.updated_at,
-    )
-    if frozen is None:
-        return None, "not_eligible"
+    if checkpoint_submission_id is not None:
+        if (
+            str(row.get("share_code") or "") != str(task.share_code or "")
+            or str(row.get("receive_code") or "") != str(task.receive_code or "")
+        ):
+            return None, "not_eligible"
+        frozen = task
+    else:
+        try:
+            previous_requested = int(task.metadata.get("update_requested_run") or 0)
+            previous_received = int(task.metadata.get("update_received_run") or 0)
+        except (TypeError, ValueError):
+            previous_requested = previous_received = 0
+        update_run = max(previous_requested, previous_received) + 1
+        started_at = time.time()
+        frozen = task_store.compare_and_set_transition(
+            task.id,
+            TaskStage.CLEANED,
+            {TaskStatus.SUCCEEDED},
+            require_unclaimed=True,
+            target_stage=TaskStage.RECEIVED,
+            target_status=TaskStatus.PENDING,
+            target_event_message=f"{source}开始追更，准备重置提交记录",
+            metadata_patch={
+                "submission_id": int(row["id"]),
+                "series_update_checkpoint": "same_link",
+                "update_requested_run": update_run,
+                "update_received_run": update_run - 1,
+                "update_started_at": started_at,
+                "previous_own_share_code": str(row.get("own_share_code") or "").strip(),
+                "force_reprocess": True,
+                "reprocess_started_at": started_at,
+            },
+            metadata_delete_keys=reprocess_delete_keys_for(task),
+            next_run_at=-1,
+            clear_errors=True,
+            clear_claim=True,
+            expected_updated_at=task.updated_at,
+        )
+        if frozen is None:
+            return None, "not_eligible"
     try:
         updated_row = store.reset_self_share_for_update(int(row["id"]))
     except Exception:
@@ -3470,6 +3519,7 @@ def start_series_update_task(
         tmdb_id=str(task.tmdb_id or "") or None,
         category=category,
         submission_id=int(updated_row["id"]),
+        metadata_delete_keys=("series_update_checkpoint",),
         next_run_at=0,
         clear_claim=True,
         expected_stage=TaskStage.RECEIVED,
@@ -3477,7 +3527,8 @@ def start_series_update_task(
         expected_updated_at=frozen.updated_at,
     )
     if updated is None:
-        return task_store.find_task(frozen.id), "failed"
+        parked = _park_series_update_checkpoint(frozen, task_store, source=source)
+        return parked or task_store.find_task(frozen.id), "failed"
     return updated, "started"
 
 

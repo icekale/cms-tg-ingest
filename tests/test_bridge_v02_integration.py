@@ -631,7 +631,8 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
         task_store,
         *,
         parent_task_id=None,
-        own_share_code="",
+        task_own_share_code="",
+        submission_own_share_code="",
         claimed=False,
     ):
         wrong_folder_id = "3481694900213253783"
@@ -653,7 +654,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             workflow_phase="share_creating",
             own_share_file_id=wrong_folder_id,
             own_share_file_name="错误电影 (2025)",
-            own_share_code=own_share_code or None,
+            own_share_code=submission_own_share_code or None,
             share_sync_status="creating",
         )
         task = task_store.upsert_task(
@@ -670,8 +671,8 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
         }
         if parent_task_id is not None:
             metadata["series_update_parent_task_id"] = int(parent_task_id)
-        if own_share_code:
-            metadata["own_share_code"] = own_share_code
+        if task_own_share_code:
+            metadata["own_share_code"] = task_own_share_code
         task = task_store.record_event(
             task.id,
             TaskStage.OWN_SHARE_CREATED,
@@ -1332,6 +1333,276 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(task_store.find_task(task.id), claimed)
             self.assertEqual(submission_store.find_by_id(int(row["id"])), original_row)
 
+    def test_start_series_update_task_recovers_freeze_checkpoint_before_submission_reset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_db_path = Path(tmp) / "tasks.db"
+            task_store = TaskStore(task_db_path)
+            row, task, recognition = self.make_completed_target(submission_store, task_store)
+            original_row = submission_store.find_by_id(int(row["id"]))
+
+            with patch.object(
+                submission_store,
+                "reset_self_share_for_update",
+                side_effect=KeyboardInterrupt("process exit after task freeze"),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    bridge.start_series_update_task(
+                        task,
+                        submission_store,
+                        task_store,
+                        source="冻结后中断",
+                    )
+
+            frozen = task_store.find_task(task.id)
+            self.assertEqual(frozen.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(frozen.status, TaskStatus.PENDING)
+            self.assertEqual(frozen.next_run_at, -1)
+            self.assertEqual(frozen.claimed_by, "")
+            self.assertEqual(frozen.claim_token, "")
+            self.assertEqual(frozen.metadata["update_requested_run"], 1)
+            self.assertEqual(frozen.metadata["update_received_run"], 0)
+            self.assertEqual(submission_store.find_by_id(int(row["id"])), original_row)
+            frozen = task_store.record_event(
+                frozen.id,
+                TaskStage.RECEIVED,
+                TaskStatus.PENDING,
+                "模拟修复前持久化检查点",
+                metadata_delete_keys=("series_update_checkpoint",),
+                next_run_at=-1,
+                clear_claim=True,
+                expected_stage=TaskStage.RECEIVED,
+                expected_status=TaskStatus.PENDING,
+                expected_updated_at=frozen.updated_at,
+            )
+            self.assertNotIn("series_update_checkpoint", frozen.metadata)
+
+            restarted_store = TaskStore(task_db_path)
+            recovered, result = bridge.start_series_update_task(
+                restarted_store.find_task(task.id),
+                submission_store,
+                restarted_store,
+                source="重启恢复",
+            )
+
+            recovered_row = submission_store.find_by_id(int(row["id"]))
+            self.assertEqual(result, "started")
+            self.assertEqual(recovered.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(recovered.status, TaskStatus.PENDING)
+            self.assertEqual(recovered.next_run_at, 0)
+            self.assertEqual(recovered.metadata["update_requested_run"], 1)
+            self.assertEqual(recovered.metadata["update_received_run"], 0)
+            self.assertEqual(recovered_row["workflow_phase"], "update_requested")
+            self.assertEqual(json.loads(recovered_row["recognition_json"]), recognition)
+            self.assertIsNone(recovered_row["own_share_code"])
+            claimed = restarted_store.claim_next_runnable("restart-worker", now=9999999999.0)
+            self.assertEqual(claimed.id, task.id)
+
+    def test_start_series_update_task_recovers_checkpoint_after_submission_reset_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_db_path = Path(tmp) / "tasks.db"
+            task_store = TaskStore(task_db_path)
+            row, task, recognition = self.make_completed_target(submission_store, task_store)
+
+            with patch.object(
+                task_store,
+                "record_event",
+                side_effect=KeyboardInterrupt("process exit before task activation"),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    bridge.start_series_update_task(
+                        task,
+                        submission_store,
+                        task_store,
+                        source="提交后中断",
+                    )
+
+            frozen = task_store.find_task(task.id)
+            reset_row = submission_store.find_by_id(int(row["id"]))
+            self.assertEqual(frozen.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(frozen.status, TaskStatus.PENDING)
+            self.assertEqual(frozen.next_run_at, -1)
+            self.assertEqual(reset_row["workflow_phase"], "update_requested")
+            self.assertEqual(json.loads(reset_row["recognition_json"]), recognition)
+            self.assertIsNone(reset_row["own_share_code"])
+
+            restarted_store = TaskStore(task_db_path)
+            recovered, result = bridge.start_series_update_task(
+                restarted_store.find_task(task.id),
+                submission_store,
+                restarted_store,
+                source="提交后重启恢复",
+            )
+
+            recovered_row = submission_store.find_by_id(int(row["id"]))
+            self.assertEqual(result, "started")
+            self.assertEqual(recovered.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(recovered.status, TaskStatus.PENDING)
+            self.assertEqual(recovered.next_run_at, 0)
+            self.assertEqual(recovered.metadata["update_requested_run"], 1)
+            self.assertEqual(recovered.metadata["update_received_run"], 0)
+            self.assertEqual(recovered_row["id"], reset_row["id"])
+            self.assertEqual(recovered_row["workflow_phase"], "update_requested")
+            self.assertEqual(json.loads(recovered_row["recognition_json"]), recognition)
+            self.assertIsNone(recovered_row["own_share_code"])
+
+    def test_start_series_update_task_parks_unchanged_checkpoint_after_activation_cas_loss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            row, task, _recognition = self.make_completed_target(submission_store, task_store)
+            real_record_event = task_store.record_event
+
+            def lose_activation(task_id, stage, status, message, **kwargs):
+                if stage == TaskStage.RECEIVED and kwargs.get("next_run_at") == 0:
+                    return None
+                return real_record_event(task_id, stage, status, message, **kwargs)
+
+            with patch.object(task_store, "record_event", side_effect=lose_activation):
+                parked, result = bridge.start_series_update_task(
+                    task,
+                    submission_store,
+                    task_store,
+                    source="激活丢失",
+                )
+
+            reset_row = submission_store.find_by_id(int(row["id"]))
+            self.assertEqual(result, "failed")
+            self.assertEqual(parked.current_stage, TaskStage.NEEDS_ACTION)
+            self.assertEqual(parked.status, TaskStatus.NEEDS_ACTION)
+            self.assertEqual(parked.next_run_at, -1)
+            self.assertEqual(task_store.find_task(task.id), parked)
+            self.assertEqual(reset_row["workflow_phase"], "update_requested")
+            self.assertIsNone(reset_row["own_share_code"])
+
+    def test_start_series_update_task_preserves_competing_activation_writer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            row, task, _recognition = self.make_completed_target(submission_store, task_store)
+            real_record_event = task_store.record_event
+            competing_snapshot = None
+
+            def lose_activation_after_competing_update(task_id, stage, status, message, **kwargs):
+                nonlocal competing_snapshot
+                if stage == TaskStage.RECEIVED and kwargs.get("next_run_at") == 0:
+                    competing_snapshot = real_record_event(
+                        task_id,
+                        TaskStage.NEEDS_ACTION,
+                        TaskStatus.NEEDS_ACTION,
+                        "其他写入者已接管同链接追更检查点",
+                        metadata_patch={"competing_same_link_writer": True},
+                        next_run_at=-1,
+                        expected_stage=TaskStage.RECEIVED,
+                        expected_status=TaskStatus.PENDING,
+                        expected_updated_at=kwargs["expected_updated_at"],
+                    )
+                    return None
+                return real_record_event(task_id, stage, status, message, **kwargs)
+
+            with patch.object(task_store, "record_event", side_effect=lose_activation_after_competing_update):
+                updated, result = bridge.start_series_update_task(
+                    task,
+                    submission_store,
+                    task_store,
+                    source="激活竞争",
+                )
+
+            reset_row = submission_store.find_by_id(int(row["id"]))
+            self.assertEqual(result, "failed")
+            self.assertIsNotNone(competing_snapshot)
+            self.assertEqual(updated, competing_snapshot)
+            self.assertEqual(task_store.find_task(task.id), competing_snapshot)
+            self.assertTrue(updated.metadata["competing_same_link_writer"])
+            self.assertEqual(reset_row["workflow_phase"], "update_requested")
+            self.assertIsNone(reset_row["own_share_code"])
+
+    def test_start_series_update_task_rejects_explicit_parent_checkpoint_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            row, task, _recognition = self.make_completed_target(submission_store, task_store)
+            lookalike = task_store.record_event(
+                task.id,
+                TaskStage.RECEIVED,
+                TaskStatus.PENDING,
+                "显式新链接准备检查点",
+                metadata_patch={
+                    "submission_id": int(row["id"]),
+                    "series_update_parent_task_id": task.id + 100,
+                    "series_update_parent_submission_id": int(row["id"]),
+                    "update_requested_run": 1,
+                    "update_received_run": 0,
+                    "update_started_at": 1000.0,
+                    "previous_own_share_code": "old-share",
+                    "force_reprocess": True,
+                    "reprocess_started_at": 1000.0,
+                },
+                next_run_at=-1,
+                expected_stage=TaskStage.CLEANED,
+                expected_status=TaskStatus.SUCCEEDED,
+                expected_updated_at=task.updated_at,
+            )
+            original_row = submission_store.find_by_id(int(row["id"]))
+
+            updated, result = bridge.start_series_update_task(
+                lookalike,
+                submission_store,
+                task_store,
+                source="错误恢复保护",
+            )
+
+            self.assertIsNone(updated)
+            self.assertEqual(result, "not_eligible")
+            self.assertEqual(task_store.find_task(task.id), lookalike)
+            self.assertEqual(submission_store.find_by_id(int(row["id"])), original_row)
+
+    def test_start_series_update_task_rejects_claimed_freeze_checkpoint_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            row, task, _recognition = self.make_completed_target(submission_store, task_store)
+
+            with patch.object(
+                submission_store,
+                "reset_self_share_for_update",
+                side_effect=KeyboardInterrupt("process exit after task freeze"),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    bridge.start_series_update_task(
+                        task,
+                        submission_store,
+                        task_store,
+                        source="冻结后中断",
+                    )
+            frozen = task_store.find_task(task.id)
+            claimed = task_store.compare_and_set_transition(
+                frozen.id,
+                TaskStage.RECEIVED,
+                {TaskStatus.PENDING},
+                require_unclaimed=True,
+                target_stage=TaskStage.RECEIVED,
+                target_status=TaskStatus.PENDING,
+                target_event_message="其他工作者认领检查点",
+                next_run_at=-1,
+                claim_by="worker-live",
+                expected_updated_at=frozen.updated_at,
+            )
+            original_row = submission_store.find_by_id(int(row["id"]))
+
+            updated, result = bridge.start_series_update_task(
+                claimed,
+                submission_store,
+                task_store,
+                source="错误恢复保护",
+            )
+
+            self.assertIsNone(updated)
+            self.assertEqual(result, "not_eligible")
+            self.assertEqual(task_store.find_task(task.id), claimed)
+            self.assertEqual(submission_store.find_by_id(int(row["id"])), original_row)
+
     def test_parse_explicit_series_update_command(self):
         cases = [
             (
@@ -1391,6 +1662,31 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertIsNone(prepared["own_share_code"])
             self.assertNotIn("3481694900213253783", json.dumps(prepared, ensure_ascii=False))
             self.assertEqual(submission_store.find_by_id(int(target_row["id"]))["own_share_code"], "old-share")
+
+    def test_explicit_new_link_series_update_clears_stale_same_link_checkpoint_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            _source_row, source_task = self.make_existing_source(submission_store, task_store)
+            source_task = task_store.patch_metadata(
+                source_task.id,
+                {"series_update_checkpoint": "same_link"},
+            )
+
+            updated, result = bridge.start_series_update_from_link(
+                target,
+                bridge.ShareKey("new", "1212"),
+                "https://115cdn.com/s/new?password=1212",
+                "464100862",
+                submission_store,
+                task_store,
+                source="显式路径保护",
+            )
+
+            self.assertEqual(result, "started")
+            self.assertEqual(updated.id, source_task.id)
+            self.assertNotIn("series_update_checkpoint", updated.metadata)
 
     def test_explicit_new_link_series_update_writes_task_first_identity_to_both_child_stores(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1556,7 +1852,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(task_store.find_task(source_task.id), source_task)
             self.assertEqual(submission_store.find_by_id(int(source_row["id"])), original_row)
 
-    def test_explicit_new_link_series_update_rejects_completed_remote_share(self):
+    def test_explicit_new_link_series_update_rejects_completed_remote_share_in_task_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
@@ -1564,7 +1860,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             source_row, source_task = self.make_existing_source(
                 submission_store,
                 task_store,
-                own_share_code="remote-share",
+                task_own_share_code="remote-share",
             )
             original_row = submission_store.find_by_id(int(source_row["id"]))
 
@@ -1582,6 +1878,36 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(result, "source_conflict")
             self.assertEqual(task_store.find_task(source_task.id), source_task)
             self.assertEqual(submission_store.find_by_id(int(source_row["id"])), original_row)
+            self.assertEqual(source_task.metadata["own_share_code"], "remote-share")
+            self.assertIsNone(original_row["own_share_code"])
+
+    def test_explicit_new_link_series_update_rejects_completed_remote_share_in_submission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            source_row, source_task = self.make_existing_source(
+                submission_store,
+                task_store,
+                submission_own_share_code="remote-share",
+            )
+            original_row = submission_store.find_by_id(int(source_row["id"]))
+
+            updated, result = bridge.start_series_update_from_link(
+                target,
+                bridge.ShareKey("new", "1212"),
+                "https://115cdn.com/s/new?password=1212",
+                "464100862",
+                submission_store,
+                task_store,
+                source="生产修复",
+            )
+
+            self.assertIsNone(updated)
+            self.assertEqual(result, "source_conflict")
+            self.assertEqual(task_store.find_task(source_task.id), source_task)
+            self.assertEqual(submission_store.find_by_id(int(source_row["id"])), original_row)
+            self.assertNotIn("own_share_code", source_task.metadata)
             self.assertEqual(original_row["own_share_code"], "remote-share")
 
     def test_explicit_new_link_series_update_detects_submission_share_completed_after_freeze(self):
