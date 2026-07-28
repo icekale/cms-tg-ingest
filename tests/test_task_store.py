@@ -9,10 +9,113 @@ from unittest.mock import patch
 
 from app.models import TaskStage, TaskStatus
 from app.strm_mode import effective_task_strm_mode
-from app.task_store import TaskStore
+from app.task_store import TaskStore, operation_scope
 
 
 class TaskStoreTests(unittest.TestCase):
+    def test_prepare_operation_is_idempotent_and_preserves_original_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("operation-prepare", "", "https://115cdn.com/s/operation-prepare")
+
+            prepared = store.prepare_operation(
+                task.id,
+                "g0:u0:submit",
+                "cms_submit",
+                {"title": "First title", "files": ["one"]},
+            )
+            repeated = store.prepare_operation(
+                task.id,
+                "g0:u0:submit",
+                "cms_submit",
+                {"files": ["one"], "title": "First title"},
+            )
+
+            self.assertEqual(repeated, prepared)
+            self.assertEqual(prepared.status, "prepared")
+            self.assertEqual(prepared.request, {"title": "First title", "files": ["one"]})
+            with self.assertRaisesRegex(ValueError, "immutable"):
+                store.prepare_operation(
+                    task.id,
+                    "g0:u0:submit",
+                    "cms_submit",
+                    {"title": "Changed title"},
+                )
+            self.assertEqual(
+                store.find_operation(task.id, "g0:u0:submit").request,
+                {"title": "First title", "files": ["one"]},
+            )
+
+    def test_operation_start_authorizes_only_prepared_transition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("operation-start", "", "https://115cdn.com/s/operation-start")
+
+            store.prepare_operation(task.id, "started", "cms_submit", {"id": 1})
+            started = store.start_operation(task.id, "started")
+            self.assertEqual(started.status, "started")
+            self.assertEqual(started.attempt_count, 1)
+            self.assertIsNone(store.start_operation(task.id, "started"))
+            self.assertEqual(store.find_operation(task.id, "started").attempt_count, 1)
+
+            store.prepare_operation(task.id, "uncertain", "cms_submit", {"id": 2})
+            store.start_operation(task.id, "uncertain")
+            store.mark_operation_uncertain(task.id, "uncertain", "network timeout")
+            self.assertIsNone(store.start_operation(task.id, "uncertain"))
+
+            store.prepare_operation(task.id, "succeeded", "cms_submit", {"id": 3})
+            store.start_operation(task.id, "succeeded")
+            store.complete_operation(task.id, "succeeded", {"submission_id": 7})
+            self.assertIsNone(store.start_operation(task.id, "succeeded"))
+
+            store.prepare_operation(task.id, "failed", "cms_submit", {"id": 4})
+            store.start_operation(task.id, "failed")
+            failed = store.mark_operation_failed(task.id, "failed", "request rejected")
+            self.assertEqual(failed.status, "failed")
+            self.assertEqual(failed.last_error, "request rejected")
+            self.assertIsNone(store.start_operation(task.id, "failed"))
+
+    def test_complete_operation_persists_json_result_after_reopening_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "tasks.db"
+            store = TaskStore(db_path)
+            task = store.upsert_task("operation-result", "", "https://115cdn.com/s/operation-result")
+            store.prepare_operation(task.id, "g0:u0:submit", "cms_submit", {"title": "Movie"})
+            store.start_operation(task.id, "g0:u0:submit")
+
+            completed = store.complete_operation(
+                task.id,
+                "g0:u0:submit",
+                {"submission_id": 7, "accepted": True},
+            )
+            reopened = TaskStore(db_path).find_operation(task.id, "g0:u0:submit")
+
+            self.assertEqual(completed.status, "succeeded")
+            self.assertEqual(completed.result, {"submission_id": 7, "accepted": True})
+            self.assertEqual(reopened, completed)
+
+    def test_clear_finished_tasks_removes_operation_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("operation-cleanup", "", "https://115cdn.com/s/operation-cleanup")
+            store.prepare_operation(task.id, "g0:u0:submit", "cms_submit", {"title": "Movie"})
+            store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+
+            self.assertEqual(store.clear_finished_tasks(), 1)
+            self.assertIsNone(store.find_operation(task.id, "g0:u0:submit"))
+
+    def test_operation_journal_migrates_and_reprocess_changes_operation_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "tasks.db"
+            store = TaskStore(db_path)
+            task = store.upsert_task("operation-scope", "", "https://115cdn.com/s/operation-scope")
+            self.assertEqual(operation_scope(task), "g0:u0")
+
+            reprocessed = store.reprocess_task(task.id, next_run_at=0)
+            updated_series = store.patch_metadata(reprocessed.id, {"update_requested_run": 1})
+
+            self.assertEqual(operation_scope(reprocessed), "g1:u0")
+            self.assertEqual(operation_scope(updated_series), "g1:u1")
     def test_self_share_review_mode_override_round_trip_and_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
@@ -1513,6 +1616,7 @@ class TaskStoreTests(unittest.TestCase):
             conn = sqlite3.connect(db_path)
             try:
                 columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+                tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
             finally:
                 conn.close()
             legacy_claim = store.claim_next_runnable("worker-1", now=10.0)
@@ -1520,6 +1624,7 @@ class TaskStoreTests(unittest.TestCase):
             updated = store.record_event(task.id, TaskStage.RECEIVED, TaskStatus.RUNNING, "收到", submission_id=7)
 
             self.assertTrue({"chat_id", "submission_id", "next_run_at", "claimed_by", "claimed_at", "claim_token", "claim_heartbeat_at", "metadata_json", "source_type", "source_key"} <= columns)
+            self.assertIn("task_operations", tables)
             self.assertIsNone(legacy_claim)
             self.assertEqual(updated.chat_id, "464100862")
             self.assertEqual(updated.submission_id, 7)

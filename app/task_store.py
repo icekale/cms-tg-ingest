@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .models import TaskSnapshot, TaskStage, TaskStatus
+from .models import TaskOperation, TaskSnapshot, TaskStage, TaskStatus
 from .quality_rules import quality_attempt_count
 from .self_share_settings import normalize_receive_cid, normalize_self_share_review_mode
 from .strm_mode import is_strm_mode_locked, normalize_strm_mode
@@ -164,13 +164,21 @@ def build_reprocess_metadata(
     patch = dict(metadata_patch or {})
     if target_stage == TaskStage.CLOUD_DOWNLOADING:
         patch["strm_mode"] = "shared"
-    return {
+    metadata = {
         "retry_from_stage": task.current_stage.value,
         "retry_stage": target_stage.value,
         "force_reprocess": True,
         "reprocess_started_at": time.time() if started_at is None else float(started_at),
         **patch,
     }
+    metadata["operation_generation"] = max(0, int(task.metadata.get("operation_generation") or 0)) + 1
+    return metadata
+
+
+def operation_scope(task: TaskSnapshot) -> str:
+    generation = max(0, int(task.metadata.get("operation_generation") or 0))
+    update_run = max(0, int(task.metadata.get("update_requested_run") or 0))
+    return f"g{generation}:u{update_run}"
 
 
 @dataclass(frozen=True)
@@ -279,6 +287,31 @@ class TaskStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id, id)")
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS task_operations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER NOT NULL,
+                    operation_key TEXT NOT NULL,
+                    operation_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    request_json TEXT NOT NULL DEFAULT '{}',
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    started_at REAL NOT NULL DEFAULT 0,
+                    finished_at REAL NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(task_id, operation_key),
+                    FOREIGN KEY(task_id) REFERENCES tasks(id)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_task_operations_task_type_status "
+                "ON task_operations(task_id, operation_type, status)"
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS runtime_state (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL,
@@ -332,6 +365,134 @@ class TaskStore:
     @staticmethod
     def _snapshot(row: sqlite3.Row) -> TaskSnapshot:
         return TaskSnapshot.from_row(dict(row))
+
+    @staticmethod
+    def _operation(row: sqlite3.Row) -> TaskOperation:
+        return TaskOperation.from_row(dict(row))
+
+    @staticmethod
+    def _operation_json(value: dict[str, Any]) -> str:
+        return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+
+    def prepare_operation(
+        self,
+        task_id: int,
+        operation_key: str,
+        operation_type: str,
+        request: dict[str, Any],
+    ) -> TaskOperation:
+        request_json = self._operation_json(request)
+        now = time.time()
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT * FROM task_operations WHERE task_id = ? AND operation_key = ?",
+                (int(task_id), str(operation_key)),
+            ).fetchone()
+            if existing is not None:
+                if existing["operation_type"] != str(operation_type) or existing["request_json"] != request_json:
+                    raise ValueError("operation request identity is immutable")
+                return self._operation(existing)
+            conn.execute(
+                """
+                INSERT INTO task_operations (
+                    task_id, operation_key, operation_type, status, request_json, created_at, updated_at
+                ) VALUES (?, ?, ?, 'prepared', ?, ?, ?)
+                """,
+                (int(task_id), str(operation_key), str(operation_type), request_json, now, now),
+            )
+            row = conn.execute(
+                "SELECT * FROM task_operations WHERE task_id = ? AND operation_key = ?",
+                (int(task_id), str(operation_key)),
+            ).fetchone()
+        return self._operation(row)
+
+    def find_operation(self, task_id: int, operation_key: str) -> TaskOperation | None:
+        with self._lock, self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM task_operations WHERE task_id = ? AND operation_key = ?",
+                (int(task_id), str(operation_key)),
+            ).fetchone()
+        return self._operation(row) if row is not None else None
+
+    def start_operation(self, task_id: int, operation_key: str) -> TaskOperation | None:
+        now = time.time()
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE task_operations
+                SET status = 'started', attempt_count = attempt_count + 1, started_at = ?, updated_at = ?
+                WHERE task_id = ? AND operation_key = ? AND status = 'prepared'
+                """,
+                (now, now, int(task_id), str(operation_key)),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = conn.execute(
+                "SELECT * FROM task_operations WHERE task_id = ? AND operation_key = ?",
+                (int(task_id), str(operation_key)),
+            ).fetchone()
+        return self._operation(row)
+
+    def complete_operation(
+        self,
+        task_id: int,
+        operation_key: str,
+        result: dict[str, Any],
+    ) -> TaskOperation | None:
+        result_json = self._operation_json(result)
+        return self._finish_operation(task_id, operation_key, "succeeded", result_json=result_json)
+
+    def mark_operation_uncertain(
+        self,
+        task_id: int,
+        operation_key: str,
+        last_error: str,
+    ) -> TaskOperation | None:
+        return self._finish_operation(task_id, operation_key, "uncertain", last_error=last_error)
+
+    def mark_operation_failed(
+        self,
+        task_id: int,
+        operation_key: str,
+        last_error: str,
+    ) -> TaskOperation | None:
+        return self._finish_operation(task_id, operation_key, "failed", last_error=last_error)
+
+    def _finish_operation(
+        self,
+        task_id: int,
+        operation_key: str,
+        status: str,
+        *,
+        result_json: str | None = None,
+        last_error: str | None = None,
+    ) -> TaskOperation | None:
+        now = time.time()
+        assignments = ["status = ?", "finished_at = ?", "updated_at = ?"]
+        values: list[Any] = [status, now, now]
+        if result_json is not None:
+            assignments.append("result_json = ?")
+            values.append(result_json)
+        if last_error is not None:
+            assignments.append("last_error = ?")
+            values.append(str(last_error))
+        values.extend([int(task_id), str(operation_key)])
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                f"UPDATE task_operations SET {', '.join(assignments)} "
+                "WHERE task_id = ? AND operation_key = ? AND status = 'started'",
+                values,
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = conn.execute(
+                "SELECT * FROM task_operations WHERE task_id = ? AND operation_key = ?",
+                (int(task_id), str(operation_key)),
+            ).fetchone()
+        return self._operation(row)
 
     def set_runtime_state(self, key: str, value: str, updated_at: float | None = None) -> None:
         timestamp = time.time() if updated_at is None else float(updated_at)
@@ -1399,6 +1560,7 @@ class TaskStore:
                 return 0
             placeholders = ",".join("?" for _ in task_ids)
             conn.execute(f"DELETE FROM task_events WHERE task_id IN ({placeholders})", task_ids)
+            conn.execute(f"DELETE FROM task_operations WHERE task_id IN ({placeholders})", task_ids)
             cursor = conn.execute(f"DELETE FROM tasks WHERE id IN ({placeholders})", task_ids)
         return int(cursor.rowcount or 0)
 
