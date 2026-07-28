@@ -882,6 +882,58 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
             self.assertEqual(stored["own_share_file_id"], "shared-folder")
 
+    def test_organizing_stage_rejects_folder_when_later_owner_has_different_tmdb(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="示例剧集 2025") or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": "示例剧集", "type": "tv", "tmdb_id": "273114", "category": "国产电视"},
+                "tmdb_resolved",
+            ) or row
+            mismatched_owner = self.tasks.upsert_task("mismatched", "", "https://115cdn.com/s/mismatched")
+            self.tasks.record_event(
+                mismatched_owner.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "mismatched owner",
+                metadata_patch={
+                    "own_share_file_id": "shared-folder",
+                    "tmdb_id": "9533",
+                    "recognition": {"tmdb_id": "9533"},
+                },
+            )
+            matching_owner = self.tasks.upsert_task("matching", "", "https://115cdn.com/s/matching")
+            self.tasks.record_event(
+                matching_owner.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "matching owner",
+                metadata_patch={
+                    "own_share_file_id": "shared-folder",
+                    "tmdb_id": "273114",
+                    "recognition": {"tmdb_id": "273114"},
+                },
+            )
+            owners = self.tasks.list_tasks_by_own_share_file_id("shared-folder")
+            self.assertEqual([owner.id for owner in owners], [matching_owner.id, mismatched_owner.id])
+            self.p115.folder = {
+                "file_id": "shared-folder",
+                "file_name": "S-示例剧集-2025-[tmdb=273114]",
+                "parent_id": "tv-parent",
+                "category": "国产电视",
+            }
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("其他 TMDB 任务", result.message)
+            self.assertFalse(stored["own_share_file_id"])
+
     def test_organizing_stage_rejects_folder_with_ambiguous_owner(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
