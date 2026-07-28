@@ -76,3 +76,50 @@ No prior agent report existed, so no prior RED result is claimed.
 ## Concerns
 
 The full warning-policy suite exited successfully with 1044 passing tests, but after its `OK` summary Python printed two `ResourceWarning: unclosed database` finalizer messages. Running `tests.test_doctor` alone with the same warning policy did not reproduce them. This fix does not touch that unrelated cleanup path, so the observation is retained for follow-up rather than hidden by a broad unrelated change.
+
+## Fix Round 2/5
+
+### Root Cause
+
+`start_series_update_from_link()` deliberately freezes a source row as an unclaimed `received/pending` checkpoint with `next_run_at=-1` before preparing the child submission. A concurrent duplicate using another `TaskStore` for the same SQLite database could read that exact in-flight snapshot and call `_park_series_update_checkpoint()`. The earlier race test released its losing invocation only after the winner returned, so it never overlapped this preparation window.
+
+### Implementation
+
+- Serialized the complete explicit new-link operation with a process-local lock keyed by the resolved `TaskStore` database path plus share code and receive code.
+- Shared the lock registry across separate `TaskStore` instances and stored locks in a `WeakValueDictionary`, so unrelated databases do not contend and unused registry entries can be reclaimed.
+- Kept the existing negative-checkpoint recovery branches unchanged. A process restart clears process-local ownership, allowing a genuinely stale checkpoint to be parked and explicitly retried rather than becoming permanently `already_started`.
+- Kept `get_or_create_share_task()`, source claim/CAS checks, URL/chat/metadata/`updated_at` preservation, and ordinary `upsert_task()` unchanged.
+
+### TDD Evidence
+
+1. RED against production code at `1e1c67d` after adding the deterministic regression:
+
+   `python3 -m unittest tests.test_bridge_v02_integration.BridgeTaskStoreHandleUpdateTests.test_explicit_new_link_series_update_duplicate_does_not_park_active_preparation_checkpoint -v`
+
+   Result: 1 test failed. While the first invocation was event-blocked in child-submission preparation, the duplicate changed the checkpoint from `TaskStage.RECEIVED` to `TaskStage.NEEDS_ACTION`.
+
+2. GREEN after adding canonical per-database/share process-local serialization:
+
+   Same command.
+
+   Result: 1 test passed. The refined test coordinates two real `TaskStore` instances, signals when the duplicate enters database-identity resolution, verifies the frozen checkpoint state and `updated_at` remain unchanged before releasing preparation, then verifies the duplicate returns `already_started` after activation.
+
+### Verification
+
+- `python3 -m unittest -v -k series_update tests.test_bridge_v02_integration.BridgeTaskStoreHandleUpdateTests`
+  - Initial run exposed an obsolete test-harness ordering assumption: the deliberately paused loser now held the outer operation lock. The test was re-coordinated so the intended winner enters first.
+  - Final result: exit 0; 31 tests passed.
+- `python3 -m unittest tests.test_bridge_v02_integration -v`
+  - Exit 0; 81 tests passed. Logged exception traces are expected simulated failure fixtures.
+- `git diff --check`
+  - Exit 0 before this report update; rerun before commit.
+
+### Files
+
+- `bridge.py`
+- `tests/test_bridge_v02_integration.py`
+- `.superpowers/sdd/2026-07-28-explicit-new-link-series-update/preintegration-fix-report.md`
+
+### Concerns
+
+No new concerns for the current single-process bridge execution model. Coordination is intentionally process-local so process restart naturally releases ownership and permits stale-checkpoint recovery; a future multi-process bridge architecture would require a persistent ownership mechanism.

@@ -3,7 +3,7 @@ import os
 import threading
 import tempfile
 import unittest
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1710,21 +1710,44 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
             task_db_path = Path(tmp) / "tasks.db"
-            winner_store = TaskStore(task_db_path)
-            _target_row, target, _recognition = self.make_completed_target(submission_store, winner_store)
-            loser_waiting_to_create = threading.Event()
-            winner_created_source = threading.Event()
+            winner_waiting_to_create = threading.Event()
+            allow_winner_creation = threading.Event()
+            loser_entered = threading.Event()
 
             class PausingTaskStore(TaskStore):
                 def get_or_create_share_task(self, share_code, receive_code, url, chat_id=""):
-                    loser_waiting_to_create.set()
-                    if not winner_created_source.wait(5):
-                        raise AssertionError("winner did not create the source task")
+                    winner_waiting_to_create.set()
+                    if not allow_winner_creation.wait(5):
+                        raise AssertionError("winner creation was not released")
                     return super().get_or_create_share_task(share_code, receive_code, url, chat_id=chat_id)
 
-            loser_store = PausingTaskStore(task_db_path)
+            class CoordinatedTaskStore(TaskStore):
+                @property
+                def db_path(self):
+                    loser_entered.set()
+                    return self._db_path
+
+                @db_path.setter
+                def db_path(self, value):
+                    self._db_path = value
+
+            winner_store = PausingTaskStore(task_db_path)
+            loser_store = CoordinatedTaskStore(task_db_path)
+            loser_entered.clear()
+            _target_row, target, _recognition = self.make_completed_target(submission_store, winner_store)
             key = bridge.ShareKey("new", "1212")
-            with ThreadPoolExecutor(max_workers=1) as executor:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                winning = executor.submit(
+                    bridge.start_series_update_from_link,
+                    target,
+                    key,
+                    "https://115cdn.com/s/new?password=1212",
+                    "winner-chat",
+                    submission_store,
+                    winner_store,
+                    source="并发胜方",
+                )
+                self.assertTrue(winner_waiting_to_create.wait(5), "winner did not reach source creation")
                 losing = executor.submit(
                     bridge.start_series_update_from_link,
                     target,
@@ -1735,19 +1758,11 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                     loser_store,
                     source="并发败方",
                 )
-                self.assertTrue(loser_waiting_to_create.wait(5), "loser did not reach source creation")
                 try:
-                    winner, winner_result = bridge.start_series_update_from_link(
-                        target,
-                        key,
-                        "https://115cdn.com/s/new?password=1212",
-                        "winner-chat",
-                        submission_store,
-                        winner_store,
-                        source="并发胜方",
-                    )
+                    self.assertTrue(loser_entered.wait(5), "loser did not enter the operation")
                 finally:
-                    winner_created_source.set()
+                    allow_winner_creation.set()
+                winner, winner_result = winning.result(timeout=5)
                 repeated, loser_result = losing.result(timeout=5)
 
             current = winner_store.find_task(winner.id)
@@ -1763,6 +1778,88 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(current.current_stage, TaskStage.RECEIVED)
             self.assertEqual(current.status, TaskStatus.PENDING)
             self.assertEqual(current.next_run_at, 0)
+
+    def test_explicit_new_link_series_update_duplicate_does_not_park_active_preparation_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_db_path = Path(tmp) / "tasks.db"
+            first_store = TaskStore(task_db_path)
+            _target_row, target, _recognition = self.make_completed_target(submission_store, first_store)
+            preparation_started = threading.Event()
+            release_preparation = threading.Event()
+            duplicate_entered = threading.Event()
+            frozen_checkpoint = None
+            real_prepare = submission_store.prepare_series_update_child
+
+            class CoordinatedTaskStore(TaskStore):
+                @property
+                def db_path(self):
+                    duplicate_entered.set()
+                    return self._db_path
+
+                @db_path.setter
+                def db_path(self, value):
+                    self._db_path = value
+
+            duplicate_store = CoordinatedTaskStore(task_db_path)
+            duplicate_entered.clear()
+
+            def prepare_while_blocked(*args, **kwargs):
+                nonlocal frozen_checkpoint
+                frozen_checkpoint = first_store.find_task_by_share_key("new", "1212")
+                preparation_started.set()
+                if not release_preparation.wait(5):
+                    raise AssertionError("preparation was not released")
+                return real_prepare(*args, **kwargs)
+
+            def run_duplicate():
+                return bridge.start_series_update_from_link(
+                    target,
+                    bridge.ShareKey("new", "1212"),
+                    "https://115cdn.com/s/duplicate?password=9999",
+                    "duplicate-chat",
+                    submission_store,
+                    duplicate_store,
+                    source="并发重复请求",
+                )
+
+            with patch.object(
+                submission_store,
+                "prepare_series_update_child",
+                side_effect=prepare_while_blocked,
+            ), ThreadPoolExecutor(max_workers=2) as executor:
+                first = executor.submit(
+                    bridge.start_series_update_from_link,
+                    target,
+                    bridge.ShareKey("new", "1212"),
+                    "https://115cdn.com/s/new?password=1212",
+                    "first-chat",
+                    submission_store,
+                    first_store,
+                    source="首次请求",
+                )
+                self.assertTrue(preparation_started.wait(5), "first call did not enter preparation")
+                duplicate = executor.submit(run_duplicate)
+                self.assertTrue(duplicate_entered.wait(5), "duplicate call did not enter the operation")
+                try:
+                    try:
+                        duplicate.result(timeout=1)
+                    except FutureTimeoutError:
+                        pass
+                    current = first_store.find_task(frozen_checkpoint.id)
+                    self.assertEqual(current.current_stage, TaskStage.RECEIVED)
+                    self.assertEqual(current.status, TaskStatus.PENDING)
+                    self.assertEqual(current.next_run_at, -1)
+                    self.assertEqual(current.updated_at, frozen_checkpoint.updated_at)
+                finally:
+                    release_preparation.set()
+                started, first_result = first.result(timeout=5)
+                repeated, duplicate_result = duplicate.result(timeout=5)
+
+            self.assertEqual(first_result, "started")
+            self.assertEqual(duplicate_result, "already_started")
+            self.assertEqual(repeated, started)
+            self.assertEqual(first_store.find_task(started.id), started)
 
     def test_explicit_new_link_series_update_parks_preparation_checkpoint_after_preparation_interruption(self):
         with tempfile.TemporaryDirectory() as tmp:

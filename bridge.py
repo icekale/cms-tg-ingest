@@ -13,6 +13,7 @@ import threading
 import time
 import urllib.error
 import urllib.parse
+import weakref
 import inspect
 from dataclasses import dataclass
 from pathlib import Path
@@ -211,6 +212,10 @@ _EXPLICIT_SERIES_UPDATE_RE = re.compile(
 )
 TRAILING_PUNCT = ".,;)。），]】》>"
 LOG = logging.getLogger("cms-tg-ingest")
+_SERIES_UPDATE_LOCKS_GUARD = threading.Lock()
+_SERIES_UPDATE_LOCKS: weakref.WeakValueDictionary[tuple[str, str, str], threading.Lock] = (
+    weakref.WeakValueDictionary()
+)
 LAST_TELEGRAM_TRANSIENT_ERROR_AT: str | None = None
 _HDHIVE_PENDING_FILTERS: dict[str, int] = {}
 _HDHIVE_FILTER_PROMPT = "请发送集数过滤，例如 S01E01-S01E10,S02；发送“清除”恢复全部正常集。"
@@ -3144,6 +3149,22 @@ def _park_series_update_checkpoint(
     )
 
 
+@contextmanager
+def _series_update_share_lock(task_store: TaskStore, key: ShareKey):
+    lock_key = (
+        str(task_store.db_path.expanduser().resolve(strict=False)),
+        key.share_code,
+        key.receive_code,
+    )
+    with _SERIES_UPDATE_LOCKS_GUARD:
+        lock = _SERIES_UPDATE_LOCKS.get(lock_key)
+        if lock is None:
+            lock = threading.Lock()
+            _SERIES_UPDATE_LOCKS[lock_key] = lock
+    with lock:
+        yield
+
+
 def start_series_update_from_link(
     target_task: Any | None,
     key: ShareKey,
@@ -3156,6 +3177,28 @@ def start_series_update_from_link(
 ) -> tuple[Any | None, str]:
     if task_store is None:
         return None, "not_eligible"
+    with _series_update_share_lock(task_store, key):
+        return _start_series_update_from_link_locked(
+            target_task,
+            key,
+            link,
+            chat_id,
+            store,
+            task_store,
+            source=source,
+        )
+
+
+def _start_series_update_from_link_locked(
+    target_task: Any | None,
+    key: ShareKey,
+    link: str,
+    chat_id: int | str,
+    store: SubmissionStore | None,
+    task_store: TaskStore,
+    *,
+    source: str,
+) -> tuple[Any | None, str]:
     target_identity = _series_update_target_identity(target_task, store)
     if target_identity is None:
         return None, "not_eligible"
