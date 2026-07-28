@@ -1,10 +1,12 @@
 import tempfile
+import threading
 import unittest
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import bridge
+from app.background_jobs import BackgroundJobCoordinator
 from app.clients.hdhive import HdhiveAccount, HdhiveResource, HdhiveUnlockItem
 from app.hdhive import HdhiveSessionStore, HdhiveWorkflow
 from app.hdhive_subscriptions import HdhiveSubscriptionService
@@ -104,6 +106,48 @@ class FakeProxy:
 
 
 class HdhiveBridgeTests(unittest.TestCase):
+    def test_subscription_check_callback_acknowledges_before_blocking_work_finishes(self):
+        telegram = FakeTelegram()
+        service = FakeSubscriptionService()
+        started = threading.Event()
+        release = threading.Event()
+        returned = threading.Event()
+        coordinator = BackgroundJobCoordinator()
+
+        def check(_subscription_id):
+            started.set()
+            release.wait(1)
+            return SimpleNamespace(discovered=1, enqueued=1, pending_confirmation=0, failed=0)
+
+        service.check = check
+
+        def invoke():
+            bridge.handle_hdhive_subscription_callback(
+                "hsub:check:1",
+                "callback-check",
+                "464100862",
+                telegram,
+                service,
+                None,
+                background_jobs=coordinator,
+            )
+            returned.set()
+
+        callback_thread = threading.Thread(target=invoke)
+        callback_thread.start()
+        try:
+            self.assertTrue(returned.wait(0.5))
+            self.assertTrue(started.wait(1))
+            self.assertEqual(telegram.answers[-1][1], "已开始检查")
+            self.assertFalse(callback_thread.is_alive())
+            release.set()
+            coordinator.shutdown(wait=True)
+            self.assertIn("检查完成：发现 1 个资源", telegram.messages[-1][1])
+        finally:
+            release.set()
+            coordinator.shutdown(wait=True)
+            callback_thread.join(timeout=1)
+
     def test_subscription_check_ack_failure_does_not_change_business_result(self):
         class AckFailTelegram(FakeTelegram):
             def answer_callback_query(self, callback_id, text="", show_alert=False):

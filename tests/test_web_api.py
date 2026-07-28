@@ -1,4 +1,5 @@
 import json
+import threading
 import tempfile
 import time
 import unittest
@@ -12,6 +13,7 @@ from app.hdhive_subscription_store import HdhiveSubscriptionStore
 from app.series_rules import parse_episode_filter
 from app.task_store import TaskStore
 from app.config import Config
+from app.background_jobs import BackgroundJobCoordinator
 from app.quality_automation import QualityAutomation
 from app.web import WebApp
 from app.web_api import _safe_error, _safe_url, serialize_health, serialize_task
@@ -68,6 +70,32 @@ class WebApiTests(unittest.TestCase):
             self.assertIn("automation", payload)
             self.assertNotIn(str(destination), body.decode())
             self.assertIn("movie.strm", item["detail"])
+
+    def test_quality_run_api_deduplicates_duplicate_clicks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            coordinator = BackgroundJobCoordinator()
+            started = threading.Event()
+            release = threading.Event()
+
+            class BlockingQuality:
+                def run_now(self):
+                    started.set()
+                    release.wait(1)
+
+            app = WebApp(store, quality_automation=BlockingQuality(), background_jobs=coordinator)
+            try:
+                first_status, _headers, first_body = app.handle_request("POST", "/api/v1/quality/run", {}, b"")
+                self.assertTrue(started.wait(1))
+                duplicates = [app.handle_request("POST", "/api/v1/quality/run", {}, b"") for _ in range(19)]
+
+                self.assertEqual(first_status, 202)
+                self.assertEqual(json.loads(first_body)["job"]["outcome"], "accepted")
+                self.assertTrue(all(status == 409 for status, _headers, _body in duplicates))
+                self.assertTrue(all(json.loads(body)["job"]["outcome"] == "already_running" for _status, _headers, body in duplicates))
+            finally:
+                release.set()
+                coordinator.shutdown(wait=True)
 
     def test_quality_action_api_validates_rule_and_returns_conflict_without_external_clients(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -652,7 +680,8 @@ class WebApiTests(unittest.TestCase):
             quality = Mock()
             quality.status_snapshot.return_value = {"enabled": True, "time": "02:50"}
             quality.update_settings.return_value = {"enabled": True, "time": "03:10"}
-            app = WebApp(store, quality_automation=quality)
+            coordinator = BackgroundJobCoordinator()
+            app = WebApp(store, quality_automation=quality, background_jobs=coordinator)
 
             clear_status, _headers, clear_body = app.handle_request("POST", "/api/v1/history/clear", {}, b"")
             settings_status, _headers, settings_body = app.handle_request(
@@ -661,8 +690,8 @@ class WebApiTests(unittest.TestCase):
                 {"Content-Type": "application/json"},
                 b'{"enabled":true,"time":"03:10","timezone":"Asia/Shanghai","max_tasks":10,"check_limit":2}',
             )
-            with patch("app.web.Thread") as thread_cls:
-                run_status, _headers, run_body = app.handle_request("POST", "/api/v1/quality/run", {}, b"")
+            run_status, _headers, run_body = app.handle_request("POST", "/api/v1/quality/run", {}, b"")
+            coordinator.shutdown(wait=True)
 
         self.assertEqual(clear_status, 200)
         self.assertEqual(json.loads(clear_body)["cleared"], 1)
@@ -676,8 +705,7 @@ class WebApiTests(unittest.TestCase):
         )
         self.assertEqual(run_status, 202)
         self.assertTrue(json.loads(run_body)["started"])
-        thread_cls.assert_called_once()
-        thread_cls.return_value.start.assert_called_once()
+        quality.run_now.assert_called_once()
 
     def test_hdhive_action_api_delegates_to_existing_services(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -686,7 +714,8 @@ class WebApiTests(unittest.TestCase):
             scheduler = Mock()
             scheduler.settings.return_value = {"enabled": True, "time": "01:30", "timezone": "Asia/Shanghai"}
             scheduler.update_settings.return_value = {"enabled": False, "time": "02:00", "timezone": "Asia/Shanghai"}
-            app = WebApp(store, hdhive_service=service, hdhive_scheduler=scheduler)
+            coordinator = BackgroundJobCoordinator()
+            app = WebApp(store, hdhive_service=service, hdhive_scheduler=scheduler, background_jobs=coordinator)
 
             pause_status, _headers, _body = app.handle_request("POST", "/api/v1/hdhive/subscriptions/7/pause", {}, b"")
             confirm_status, _headers, _body = app.handle_request("POST", "/api/v1/hdhive/items/8/confirm", {}, b"")
@@ -696,8 +725,8 @@ class WebApiTests(unittest.TestCase):
                 {"Content-Type": "application/json"},
                 b'{"enabled":false,"time":"02:00","timezone":"Asia/Shanghai"}',
             )
-            with patch("app.web.Thread") as thread_cls:
-                run_status, _headers, run_body = app.handle_request("POST", "/api/v1/hdhive/run", {}, b"")
+            run_status, _headers, run_body = app.handle_request("POST", "/api/v1/hdhive/run", {}, b"")
+            coordinator.shutdown(wait=True)
 
         self.assertEqual(pause_status, 200)
         service.pause.assert_called_once_with(7)
@@ -708,7 +737,7 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(json.loads(settings_body)["settings"]["time"], "02:00")
         self.assertEqual(run_status, 202)
         self.assertTrue(json.loads(run_body)["started"])
-        thread_cls.return_value.start.assert_called_once()
+        scheduler.run_now.assert_called_once()
 
     def test_serialize_task_does_not_expose_secret_metadata(self):
         task = type(

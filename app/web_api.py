@@ -185,9 +185,20 @@ def serialize_health(store: TaskStore, *, enabled: bool = True, now: float | Non
     }
 
 
-def serialize_hdhive(service: Any | None, scheduler: Any | None = None) -> dict[str, Any]:
+def serialize_background_jobs(background_jobs: Any | None, *, prefix: str = "") -> list[dict[str, Any]]:
+    if background_jobs is None:
+        return []
+    snapshots = getattr(background_jobs, "list_snapshots", lambda: ())()
+    return [snapshot.payload() for snapshot in snapshots if str(getattr(snapshot, "key", "")).startswith(prefix)]
+
+
+def serialize_hdhive(
+    service: Any | None,
+    scheduler: Any | None = None,
+    background_jobs: Any | None = None,
+) -> dict[str, Any]:
     if service is None:
-        return {"enabled": False, "subscriptions": [], "account": None, "schedule": {}}
+        return {"enabled": False, "subscriptions": [], "account": None, "schedule": {}, "background_jobs": []}
     subscriptions = []
     for subscription in service.list():
         item_rows = []
@@ -231,7 +242,13 @@ def serialize_hdhive(service: Any | None, scheduler: Any | None = None) -> dict[
             schedule = dict(scheduler.status_snapshot())
         except Exception as exc:
             schedule = {"error": _safe_error(str(exc)[:160])}
-    return {"enabled": True, "subscriptions": subscriptions, "account": account, "schedule": schedule}
+    return {
+        "enabled": True,
+        "subscriptions": subscriptions,
+        "account": account,
+        "schedule": schedule,
+        "background_jobs": serialize_background_jobs(background_jobs, prefix="hdhive:"),
+    }
 
 
 def serialize_hdhive_subscription(service: Any | None, subscription_id: int) -> dict[str, Any] | None:
@@ -355,7 +372,13 @@ def quality_items(
     return items
 
 
-def api_quality(store: TaskStore, *, limit: int = 100, quality_automation: Any | None = None) -> dict[str, Any]:
+def api_quality(
+    store: TaskStore,
+    *,
+    limit: int = 100,
+    quality_automation: Any | None = None,
+    background_jobs: Any | None = None,
+) -> dict[str, Any]:
     items = quality_items(store, limit=limit, quality_automation=quality_automation)
     rule_counts: dict[str, int] = {}
     task_keys: set[tuple[int, str]] = set()
@@ -383,4 +406,5 @@ def api_quality(store: TaskStore, *, limit: int = 100, quality_automation: Any |
     if quality_automation is not None:
         snapshot = quality_automation.status_snapshot()
         payload["automation"] = snapshot if isinstance(snapshot, dict) else {}
+    payload["background_job"] = next(iter(serialize_background_jobs(background_jobs, prefix="quality:run")), None)
     return payload

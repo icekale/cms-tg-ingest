@@ -43,6 +43,7 @@ from app.clients.p115 import (
     select_source_residue_115_files,
 )
 from app.backup import BackupScheduler, start_backup_loop
+from app.background_jobs import BackgroundJobCoordinator
 
 from app.config import (
     Config,
@@ -431,6 +432,7 @@ def maybe_start_web_server(
     hdhive_service: HdhiveSubscriptionService | None = None,
     hdhive_scheduler: HdhiveSubscriptionScheduler | None = None,
     frontend_dist_path: str | None = None,
+    background_jobs: BackgroundJobCoordinator | None = None,
     starter=start_web_server,
 ):
     if not config.web_enabled:
@@ -449,6 +451,8 @@ def maybe_start_web_server(
         kwargs["hdhive_service"] = hdhive_service
     if hdhive_scheduler is not None:
         kwargs["hdhive_scheduler"] = hdhive_scheduler
+    if background_jobs is not None:
+        kwargs["background_jobs"] = background_jobs
     try:
         starter_parameters = inspect.signature(starter).parameters
         supports_self_share_config = "self_share_config" in starter_parameters or any(
@@ -480,6 +484,15 @@ def maybe_start_web_server(
         supports_max_retries = True
     if not supports_max_retries:
         kwargs.pop("max_retries", None)
+    try:
+        starter_parameters = inspect.signature(starter).parameters
+        supports_background_jobs = "background_jobs" in starter_parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in starter_parameters.values()
+        )
+    except (TypeError, ValueError):
+        supports_background_jobs = True
+    if not supports_background_jobs:
+        kwargs.pop("background_jobs", None)
     server = starter(task_store, config.web_host, config.web_port, **kwargs)
     LOG.info("v0.2 web admin started host=%s port=%s", config.web_host, config.web_port)
     return server
@@ -493,6 +506,7 @@ def call_maybe_start_web_server(
     hdhive_service: HdhiveSubscriptionService | None = None,
     hdhive_scheduler: HdhiveSubscriptionScheduler | None = None,
     frontend_dist_path: str | None = None,
+    background_jobs: BackgroundJobCoordinator | None = None,
 ):
     try:
         parameters = inspect.signature(maybe_start_web_server).parameters
@@ -516,16 +530,20 @@ def call_maybe_start_web_server(
     supports_max_retries = "max_retries" in parameters or any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     )
-    if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler or supports_frontend_dist_path or supports_max_retries:
-        return maybe_start_web_server(
-            config,
-            task_store,
-            submission_store=submission_store if supports_submission_store else None,
-            quality_automation=quality_automation if supports_quality_automation else None,
-            hdhive_service=hdhive_service if supports_hdhive_service else None,
-            hdhive_scheduler=hdhive_scheduler if supports_hdhive_scheduler else None,
-            frontend_dist_path=frontend_dist_path if supports_frontend_dist_path else None,
-        )
+    supports_background_jobs = "background_jobs" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler or supports_frontend_dist_path or supports_max_retries or supports_background_jobs:
+        kwargs = {
+            "submission_store": submission_store if supports_submission_store else None,
+            "quality_automation": quality_automation if supports_quality_automation else None,
+            "hdhive_service": hdhive_service if supports_hdhive_service else None,
+            "hdhive_scheduler": hdhive_scheduler if supports_hdhive_scheduler else None,
+            "frontend_dist_path": frontend_dist_path if supports_frontend_dist_path else None,
+        }
+        if supports_background_jobs:
+            kwargs["background_jobs"] = background_jobs
+        return maybe_start_web_server(config, task_store, **kwargs)
     return maybe_start_web_server(config, task_store)
 
 
@@ -1947,6 +1965,7 @@ def handle_hdhive_subscription_callback(
     telegram: TelegramClient,
     service: HdhiveSubscriptionService | None,
     scheduler: HdhiveSubscriptionScheduler | None,
+    background_jobs: BackgroundJobCoordinator | None = None,
 ) -> bool:
     parsed = parse_hdhive_subscription_callback(data)
     if parsed is None:
@@ -1972,6 +1991,41 @@ def handle_hdhive_subscription_callback(
         elif action == "delete":
             service.delete(target_id)
             message = "订阅已删除，已入库内容不会受影响。"
+        elif action in {"check", "confirm"} and background_jobs is not None:
+            result_holder: dict[str, Any] = {}
+
+            def run_manual_job() -> None:
+                result_holder["result"] = service.check(target_id) if action == "check" else service.confirm_item(target_id)
+
+            def send_completion(snapshot: Any) -> None:
+                if snapshot.status == "failed":
+                    telegram.send_message(chat_id, f"HDHive 订阅操作失败：{snapshot.error}")
+                    return
+                result = result_holder["result"]
+                if action == "check":
+                    message = (
+                        f"检查完成：发现 {result.discovered} 个资源，入队 {result.enqueued} 个，"
+                        f"待确认 {result.pending_confirmation} 个，失败 {result.failed} 个。"
+                    )
+                else:
+                    message = (
+                        f"已处理确认资源：入队 {result.enqueued} 个，"
+                        f"待确认 {result.pending_confirmation} 个，失败 {result.failed} 个。"
+                    )
+                text, keyboard = format_hdhive_subscription_view(service, scheduler, chat_id)
+                telegram.send_message(chat_id, f"{message}\n\n{text}", reply_markup=keyboard)
+
+            key = f"hdhive:subscription:{target_id}" if action == "check" else f"hdhive:item:{target_id}"
+            description = f"检查 HDHive 订阅 #{target_id}" if action == "check" else f"确认 HDHive 资源 #{target_id}"
+            submission = background_jobs.submit(key, run_manual_job, description=description, on_complete=send_completion)
+            feedback = {
+                "accepted": "已开始检查" if action == "check" else "已开始确认",
+                "already_running": "正在处理中",
+                "capacity_rejected": "后台任务繁忙",
+                "closed": "服务正在关闭",
+            }[submission.outcome]
+            safe_answer_callback_query(telegram, callback_id, feedback, show_alert=submission.outcome in {"capacity_rejected", "closed"})
+            return True
         elif action == "check":
             result = service.check(target_id)
             message = (
@@ -2227,6 +2281,7 @@ def handle_callback_query(
     hdhive_subscription_service: HdhiveSubscriptionService | None = None,
     hdhive_subscription_scheduler: HdhiveSubscriptionScheduler | None = None,
     max_retries: int = 3,
+    background_jobs: BackgroundJobCoordinator | None = None,
 ) -> None:
     sender_id = ((callback_query.get("from") or {}).get("id"))
     message = callback_query.get("message") or {}
@@ -2262,6 +2317,7 @@ def handle_callback_query(
         telegram,
         hdhive_subscription_service,
         hdhive_subscription_scheduler,
+        background_jobs,
     ):
         return
     if handle_hdhive_callback(
@@ -3326,6 +3382,7 @@ def handle_update(
     hdhive_subscription_service: HdhiveSubscriptionService | None = None,
     hdhive_subscription_scheduler: HdhiveSubscriptionScheduler | None = None,
     max_retries: int = 3,
+    background_jobs: BackgroundJobCoordinator | None = None,
 ) -> None:
     if update.get("callback_query"):
         handle_callback_query(
@@ -3341,6 +3398,7 @@ def handle_update(
             hdhive_subscription_service=hdhive_subscription_service,
             hdhive_subscription_scheduler=hdhive_subscription_scheduler,
             max_retries=max_retries,
+            background_jobs=background_jobs,
         )
         return
 
@@ -3722,6 +3780,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
     )
     store = SubmissionStore(config.db_path)
     task_store = create_task_store(config)
+    background_jobs = BackgroundJobCoordinator(state_store=task_store)
     hdhive_workflow = create_hdhive_workflow(config, cms)
     self_share_config = SelfShareConfig.from_config(config, cms)
     p115 = (
@@ -3992,6 +4051,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         hdhive_service=hdhive_subscription_service,
         hdhive_scheduler=hdhive_subscription_scheduler,
         frontend_dist_path=getattr(config, "frontend_dist_path", "/app/frontend/dist"),
+        background_jobs=background_jobs,
     )
 
     try:
@@ -4023,6 +4083,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
                         hdhive_subscription_service=hdhive_subscription_service,
                         hdhive_subscription_scheduler=hdhive_subscription_scheduler,
                         max_retries=config.task_max_retries,
+                        background_jobs=background_jobs,
                     )
             except Exception as exc:
                 if stop_event.is_set():
@@ -4050,6 +4111,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         if hdhive_subscription_scheduler is not None:
             hdhive_subscription_scheduler.stop(join_timeout=5)
         stop_web_server(web_server)
+        background_jobs.shutdown(wait=True)
 
 
 def main() -> int:

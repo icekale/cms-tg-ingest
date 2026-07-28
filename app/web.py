@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
+from .background_jobs import BackgroundJobCoordinator, JobSubmission
 from .config import SelfShareConfig
 from .models import TaskStage, TaskStatus
 from .quality import QualityIssue, format_task_quality_report, scan_task_quality
@@ -66,6 +67,26 @@ _TASK_PHASES = (
     ("Emby 确认", {TaskStage.EMBY_CONFIRMED}),
     ("清理完成", {TaskStage.CLEANED}),
 )
+
+
+def _background_job_status_markup(background_jobs: BackgroundJobCoordinator | None, prefix: str) -> str:
+    if background_jobs is None:
+        return ""
+    snapshots = [snapshot for snapshot in background_jobs.list_snapshots() if snapshot.key.startswith(prefix)]
+    if not snapshots:
+        return ""
+    snapshot = max(snapshots, key=lambda item: item.queued_at)
+    values = [
+        html.escape(snapshot.description or snapshot.key),
+        html.escape(snapshot.status),
+    ]
+    if snapshot.started_at:
+        values.append(html.escape(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(snapshot.started_at))))
+    if snapshot.finished_at:
+        values.append(html.escape(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(snapshot.finished_at))))
+    if snapshot.error:
+        values.append(html.escape(snapshot.error))
+    return f'<p class="task-message">后台任务：{" · ".join(values)}</p>'
 
 def _navigation(active: str) -> str:
     links = []
@@ -754,6 +775,7 @@ def render_quality_page(
     store: TaskStore,
     quality_automation: QualityAutomation | None = None,
     max_retries: int = 3,
+    background_jobs: BackgroundJobCoordinator | None = None,
 ) -> str:
     allowed_roots = quality_automation.allowed_roots if quality_automation is not None else ()
     issues = scan_task_quality(store, allowed_roots=allowed_roots)
@@ -903,6 +925,7 @@ def render_quality_page(
   </form>
   <div class="actions">{run_button}<form method="post" action="/quality/settings/reset"><button class="button-secondary" type="submit">恢复环境默认</button></form></div>
   {f'<p class="subtle">当前运行：{html.escape(current_run)}</p>' if current_run else ''}
+  {_background_job_status_markup(background_jobs, "quality:run")}
 </section>
 """
     body = f"""
@@ -1144,6 +1167,7 @@ def _hdhive_account_markup(service: Any | None) -> str:
 def render_hdhive_page(
     service: Any | None = None,
     scheduler: Any | None = None,
+    background_jobs: BackgroundJobCoordinator | None = None,
 ) -> str:
     subscriptions = []
     if service is not None:
@@ -1250,7 +1274,7 @@ def render_hdhive_page(
   <a class="button" href="/">返回运行概览</a>
 </div>
 <section class="panel"><div class="panel-header"><h2>账号状态</h2></div>{_hdhive_account_markup(service)}</section>
-<section class="panel"><div class="panel-header"><h2>自动检查</h2></div>{schedule_markup}{settings_markup}</section>
+<section class="panel"><div class="panel-header"><h2>自动检查</h2></div>{schedule_markup}{settings_markup}{_background_job_status_markup(background_jobs, "hdhive:")}</section>
 <section class="panel"><div class="panel-header"><h2>当前订阅</h2></div>{subscription_error}{subscriptions_markup}</section>
 <section class="panel"><div class="panel-header"><h2>待确认资源</h2><span class="subtle">费用超过自动解锁阈值时需要确认</span></div>{pending_markup}</section>
 <section class="panel"><div class="panel-header"><h2>解锁记录</h2><span class="subtle">显示实际/估算积分、解锁时间和关联任务号</span></div>{unlocked_markup}</section>
@@ -1270,6 +1294,7 @@ class WebApp:
         self_share_config: SelfShareConfig | None = None,
         frontend_dist_path: str | Path = "/app/frontend/dist",
         max_retries: int = 3,
+        background_jobs: BackgroundJobCoordinator | None = None,
     ):
         self.store = store
         self.web_token = web_token
@@ -1281,6 +1306,20 @@ class WebApp:
         self.self_share_config = self_share_config or SelfShareConfig()
         self.frontend_dist_path = Path(frontend_dist_path)
         self.max_retries = normalize_task_max_retries(max_retries)
+        self.background_jobs = background_jobs or BackgroundJobCoordinator()
+
+    def _submit_background(self, key: str, callable: Any, *, description: str) -> JobSubmission:
+        return self.background_jobs.submit(key, callable, description=description)
+
+    @staticmethod
+    def _job_response(submission: JobSubmission) -> tuple[int, dict[str, Any]]:
+        status = {
+            "accepted": 202,
+            "already_running": 409,
+            "capacity_rejected": 429,
+            "closed": 503,
+        }[submission.outcome]
+        return status, {"job": submission.payload(), "started": submission.outcome == "accepted"}
 
     def _own_share_receive_code_payload(self) -> dict[str, Any]:
         resolved = resolve_own_share_receive_code(self.store, self.self_share_config)
@@ -1341,7 +1380,9 @@ class WebApp:
             page = render_task_list(self.store, task_engine_enabled=self.task_engine_enabled)
             return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, page.encode("utf-8")
         if method == "GET" and parsed.path == "/quality":
-            return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, render_quality_page(self.store, self.quality_automation, self.max_retries).encode("utf-8")
+            return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, render_quality_page(
+                self.store, self.quality_automation, self.max_retries, self.background_jobs
+            ).encode("utf-8")
         if method == "POST" and parsed.path in {
             "/quality/action/execute",
             "/quality/action/reprocess",
@@ -1364,7 +1405,7 @@ class WebApp:
         if method == "POST" and parsed.path == "/quality/run":
             if self.quality_automation is None:
                 return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"quality automation unavailable"
-            Thread(target=self.quality_automation.run_now, name="quality-manual-run", daemon=True).start()
+            self._submit_background("quality:run", self.quality_automation.run_now, description="质量巡检")
             return 303, {"Location": "/quality", **auth_headers}, b""
         if method == "POST" and parsed.path == "/quality/settings/reset":
             if self.quality_automation is None:
@@ -1390,7 +1431,7 @@ class WebApp:
             page = render_health_page(self.store, task_engine_enabled=self.task_engine_enabled)
             return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, page.encode("utf-8")
         if method == "GET" and parsed.path == "/hdhive":
-            page = render_hdhive_page(self.hdhive_service, self.hdhive_scheduler)
+            page = render_hdhive_page(self.hdhive_service, self.hdhive_scheduler, self.background_jobs)
             status = 200 if self.hdhive_service is not None else 409
             return status, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, page.encode("utf-8")
         if method == "POST" and parsed.path == "/hdhive/settings":
@@ -1411,7 +1452,7 @@ class WebApp:
             scheduler = self.hdhive_scheduler
             if scheduler is None:
                 return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"HDHive scheduler unavailable"
-            Thread(target=scheduler.run_now, name="hdhive-manual-run", daemon=True).start()
+            self._submit_background("hdhive:run", scheduler.run_now, description="检查全部 HDHive 订阅")
             return 303, {"Location": "/hdhive", **auth_headers}, b""
         if method == "POST":
             hdhive_parts = [part for part in parsed.path.split("/") if part]
@@ -1435,25 +1476,21 @@ class WebApp:
                         return 400, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, str(exc).encode("utf-8")
                     return 303, {"Location": "/hdhive", **auth_headers}, b""
                 if action == "check":
-                    def check_subscription() -> None:
-                        try:
-                            service.check(subscription_id)
-                        except Exception:
-                            return
-
-                    Thread(target=check_subscription, name=f"hdhive-check-{subscription_id}", daemon=True).start()
+                    self._submit_background(
+                        f"hdhive:subscription:{subscription_id}",
+                        lambda: service.check(subscription_id),
+                        description=f"检查 HDHive 订阅 #{subscription_id}",
+                    )
                     return 303, {"Location": "/hdhive", **auth_headers}, b""
             if len(hdhive_parts) == 4 and hdhive_parts[:2] == ["hdhive", "item"] and hdhive_parts[2].isdigit() and hdhive_parts[3] == "confirm":
                 if service is None:
                     return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"HDHive service unavailable"
                 item_id = int(hdhive_parts[2])
-                def confirm_item() -> None:
-                    try:
-                        service.confirm_item(item_id)
-                    except Exception:
-                        return
-
-                Thread(target=confirm_item, name=f"hdhive-confirm-{item_id}", daemon=True).start()
+                self._submit_background(
+                    f"hdhive:item:{item_id}",
+                    lambda: service.confirm_item(item_id),
+                    description=f"确认 HDHive 资源 #{item_id}",
+                )
                 return 303, {"Location": "/hdhive", **auth_headers}, b""
         if method == "POST" and parsed.path == "/history/clear":
             self.store.clear_finished_tasks()
@@ -1560,8 +1597,9 @@ class WebApp:
             if self.quality_automation is None:
                 status, response_headers, response_body = api_response({"error": "quality_unavailable"}, status=409)
                 return status, {**response_headers, **auth_headers}, response_body
-            Thread(target=self.quality_automation.run_now, name="quality-api-run", daemon=True).start()
-            status, response_headers, response_body = api_response({"started": True}, status=202)
+            submission = self._submit_background("quality:run", self.quality_automation.run_now, description="质量巡检")
+            status, payload = self._job_response(submission)
+            status, response_headers, response_body = api_response(payload, status=status)
             return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path == "/api/v1/quality/settings/reset":
             if self.quality_automation is None:
@@ -1618,8 +1656,13 @@ class WebApp:
                 status, response_headers, response_body = api_response({"subscription": serialized})
                 return status, {**response_headers, **auth_headers}, response_body
             if action == "check":
-                Thread(target=service.check, args=(subscription_id,), name=f"hdhive-api-check-{subscription_id}", daemon=True).start()
-                status, response_headers, response_body = api_response({"started": True}, status=202)
+                submission = self._submit_background(
+                    f"hdhive:subscription:{subscription_id}",
+                    lambda: service.check(subscription_id),
+                    description=f"检查 HDHive 订阅 #{subscription_id}",
+                )
+                status, payload = self._job_response(submission)
+                status, response_headers, response_body = api_response(payload, status=status)
                 return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and len(parts) == 7 and parts[3:5] == ["hdhive", "items"] and parts[5].isdigit() and parts[6] == "confirm":
             service = self.hdhive_service
@@ -1627,8 +1670,13 @@ class WebApp:
                 status, response_headers, response_body = api_response({"error": "hdhive_unavailable"}, status=409)
                 return status, {**response_headers, **auth_headers}, response_body
             item_id = int(parts[5])
-            Thread(target=service.confirm_item, args=(item_id,), name=f"hdhive-api-confirm-{item_id}", daemon=True).start()
-            status, response_headers, response_body = api_response({"started": True}, status=202)
+            submission = self._submit_background(
+                f"hdhive:item:{item_id}",
+                lambda: service.confirm_item(item_id),
+                description=f"确认 HDHive 资源 #{item_id}",
+            )
+            status, payload = self._job_response(submission)
+            status, response_headers, response_body = api_response(payload, status=status)
             return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path == "/api/v1/hdhive/settings":
             scheduler = self.hdhive_scheduler
@@ -1652,8 +1700,9 @@ class WebApp:
             if scheduler is None:
                 status, response_headers, response_body = api_response({"error": "hdhive_scheduler_unavailable"}, status=409)
                 return status, {**response_headers, **auth_headers}, response_body
-            Thread(target=scheduler.run_now, name="hdhive-api-run", daemon=True).start()
-            status, response_headers, response_body = api_response({"started": True}, status=202)
+            submission = self._submit_background("hdhive:run", scheduler.run_now, description="检查全部 HDHive 订阅")
+            status, payload = self._job_response(submission)
+            status, response_headers, response_body = api_response(payload, status=status)
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/overview":
             payload = {
@@ -1703,12 +1752,12 @@ class WebApp:
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/quality":
             status, response_headers, response_body = api_response(
-                api_quality(self.store, quality_automation=self.quality_automation)
+                api_quality(self.store, quality_automation=self.quality_automation, background_jobs=self.background_jobs)
             )
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/hdhive":
             try:
-                payload = serialize_hdhive(self.hdhive_service, self.hdhive_scheduler)
+                payload = serialize_hdhive(self.hdhive_service, self.hdhive_scheduler, self.background_jobs)
             except Exception as exc:
                 status, response_headers, response_body = api_response({"error": "hdhive_unavailable", "message": str(exc)[:160]}, status=503)
                 return status, {**response_headers, **auth_headers}, response_body
@@ -1800,6 +1849,7 @@ def start_web_server(
     self_share_config: SelfShareConfig | None = None,
     frontend_dist_path: str | Path = "/app/frontend/dist",
     max_retries: int = 3,
+    background_jobs: BackgroundJobCoordinator | None = None,
 ) -> ThreadingHTTPServer:
     app = WebApp(
         store,
@@ -1812,6 +1862,7 @@ def start_web_server(
         self_share_config=self_share_config,
         frontend_dist_path=frontend_dist_path,
         max_retries=max_retries,
+        background_jobs=background_jobs,
     )
 
     class Handler(BaseHTTPRequestHandler):
