@@ -2127,6 +2127,30 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(updated.metadata["update_requested_run"], 1)
             self.assertIn("已开始追更", telegram.messages[-1][1])
 
+    def test_untargeted_colon_series_update_command_requeues_completed_series(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _row, task, _recognition = self.make_completed_target(submission_store, task_store)
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("追更：https://115cdn.com/s/old?password=1212"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                task_engine_enabled=True,
+            )
+
+            updated = task_store.find_task(task.id)
+            self.assertEqual(updated.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertIn("已开始追更", telegram.messages[-1][1])
+
     def test_explicit_series_update_command_requires_target_for_new_link(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
@@ -2271,6 +2295,53 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
             self.assertIsNone(task_store.find_task_by_share_key("new", "1212"))
             self.assertIsNone(task_store.find_task_by_share_key("second", "3434"))
+            self.assertIn("仅支持一个 115 分享链接", telegram.messages[-1][1])
+
+    def test_targeted_explicit_series_update_command_rejects_extra_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update(f"追更 #{target.id} note https://115cdn.com/s/new?password=1212"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                task_engine_enabled=True,
+            )
+
+            self.assertIsNone(task_store.find_task_by_share_key("new", "1212"))
+            self.assertIsNone(submission_store.find_by_key(bridge.ShareKey("new", "1212")))
+            self.assertIn("仅支持一个 115 分享链接", telegram.messages[-1][1])
+
+    def test_targeted_explicit_series_update_command_rejects_duplicate_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            telegram = FakeTelegram()
+            link = "https://115cdn.com/s/new?password=1212"
+
+            bridge.handle_update(
+                self.update(f"追更 #{target.id} {link} {link}"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                task_engine_enabled=True,
+            )
+
+            self.assertIsNone(task_store.find_task_by_share_key("new", "1212"))
+            self.assertIsNone(submission_store.find_by_key(bridge.ShareKey("new", "1212")))
             self.assertIn("仅支持一个 115 分享链接", telegram.messages[-1][1])
 
     def test_targeted_explicit_series_update_command_rejects_magnet(self):

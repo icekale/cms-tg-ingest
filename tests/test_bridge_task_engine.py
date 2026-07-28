@@ -1006,6 +1006,110 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.p115.list_file_calls, [])
             self.assertEqual(self.p115.created_shares, [])
 
+    def test_own_share_stage_rechecks_late_folder_owner_before_operations(self):
+        class RecoveryTrackingP115(FakeP115):
+            def __init__(self):
+                super().__init__()
+                self.recovery_queries = []
+
+            def find_own_share_by_title(self, title, min_create_time=0):
+                self.recovery_queries.append((title, min_create_time))
+                return None
+
+        for pending_recovery in (False, True):
+            with self.subTest(pending_recovery=pending_recovery), tempfile.TemporaryDirectory() as tmp:
+                workflow = self._workflow(tmp)
+                workflow.p115 = RecoveryTrackingP115()
+                row = self._row()
+                row = self.submissions.update_self_share(
+                    int(row["id"]),
+                    workflow_mode="self_share_sync",
+                    workflow_phase="share_alias_prepared",
+                    own_share_file_id="shared-folder",
+                    own_share_file_name="S-示例剧集-2025-[tmdb=273114]",
+                ) or row
+                row = self.submissions.update_recognition(
+                    int(row["id"]),
+                    {"ok": True, "title": "示例剧集", "type": "tv", "tmdb_id": "273114", "category": "国产电视"},
+                    "self_share_resolved",
+                ) or row
+                owner = self.tasks.upsert_task("owner", "", "https://115cdn.com/s/owner")
+                self.tasks.record_event(
+                    owner.id,
+                    TaskStage.ORGANIZING,
+                    TaskStatus.PENDING,
+                    "late owner",
+                    metadata_patch={
+                        "own_share_file_id": "shared-folder",
+                        "tmdb_id": "9533",
+                        "recognition": {"tmdb_id": "9533"},
+                    },
+                )
+                metadata = {"submission_id": row["id"]}
+                if pending_recovery:
+                    metadata["share_create_status"] = "pending"
+                    metadata["share_create_requested_at"] = 1000.0
+                task = self._claim_task(
+                    "abc",
+                    "1234",
+                    TaskStage.OWN_SHARE_CREATED,
+                    metadata,
+                    row["id"],
+                )
+
+                result = workflow.run_stage(task)
+                stored = self.submissions.find_by_id(int(row["id"]))
+
+                self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+                self.assertIn("其他 TMDB 任务", result.message)
+                self.assertEqual(stored["own_share_file_id"], "shared-folder")
+                self.assertIsNone(
+                    self.tasks.find_operation(task.id, self._create_share_operation_key(task, "shared-folder"))
+                )
+                self.assertEqual(workflow.p115.created_shares, [])
+                self.assertEqual(workflow.p115.recovery_queries, [])
+
+    def test_own_share_stage_allows_late_same_tmdb_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="share_alias_prepared",
+                own_share_file_id="shared-folder",
+                own_share_file_name="S-示例剧集-2025-[tmdb=273114]",
+            ) or row
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": "示例剧集", "type": "tv", "tmdb_id": "273114", "category": "国产电视"},
+                "self_share_resolved",
+            ) or row
+            owner = self.tasks.upsert_task("owner", "", "https://115cdn.com/s/owner")
+            self.tasks.record_event(
+                owner.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "late owner",
+                metadata_patch={
+                    "own_share_file_id": "shared-folder",
+                    "tmdb_id": "273114",
+                    "recognition": {"tmdb_id": "273114"},
+                },
+            )
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(workflow.p115.created_shares, ["shared-folder"])
+
     def test_organizing_stage_normalizes_explicit_tmdb_name_before_cms(self):
         class ExplicitTmdbResolver:
             enabled = True
@@ -3796,6 +3900,81 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(updated["own_share_file_id"], "episode-id")
             self.assertEqual(updated["own_share_code"], "file-share")
             self.assertTrue(result.metadata["direct_file_share"])
+
+    def test_direct_file_fallback_rechecks_conflicting_owner_before_replacement(self):
+        class FolderGoneP115(FakeP115):
+            def create_share(self, file_id):
+                self.created_shares.append(file_id)
+                if file_id == "series-id":
+                    raise RuntimeError("目录不存在或已转移")
+                return {
+                    "share_code": "file-share",
+                    "receive_code": "1212",
+                    "share_url": "https://115cdn.com/s/file-share?password=1212",
+                }
+
+        for owner_tmdb_id in ("9533", ""):
+            with self.subTest(owner_tmdb_id=owner_tmdb_id), tempfile.TemporaryDirectory() as tmp:
+                workflow = self._workflow(tmp)
+                workflow.p115 = FolderGoneP115()
+                row = self._row()
+                row = self.submissions.update_self_share(
+                    int(row["id"]),
+                    workflow_mode="self_share_sync",
+                    workflow_phase="share_alias_prepared",
+                    own_share_file_id="series-id",
+                    own_share_file_name="Q-权力的游戏前传：龙族-2022-[tmdb=94997]",
+                ) or row
+                row = self.submissions.update_recognition(
+                    int(row["id"]),
+                    {"ok": True, "title": "龙族", "type": "tv", "tmdb_id": "94997", "category": "外国电视"},
+                    "self_share_resolved",
+                ) or row
+                owner = self.tasks.upsert_task("owner", "", "https://115cdn.com/s/owner")
+                owner_metadata = {"own_share_file_id": "episode-id"}
+                if owner_tmdb_id:
+                    owner_metadata.update(
+                        {"tmdb_id": owner_tmdb_id, "recognition": {"tmdb_id": owner_tmdb_id}}
+                    )
+                self.tasks.record_event(
+                    owner.id,
+                    TaskStage.ORGANIZING,
+                    TaskStatus.PENDING,
+                    "fallback owner",
+                    metadata_patch=owner_metadata,
+                )
+                task = self._claim_task(
+                    "abc",
+                    "1234",
+                    TaskStage.OWN_SHARE_CREATED,
+                    {
+                        "submission_id": row["id"],
+                        "organized_folder": {
+                            "file_id": "series-id",
+                            "direct_file_id": "episode-id",
+                            "direct_relative_path": "Season 03/龙族.S03E03.strm",
+                        },
+                    },
+                    row["id"],
+                )
+
+                with patch.object(
+                    self.submissions,
+                    "replace_self_share_source_file_id",
+                    wraps=self.submissions.replace_self_share_source_file_id,
+                ) as replace_source:
+                    result = workflow.run_stage(task)
+                stored = self.submissions.find_by_id(int(row["id"]))
+
+                self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+                self.assertIn("其他 TMDB 任务", result.message)
+                replace_source.assert_not_called()
+                self.assertEqual(stored["own_share_file_id"], "series-id")
+                self.assertFalse(stored["own_share_code"])
+                self.assertIsNone(
+                    self.tasks.find_operation(task.id, self._create_share_operation_key(task, "episode-id"))
+                )
+                self.assertEqual(workflow.p115.created_shares, ["series-id"])
 
     def test_production_index_direct_fallback_survives_result_loss_and_cleans_direct_parent(self):
         class FolderGoneP115(FakeP115):

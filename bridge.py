@@ -210,6 +210,10 @@ _EXPLICIT_SERIES_UPDATE_RE = re.compile(
     r"^追更(?:\s*#(?P<task_id>\d+))?(?:\s*[：:])?\s*(?P<payload>.*)$",
     re.DOTALL,
 )
+_TARGETED_SERIES_UPDATE_RE = re.compile(
+    r"^追更\s+#(?P<task_id>\d+)\s+(?P<link>https?://(?:www\.)?(?:115cdn|115|anxia)\.com/s/[^\s<>'\"]+)\s*$",
+    re.I,
+)
 TRAILING_PUNCT = ".,;)。），]】》>"
 LOG = logging.getLogger("cms-tg-ingest")
 _SERIES_UPDATE_LOCKS_GUARD = threading.Lock()
@@ -4036,6 +4040,15 @@ def handle_update(
             return
 
     explicit_series_update, explicit_target_task_id, series_update_payload = parse_explicit_series_update_command(text)
+    if explicit_target_task_id is not None:
+        targeted_match = _TARGETED_SERIES_UPDATE_RE.fullmatch(str(text or "").strip())
+        if (
+            targeted_match is None
+            or int(targeted_match.group("task_id")) != explicit_target_task_id
+            or targeted_match.group("link") != targeted_match.group("link").rstrip(TRAILING_PUNCT)
+        ):
+            telegram.send_message(chat_id, "指定历史任务追更仅支持一个 115 分享链接")
+            return
     if explicit_series_update:
         text = series_update_payload
     sources = parse_media_sources(text)

@@ -1740,6 +1740,17 @@ class BridgeSelfShareTaskWorkflow:
                 "等待可验证的 CMS 整理后源目录，当前 115 ID 仍是接收/分享快照，拒绝创建自有分享",
                 self._own_share_metadata(row) | {"own_share_file_id": ""},
             )
+        if self._conflicting_folder_owner(
+            task,
+            {"file_id": file_id},
+            recognition,
+            row,
+            str(row.get("own_share_file_name") or task.title or task.share_code),
+        ):
+            return StageResult.needs_action(
+                "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享",
+                self._own_share_metadata(row) | {"own_share_file_id": ""},
+            )
         created = False
         direct_file_share = False
         direct_relative_path = ""
@@ -1800,6 +1811,17 @@ class BridgeSelfShareTaskWorkflow:
                 direct_file_id, direct_relative_path, direct_file_name, direct_parent_id = self._direct_file_share_details(task)
                 if not direct_file_id or not self._is_gone_share_source_error(exc):
                     raise
+                if self._conflicting_folder_owner(
+                    task,
+                    {"file_id": direct_file_id},
+                    recognition,
+                    row,
+                    direct_file_name or Path(direct_relative_path).name,
+                ):
+                    return StageResult.needs_action(
+                        "CMS 直链文件已被其他 TMDB 任务占用，已阻止创建自有分享",
+                        self._own_share_metadata(row),
+                    )
                 if not hasattr(self.store, "replace_self_share_source_file_id"):
                     raise
                 row = self.store.replace_self_share_source_file_id(int(row["id"]), direct_file_id) or row
