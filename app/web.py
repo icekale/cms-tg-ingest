@@ -50,6 +50,7 @@ from .web_api import (
 
 
 MAX_REQUEST_BODY_BYTES = 64 * 1024
+REQUEST_BODY_READ_TIMEOUT_SECONDS = 2
 
 
 class RequestBodyTooLarge(ValueError):
@@ -1899,12 +1900,44 @@ def start_web_server(
             except ValueError:
                 self._request_body_error(400, b"Invalid Content-Length")
                 return
-            self._serve(self.rfile.read(length) if length else b"")
+            try:
+                body = self._read_request_body(length) if length else b""
+            except ValueError:
+                self._request_body_error(400, b"Incomplete request body")
+                return
+            self._serve(body)
+
+        def _read_request_body(self, length: int) -> bytes:
+            previous_timeout = self.connection.gettimeout()
+            deadline = time.monotonic() + REQUEST_BODY_READ_TIMEOUT_SECONDS
+            chunks = []
+            remaining = length
+            try:
+                while remaining:
+                    timeout = deadline - time.monotonic()
+                    if timeout <= 0:
+                        raise TimeoutError
+                    self.connection.settimeout(timeout)
+                    chunk = self.rfile.read1(min(8192, remaining))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+            except TimeoutError as exc:
+                raise ValueError("request body read timed out") from exc
+            finally:
+                self.connection.settimeout(previous_timeout)
+            body = b"".join(chunks)
+            if len(body) != length:
+                raise ValueError("request body is shorter than Content-Length")
+            return body
 
         def _request_body_error(self, status: int, payload: bytes) -> None:
+            self.close_connection = True
             self.send_response(status)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(payload)
 

@@ -76,6 +76,46 @@ class WebAdminTests(unittest.TestCase):
             finally:
                 bridge.stop_web_server(server)
 
+    def test_content_length_handler_rejects_incomplete_bodies_without_blocking_server(self):
+        def post(server, content_length, body=b"", *, close_write=True):
+            request = b"\r\n".join(
+                [
+                    b"POST /history/clear HTTP/1.0",
+                    b"Host: localhost",
+                    f"Content-Length: {content_length}".encode("ascii"),
+                    b"",
+                    body,
+                ]
+            )
+            with socket.create_connection(server.server_address, timeout=1) as client:
+                client.settimeout(0.3)
+                client.sendall(request)
+                if close_write:
+                    client.shutdown(socket.SHUT_WR)
+                started = time.monotonic()
+                try:
+                    response = client.recv(4096)
+                except socket.timeout:
+                    client.shutdown(socket.SHUT_WR)
+                    client.settimeout(1)
+                    response = client.recv(4096)
+                return response, time.monotonic() - started
+
+        with tempfile.TemporaryDirectory() as tmp, patch("app.web.REQUEST_BODY_READ_TIMEOUT_SECONDS", 0.05):
+            store = TaskStore(Path(tmp) / "tasks.db")
+            server = start_web_server(store, "127.0.0.1", 0)
+            try:
+                for body, close_write in ((b"abc", True), (b"", False)):
+                    with self.subTest(body=body, close_write=close_write):
+                        response, elapsed = post(server, 5, body, close_write=close_write)
+                        self.assertTrue(response.startswith(b"HTTP/1.0 400"))
+                        self.assertIn(b"Content-Length:", response)
+                        self.assertLess(elapsed, 0.25)
+                        response, _elapsed = post(server, 0)
+                        self.assertTrue(response.startswith(b"HTTP/1.0 303"))
+            finally:
+                bridge.stop_web_server(server)
+
     def test_quality_page_reprocess_action_is_registered_and_orphan_is_not_linked(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
