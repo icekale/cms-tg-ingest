@@ -130,6 +130,59 @@ class BackgroundJobCoordinatorTests(unittest.TestCase):
             LOG.removeHandler(handler)
             coordinator.shutdown(wait=True)
 
+    def test_redacts_human_and_structured_credential_forms_everywhere(self):
+        class StateStore:
+            def __init__(self):
+                self.values = {}
+
+            def set_runtime_state(self, key, value):
+                self.values[key] = value
+
+        from app.task_store import TaskStore
+        from app.web_api import api_quality
+        from pathlib import Path
+        import tempfile
+
+        credentials = (
+            ("AWS Access Key ID: AKIA-HUMAN", "AKIA-HUMAN"),
+            ("Access Key: ACCESS-HUMAN", "ACCESS-HUMAN"),
+            ("Secret Key: SECRET-HUMAN", "SECRET-HUMAN"),
+            ('{"AWS_ACCESS_KEY_ID":"AKIA-JSON","OPENAI_API_KEY":"API-JSON"}', "AKIA-JSON"),
+            ('{"AWS_ACCESS_KEY_ID":"AKIA-JSON","OPENAI_API_KEY":"API-JSON"}', "API-JSON"),
+            ("{'SECRET_KEY': 'SECRET-DICT'}", "SECRET-DICT"),
+        )
+
+        for credential, secret in credentials:
+            with self.subTest(credential=credential, secret=secret):
+                state_store = StateStore()
+                coordinator = BackgroundJobCoordinator(state_store=state_store)
+                stream = io.StringIO()
+                handler = logging.StreamHandler(stream)
+                LOG.addHandler(handler)
+                try:
+                    coordinator.submit(
+                        "quality:run",
+                        lambda: (_ for _ in ()).throw(RuntimeError(f"request failed {credential}")),
+                        description=f"run with {credential}",
+                    )
+                    coordinator.shutdown(wait=True)
+                    with tempfile.TemporaryDirectory() as tmp:
+                        api_payload = json.dumps(
+                            api_quality(TaskStore(Path(tmp) / "tasks.db"), background_jobs=coordinator)
+                        )
+                    snapshot = coordinator.snapshot("quality:run")
+                    values = (
+                        snapshot.description,
+                        snapshot.error,
+                        state_store.values["background_job:quality:run"],
+                        api_payload,
+                        stream.getvalue(),
+                    )
+                    self.assertTrue(all(secret not in value for value in values))
+                finally:
+                    LOG.removeHandler(handler)
+                    coordinator.shutdown(wait=True)
+
     def test_redactor_preserves_ordinary_diagnostic_key_names(self):
         text = "task_key=task operation_key=operation primary_key=primary sort_key=sort monkey=banana"
 

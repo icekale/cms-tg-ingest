@@ -46,9 +46,12 @@ _COMPOUND_SECRET_VALUE = re.compile(
     r"(?i)\b([a-z][a-z0-9_-]*(?:token|password|secret|cookie))\s*[=:]\s*[^\s,;]+"
 )
 _EXPLICIT_CREDENTIAL_KEY_VALUE = re.compile(
-    r"(?i)\b(aws_access_key_id|aws_secret_access_key|[a-z0-9_-]*api[_-]?key(?:[_-]?id)?|"
-    r"[a-z0-9_-]*access[_-]?key(?:[_-]?id)?|[a-z0-9_-]*secret[_-]?key|"
-    r"[a-z0-9_-]*private[_-]?key)\s*[=:]\s*[^\s,;]+"
+    r'''(?i)(?<![a-z0-9_-])["']?(aws(?:[-_]|\s)+access(?:[-_]|\s)+key(?:[-_]|\s)+id|'''
+    r'''aws(?:[-_]|\s)+secret(?:[-_]|\s)+access(?:[-_]|\s)+key|'''
+    r'''[a-z0-9_-]*api(?:[-_]|\s)*key(?:(?:[-_]|\s)*id)?|'''
+    r'''[a-z0-9_-]*access(?:[-_]|\s)*key(?:(?:[-_]|\s)*id)?|'''
+    r'''[a-z0-9_-]*secret(?:[-_]|\s)*key|[a-z0-9_-]*private(?:[-_]|\s)*key)["']?'''
+    r'''\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s,;}\]"']+)'''
 )
 _COOKIE_HEADER_VALUE = re.compile(
     r"(?i)\b(cookie)\s*[:=]\s*((?:[^\s;=,]+=[^\s;,]*)(?:\s*;\s*[^\s;=,]+=[^\s;,]*)*)"
