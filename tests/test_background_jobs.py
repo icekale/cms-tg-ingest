@@ -40,6 +40,48 @@ class BackgroundJobCoordinatorTests(unittest.TestCase):
             LOG.removeHandler(handler)
             coordinator.shutdown(wait=True)
 
+    def test_failure_redacts_compound_keys_and_every_cookie_segment_everywhere(self):
+        class StateStore:
+            def __init__(self):
+                self.values = {}
+
+            def set_runtime_state(self, key, value):
+                self.values[key] = value
+
+        state_store = StateStore()
+        coordinator = BackgroundJobCoordinator(state_store=state_store)
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        LOG.addHandler(handler)
+        error = (
+            "upstream rejected request: refresh_token=refresh-secret OPENAI_API_KEY=openai-secret "
+            "TG_BOT_TOKEN=tg-secret monkey=banana Cookie: session=session-secret; csrf=csrf-secret; preference=light"
+        )
+        try:
+            coordinator.submit("quality:run", lambda: (_ for _ in ()).throw(RuntimeError(error)))
+            coordinator.shutdown(wait=True)
+            from app.web_api import api_quality
+            from app.task_store import TaskStore
+            from pathlib import Path
+            import tempfile
+
+            with tempfile.TemporaryDirectory() as tmp:
+                api_payload = json.dumps(api_quality(TaskStore(Path(tmp) / "tasks.db"), background_jobs=coordinator))
+            values = [
+                coordinator.snapshot("quality:run").error,
+                state_store.values["background_job:quality:run"],
+                api_payload,
+                stream.getvalue(),
+            ]
+            for secret in ("refresh-secret", "openai-secret", "tg-secret", "session-secret", "csrf-secret", "light"):
+                self.assertTrue(all(secret not in value for value in values))
+            self.assertIn("upstream rejected request", values[0])
+            self.assertIn("monkey=banana", values[0])
+            self.assertLessEqual(len(values[0]), 160)
+        finally:
+            LOG.removeHandler(handler)
+            coordinator.shutdown(wait=True)
+
     def test_state_persistence_exception_does_not_log_its_credential(self):
         class FailingStateStore:
             def set_runtime_state(self, _key, _value):

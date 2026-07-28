@@ -42,6 +42,21 @@ class WebApiTests(unittest.TestCase):
             self.assertNotIn("secret", json.dumps(payload))
         self.assertNotIn("background_jobs", hdhive)
 
+    def test_background_job_status_prefers_newest_submission_over_old_completion(self):
+        snapshots = (
+            BackgroundJobSnapshot("hdhive:run", "old completed", "succeeded", 10, 11, 1000, ""),
+            BackgroundJobSnapshot("hdhive:item:7", "newly queued", "queued", 20, None, None, ""),
+        )
+
+        class SnapshotSource:
+            def list_snapshots(self):
+                return snapshots
+
+        payload = serialize_hdhive(SimpleNamespace(list=lambda: []), background_jobs=SnapshotSource())
+
+        self.assertEqual(payload["background_job"]["description"], "newly queued")
+        self.assertEqual(payload["background_job"]["state"], "queued")
+
     def _quality_service(self, tmp, store):
         root = Path(tmp) / "library"
         config = Config(

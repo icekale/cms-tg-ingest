@@ -42,16 +42,32 @@ class JobSubmission:
 _AUTHORIZATION_VALUE = re.compile(r"(?i)\b(authorization)\s*[=:]\s*(?:bearer\s+)?[^\s,;]+")
 _API_KEY_VALUE = re.compile(r"(?i)\b(x-api-key|api[-_ ]?key)\s*[=:]\s*[^\s,;]+")
 _BEARER_VALUE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
+_COMPOUND_SECRET_VALUE = re.compile(
+    r"(?i)\b([a-z][a-z0-9_-]*(?:token|api[_-]?key|password|secret|[_-]key))\s*[=:]\s*[^\s,;]+"
+)
+_COOKIE_HEADER_VALUE = re.compile(
+    r"(?i)\b(cookie)\s*[:=]\s*((?:[^\s;=,]+=[^\s;,]+)(?:\s*;\s*[^\s;=,]+=[^\s;,]+)*)"
+)
 _SENSITIVE_VALUE = re.compile(r"(?i)\b(token|cookie|password|secret)\s*[=:]\s*[^\s,;]+")
 _URL = re.compile(r"https?://\S+")
 
 
 def redact_background_text(value: object) -> str:
     text = _URL.sub("[redacted-url]", str(value))
+    text = _COOKIE_HEADER_VALUE.sub(_redact_cookie_header, text)
     text = _AUTHORIZATION_VALUE.sub(r"\1=[redacted]", text)
     text = _API_KEY_VALUE.sub(r"\1=[redacted]", text)
     text = _BEARER_VALUE.sub("Bearer [redacted]", text)
+    text = _COMPOUND_SECRET_VALUE.sub(r"\1=[redacted]", text)
     return _SENSITIVE_VALUE.sub(r"\1=[redacted]", text)
+
+
+def _redact_cookie_header(match: re.Match[str]) -> str:
+    segments = []
+    for segment in match.group(2).split(";"):
+        name = segment.split("=", 1)[0].strip()
+        segments.append(f"{name}=[redacted]")
+    return f"{match.group(1)}=" + "; ".join(segments)
 
 
 class BackgroundJobCoordinator:

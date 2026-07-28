@@ -193,7 +193,7 @@ def serialize_background_job(background_jobs: Any | None, *, prefix: str = "") -
     matches = [snapshot for snapshot in snapshots if str(getattr(snapshot, "key", "")).startswith(prefix)]
     if not matches:
         return None
-    snapshot = max(matches, key=lambda item: float(getattr(item, "finished_at", 0) or getattr(item, "started_at", 0) or getattr(item, "queued_at", 0)))
+    snapshot = max(matches, key=lambda item: float(getattr(item, "queued_at", 0)))
     return {
         "description": str(getattr(snapshot, "description", "")),
         "state": str(getattr(snapshot, "status", "")),
