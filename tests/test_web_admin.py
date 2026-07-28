@@ -134,18 +134,29 @@ class WebAdminTests(unittest.TestCase):
             server = start_web_server(store, "127.0.0.1", 0)
             stderr = io.StringIO()
             reset_request_finished = Event()
+            reset_request = None
+            original_get_request = server.get_request
             original_shutdown_request = server.shutdown_request
+
+            def get_request():
+                nonlocal reset_request
+                request = original_get_request()
+                if reset_request is None:
+                    reset_request = request[0]
+                return request
 
             def shutdown_request(request):
                 try:
                     return original_shutdown_request(request)
                 finally:
-                    reset_request_finished.set()
+                    if request is reset_request:
+                        reset_request_finished.set()
 
             try:
                 with (
                     redirect_stderr(stderr),
                     patch.object(server, "handle_error", wraps=server.handle_error) as handle_error,
+                    patch.object(server, "get_request", side_effect=get_request),
                     patch.object(server, "shutdown_request", side_effect=shutdown_request),
                 ):
                     client = socket.create_connection(server.server_address, timeout=1)
