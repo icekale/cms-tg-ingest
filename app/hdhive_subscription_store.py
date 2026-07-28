@@ -631,12 +631,23 @@ class HdhiveSubscriptionStore:
         return self._update_unlocked_intake(item_id, last_error=_redact_persisted_error(error))
 
     def mark_item_unlock_unknown(self, item_id: int) -> HdhiveSubscriptionItem:
-        return self._update_item(
-            item_id,
-            status="pending_confirmation",
-            last_error="解锁结果未知，禁止自动重复扣分",
-            skip_reason="unlock_outcome_unknown",
-        )
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE hdhive_subscription_items
+                SET status = 'pending_confirmation', unlock_state = 'unknown',
+                    last_error = ?, skip_reason = 'unlock_outcome_unknown', updated_at = ?
+                WHERE id = ?
+                """,
+                ("解锁结果未知，禁止自动重复扣分", time.time(), int(item_id)),
+            )
+            row = connection.execute(
+                "SELECT * FROM hdhive_subscription_items WHERE id = ?",
+                (int(item_id),),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"HDHive subscription item {item_id} does not exist")
+        return HdhiveSubscriptionItem.from_row(row)
 
     def _update_unlocked_intake(
         self,

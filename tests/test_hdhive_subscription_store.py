@@ -262,6 +262,23 @@ class HdhiveSubscriptionStoreTests(unittest.TestCase):
             self.assertEqual(pending.skip_reason, "unlock_outcome_unknown")
             self.assertEqual(pending.last_error, "解锁结果未知，禁止自动重复扣分")
 
+    def test_mark_unlock_unknown_persists_all_unknown_state_atomically(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tasks.db"
+            store = HdhiveSubscriptionStore(path)
+            subscription = store.create_subscription("1", "tmdb_tv", "1416", "剧集", "1416")
+            item = store.upsert_item(subscription.id, "S01E01", "resource", "valid", 1080, 8)
+            store.mark_item_unlocking(item.id)
+
+            saved = store.mark_item_unlock_unknown(item.id)
+            reopened = HdhiveSubscriptionStore(path).get_item(item.id)
+
+            for current in (saved, reopened):
+                self.assertEqual(current.status, "pending_confirmation")
+                self.assertEqual(current.unlock_state, "unknown")
+                self.assertEqual(current.skip_reason, "unlock_outcome_unknown")
+                self.assertEqual(current.last_error, "解锁结果未知，禁止自动重复扣分")
+
 
 if __name__ == "__main__":
     unittest.main()

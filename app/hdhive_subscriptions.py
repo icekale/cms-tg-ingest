@@ -18,6 +18,7 @@ from app.series_rules import EpisodeKey, completion_state, is_special_episode, p
 
 LOG = logging.getLogger("cms-tg-ingest")
 _UNLOCK_STALE_AFTER_SECONDS = 3600
+_DEFINITIVE_NO_CHARGE_ERRORS = {"INSUFFICIENT_POINTS", "INVALID_RESOURCE"}
 
 
 class HdhiveUrlError(ValueError):
@@ -356,18 +357,30 @@ class HdhiveSubscriptionService:
                 item.status == "pending_confirmation" and item.skip_reason == "unlock_outcome_unknown"
             )
 
-        for item in self.store.list_items(subscription.id):
+        persisted_items = self.store.list_items(subscription.id)
+        for item in persisted_items:
             if item.status == "unlocking":
                 self.store.reconcile_stale_unlocking(
                     item.id,
                     stale_after_seconds=_UNLOCK_STALE_AFTER_SECONDS,
                 )
 
-        for item in self.store.list_items(subscription.id):
+        persisted_items = self.store.list_items(subscription.id)
+        enqueued_episode_keys = {
+            item.normalized_episode_key or item.episode_key
+            for item in persisted_items
+            if item.status == "enqueued" and (item.normalized_episode_key or item.episode_key)
+        }
+        for item in persisted_items:
             if item.status == "unlocked" and item.unlocked_url:
+                saved_episode_key = item.normalized_episode_key or item.episode_key
+                if saved_episode_key and saved_episode_key in enqueued_episode_keys:
+                    continue
                 try:
                     self._enqueue_saved_item(subscription, item)
                     enqueued += 1
+                    if saved_episode_key:
+                        enqueued_episode_keys.add(saved_episode_key)
                 except Exception as exc:
                     self.store.mark_item_intake_failed(item.id, str(exc))
                     failed += 1
@@ -498,12 +511,23 @@ class HdhiveSubscriptionService:
                 try:
                     result = self._unlock_one(selected)
                     if not result.success or not result.full_url:
-                        self.store.mark_item_failed(selected_item.id, result.message or result.error_code or "HDHive 解锁失败")
-                        failed += 1
+                        if (
+                            not result.success
+                            and result.points_spent is None
+                            and result.error_code in _DEFINITIVE_NO_CHARGE_ERRORS
+                        ):
+                            self.store.mark_item_failed(
+                                selected_item.id,
+                                result.message or result.error_code,
+                            )
+                            failed += 1
+                        else:
+                            self.store.mark_item_unlock_unknown(selected_item.id)
+                            pending += 1
                         continue
                     if not _is_115_share_url(result.full_url):
-                        self.store.mark_item_failed(selected_item.id, "解锁结果不是 115 分享链接")
-                        failed += 1
+                        self.store.mark_item_unlock_unknown(selected_item.id)
+                        pending += 1
                         continue
                     if result.points_spent is not None:
                         unlock_points_spent = result.points_spent
