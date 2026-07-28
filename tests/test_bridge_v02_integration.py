@@ -566,6 +566,135 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             }
         }
 
+    def make_completed_target(
+        self,
+        submission_store,
+        task_store,
+        *,
+        share_code="old",
+        category="国产电视",
+        media_type="tv",
+        tmdb_id="273114",
+        stage=TaskStage.CLEANED,
+        status=TaskStatus.SUCCEEDED,
+    ):
+        recognition = {
+            "ok": True,
+            "title": f"X-悬案-2026-[tmdb={tmdb_id}]",
+            "tmdb_id": tmdb_id,
+            "type": media_type,
+            "category": category,
+        }
+        row = submission_store.upsert_submission(
+            bridge.ShareKey(share_code, "1212"),
+            f"https://115cdn.com/s/{share_code}?password=1212",
+            "completed",
+            title=recognition["title"],
+        )
+        row = submission_store.update_recognition(int(row["id"]), recognition, "selected")
+        row = submission_store.update_category(int(row["id"]), category, "selected")
+        row = submission_store.update_self_share(
+            int(row["id"]),
+            workflow_mode="self_share_sync",
+            workflow_phase="cleanup_completed",
+            own_share_file_id="old-tv-folder",
+            own_share_file_name=recognition["title"],
+            own_share_code="old-share",
+            own_share_receive_code="1212",
+            own_share_url="https://115cdn.com/s/old-share?password=1212",
+            share_sync_status="submitted",
+        )
+        task = task_store.upsert_task(
+            share_code,
+            "1212",
+            f"https://115cdn.com/s/{share_code}?password=1212",
+            chat_id="464100862",
+        )
+        task = task_store.record_event(
+            task.id,
+            stage,
+            status,
+            "目标任务状态",
+            title=recognition["title"],
+            tmdb_id=tmdb_id,
+            category=category,
+            submission_id=int(row["id"]),
+            metadata_patch={"submission_id": int(row["id"]), "own_share_code": "old-share"},
+        )
+        return row, task, recognition
+
+    def make_existing_source(
+        self,
+        submission_store,
+        task_store,
+        *,
+        parent_task_id=None,
+        own_share_code="",
+        claimed=False,
+    ):
+        wrong_folder_id = "3481694900213253783"
+        row = submission_store.upsert_submission(
+            bridge.ShareKey("new", "1212"),
+            "https://115cdn.com/s/new?password=1212",
+            "running",
+            title="错误电影 (2025)",
+        )
+        row = submission_store.update_recognition(
+            int(row["id"]),
+            {"title": "错误电影 (2025)", "tmdb_id": "999", "type": "movie", "category": "欧美电影"},
+            "selected",
+        )
+        row = submission_store.update_category(int(row["id"]), "欧美电影", "selected")
+        row = submission_store.update_self_share(
+            int(row["id"]),
+            workflow_mode="self_share_sync",
+            workflow_phase="share_creating",
+            own_share_file_id=wrong_folder_id,
+            own_share_file_name="错误电影 (2025)",
+            own_share_code=own_share_code or None,
+            share_sync_status="creating",
+        )
+        task = task_store.upsert_task(
+            "new",
+            "1212",
+            "https://115cdn.com/s/new?password=1212",
+            chat_id="464100862",
+        )
+        metadata = {
+            "submission_id": int(row["id"]),
+            "own_share_file_id": wrong_folder_id,
+            "share_create_status": "creating",
+            "recognition": {"tmdb_id": "999", "type": "movie", "category": "欧美电影"},
+        }
+        if parent_task_id is not None:
+            metadata["series_update_parent_task_id"] = int(parent_task_id)
+        if own_share_code:
+            metadata["own_share_code"] = own_share_code
+        task = task_store.record_event(
+            task.id,
+            TaskStage.OWN_SHARE_CREATED,
+            TaskStatus.RUNNING,
+            "生产残留任务",
+            title="错误电影 (2025)",
+            tmdb_id="999",
+            category="欧美电影",
+            submission_id=int(row["id"]),
+            metadata_patch=metadata,
+        )
+        if claimed:
+            task = task_store.compare_and_set_transition(
+                task.id,
+                TaskStage.OWN_SHARE_CREATED,
+                {TaskStatus.RUNNING},
+                require_unclaimed=True,
+                target_stage=TaskStage.OWN_SHARE_CREATED,
+                target_status=TaskStatus.RUNNING,
+                target_event_message="生产任务已认领",
+                claim_by="worker-338",
+                expected_updated_at=task.updated_at,
+            )
+        return row, task
+
     def test_handle_update_records_received_and_cms_submitted_task_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
@@ -1171,6 +1300,311 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(updated.metadata["update_requested_run"], 1)
             self.assertEqual(updated.metadata["update_received_run"], 0)
 
+    def test_start_series_update_task_rejects_claimed_completed_series_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            row, task, _recognition = self.make_completed_target(submission_store, task_store)
+            claimed = task_store.compare_and_set_transition(
+                task.id,
+                TaskStage.CLEANED,
+                {TaskStatus.SUCCEEDED},
+                require_unclaimed=True,
+                target_stage=TaskStage.CLEANED,
+                target_status=TaskStatus.SUCCEEDED,
+                target_event_message="保留生产任务",
+                claim_by="worker-live",
+                expected_updated_at=task.updated_at,
+            )
+            original_row = submission_store.find_by_id(int(row["id"]))
+
+            updated, result = bridge.start_series_update_task(
+                claimed,
+                submission_store,
+                task_store,
+                source="文本追更",
+            )
+
+            self.assertIsNone(updated)
+            self.assertEqual(result, "not_eligible")
+            self.assertEqual(task_store.find_task(task.id), claimed)
+            self.assertEqual(submission_store.find_by_id(int(row["id"])), original_row)
+
+    def test_parse_explicit_series_update_command(self):
+        cases = [
+            (
+                "追更 #328 https://115cdn.com/s/new?password=1212",
+                (True, 328, "https://115cdn.com/s/new?password=1212"),
+            ),
+            (
+                "追更：https://115cdn.com/s/old?password=1212",
+                (True, None, "https://115cdn.com/s/old?password=1212"),
+            ),
+            (
+                "https://115cdn.com/s/plain?password=1212",
+                (False, None, "https://115cdn.com/s/plain?password=1212"),
+            ),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertEqual(bridge.parse_explicit_series_update_command(text), expected)
+
+    def test_explicit_new_link_series_update_repairs_existing_unclaimed_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            target_row, target, target_recognition = self.make_completed_target(submission_store, task_store)
+            source_row, source_task = self.make_existing_source(submission_store, task_store)
+
+            updated, result = bridge.start_series_update_from_link(
+                target,
+                bridge.ShareKey("new", "1212"),
+                "https://115cdn.com/s/new?password=1212",
+                "464100862",
+                submission_store,
+                task_store,
+                source="生产修复",
+            )
+
+            self.assertEqual(result, "started")
+            self.assertEqual(updated.id, source_task.id)
+            self.assertEqual(updated.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(updated.status, TaskStatus.PENDING)
+            self.assertEqual(updated.tmdb_id, "273114")
+            self.assertEqual(updated.category, "国产电视")
+            self.assertEqual(updated.metadata["series_update_parent_task_id"], target.id)
+            self.assertEqual(updated.metadata["update_requested_run"], 1)
+            self.assertEqual(updated.metadata["update_received_run"], 0)
+            self.assertNotIn("own_share_file_id", updated.metadata)
+            self.assertNotIn("share_create_status", updated.metadata)
+            self.assertEqual(updated.next_run_at, 0)
+
+            prepared = submission_store.find_by_id(int(source_row["id"]))
+            self.assertEqual(json.loads(prepared["recognition_json"]), target_recognition)
+            self.assertEqual(prepared["category_choice"], "国产电视")
+            self.assertEqual(prepared["workflow_mode"], "self_share_sync")
+            self.assertEqual(prepared["workflow_phase"], "update_requested")
+            self.assertIsNone(prepared["own_share_file_id"])
+            self.assertIsNone(prepared["own_share_file_name"])
+            self.assertIsNone(prepared["own_share_code"])
+            self.assertNotIn("3481694900213253783", json.dumps(prepared, ensure_ascii=False))
+            self.assertEqual(submission_store.find_by_id(int(target_row["id"]))["own_share_code"], "old-share")
+
+    def test_explicit_new_link_series_update_rejects_claimed_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            source_row, claimed = self.make_existing_source(submission_store, task_store, claimed=True)
+            original_row = submission_store.find_by_id(int(source_row["id"]))
+
+            updated, result = bridge.start_series_update_from_link(
+                target,
+                bridge.ShareKey("new", "1212"),
+                "https://115cdn.com/s/new?password=1212",
+                "464100862",
+                submission_store,
+                task_store,
+                source="生产修复",
+            )
+
+            self.assertIsNone(updated)
+            self.assertEqual(result, "source_busy")
+            self.assertTrue(claimed.claimed_by)
+            self.assertTrue(claimed.claim_token)
+            self.assertEqual(task_store.find_task(claimed.id), claimed)
+            self.assertEqual(submission_store.find_by_id(int(source_row["id"])), original_row)
+
+    def test_explicit_new_link_series_update_rejects_claimed_target_without_creating_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            claimed = task_store.compare_and_set_transition(
+                target.id,
+                TaskStage.CLEANED,
+                {TaskStatus.SUCCEEDED},
+                require_unclaimed=True,
+                target_stage=TaskStage.CLEANED,
+                target_status=TaskStatus.SUCCEEDED,
+                target_event_message="目标任务已认领",
+                claim_by="worker-live",
+                expected_updated_at=target.updated_at,
+            )
+
+            updated, result = bridge.start_series_update_from_link(
+                claimed,
+                bridge.ShareKey("new", "1212"),
+                "https://115cdn.com/s/new?password=1212",
+                "464100862",
+                submission_store,
+                task_store,
+                source="生产修复",
+            )
+
+            self.assertIsNone(updated)
+            self.assertEqual(result, "not_eligible")
+            self.assertEqual(task_store.find_task(target.id), claimed)
+            self.assertIsNone(task_store.find_task_by_share_key("new", "1212"))
+
+    def test_explicit_new_link_series_update_rejects_invalid_target_identity_without_creating_source(self):
+        invalid_targets = [
+            {"media_type": "movie"},
+            {"tmdb_id": ""},
+            {"workflow_mode": "direct"},
+        ]
+        for invalid in invalid_targets:
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as tmp:
+                submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+                task_store = TaskStore(Path(tmp) / "tasks.db")
+                target_row, target, _recognition = self.make_completed_target(
+                    submission_store,
+                    task_store,
+                    media_type=invalid.get("media_type", "tv"),
+                    tmdb_id=invalid.get("tmdb_id", "273114"),
+                )
+                if "workflow_mode" in invalid:
+                    submission_store.update_self_share(
+                        int(target_row["id"]),
+                        workflow_mode=invalid["workflow_mode"],
+                    )
+
+                updated, result = bridge.start_series_update_from_link(
+                    target,
+                    bridge.ShareKey("new", "1212"),
+                    "https://115cdn.com/s/new?password=1212",
+                    "464100862",
+                    submission_store,
+                    task_store,
+                    source="生产修复",
+                )
+
+                self.assertIsNone(updated)
+                self.assertEqual(result, "not_eligible")
+                self.assertIsNone(task_store.find_task_by_share_key("new", "1212"))
+
+    def test_explicit_new_link_series_update_rejects_different_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            source_row, source_task = self.make_existing_source(
+                submission_store,
+                task_store,
+                parent_task_id=target.id + 100,
+            )
+            original_row = submission_store.find_by_id(int(source_row["id"]))
+
+            updated, result = bridge.start_series_update_from_link(
+                target,
+                bridge.ShareKey("new", "1212"),
+                "https://115cdn.com/s/new?password=1212",
+                "464100862",
+                submission_store,
+                task_store,
+                source="生产修复",
+            )
+
+            self.assertIsNone(updated)
+            self.assertEqual(result, "source_conflict")
+            self.assertEqual(task_store.find_task(source_task.id), source_task)
+            self.assertEqual(submission_store.find_by_id(int(source_row["id"])), original_row)
+
+    def test_explicit_new_link_series_update_rejects_completed_remote_share(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            source_row, source_task = self.make_existing_source(
+                submission_store,
+                task_store,
+                own_share_code="remote-share",
+            )
+            original_row = submission_store.find_by_id(int(source_row["id"]))
+
+            updated, result = bridge.start_series_update_from_link(
+                target,
+                bridge.ShareKey("new", "1212"),
+                "https://115cdn.com/s/new?password=1212",
+                "464100862",
+                submission_store,
+                task_store,
+                source="生产修复",
+            )
+
+            self.assertIsNone(updated)
+            self.assertEqual(result, "source_conflict")
+            self.assertEqual(task_store.find_task(source_task.id), source_task)
+            self.assertEqual(submission_store.find_by_id(int(source_row["id"])), original_row)
+            self.assertEqual(original_row["own_share_code"], "remote-share")
+
+    def test_explicit_new_link_series_update_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            key = bridge.ShareKey("new", "1212")
+            first, first_result = bridge.start_series_update_from_link(
+                target,
+                key,
+                "https://115cdn.com/s/new?password=1212",
+                "464100862",
+                submission_store,
+                task_store,
+                source="生产修复",
+            )
+
+            repeated, result = bridge.start_series_update_from_link(
+                target,
+                key,
+                "https://115cdn.com/s/new?password=1212",
+                "464100862",
+                submission_store,
+                task_store,
+                source="生产修复",
+            )
+
+            self.assertEqual(first_result, "started")
+            self.assertEqual(result, "already_started")
+            self.assertEqual(repeated, first)
+            self.assertEqual(repeated.metadata["update_requested_run"], 1)
+
+    def test_explicit_new_link_series_update_preparation_failure_stays_frozen(self):
+        failures = [None, RuntimeError("prepare failed")]
+        for failure in failures:
+            with self.subTest(failure=repr(failure)), tempfile.TemporaryDirectory() as tmp:
+                submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+                task_store = TaskStore(Path(tmp) / "tasks.db")
+                _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+                if isinstance(failure, Exception):
+                    preparation = patch.object(
+                        submission_store,
+                        "prepare_series_update_child",
+                        side_effect=failure,
+                    )
+                else:
+                    preparation = patch.object(
+                        submission_store,
+                        "prepare_series_update_child",
+                        return_value=None,
+                    )
+                with preparation, patch.object(bridge.LOG, "exception"):
+                    updated, result = bridge.start_series_update_from_link(
+                        target,
+                        bridge.ShareKey("new", "1212"),
+                        "https://115cdn.com/s/new?password=1212",
+                        "464100862",
+                        submission_store,
+                        task_store,
+                        source="生产修复",
+                    )
+
+                self.assertEqual(result, "failed")
+                self.assertEqual(updated.current_stage, TaskStage.NEEDS_ACTION)
+                self.assertEqual(updated.status, TaskStatus.NEEDS_ACTION)
+                self.assertEqual(updated.next_run_at, -1)
+                self.assertEqual(updated.metadata["series_update_parent_task_id"], target.id)
+
     def test_explicit_series_update_command_requeues_completed_series(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
@@ -1211,7 +1645,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(updated.metadata["update_requested_run"], 1)
             self.assertIn("已开始追更", telegram.messages[-1][1])
 
-    def test_explicit_series_update_command_falls_back_to_new_intake(self):
+    def test_explicit_series_update_command_requires_target_for_new_link(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
@@ -1229,27 +1663,18 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 task_engine_enabled=True,
             )
 
-            task = task_store.find_task_by_share_key("new", "1234")
-            self.assertIsNotNone(task)
-            self.assertEqual(task.current_stage, TaskStage.RECEIVED)
-            self.assertEqual(task.status, TaskStatus.PENDING)
+            self.assertIsNone(task_store.find_task_by_share_key("new", "1234"))
+            self.assertIn("需指定历史任务号", telegram.messages[-1][1])
 
-    def test_explicit_series_update_command_keeps_completed_movie_in_normal_intake(self):
+    def test_targeted_explicit_series_update_command_starts_new_link(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
-            task = task_store.upsert_task("movie", "1234", "https://115cdn.com/s/movie?password=1234")
-            task_store.record_event(
-                task.id,
-                TaskStage.CLEANED,
-                TaskStatus.SUCCEEDED,
-                "清理完成",
-                category="欧美电影",
-            )
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             telegram = FakeTelegram()
 
             bridge.handle_update(
-                self.update("追更 https://115cdn.com/s/movie?password=1234"),
+                self.update(f"追更 #{target.id} https://115cdn.com/s/new?password=1212"),
                 FakeCmsSubmit(),
                 telegram,
                 "464100862",
@@ -1260,10 +1685,133 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 task_engine_enabled=True,
             )
 
-            unchanged = task_store.find_task(task.id)
-            self.assertEqual(unchanged.current_stage, TaskStage.CLEANED)
-            self.assertEqual(unchanged.status, TaskStatus.SUCCEEDED)
-            self.assertIn("任务已完成", telegram.messages[-1][1])
+            child = task_store.find_task_by_share_key("new", "1212")
+            self.assertIsNotNone(child)
+            self.assertEqual(child.metadata["series_update_parent_task_id"], target.id)
+            self.assertIn("已开始追更", telegram.messages[-1][1])
+
+    def test_targeted_explicit_series_update_command_rejects_movie_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(
+                submission_store,
+                task_store,
+                category="欧美电影",
+                media_type="movie",
+            )
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update(f"追更 #{target.id} https://115cdn.com/s/new?password=1212"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                task_engine_enabled=True,
+            )
+
+            self.assertIsNone(task_store.find_task_by_share_key("new", "1212"))
+            self.assertIn("不符合追更条件", telegram.messages[-1][1])
+
+    def test_targeted_explicit_series_update_command_rejects_unfinished_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(
+                submission_store,
+                task_store,
+                stage=TaskStage.EMBY_CONFIRMED,
+                status=TaskStatus.RUNNING,
+            )
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update(f"追更 #{target.id} https://115cdn.com/s/new?password=1212"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                task_engine_enabled=True,
+            )
+
+            self.assertIsNone(task_store.find_task_by_share_key("new", "1212"))
+            self.assertIn("不符合追更条件", telegram.messages[-1][1])
+
+    def test_targeted_explicit_series_update_command_rejects_missing_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update("追更 #999 https://115cdn.com/s/new?password=1212"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                task_engine_enabled=True,
+            )
+
+            self.assertIsNone(task_store.find_task_by_share_key("new", "1212"))
+            self.assertIn("历史任务不存在", telegram.messages[-1][1])
+
+    def test_targeted_explicit_series_update_command_rejects_multiple_urls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update(
+                    f"追更 #{target.id} https://115cdn.com/s/new?password=1212 "
+                    "https://115cdn.com/s/second?password=3434"
+                ),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                task_engine_enabled=True,
+            )
+
+            self.assertIsNone(task_store.find_task_by_share_key("new", "1212"))
+            self.assertIsNone(task_store.find_task_by_share_key("second", "3434"))
+            self.assertIn("仅支持一个 115 分享链接", telegram.messages[-1][1])
+
+    def test_targeted_explicit_series_update_command_rejects_magnet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            telegram = FakeTelegram()
+
+            bridge.handle_update(
+                self.update(f"追更 #{target.id} magnet:?xt=urn:btih:0123456789abcdef"),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                self_share_workflow=object(),
+                task_engine_enabled=True,
+            )
+
+            self.assertEqual([task.id for task in task_store.list_recent_tasks(limit=10)], [target.id])
+            self.assertIn("仅支持一个 115 分享链接", telegram.messages[-1][1])
 
     def test_completed_tv_task_exposes_update_button_and_resets_for_new_run(self):
         with tempfile.TemporaryDirectory() as tmp:
