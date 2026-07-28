@@ -444,11 +444,12 @@ class P115WebClient:
         data: dict | None = None,
         params: dict | None = None,
         headers: dict[str, str] | None = None,
+        use_cache: bool = True,
     ) -> dict:
         with self._request_lock:
             method = str(method or "GET").upper()
             cache_key = None
-            if method == "GET" and self.cache_ttl_seconds > 0:
+            if method == "GET" and use_cache and self.cache_ttl_seconds > 0:
                 cache_key = json.dumps(
                     {
                         "url": str(url),
@@ -465,7 +466,7 @@ class P115WebClient:
                     if float(self.clock()) < expires_at:
                         return deepcopy(response)
                     self._get_cache.pop(cache_key, None)
-            else:
+            elif method != "GET" or use_cache:
                 # Any mutating request can invalidate a previously cached listing or share snapshot.
                 self._get_cache.clear()
                 self._share_list_cache = None
@@ -505,6 +506,7 @@ class P115WebClient:
         cid: str = "0",
         limit: int = 100,
         offset: int = 0,
+        use_cache: bool = True,
     ) -> dict[str, Any]:
         page_size = max(1, min(int(limit), 100))
         page_offset = max(0, int(offset))
@@ -519,6 +521,7 @@ class P115WebClient:
                 "offset": page_offset,
                 "limit": page_size,
             },
+            use_cache=use_cache,
         )
         try:
             self._ensure_state(resp, "115 share snap failed")
@@ -540,6 +543,7 @@ class P115WebClient:
         cid: str = "0",
         limit: int = 100,
         offset: int = 0,
+        use_cache: bool = True,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         page_size = max(1, min(int(limit), 100))
         page_offset = max(0, int(offset))
@@ -558,6 +562,7 @@ class P115WebClient:
                 cid=cid,
                 limit=request_limit,
                 offset=page_offset,
+                use_cache=use_cache,
             )
             if first_snap is None:
                 first_snap = snap
@@ -694,7 +699,13 @@ class P115WebClient:
         *,
         snapshot_all_targets: bool,
     ) -> dict[str, Any]:
-        items, snap = self.share_root_items(share_code, receive_code, cid="0", limit=100)
+        items, snap = self.share_root_items(
+            share_code,
+            receive_code,
+            cid="0",
+            limit=100,
+            use_cache=False,
+        )
         data = snap.get("data") if isinstance(snap.get("data"), dict) else {}
         file_ids = [p115_share_item_id(item) for item in items]
         if not file_ids:
@@ -714,7 +725,7 @@ class P115WebClient:
             # A share snapshot ID is not a local file ID. Capture the target
             # root before receiving so a later same-name lookup cannot select
             # an older file already waiting in the pending directory.
-            existing_items = self.list_files(str(target_cid), limit=500)
+            existing_items = self.list_files(str(target_cid), limit=500, use_cache=False)
             existing_file_ids = [
                 file_id
                 for file_id in (p115_file_id(item) for item in existing_items)
@@ -901,7 +912,7 @@ class P115WebClient:
         for source_name in source_names:
             source_norm = normalize_text(source_name)
             matches = [item for item in remaining if normalize_text(item["file_name"]) == source_norm]
-            if not matches and len(source_items) == 1 and len(remaining) == 1:
+            if not matches and not require_new and len(source_items) == 1 and len(remaining) == 1:
                 matches = remaining[:]
             if not matches:
                 continue
@@ -1090,10 +1101,18 @@ class P115WebClient:
             raise RuntimeError("115 cloud download output has multiple children; use discovery APIs")
         return outputs[0]
 
-    def list_files(self, parent_id: str, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+    def list_files(
+        self,
+        parent_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        *,
+        use_cache: bool = True,
+    ) -> list[dict[str, Any]]:
         resp = self._request(
             "https://webapi.115.com/files",
             params={"cid": str(parent_id), "limit": limit, "offset": max(0, int(offset)), "show_dir": 1, "fc_mix": 1},
+            use_cache=use_cache,
         )
         self._ensure_state(resp, "115 list files failed")
         return iter_items(resp.get("data") or resp)

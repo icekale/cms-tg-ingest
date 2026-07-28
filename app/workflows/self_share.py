@@ -89,6 +89,19 @@ def is_115_receive_restricted_error(exc: Exception) -> bool:
     return is_p115_risk_control_message(text)
 
 
+def is_complete_share_receive_result(received: dict[str, Any] | None) -> bool:
+    if not isinstance(received, dict) or not received.get("received_items_complete"):
+        return False
+    items = received.get("received_items")
+    if not isinstance(items, list):
+        return False
+    try:
+        expected_count = int(received.get("received_expected_item_count") or 0)
+    except (TypeError, ValueError):
+        return False
+    return expected_count > 0 and len(items) == expected_count
+
+
 def has_authoritative_category(row: dict[str, Any], recognition: dict[str, Any]) -> bool:
     if str(row.get("category_status") or "").strip() == "selected" and str(row.get("category_choice") or "").strip():
         return True
@@ -782,6 +795,7 @@ class BridgeSelfShareTaskWorkflow:
             else:
                 operation = self.task_store.find_operation(int(task.id), operation_key)
 
+        execution_incomplete = False
         if execute_authorized:
             try:
                 received = self.p115.execute_prepared_share_receive(operation.request)
@@ -797,10 +811,13 @@ class BridgeSelfShareTaskWorkflow:
             except Exception as exc:
                 self.task_store.mark_operation_uncertain(int(task.id), operation_key, str(exc))
                 raise
-            completed = self.task_store.complete_operation(int(task.id), operation_key, received)
-            if completed is None:
-                completed = self.task_store.find_operation(int(task.id), operation_key)
-            operation = completed
+            if is_complete_share_receive_result(received):
+                completed = self.task_store.complete_operation(int(task.id), operation_key, received)
+                if completed is None:
+                    completed = self.task_store.find_operation(int(task.id), operation_key)
+                operation = completed
+            else:
+                execution_incomplete = True
 
         if operation is None:
             return StageResult.needs_action(
@@ -810,8 +827,9 @@ class BridgeSelfShareTaskWorkflow:
         if operation.status == "succeeded":
             received = operation.result
         elif operation.status in {"started", "uncertain"}:
-            received = self.p115.reconcile_prepared_share_receive(operation.request)
-            if received and bool(received.get("received_items_complete")):
+            if not execution_incomplete:
+                received = self.p115.reconcile_prepared_share_receive(operation.request)
+            if is_complete_share_receive_result(received):
                 if operation.status == "started":
                     completed = self.task_store.complete_operation(int(task.id), operation_key, received)
                     if completed is not None:

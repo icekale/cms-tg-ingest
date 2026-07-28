@@ -424,6 +424,54 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(len(self.p115.received), 1)
             self.assertEqual(len(self.p115.receive_reconciliations), 1)
 
+    def test_incomplete_receive_result_stays_started_and_never_posts_again(self):
+        class IncompleteReceiveP115(FakeP115):
+            def _incomplete_result(self, intent):
+                result = self._receive_result(intent)
+                result["received_items"] = result["received_items"][:1]
+                result["received_items_complete"] = False
+                return result
+
+            def execute_prepared_share_receive(self, intent):
+                self.received.append((intent["share_code"], intent["receive_code"], intent["target_cid"]))
+                self.received_target_visible = True
+                return self._incomplete_result(intent)
+
+            def reconcile_prepared_share_receive(self, intent):
+                self.receive_reconciliations.append(dict(intent))
+                return self._incomplete_result(intent)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            self.p115 = IncompleteReceiveP115()
+            workflow.p115 = self.p115
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            self.tasks.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+            clock = [time.time()]
+            workflow._now = lambda: clock[0]
+            runner = TaskRunner(self.tasks, workflow, worker_id="receive-incomplete", now=lambda: clock[0])
+
+            runner.run_once()
+
+            operation_key = self._receive_operation_key(task)
+            operation = self.tasks.find_operation(task.id, operation_key)
+            waiting = self.tasks.find_task(task.id)
+            self.assertEqual(operation.status, "started")
+            self.assertEqual(waiting.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(waiting.status, TaskStatus.RUNNING)
+            self.assertEqual(len(self.p115.received), 1)
+            self.assertIsNone(self.submissions.find_by_key(bridge.ShareKey("abc", "1234")))
+
+            clock[0] = operation.started_at + 3600
+            runner.run_once()
+
+            timed_out = self.tasks.find_task(task.id)
+            self.assertEqual(timed_out.status, TaskStatus.NEEDS_ACTION)
+            self.assertEqual(self.tasks.find_operation(task.id, operation_key).status, "started")
+            self.assertEqual(len(self.p115.received), 1)
+            self.assertEqual(len(self.p115.receive_reconciliations), 1)
+            self.assertIsNone(self.submissions.find_by_key(bridge.ShareKey("abc", "1234")))
+
     def test_receive_saved_result_survives_discarded_taskrunner_stage_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp, receive_cid="pending-cid")

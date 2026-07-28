@@ -85,6 +85,46 @@ class HttpClientTests(unittest.TestCase):
         self.assertTrue(all(method == "GET" for _url, method, _data, _params in http.calls))
         self.assertFalse(any(url.endswith("/share/receive") for url, *_rest in http.calls))
 
+    def test_prepare_share_receive_bypasses_preseeded_source_and_target_caches(self):
+        class FakeHttp:
+            def __init__(self):
+                self.source_id = "stale-source"
+                self.target_id = "stale-target"
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append(url)
+                if url.endswith("/share/snap"):
+                    return {
+                        "state": True,
+                        "data": {
+                            "shareinfo": {"share_title": "Root A"},
+                            "list": [{"fid": self.source_id, "n": "Root A"}],
+                        },
+                    }
+                if url.endswith("/files"):
+                    return {
+                        "state": True,
+                        "data": [
+                            {"cid": self.target_id, "pid": "pending-cid", "n": "Existing Root"}
+                        ],
+                    }
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = P115WebClient("UID=1", http=http, timeout=3, cache_ttl_seconds=60, clock=lambda: 100)
+        client.share_root_items("abc", "1234", cid="0", limit=100)
+        client.list_files("pending-cid", limit=500)
+        http.source_id = "fresh-source"
+        http.target_id = "fresh-target"
+
+        intent = client.prepare_share_receive("abc", "1234", "pending-cid")
+
+        self.assertEqual(intent["source_file_ids"], ["fresh-source"])
+        self.assertEqual(intent["target_pre_call_file_ids"], ["fresh-target"])
+        self.assertEqual(sum(url.endswith("/share/snap") for url in http.calls), 2)
+        self.assertEqual(sum(url.endswith("/files") for url in http.calls), 2)
+
     def test_execute_prepared_share_receive_posts_saved_source_ids_once(self):
         class FakeHttp:
             def __init__(self):
@@ -179,6 +219,38 @@ class HttpClientTests(unittest.TestCase):
         self.assertTrue(result["received_items_complete"])
         self.assertTrue(all(method == "GET" for _url, method, _data, _params in http.calls))
         self.assertFalse(any(url.endswith("/share/receive") for url, *_rest in http.calls))
+
+    def test_reconcile_prepared_share_receive_rejects_unrelated_single_delta(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                if url.endswith("/files"):
+                    return {
+                        "state": True,
+                        "data": [
+                            {
+                                "cid": "unrelated-new-id",
+                                "pid": "pending-cid",
+                                "n": "Unrelated Upload",
+                            }
+                        ],
+                    }
+                raise AssertionError(url)
+
+        client = P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+        intent = {
+            "share_code": "abc",
+            "receive_code": "1234",
+            "target_cid": "pending-cid",
+            "source_file_ids": ["source-a"],
+            "source_file_names": ["Root A"],
+            "title": "Root A",
+            "target_pre_call_file_ids": [],
+            "target_snapshot_complete": True,
+        }
+
+        result = client.reconcile_prepared_share_receive(intent)
+
+        self.assertIsNone(result)
 
     def test_json_get_retries_remote_disconnect(self):
         with (
