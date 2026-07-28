@@ -366,21 +366,23 @@ class HdhiveSubscriptionService:
                 )
 
         persisted_items = self.store.list_items(subscription.id)
-        enqueued_episode_keys = {
-            item.normalized_episode_key or item.episode_key
+        enqueued_by_episode = {
+            self._stored_episode_keys(item): item
             for item in persisted_items
-            if item.status == "enqueued" and (item.normalized_episode_key or item.episode_key)
+            if item.status == "enqueued" and self._stored_episode_keys(item)
         }
         for item in persisted_items:
             if item.status == "unlocked" and item.unlocked_url:
-                saved_episode_key = item.normalized_episode_key or item.episode_key
-                if saved_episode_key and saved_episode_key in enqueued_episode_keys:
+                saved_episode = self._stored_episode_keys(item)
+                terminal_sibling = enqueued_by_episode.get(saved_episode)
+                if terminal_sibling is not None:
+                    self.store.mark_item_enqueued(item.id, terminal_sibling.task_id)
                     continue
                 try:
-                    self._enqueue_saved_item(subscription, item)
+                    enqueued_item = self._enqueue_saved_item(subscription, item)
                     enqueued += 1
-                    if saved_episode_key:
-                        enqueued_episode_keys.add(saved_episode_key)
+                    if saved_episode:
+                        enqueued_by_episode[saved_episode] = enqueued_item
                 except Exception as exc:
                     self.store.mark_item_intake_failed(item.id, str(exc))
                     failed += 1

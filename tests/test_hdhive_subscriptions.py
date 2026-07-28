@@ -297,10 +297,56 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
                 self.assertEqual(proxy.unlock_calls, [["ambiguous"]])
                 self.assertEqual(intake_calls, [])
 
-    def test_saved_unlock_does_not_enqueue_when_episode_sibling_is_terminal(self):
-        saved_url = "https://115cdn.com/s/saved-alternative?password=abcd"
+    def test_saved_unlock_matches_terminal_sibling_by_canonical_episode_identity(self):
+        saved_url = "https://115cdn.com/s/saved-legacy-alternative?password=abcd"
         directory, store, subscription, proxy, service, intake_calls = self.make_service(
-            [resource("saved-alternative", points=8)]
+            [resource("saved-legacy-alternative", points=8)]
+        )
+        try:
+            terminal = store.upsert_item(
+                subscription.id,
+                "s01e01",
+                "legacy-terminal-sibling",
+                "valid",
+                2160,
+                1,
+            )
+            saved = store.upsert_item(
+                subscription.id,
+                "S01E01",
+                "saved-legacy-alternative",
+                "valid",
+                1080,
+                8,
+                normalized_episode_key="S01E01",
+            )
+            store.mark_item_enqueued(terminal.id, 77)
+            store.mark_item_unlocked(saved.id, saved_url, 8, "actual", 1700000000)
+
+            result = service.check(subscription.id)
+            current = store.get_item(saved.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.enqueued, 0)
+        self.assertEqual(current.status, "enqueued")
+        self.assertEqual(current.task_id, 77)
+        self.assertEqual(proxy.unlock_calls, [])
+        self.assertEqual(intake_calls, [])
+
+    def test_suppressed_saved_unlock_is_terminal_for_completion(self):
+        saved_url = "https://115cdn.com/s/saved-alternative?password=abcd"
+        tmdb = FakeTmdbResolver(
+            {
+                "ok": True,
+                "status": "Ended",
+                "seasons": [{"season_number": 1, "episode_count": 1}],
+            }
+        )
+        directory, store, subscription, proxy, service, intake_calls = self.make_service(
+            [resource("saved-alternative", points=8)],
+            tmdb_resolver=tmdb,
+            emby=FakeEmby({"S09E09"}),
         )
         try:
             terminal = store.upsert_item(
@@ -330,8 +376,9 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
             directory.cleanup()
 
         self.assertEqual(result.enqueued, 0)
-        self.assertEqual(current.status, "unlocked")
-        self.assertEqual(current.task_id, None)
+        self.assertEqual(result.subscription_status, "completed")
+        self.assertEqual(current.status, "enqueued")
+        self.assertEqual(current.task_id, 77)
         self.assertEqual(proxy.unlock_calls, [])
         self.assertEqual(intake_calls, [])
 
