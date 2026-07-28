@@ -150,6 +150,9 @@ class BackgroundJobCoordinatorTests(unittest.TestCase):
             ('{"AWS_ACCESS_KEY_ID":"AKIA-JSON","OPENAI_API_KEY":"API-JSON"}', "AKIA-JSON"),
             ('{"AWS_ACCESS_KEY_ID":"AKIA-JSON","OPENAI_API_KEY":"API-JSON"}', "API-JSON"),
             ("{'SECRET_KEY': 'SECRET-DICT'}", "SECRET-DICT"),
+            (r'{\"AWS_ACCESS_KEY_ID\":\"AKIA-ESCAPED\"}', "AKIA-ESCAPED"),
+            (r'{\"OPENAI_API_KEY\":\"API-ESCAPED\"}', "API-ESCAPED"),
+            (r"\'SECRET_KEY\': \'SECRET-ESCAPED\'", "SECRET-ESCAPED"),
         )
 
         for credential, secret in credentials:
