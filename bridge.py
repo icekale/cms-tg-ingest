@@ -352,7 +352,10 @@ def create_task_store(config: Config) -> TaskStore:
 def create_backup_scheduler(config: Config, task_store: TaskStore) -> BackupScheduler:
     return BackupScheduler(
         task_store,
-        [config.db_path, config.task_db_path],
+        {
+            "submissions": Path(config.db_path),
+            "tasks": Path(config.task_db_path),
+        },
         config.backup_dir,
         run_time=config.backup_time,
         timezone_name=config.backup_timezone,

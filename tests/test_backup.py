@@ -63,7 +63,9 @@ class BackupTests(unittest.TestCase):
                 connections.append(tracked)
                 return tracked
 
-            with patch("app.backup.sqlite3.connect", side_effect=connect):
+            with patch("app.backup.sqlite3.connect", side_effect=connect), patch(
+                "app.backup.sqlite_quick_check", create=True
+            ):
                 succeeded = backup_sqlite_databases([source], destination, now=1_735_689_600.0)
                 fail_backup = True
                 failed = backup_sqlite_databases([source], destination, now=1_735_689_601.0)
@@ -117,6 +119,75 @@ class BackupTests(unittest.TestCase):
             with closing(sqlite3.connect(backup_path)) as connection:
                 value = connection.execute("SELECT value FROM values_table").fetchone()[0]
             self.assertEqual(value, "snapshot")
+
+    def test_backup_rejects_duplicate_derived_names_before_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            one = root / "one" / "state.db"
+            two = root / "two" / "state.db"
+            destination = root / "backups"
+            one.parent.mkdir()
+            two.parent.mkdir()
+            self._make_database(one, "one")
+            self._make_database(two, "two")
+
+            result = backup_sqlite_databases([one, two], destination, now=1_735_689_600.0)
+
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.files, [])
+            self.assertIn(str(one), result.error)
+            self.assertIn(str(two), result.error)
+            self.assertEqual(list(destination.glob("state-*.db")), [])
+
+    def test_backup_uses_stable_mapping_names_for_same_stem_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            one = root / "one" / "state.db"
+            two = root / "two" / "state.db"
+            destination = root / "backups"
+            one.parent.mkdir()
+            two.parent.mkdir()
+            self._make_database(one, "one")
+            self._make_database(two, "two")
+
+            result = backup_sqlite_databases(
+                {"submissions": one, "tasks": two},
+                destination,
+                now=1_735_689_600.0,
+            )
+
+            self.assertEqual(result.status, "succeeded")
+            self.assertEqual(len(result.files), 2)
+            backup_paths = [Path(path) for path in result.files]
+            self.assertTrue(any(path.name.startswith("submissions-") for path in backup_paths))
+            self.assertTrue(any(path.name.startswith("tasks-") for path in backup_paths))
+            values = {}
+            for path in backup_paths:
+                with closing(sqlite3.connect(path)) as connection:
+                    values[path.name.split("-", 1)[0]] = connection.execute(
+                        "SELECT value FROM values_table"
+                    ).fetchone()[0]
+            self.assertEqual(values, {"submissions": "one", "tasks": "two"})
+
+    def test_backup_does_not_publish_unverified_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "tasks.db"
+            destination = root / "backups"
+            self._make_database(source)
+
+            with patch(
+                "app.backup.sqlite_quick_check",
+                side_effect=sqlite3.DatabaseError("corrupt snapshot"),
+                create=True,
+            ):
+                result = backup_sqlite_databases([source], destination, now=1_735_689_600.0)
+
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.files, [])
+            self.assertIn("corrupt snapshot", result.error)
+            self.assertEqual(list(destination.glob("tasks-*.db")), [])
+            self.assertEqual(list(destination.glob("*.tmp")), [])
 
     def test_backup_reports_missing_source_without_discarding_existing_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -230,6 +301,13 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(
                 scheduler.sources,
                 (Path(config.db_path), Path(config.task_db_path)),
+            )
+            self.assertEqual(
+                scheduler.named_sources,
+                {
+                    "submissions": Path(config.db_path),
+                    "tasks": Path(config.task_db_path),
+                },
             )
             self.assertEqual(scheduler.destination, Path(config.backup_dir))
             self.assertEqual(scheduler.run_time.hour, 4)
