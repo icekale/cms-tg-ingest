@@ -62,7 +62,7 @@ _STRUCTURED_CREDENTIAL_VALUE = re.compile(
     r'''(?i)((?<![a-z0-9_-])(?:\\?["'])?'''
     r'''(?:authorization|access_token|api_key|token|secret|password|set[-_]cookie|cookie)'''
     r'''(?:\\?["'])?\s*:\s*)'''
-    r'''(?:\\?["'][^,}\]]*?\\?["']|[^\s,;}\]]+)'''
+    r'''(?:\\?"(?:\\.|[^"\\])*\\?"|\\?'(?:\\.|[^'\\])*\\?'|[^\s,;}\]]+)'''
 )
 _SENSITIVE_VALUE = re.compile(r"(?i)\b(token|cookie|password|secret)\s*[=:]\s*[^\s,;]+")
 _URL = re.compile(r"https?://\S+")

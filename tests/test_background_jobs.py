@@ -211,6 +211,9 @@ class BackgroundJobCoordinatorTests(unittest.TestCase):
             ('{"set-cookie":"json-set-cookie-value"}', "json-set-cookie-value"),
             (r'{\"token\":\"escaped-token-value\"}', "escaped-token-value"),
             (r"\{'set-cookie': \'escaped-set-cookie-value\'\}", "escaped-set-cookie-value"),
+            ('{"password":"alpha-secret,beta-secret"}', "beta-secret"),
+            (r'{\"token\":\"left-secret,right-secret\"}', "right-secret"),
+            ('{"secret":"prefix-secret}middle-secret]suffix-secret"}', "suffix-secret"),
         )
 
         for credential, secret in credentials:
