@@ -1364,6 +1364,91 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(telegram.answers[-1][1], "已开始追更")
             self.assertIn("已开始追更", telegram.messages[-1][1])
 
+    def test_prepare_series_update_child_copies_only_stable_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            target_recognition = {
+                "ok": True,
+                "title": "X-悬案-2026-[tmdb=273114]",
+                "share_name": "悬案 (2026)",
+                "tmdb_id": "273114",
+                "type": "tv",
+                "category": "国产电视",
+                "category_status": "self_share_resolved",
+                "organized_parent_id": "tv-parent",
+                "parent_id": "tv-parent",
+            }
+            target = submission_store.upsert_submission(
+                bridge.ShareKey("old", "1212"),
+                "https://115cdn.com/s/old?password=1212",
+                "completed",
+                title=target_recognition["title"],
+            )
+            target = submission_store.update_recognition(int(target["id"]), target_recognition, "self_share_resolved")
+            target = submission_store.update_category(int(target["id"]), "国产电视", "self_share_resolved")
+            target = submission_store.update_self_share(
+                int(target["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="cleanup_completed",
+                own_share_code="old-share",
+                own_share_receive_code="1212",
+                own_share_file_id="tv-parent",
+            )
+            child = submission_store.upsert_submission(
+                bridge.ShareKey("new", "1212"),
+                "https://115cdn.com/s/new?password=1212",
+                "failed",
+                title="错误电影 (2025)",
+            )
+            child = submission_store.update_recognition(
+                int(child["id"]),
+                {"title": "错误电影 (2025)", "type": "movie", "category": "欧美电影"},
+                "selected",
+            )
+            child = submission_store.update_category(int(child["id"]), "欧美电影", "selected")
+            child = submission_store.update_self_share(
+                int(child["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="share_sync_submitted",
+                own_share_file_id="wrong-movie-folder",
+                own_share_code="stale-share",
+            )
+            child = submission_store.update_move(int(child["id"]), "moved", category_final="欧美电影")
+            child = submission_store.update_emby(int(child["id"]), "confirmed", item_id="stale-emby")
+            submission_store.update_cleanup(int(child["id"]), "deleted", file_id="wrong-movie-folder")
+
+            prepared = submission_store.prepare_series_update_child(
+                int(target["id"]),
+                bridge.ShareKey("new", "1212"),
+                "https://115cdn.com/s/new?password=1212",
+            )
+
+            self.assertEqual(json.loads(prepared["recognition_json"]), target_recognition)
+            self.assertEqual(prepared["category_choice"], "国产电视")
+            self.assertEqual(prepared["category_status"], "selected")
+            self.assertEqual(prepared["workflow_mode"], "self_share_sync")
+            self.assertEqual(prepared["workflow_phase"], "update_requested")
+            self.assertEqual(prepared["status"], "received")
+            self.assertIsNone(prepared["own_share_file_id"])
+            self.assertIsNone(prepared["own_share_code"])
+            self.assertIsNone(prepared["move_status"])
+            self.assertIsNone(prepared["emby_status"])
+            self.assertIsNone(prepared["cleanup_status"])
+            self.assertEqual(submission_store.find_by_id(int(target["id"]))["own_share_code"], "old-share")
+
+    def test_prepare_series_update_child_missing_target_creates_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+
+            prepared = submission_store.prepare_series_update_child(
+                99999,
+                bridge.ShareKey("new", "1212"),
+                "https://115cdn.com/s/new?password=1212",
+            )
+
+            self.assertIsNone(prepared)
+            self.assertIsNone(submission_store.find_by_key(bridge.ShareKey("new", "1212")))
+
     def test_task_retry_callback_requeues_failed_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")

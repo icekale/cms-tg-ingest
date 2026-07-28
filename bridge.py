@@ -986,6 +986,102 @@ class SubmissionStore:
             row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
         return self._row_to_dict(row)
 
+    def prepare_series_update_child(
+        self,
+        target_row_id: int,
+        child_key: ShareKey,
+        child_url: str,
+    ) -> dict[str, Any] | None:
+        now = time.time()
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            target = conn.execute(
+                "SELECT * FROM submissions WHERE id = ?",
+                (int(target_row_id),),
+            ).fetchone()
+            if target is None:
+                return None
+            if (
+                str(target["share_code"] or "") == child_key.share_code
+                and str(target["receive_code"] or "") == child_key.receive_code
+            ):
+                return None
+            try:
+                target_recognition = json.loads(str(target["recognition_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                target_recognition = {}
+            if not isinstance(target_recognition, dict):
+                target_recognition = {}
+            recognition_json = json.dumps(target_recognition, ensure_ascii=False, sort_keys=True)
+            category = str(
+                target["category_choice"]
+                or target["category_final"]
+                or target_recognition.get("category")
+                or ""
+            ).strip()
+            conn.execute(
+                """
+                INSERT INTO submissions (
+                    share_code, receive_code, url, title, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'received', ?, ?)
+                ON CONFLICT(share_code, receive_code) DO UPDATE SET
+                    url = excluded.url,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    child_key.share_code,
+                    child_key.receive_code,
+                    str(child_url),
+                    str(target["title"] or ""),
+                    now,
+                    now,
+                ),
+            )
+            child = conn.execute(
+                "SELECT id FROM submissions WHERE share_code = ? AND receive_code = ?",
+                (child_key.share_code, child_key.receive_code),
+            ).fetchone()
+            if child is None or int(child["id"]) == int(target_row_id):
+                return None
+            conn.execute(
+                """
+                UPDATE submissions
+                SET cms_task_id = NULL,
+                    title = ?, status = 'received', last_error = NULL,
+                    category_choice = ?, category_status = 'selected',
+                    recognition_json = ?, workflow_mode = 'self_share_sync',
+                    workflow_phase = 'update_requested',
+                    own_share_file_id = NULL, own_share_file_name = NULL,
+                    own_share_code = NULL, own_share_receive_code = NULL,
+                    own_share_url = NULL, share_sync_status = NULL,
+                    canonical_manifest_json = NULL, share_alias_name = NULL,
+                    share_alias_level = NULL, share_validation_status = NULL,
+                    share_validation_error = NULL, share_probe_at = NULL,
+                    share_invalid_at = NULL, share_invalid_reason = NULL,
+                    source_path = NULL,
+                    dest_path = NULL, move_status = NULL, move_error = NULL,
+                    move_started_at = NULL, move_finished_at = NULL,
+                    category_final = NULL, emby_status = NULL,
+                    emby_item_id = NULL, emby_title = NULL, emby_path = NULL,
+                    emby_parent = NULL, cleanup_status = NULL,
+                    cleanup_file_id = NULL, cleanup_error = NULL,
+                    cleanup_finished_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    str(target["title"] or ""),
+                    category,
+                    recognition_json,
+                    now,
+                    int(child["id"]),
+                ),
+            )
+            prepared = conn.execute(
+                "SELECT * FROM submissions WHERE id = ?",
+                (int(child["id"]),),
+            ).fetchone()
+        return self._row_to_dict(prepared)
+
     def replace_self_share_source_file_id(self, row_id: int, file_id: str) -> dict[str, Any] | None:
         with self._lock, self._connection() as conn:
             conn.execute(
