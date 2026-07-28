@@ -104,6 +104,8 @@ class CmsCloudDataIndexTests(unittest.TestCase):
                     "file_name": "Q-权力的游戏前传：龙族-2022-[tmdb=94997]",
                     "parent_id": "tv-root",
                     "direct_file_id": "episode",
+                    "direct_file_name": "权力的游戏前传：龙族 (2022) - S03E03.mkv",
+                    "direct_parent_id": "season",
                     "direct_relative_path": "episode.strm",
                 },
             )
@@ -164,6 +166,8 @@ class CmsCloudDataIndexTests(unittest.TestCase):
                     "file_name": "Q-权力的游戏前传：龙族-2022-[tmdb=94997]",
                     "parent_id": "tv-root",
                     "direct_file_id": "episode",
+                    "direct_file_name": "House.of.the.Dragon.S03E05.mkv",
+                    "direct_parent_id": "season",
                 },
             )
 

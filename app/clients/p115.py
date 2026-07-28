@@ -637,6 +637,7 @@ class P115WebClient:
         expected_title = str(share_title or "").strip()
         if not expected_title:
             return None
+        minimum_create_second = int(max(0.0, as_float(min_create_time, 0.0)))
         resp = self._request(
             "https://webapi.115.com/share/slist",
             params={
@@ -655,7 +656,7 @@ class P115WebClient:
             if title != expected_title:
                 continue
             create_time = as_float(item.get("create_time") or item.get("share_time"), 0.0)
-            if min_create_time and create_time < float(min_create_time):
+            if minimum_create_second and create_time < minimum_create_second:
                 continue
             share_code = str(item.get("share_code") or item.get("sharecode") or "").strip()
             if not share_code:

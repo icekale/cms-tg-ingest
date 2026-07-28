@@ -192,6 +192,7 @@ from app.workflows.self_share import (
     has_authoritative_category,
     is_115_receive_restricted_error,
     is_move_plan_retryable,
+    journaled_delete_file,
     match_emby_item,
     resolve_category_with_fallbacks,
     resolve_self_share_recognition_before_prepare,
@@ -199,6 +200,7 @@ from app.workflows.self_share import (
     send_move_result,
     should_attempt_strm_move,
     should_defer_for_probing,
+    source_delete_parent_id,
 )
 
 LINK_RE = re.compile(r"https?://(?:www\.)?(?:115cdn|115|anxia)\.com/s/[^\s<>'\"]+", re.I)
@@ -256,7 +258,24 @@ class _QualityRepairAdapter:
         row = self.submission_store.find_by_id(int(submission_id))
         if not row:
             return False
-        updated, _message = cleanup_own_share_source(self.submission_store, row, self.cleanup_client)
+        if str(row.get("cleanup_status") or "").lower() == "deleted":
+            return True
+        file_id = str(row.get("own_share_file_id") or "").strip()
+        parent_id = source_delete_parent_id(task, row, file_id)
+        if not self.cleanup_client or not file_id or not parent_id:
+            return False
+        recovery = journaled_delete_file(
+            self.task_store,
+            task,
+            self.cleanup_client,
+            file_id,
+            parent_id,
+            "delete_source",
+            now=time.time(),
+        )
+        if recovery is not None:
+            return False
+        updated = self.submission_store.update_cleanup(int(row["id"]), "deleted", file_id=file_id) or row
         return str(updated.get("cleanup_status") or "").lower() == "deleted"
 
 

@@ -137,7 +137,10 @@ class CmsCloudDataIndex:
 
     @staticmethod
     def _folder_for_row(conn: sqlite3.Connection, row: sqlite3.Row, tmdb_id: str = "") -> dict[str, str] | None:
-        direct_file_id = "" if int(row["is_dir"] or 0) else str(row["fid"] or "").strip()
+        is_direct_file = not int(row["is_dir"] or 0)
+        direct_file_id = str(row["fid"] or "").strip() if is_direct_file else ""
+        direct_file_name = str(row["name"] or "").strip() if is_direct_file else ""
+        direct_parent_id = str(row["pid"] or "").strip() if is_direct_file else ""
         seen: set[str] = set()
         while row:
             fid = str(row["fid"] or "").strip()
@@ -152,6 +155,8 @@ class CmsCloudDataIndex:
                     "file_name": name,
                     "parent_id": str(row["pid"] or "").strip(),
                     "direct_file_id": direct_file_id,
+                    "direct_file_name": direct_file_name,
+                    "direct_parent_id": direct_parent_id,
                 }
             parent_id = str(row["pid"] or "").strip()
             if not parent_id:

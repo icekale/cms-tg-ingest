@@ -83,6 +83,117 @@ def as_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def source_delete_parent_id(task: Any, row: dict[str, Any], file_id: str) -> str:
+    folder = task.metadata.get("organized_folder")
+    if isinstance(folder, dict):
+        if str(folder.get("file_id") or "").strip() == file_id:
+            parent_id = str(folder.get("parent_id") or "").strip()
+            if parent_id:
+                return parent_id
+        if str(folder.get("direct_file_id") or "").strip() == file_id:
+            return str(folder.get("direct_parent_id") or "").strip()
+    if str(task.metadata.get("direct_file_share_file_id") or "").strip() == file_id:
+        parent_id = str(task.metadata.get("direct_file_share_parent_id") or "").strip()
+        if parent_id:
+            return parent_id
+    try:
+        recognition = json.loads(row.get("recognition_json") or "{}")
+    except (TypeError, ValueError):
+        recognition = {}
+    recognition = recognition if isinstance(recognition, dict) else {}
+    return str(recognition.get("organized_parent_id") or recognition.get("parent_id") or "").strip()
+
+
+def _is_missing_delete_target_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return any(
+        token in message
+        for token in (
+            "file not found",
+            "文件不存在",
+            "文件已不存在",
+            "不存在或已删除",
+            "目标不存在",
+        )
+    )
+
+
+def journaled_delete_file(
+    task_store: Any,
+    task: Any,
+    cleanup_client: Any,
+    file_id: str,
+    parent_id: str,
+    operation_type: str,
+    *,
+    now: float,
+) -> StageResult | None:
+    operation_key = f"{operation_scope(task)}:{operation_type}:{file_id}"
+    operation = task_store.find_operation(int(task.id), operation_key)
+    if operation is None:
+        operation = task_store.prepare_operation(
+            int(task.id),
+            operation_key,
+            operation_type,
+            {"file_id": file_id, "parent_id": parent_id},
+        )
+    if operation.status == "prepared":
+        started = task_store.start_operation(int(task.id), operation_key)
+        operation = started or task_store.find_operation(int(task.id), operation_key)
+        if started is not None:
+            try:
+                response = cleanup_client.delete_file(str(operation.request.get("file_id") or file_id))
+            except Exception as exc:
+                if not _is_missing_delete_target_error(exc):
+                    raise
+                response = {"state": True, "already_absent": True}
+            completed = task_store.complete_operation(
+                int(task.id),
+                operation_key,
+                response if isinstance(response, dict) else {"state": True},
+            )
+            operation = completed or task_store.find_operation(int(task.id), operation_key)
+    if operation is None:
+        raise RuntimeError("115 delete operation disappeared")
+    metadata = {
+        "delete_operation_key": operation_key,
+        "delete_operation_type": operation_type,
+        "delete_file_id": file_id,
+        "delete_parent_id": parent_id,
+    }
+    if operation.status == "succeeded":
+        return None
+    if operation.status not in {"started", "uncertain"}:
+        return StageResult.needs_action("115 删除操作状态无法安全恢复，请人工检查", metadata)
+    try:
+        exists = cleanup_client.file_exists_in_parent(
+            str(operation.request.get("file_id") or file_id),
+            str(operation.request.get("parent_id") or parent_id),
+        )
+    except Exception as exc:
+        return StageResult.defer(
+            f"115 删除结果暂时无法确认：{exc}",
+            _DELETE_RECOVERY_RETRY_SECONDS,
+            metadata,
+        )
+    if not exists:
+        if operation.status == "started":
+            task_store.complete_operation(
+                int(task.id),
+                operation_key,
+                {"state": True, "reconciled_absent": True},
+            )
+        return None
+    recovery_age = max(0.0, float(now) - float(operation.started_at or operation.created_at))
+    if recovery_age >= _DELETE_RECOVERY_WINDOW_SECONDS:
+        return StageResult.needs_action("115 删除结果仍不明确，文件仍存在且禁止自动重复删除", metadata)
+    return StageResult.defer(
+        "等待确认 115 删除结果，禁止自动重复删除",
+        _DELETE_RECOVERY_RETRY_SECONDS,
+        metadata,
+    )
+
+
 
 def is_115_receive_restricted_error(exc: Exception) -> bool:
     if isinstance(exc, P115RiskControlError):
@@ -1644,14 +1755,31 @@ class BridgeSelfShareTaskWorkflow:
                     },
                 )
             except RuntimeError as exc:
-                direct_file_id, direct_relative_path = self._direct_file_share_details(task)
+                direct_file_id, direct_relative_path, direct_file_name, direct_parent_id = self._direct_file_share_details(task)
                 if not direct_file_id or not self._is_gone_share_source_error(exc):
                     raise
                 if not hasattr(self.store, "replace_self_share_source_file_id"):
                     raise
                 row = self.store.replace_self_share_source_file_id(int(row["id"]), direct_file_id) or row
-                direct_title = str(task.metadata.get("cloud_output_name") or Path(direct_relative_path).name).strip()
-                share = self._journaled_create_share(task, direct_file_id, direct_title, receive_code)
+                direct_title = str(
+                    direct_file_name
+                    or task.metadata.get("cloud_output_name")
+                    or Path(direct_relative_path).name
+                ).strip()
+                direct_metadata = {
+                    "direct_file_share": True,
+                    "direct_file_share_file_id": direct_file_id,
+                    "direct_file_share_file_name": direct_file_name,
+                    "direct_file_share_parent_id": direct_parent_id,
+                    "direct_file_share_relative_path": direct_relative_path,
+                }
+                share = self._journaled_create_share(
+                    task,
+                    direct_file_id,
+                    direct_title,
+                    receive_code,
+                    recovery_metadata=direct_metadata,
+                )
                 direct_file_share = True
             row = self.store.update_self_share(
                 int(row["id"]),
@@ -1663,21 +1791,22 @@ class BridgeSelfShareTaskWorkflow:
             created = True
         message = "已创建自有 115 分享" if created else "已存在自有 115 分享"
         metadata = self._own_share_metadata(row)
+        durable_file_id = str(row.get("own_share_file_id") or file_id).strip()
+        durable_operation = self.task_store.find_operation(
+            int(task.id),
+            f"{operation_scope(task)}:create_share:{durable_file_id}",
+        )
+        metadata.update(self._create_share_operation_metadata(durable_operation))
         share_created_at = self._positive_timestamp(task.metadata.get("share_created_at")) or recovered_share_created_at
-        if created:
-            share_created_at = self._now()
+        share_created_at = self._positive_timestamp(metadata.get("share_created_at")) or share_created_at
+        if created and not share_created_at:
+            share_created_at = float(int(max(0.0, self._now())))
         if share_creation_pending and not share_created_at:
             share_created_at = self._now()
         if share_created_at:
             metadata["share_created_at"] = share_created_at
         if direct_file_share:
-            metadata.update(
-                {
-                    "direct_file_share": True,
-                    "direct_file_share_file_id": direct_file_id,
-                    "direct_file_share_relative_path": direct_relative_path,
-                }
-            )
+            metadata.update(direct_metadata)
         return StageResult.complete(message, metadata)
 
     def _journaled_create_share(
@@ -1686,20 +1815,24 @@ class BridgeSelfShareTaskWorkflow:
         file_id: str,
         share_title: str,
         receive_code: str,
+        *,
+        recovery_metadata: dict[str, Any] | None = None,
     ) -> dict[str, str]:
         operation_key = f"{operation_scope(task)}:create_share:{file_id}"
         operation = self.task_store.find_operation(int(task.id), operation_key)
         if operation is None:
+            request = {
+                "file_id": file_id,
+                "share_title": share_title,
+                "receive_code": receive_code,
+                "requested_at": float(int(max(0.0, self._now()))),
+            }
+            request.update(recovery_metadata or {})
             operation = self.task_store.prepare_operation(
                 int(task.id),
                 operation_key,
                 "create_share",
-                {
-                    "file_id": file_id,
-                    "share_title": share_title,
-                    "receive_code": receive_code,
-                    "requested_at": self._now(),
-                },
+                request,
             )
         if operation.status == "prepared":
             started = self.task_store.start_operation(int(task.id), operation_key)
@@ -1741,6 +1874,28 @@ class BridgeSelfShareTaskWorkflow:
             str(operation.request.get("receive_code") or receive_code),
         )
         return {**created, **settings}
+
+    def _create_share_operation_metadata(self, operation: Any | None) -> dict[str, Any]:
+        if operation is None or operation.status not in {"started", "uncertain", "succeeded"}:
+            return {}
+        metadata: dict[str, Any] = {}
+        created_at = self._positive_timestamp(operation.result.get("create_time"))
+        if not created_at:
+            created_at = self._positive_timestamp(operation.request.get("requested_at"))
+        if created_at:
+            metadata["share_created_at"] = created_at
+        if operation.request.get("direct_file_share"):
+            for key in (
+                "direct_file_share",
+                "direct_file_share_file_id",
+                "direct_file_share_file_name",
+                "direct_file_share_parent_id",
+                "direct_file_share_relative_path",
+            ):
+                value = operation.request.get(key)
+                if value not in (None, ""):
+                    metadata[key] = value
+        return metadata
 
     def _stage_share_validated(self, task):
         row = self._submission_row(task)
@@ -2132,32 +2287,11 @@ class BridgeSelfShareTaskWorkflow:
         return StageResult.complete("115 转存源已删除，自有分享保留", metadata)
 
     def _delete_source_parent_id(self, task, row: dict[str, Any], file_id: str) -> str:
-        folder = task.metadata.get("organized_folder")
-        if isinstance(folder, dict):
-            folder_file_id = str(folder.get("file_id") or "").strip()
-            if folder_file_id == file_id:
-                parent_id = str(folder.get("parent_id") or "").strip()
-                if parent_id:
-                    return parent_id
-            direct_file_id = str(folder.get("direct_file_id") or "").strip()
-            if direct_file_id == file_id:
-                return str(folder.get("direct_parent_id") or "").strip()
-        recognition = self._recognition_from_row(row)
-        return str(recognition.get("organized_parent_id") or recognition.get("parent_id") or "").strip()
+        return source_delete_parent_id(task, row, file_id)
 
     @staticmethod
     def _is_missing_delete_target_error(exc: Exception) -> bool:
-        message = str(exc or "").lower()
-        return any(
-            token in message
-            for token in (
-                "file not found",
-                "文件不存在",
-                "文件已不存在",
-                "不存在或已删除",
-                "目标不存在",
-            )
-        )
+        return _is_missing_delete_target_error(exc)
 
     def _journaled_delete(
         self,
@@ -2166,69 +2300,14 @@ class BridgeSelfShareTaskWorkflow:
         parent_id: str,
         operation_type: str,
     ) -> StageResult | None:
-        operation_key = f"{operation_scope(task)}:{operation_type}:{file_id}"
-        operation = self.task_store.find_operation(int(task.id), operation_key)
-        if operation is None:
-            operation = self.task_store.prepare_operation(
-                int(task.id),
-                operation_key,
-                operation_type,
-                {"file_id": file_id, "parent_id": parent_id},
-            )
-        if operation.status == "prepared":
-            started = self.task_store.start_operation(int(task.id), operation_key)
-            operation = started or self.task_store.find_operation(int(task.id), operation_key)
-            if started is not None:
-                try:
-                    response = self.cleanup_client.delete_file(str(operation.request.get("file_id") or file_id))
-                except Exception as exc:
-                    if not self._is_missing_delete_target_error(exc):
-                        raise
-                    response = {"state": True, "already_absent": True}
-                completed = self.task_store.complete_operation(
-                    int(task.id),
-                    operation_key,
-                    response if isinstance(response, dict) else {"state": True},
-                )
-                operation = completed or self.task_store.find_operation(int(task.id), operation_key)
-        if operation is None:
-            raise RuntimeError("115 delete operation disappeared")
-        metadata = {
-            "delete_operation_key": operation_key,
-            "delete_operation_type": operation_type,
-            "delete_file_id": file_id,
-            "delete_parent_id": parent_id,
-        }
-        if operation.status == "succeeded":
-            return None
-        if operation.status not in {"started", "uncertain"}:
-            return StageResult.needs_action("115 删除操作状态无法安全恢复，请人工检查", metadata)
-        try:
-            exists = self.cleanup_client.file_exists_in_parent(
-                str(operation.request.get("file_id") or file_id),
-                str(operation.request.get("parent_id") or parent_id),
-            )
-        except Exception as exc:
-            return StageResult.defer(
-                f"115 删除结果暂时无法确认：{exc}",
-                _DELETE_RECOVERY_RETRY_SECONDS,
-                metadata,
-            )
-        if not exists:
-            if operation.status == "started":
-                self.task_store.complete_operation(
-                    int(task.id),
-                    operation_key,
-                    {"state": True, "reconciled_absent": True},
-                )
-            return None
-        recovery_age = max(0.0, self._now() - float(operation.started_at or operation.created_at))
-        if recovery_age >= _DELETE_RECOVERY_WINDOW_SECONDS:
-            return StageResult.needs_action("115 删除结果仍不明确，文件仍存在且禁止自动重复删除", metadata)
-        return StageResult.defer(
-            "等待确认 115 删除结果，禁止自动重复删除",
-            _DELETE_RECOVERY_RETRY_SECONDS,
-            metadata,
+        return journaled_delete_file(
+            self.task_store,
+            task,
+            self.cleanup_client,
+            file_id,
+            parent_id,
+            operation_type,
+            now=self._now(),
         )
 
     def _cleanup_residue_operations(self, task, row: dict[str, Any]) -> tuple[StageResult | None, int]:
@@ -2493,18 +2572,20 @@ class BridgeSelfShareTaskWorkflow:
         )
 
     @staticmethod
-    def _direct_file_share_details(task) -> tuple[str, str]:
+    def _direct_file_share_details(task) -> tuple[str, str, str, str]:
         folder = task.metadata.get("organized_folder")
         folder = folder if isinstance(folder, dict) else {}
         file_id = str(folder.get("direct_file_id") or task.metadata.get("direct_file_share_file_id") or "").strip()
         relative_path = str(folder.get("direct_relative_path") or task.metadata.get("direct_file_share_relative_path") or "").strip()
+        file_name = str(folder.get("direct_file_name") or task.metadata.get("direct_file_share_file_name") or "").strip()
+        parent_id = str(folder.get("direct_parent_id") or task.metadata.get("direct_file_share_parent_id") or "").strip()
         relative = Path(relative_path)
         if not file_id or not relative_path or relative.is_absolute() or ".." in relative.parts:
-            return "", ""
-        return file_id, relative_path
+            return "", "", "", ""
+        return file_id, relative_path, file_name, parent_id
 
     def _prepare_direct_file_share_strm(self, task, row: dict[str, Any]) -> Path | None:
-        _file_id, relative_path = self._direct_file_share_details(task)
+        _file_id, relative_path, _file_name, _parent_id = self._direct_file_share_details(task)
         folder_name = str(row.get("own_share_file_name") or "").strip()
         own_share_code = str(row.get("own_share_code") or "").strip()
         receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
