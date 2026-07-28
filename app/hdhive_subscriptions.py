@@ -433,47 +433,68 @@ class HdhiveSubscriptionService:
                 pending += 1
                 continue
 
-            requires_confirmation = not selected.is_unlocked and (
-                selected.unlock_points is None or selected.unlock_points > self.auto_unlock_max_points
-            )
-            if requires_confirmation and confirmed_item_id != selected_item.id:
-                self.store.mark_item_pending(selected_item.id, "积分超过自动解锁阈值或费用未知")
-                pending += 1
-                continue
+            saved_item = selected_item if selected_item.status == "unlocked" and selected_item.unlocked_url else None
+            if saved_item is None:
+                requires_confirmation = not selected.is_unlocked and (
+                    selected.unlock_points is None or selected.unlock_points > self.auto_unlock_max_points
+                )
+                if (
+                    requires_confirmation
+                    and confirmed_item_id != selected_item.id
+                    and selected_item.status != "unlocking"
+                ):
+                    self.store.mark_item_pending(selected_item.id, "积分超过自动解锁阈值或费用未知")
+                    pending += 1
+                    continue
 
-            claimed_item = self.store.claim_item_unlocking(
-                selected_item.id,
-                stale_after_seconds=_UNLOCK_STALE_AFTER_SECONDS,
-            )
-            if claimed_item is None:
-                skipped += 1
-                continue
-            try:
-                result = self._unlock_one(selected)
-                if not result.success or not result.full_url:
-                    self.store.mark_item_failed(selected_item.id, result.message or result.error_code or "HDHive 解锁失败")
-                    failed += 1
-                    continue
-                if not _is_115_share_url(result.full_url):
-                    self.store.mark_item_failed(selected_item.id, "解锁结果不是 115 分享链接")
-                    failed += 1
-                    continue
-                intake_result = self.enqueue_links([result.full_url], subscription.chat_id)
-                if result.points_spent is not None:
-                    unlock_points_spent = result.points_spent
-                    unlock_points_source = "actual"
-                elif result.already_owned:
-                    unlock_points_spent = 0
-                    unlock_points_source = "actual"
-                else:
-                    unlock_points_spent = selected.unlock_points
-                    unlock_points_source = "estimated" if unlock_points_spent is not None else "unknown"
-                saved_item = self.store.mark_item_enqueued(
+                claimed_item = self.store.claim_item_unlocking(
                     selected_item.id,
+                    stale_after_seconds=_UNLOCK_STALE_AFTER_SECONDS,
+                )
+                if claimed_item is None:
+                    current_item = self.store.get_item(selected_item.id)
+                    if current_item is not None and current_item.status == "pending_confirmation":
+                        pending += 1
+                    else:
+                        skipped += 1
+                    continue
+                try:
+                    result = self._unlock_one(selected)
+                    if not result.success or not result.full_url:
+                        self.store.mark_item_failed(selected_item.id, result.message or result.error_code or "HDHive 解锁失败")
+                        failed += 1
+                        continue
+                    if not _is_115_share_url(result.full_url):
+                        self.store.mark_item_failed(selected_item.id, "解锁结果不是 115 分享链接")
+                        failed += 1
+                        continue
+                    if result.points_spent is not None:
+                        unlock_points_spent = result.points_spent
+                        unlock_points_source = "actual"
+                    elif result.already_owned:
+                        unlock_points_spent = 0
+                        unlock_points_source = "actual"
+                    else:
+                        unlock_points_spent = selected.unlock_points
+                        unlock_points_source = "estimated" if unlock_points_spent is not None else "unknown"
+                    saved_item = self.store.mark_item_unlocked(
+                        selected_item.id,
+                        result.full_url,
+                        unlock_points_spent,
+                        unlock_points_source,
+                        time.time(),
+                    )
+                except Exception as exc:
+                    self.store.mark_item_failed(selected_item.id, str(exc))
+                    failed += 1
+                    continue
+
+            try:
+                saved_item = self.store.mark_item_enqueue_started(saved_item.id)
+                intake_result = self.enqueue_links([saved_item.unlocked_url], subscription.chat_id)
+                saved_item = self.store.mark_item_enqueued(
+                    saved_item.id,
                     _task_id_from_intake_result(intake_result),
-                    unlock_points_spent=unlock_points_spent,
-                    unlock_points_source=unlock_points_source,
-                    unlocked_at=time.time(),
                 )
                 if self.on_item_enqueued is not None:
                     try:
@@ -482,7 +503,7 @@ class HdhiveSubscriptionService:
                         LOG.exception("HDHive unlock notification failed item_id=%s", saved_item.id)
                 enqueued += 1
             except Exception as exc:
-                self.store.mark_item_failed(selected_item.id, str(exc))
+                self.store.mark_item_intake_failed(saved_item.id, str(exc))
                 failed += 1
 
         tmdb_details: dict[str, Any] = {}
@@ -515,7 +536,7 @@ class HdhiveSubscriptionService:
                 # A filter only proves an episode was intentionally skipped while
                 # the corresponding HDHive resource was present in this check.
                 terminal.update(item_keys)
-            if item.status in {"pending_confirmation", "failed", "unlocking", "unparsed"}:
+            if item.status in {"pending_confirmation", "failed", "unlocking", "unlocked", "unparsed"}:
                 blocked.update(item_keys)
         blocked.update(expected - terminal)
         completion = completion_state(tmdb_status, expected, terminal, blocked)

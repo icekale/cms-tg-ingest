@@ -5,7 +5,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +71,10 @@ class HdhiveSubscriptionItem:
     updated_at: float
     normalized_episode_key: str = ""
     skip_reason: str = ""
+    unlocked_url: str = field(default="", repr=False)
+    unlock_state: str = ""
+    unlock_requested_at: float | None = None
+    enqueue_started_at: float | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "HdhiveSubscriptionItem":
@@ -93,6 +97,10 @@ class HdhiveSubscriptionItem:
             updated_at=float(row["updated_at"] or 0),
             normalized_episode_key=str(row["normalized_episode_key"] or ""),
             skip_reason=str(row["skip_reason"] or ""),
+            unlocked_url=str(row["unlocked_url"] or ""),
+            unlock_state=str(row["unlock_state"] or ""),
+            unlock_requested_at=float(row["unlock_requested_at"]) if row["unlock_requested_at"] is not None else None,
+            enqueue_started_at=float(row["enqueue_started_at"]) if row["enqueue_started_at"] is not None else None,
         )
 
 
@@ -189,6 +197,10 @@ class HdhiveSubscriptionStore:
                     updated_at REAL NOT NULL,
                     normalized_episode_key TEXT NOT NULL DEFAULT '',
                     skip_reason TEXT NOT NULL DEFAULT '',
+                    unlocked_url TEXT NOT NULL DEFAULT '',
+                    unlock_state TEXT NOT NULL DEFAULT '',
+                    unlock_requested_at REAL,
+                    enqueue_started_at REAL,
                     UNIQUE(subscription_id, episode_key, resource_slug),
                     FOREIGN KEY(subscription_id) REFERENCES hdhive_subscriptions(id)
                 );
@@ -227,6 +239,10 @@ class HdhiveSubscriptionStore:
                     "unlocked_at": "REAL",
                     "normalized_episode_key": "TEXT NOT NULL DEFAULT ''",
                     "skip_reason": "TEXT NOT NULL DEFAULT ''",
+                    "unlocked_url": "TEXT NOT NULL DEFAULT ''",
+                    "unlock_state": "TEXT NOT NULL DEFAULT ''",
+                    "unlock_requested_at": "REAL",
+                    "enqueue_started_at": "REAL",
                 },
             )
 
@@ -560,11 +576,96 @@ class HdhiveSubscriptionStore:
             unlocked_at=unlocked_at,
         )
 
+    def mark_item_unlocked(
+        self,
+        item_id: int,
+        full_url: str,
+        points_spent: int | None,
+        points_source: str,
+        unlocked_at: float,
+    ) -> HdhiveSubscriptionItem:
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE hdhive_subscription_items
+                SET status = 'unlocked', unlocked_url = ?, unlock_state = 'unlocked',
+                    unlock_points_spent = ?, unlock_points_source = ?, unlocked_at = ?,
+                    last_error = '', skip_reason = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    str(full_url),
+                    points_spent,
+                    str(points_source or ""),
+                    float(unlocked_at),
+                    time.time(),
+                    int(item_id),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM hdhive_subscription_items WHERE id = ?",
+                (int(item_id),),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"HDHive subscription item {item_id} does not exist")
+        return HdhiveSubscriptionItem.from_row(row)
+
+    def mark_item_enqueue_started(self, item_id: int, now: float | None = None) -> HdhiveSubscriptionItem:
+        return self._update_unlocked_intake(
+            item_id,
+            enqueue_started_at=time.time() if now is None else float(now),
+            last_error="",
+        )
+
+    def mark_item_intake_failed(self, item_id: int, error: str) -> HdhiveSubscriptionItem:
+        return self._update_unlocked_intake(item_id, last_error=str(error or ""))
+
+    def _update_unlocked_intake(
+        self,
+        item_id: int,
+        *,
+        enqueue_started_at: float | None = None,
+        last_error: str,
+    ) -> HdhiveSubscriptionItem:
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE hdhive_subscription_items
+                SET last_error = ?, enqueue_started_at = COALESCE(?, enqueue_started_at), updated_at = ?
+                WHERE id = ? AND status = 'unlocked'
+                """,
+                (last_error, enqueue_started_at, time.time(), int(item_id)),
+            )
+            row = connection.execute(
+                "SELECT * FROM hdhive_subscription_items WHERE id = ?",
+                (int(item_id),),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"HDHive subscription item {item_id} does not exist")
+        return HdhiveSubscriptionItem.from_row(row)
+
     def mark_item_failed(self, item_id: int, error: str) -> HdhiveSubscriptionItem:
         return self._update_item(item_id, status="failed", last_error=error)
 
     def mark_item_unlocking(self, item_id: int) -> HdhiveSubscriptionItem:
-        return self._update_item(item_id, status="unlocking", last_error="")
+        now = time.time()
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE hdhive_subscription_items
+                SET status = 'unlocking', unlock_state = 'unlocking', unlock_requested_at = ?,
+                    enqueue_started_at = NULL, last_error = '', skip_reason = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (now, now, int(item_id)),
+            )
+            row = connection.execute(
+                "SELECT * FROM hdhive_subscription_items WHERE id = ?",
+                (int(item_id),),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"HDHive subscription item {item_id} does not exist")
+        return HdhiveSubscriptionItem.from_row(row)
 
     def claim_item_unlocking(
         self,
@@ -577,17 +678,38 @@ class HdhiveSubscriptionStore:
         current_time = time.time() if now is None else float(now)
         stale_before = current_time - max(1, int(stale_after_seconds))
         with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT * FROM hdhive_subscription_items WHERE id = ?",
+                (int(item_id),),
+            ).fetchone()
+            if current is None:
+                return None
+            if str(current["status"] or "") == "unlocking":
+                requested_at = float(current["unlock_requested_at"] or current["updated_at"] or 0)
+                if requested_at > stale_before:
+                    return None
+                if not str(current["unlocked_url"] or ""):
+                    connection.execute(
+                        """
+                        UPDATE hdhive_subscription_items
+                        SET status = 'pending_confirmation', unlock_state = 'unknown',
+                            last_error = ?, skip_reason = 'unlock_outcome_unknown', updated_at = ?
+                        WHERE id = ? AND status = 'unlocking'
+                        """,
+                        ("解锁结果未知，禁止自动重复扣分", current_time, int(item_id)),
+                    )
+                    return None
             cursor = connection.execute(
                 """
                 UPDATE hdhive_subscription_items
-                SET status = 'unlocking', last_error = '', updated_at = ?
+                SET status = 'unlocking', unlock_state = 'unlocking', unlock_requested_at = ?,
+                    unlocked_url = '', enqueue_started_at = NULL,
+                    last_error = '', skip_reason = '', updated_at = ?
                 WHERE id = ?
-                  AND (
-                      status IN ('discovered', 'failed', 'pending_confirmation')
-                      OR (status = 'unlocking' AND updated_at <= ?)
-                  )
+                  AND status IN ('discovered', 'failed', 'pending_confirmation')
                 """,
-                (current_time, int(item_id), stale_before),
+                (current_time, current_time, int(item_id)),
             )
             if cursor.rowcount != 1:
                 return None

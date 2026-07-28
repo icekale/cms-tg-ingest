@@ -18,6 +18,7 @@ from app.hdhive_subscriptions import (
     parse_hdhive_tv_url,
     select_best_resource,
 )
+from app.task_store import TaskStore
 
 
 def resource(
@@ -215,10 +216,10 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(stored.status, "pending_confirmation")
         self.assertEqual(proxy.unlock_calls, [])
 
-    def test_stale_unlocking_item_is_retried(self):
+    def test_stale_unlocking_item_requires_confirmation_without_replay(self):
         unlock_items = [HdhiveUnlockItem("stale", True, "https://115cdn.com/s/stale?password=abcd", "", "", False)]
         directory, store, subscription, proxy, service, intake_calls = self.make_service(
-            [resource("stale", resolution="2160P", points=8)], unlock_items
+            [resource("stale", resolution="2160P", points=21)], unlock_items
         )
         try:
             item = store.list_items(subscription.id)
@@ -227,8 +228,8 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
             store.mark_item_unlocking(stored.id)
             with store._lock, store._connection() as connection:
                 connection.execute(
-                    "UPDATE hdhive_subscription_items SET updated_at = ? WHERE id = ?",
-                    (1.0, stored.id),
+                    "UPDATE hdhive_subscription_items SET unlock_requested_at = ?, updated_at = ? WHERE id = ?",
+                    (1.0, 1.0, stored.id),
                 )
 
             result = service.check(subscription.id)
@@ -236,10 +237,77 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         finally:
             directory.cleanup()
 
-        self.assertEqual(result.enqueued, 1)
-        self.assertEqual(current.status, "enqueued")
-        self.assertEqual(proxy.unlock_calls, [["stale"]])
-        self.assertEqual(intake_calls, [(["https://115cdn.com/s/stale?password=abcd"], "464100862")])
+        self.assertEqual(result.pending_confirmation, 1)
+        self.assertEqual(current.status, "pending_confirmation")
+        self.assertEqual(current.skip_reason, "unlock_outcome_unknown")
+        self.assertEqual(current.last_error, "解锁结果未知，禁止自动重复扣分")
+        self.assertEqual(proxy.unlock_calls, [])
+        self.assertEqual(intake_calls, [])
+
+    def test_saved_unlock_resumes_intake_after_restart_without_second_charge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            hdhive_path = Path(directory) / "hdhive.db"
+            task_store = TaskStore(Path(directory) / "tasks.db")
+            store = HdhiveSubscriptionStore(hdhive_path)
+            subscription = store.create_subscription("464100862", "tmdb_tv", "255358", "剧集", "255358")
+            full_url = "https://115cdn.com/s/restart?password=abcd"
+            first_proxy = FakeSubscriptionProxy(
+                [resource("restart", resolution="2160P", points=8)],
+                [HdhiveUnlockItem("restart", True, full_url, "", "", False, points_spent=6)],
+            )
+            intake_task_ids = []
+
+            def enqueue_then_crash(urls, chat_id):
+                task = task_store.upsert_task("restart", "abcd", urls[0], chat_id=str(chat_id))
+                intake_task_ids.append(task.id)
+                raise RuntimeError("injected intake failure")
+
+            first_service = HdhiveSubscriptionService(
+                proxy=first_proxy,
+                store=store,
+                enqueue_links=enqueue_then_crash,
+                auto_unlock_max_points=20,
+            )
+
+            first_result = first_service.check(subscription.id)
+            saved_after_crash = store.list_items(subscription.id)[0]
+            original_unlocked_at = saved_after_crash.unlocked_at
+
+            self.assertEqual(first_result.failed, 1)
+            self.assertEqual(first_proxy.unlock_calls, [["restart"]])
+            self.assertEqual(saved_after_crash.status, "unlocked")
+            self.assertEqual(saved_after_crash.unlocked_url, full_url)
+            self.assertEqual(saved_after_crash.unlock_state, "unlocked")
+            self.assertGreater(saved_after_crash.unlock_requested_at or 0, 0)
+            self.assertGreater(saved_after_crash.enqueue_started_at or 0, 0)
+            self.assertEqual(saved_after_crash.unlock_points_spent, 6)
+            self.assertEqual(saved_after_crash.unlock_points_source, "actual")
+
+            reopened = HdhiveSubscriptionStore(hdhive_path)
+            restarted_proxy = FakeSubscriptionProxy([resource("restart", resolution="2160P", points=8)])
+
+            def enqueue_after_restart(urls, chat_id):
+                task = task_store.upsert_task("restart", "abcd", urls[0], chat_id=str(chat_id))
+                intake_task_ids.append(task.id)
+                return task.id
+
+            restarted_service = HdhiveSubscriptionService(
+                proxy=restarted_proxy,
+                store=reopened,
+                enqueue_links=enqueue_after_restart,
+                auto_unlock_max_points=20,
+            )
+
+            restarted_result = restarted_service.check(subscription.id)
+            saved = reopened.get_item(saved_after_crash.id)
+
+            self.assertEqual(restarted_result.enqueued, 1)
+            self.assertEqual(restarted_proxy.unlock_calls, [])
+            self.assertEqual(intake_task_ids[0], intake_task_ids[1])
+            self.assertEqual(saved.task_id, intake_task_ids[0])
+            self.assertEqual(saved.unlock_points_spent, 6)
+            self.assertEqual(saved.unlock_points_source, "actual")
+            self.assertEqual(saved.unlocked_at, original_unlocked_at)
 
     def test_structured_season_episode_wins_over_invalid_episode_key(self):
         unlock_items = [
