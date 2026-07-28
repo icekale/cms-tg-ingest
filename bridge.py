@@ -339,6 +339,10 @@ class ShareKey:
     receive_code: str
 
 
+class SeriesUpdateSourceConflict(RuntimeError):
+    pass
+
+
 def parse_explicit_series_update_command(text: str) -> tuple[bool, int | None, str]:
     match = _EXPLICIT_SERIES_UPDATE_RE.match(str(text or "").strip())
     if not match:
@@ -1003,10 +1007,33 @@ class SubmissionStore:
         target_row_id: int,
         child_key: ShareKey,
         child_url: str,
+        *,
+        canonical_title: str | None = None,
+        canonical_tmdb_id: str | None = None,
+        canonical_category: str | None = None,
+        canonical_recognition: dict[str, Any] | None = None,
+        expected_child_exists: bool | None = None,
+        expected_child_id: int | None = None,
+        expected_child_updated_at: float | None = None,
     ) -> dict[str, Any] | None:
         now = time.time()
         with self._lock, self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            existing_child = conn.execute(
+                "SELECT id, updated_at, own_share_code FROM submissions WHERE share_code = ? AND receive_code = ?",
+                (child_key.share_code, child_key.receive_code),
+            ).fetchone()
+            if expected_child_exists is False and existing_child is not None:
+                raise SeriesUpdateSourceConflict("子任务提交记录在冻结后出现")
+            if expected_child_exists is True:
+                if (
+                    existing_child is None
+                    or int(existing_child["id"]) != int(expected_child_id)
+                    or float(existing_child["updated_at"] or 0) != float(expected_child_updated_at)
+                ):
+                    raise SeriesUpdateSourceConflict("子任务提交记录在冻结后发生变化")
+                if str(existing_child["own_share_code"] or "").strip():
+                    raise SeriesUpdateSourceConflict("子任务分享已在冻结后创建")
             target = conn.execute(
                 "SELECT * FROM submissions WHERE id = ?",
                 (int(target_row_id),),
@@ -1024,13 +1051,25 @@ class SubmissionStore:
                 target_recognition = {}
             if not isinstance(target_recognition, dict):
                 target_recognition = {}
-            recognition_json = json.dumps(target_recognition, ensure_ascii=False, sort_keys=True)
-            category = str(
-                target["category_choice"]
-                or target["category_final"]
-                or target_recognition.get("category")
-                or ""
-            ).strip()
+            child_title = str(target["title"] or "") if canonical_title is None else str(canonical_title)
+            category = (
+                str(
+                    target["category_choice"]
+                    or target["category_final"]
+                    or target_recognition.get("category")
+                    or ""
+                ).strip()
+                if canonical_category is None
+                else str(canonical_category).strip()
+            )
+            child_recognition = dict(canonical_recognition) if canonical_recognition is not None else target_recognition
+            if canonical_title is not None:
+                child_recognition["title"] = child_title
+            if canonical_tmdb_id is not None:
+                child_recognition["tmdb_id"] = str(canonical_tmdb_id).strip()
+            if canonical_category is not None:
+                child_recognition["category"] = category
+            recognition_json = json.dumps(child_recognition, ensure_ascii=False, sort_keys=True)
             conn.execute(
                 """
                 INSERT INTO submissions (
@@ -1044,7 +1083,7 @@ class SubmissionStore:
                     child_key.share_code,
                     child_key.receive_code,
                     str(child_url),
-                    str(target["title"] or ""),
+                    child_title,
                     now,
                     now,
                 ),
@@ -1081,7 +1120,7 @@ class SubmissionStore:
                 WHERE id = ?
                 """,
                 (
-                    str(target["title"] or ""),
+                    child_title,
                     category,
                     recognition_json,
                     now,
@@ -3064,7 +3103,16 @@ def _series_update_target_identity(
     if str(recognition.get("type") or "").strip() != "tv":
         return None
     title = str(target_task.title or target_row.get("title") or recognition.get("title") or "").strip()
-    return target_row, recognition, title, tmdb_id, category
+    canonical_recognition = dict(recognition)
+    canonical_recognition.update(
+        {
+            "title": title,
+            "tmdb_id": tmdb_id,
+            "category": category,
+            "type": "tv",
+        }
+    )
+    return target_row, canonical_recognition, title, tmdb_id, category
 
 
 def start_series_update_from_link(
@@ -3166,12 +3214,41 @@ def start_series_update_from_link(
         return current, "failed"
 
     preparation_error = ""
+    preparation_conflict = ""
     prepared = None
     try:
-        prepared = store.prepare_series_update_child(int(target_row["id"]), key, link)
+        prepared = store.prepare_series_update_child(
+            int(target_row["id"]),
+            key,
+            link,
+            canonical_title=title,
+            canonical_tmdb_id=tmdb_id,
+            canonical_category=category,
+            canonical_recognition=recognition,
+            expected_child_exists=child_row is not None,
+            expected_child_id=int(child_row["id"]) if child_row is not None else None,
+            expected_child_updated_at=float(child_row["updated_at"]) if child_row is not None else None,
+        )
+    except SeriesUpdateSourceConflict as exc:
+        preparation_conflict = str(exc)
     except Exception as exc:
         preparation_error = str(exc)
         LOG.exception("Failed to prepare explicit series update child")
+    if preparation_conflict:
+        conflicted = task_store.record_event(
+            frozen.id,
+            TaskStage.NEEDS_ACTION,
+            TaskStatus.NEEDS_ACTION,
+            f"{source}绑定历史剧集冲突：{preparation_conflict}",
+            error_type="series_update_source_conflict",
+            error_summary=preparation_conflict,
+            next_run_at=-1,
+            clear_claim=True,
+            expected_stage=TaskStage.RECEIVED,
+            expected_status=TaskStatus.PENDING,
+            expected_updated_at=frozen.updated_at,
+        )
+        return conflicted or task_store.find_task(frozen.id), "source_conflict"
     if prepared is None:
         summary = preparation_error or "子任务提交记录准备失败"
         failed = task_store.record_event(

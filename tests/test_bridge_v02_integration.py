@@ -1390,6 +1390,50 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertNotIn("3481694900213253783", json.dumps(prepared, ensure_ascii=False))
             self.assertEqual(submission_store.find_by_id(int(target_row["id"]))["own_share_code"], "old-share")
 
+    def test_explicit_new_link_series_update_writes_task_first_identity_to_both_child_stores(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            original_target_row = submission_store.find_by_id(int(target_row["id"]))
+            target = task_store.record_event(
+                target.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "任务身份优先",
+                title="T-权威剧集-2027-[tmdb=884422]",
+                tmdb_id="884422",
+                category="外国电视",
+            )
+            expected_recognition = {
+                "ok": True,
+                "title": "T-权威剧集-2027-[tmdb=884422]",
+                "tmdb_id": "884422",
+                "type": "tv",
+                "category": "外国电视",
+            }
+
+            updated, result = bridge.start_series_update_from_link(
+                target,
+                bridge.ShareKey("new", "1212"),
+                "https://115cdn.com/s/new?password=1212",
+                "464100862",
+                submission_store,
+                task_store,
+                source="身份修复",
+            )
+
+            child_row = submission_store.find_by_id(int(updated.submission_id))
+            self.assertEqual(result, "started")
+            self.assertEqual(updated.title, "T-权威剧集-2027-[tmdb=884422]")
+            self.assertEqual(updated.tmdb_id, "884422")
+            self.assertEqual(updated.category, "外国电视")
+            self.assertEqual(updated.metadata["recognition"], expected_recognition)
+            self.assertEqual(child_row["title"], "T-权威剧集-2027-[tmdb=884422]")
+            self.assertEqual(child_row["category_choice"], "外国电视")
+            self.assertEqual(json.loads(child_row["recognition_json"]), expected_recognition)
+            self.assertEqual(submission_store.find_by_id(int(target_row["id"])), original_target_row)
+
     def test_explicit_new_link_series_update_rejects_claimed_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
@@ -1537,6 +1581,62 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(task_store.find_task(source_task.id), source_task)
             self.assertEqual(submission_store.find_by_id(int(source_row["id"])), original_row)
             self.assertEqual(original_row["own_share_code"], "remote-share")
+
+    def test_explicit_new_link_series_update_detects_submission_share_completed_after_freeze(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
+            source_row, _source_task = self.make_existing_source(submission_store, task_store)
+            real_freeze = task_store.compare_and_set_transition
+
+            def freeze_then_complete_share(*args, **kwargs):
+                frozen = real_freeze(*args, **kwargs)
+                submission_store.update_self_share(
+                    int(source_row["id"]),
+                    workflow_phase="share_sync_submitted",
+                    own_share_file_id="remote-folder",
+                    own_share_file_name="remote-series",
+                    own_share_code="race-share",
+                    own_share_receive_code="3434",
+                    own_share_url="https://115cdn.com/s/race-share?password=3434",
+                    share_sync_status="submitted",
+                    canonical_manifest_json='{"remote": true}',
+                    share_alias_name="remote-alias",
+                    share_alias_level=1,
+                    share_validation_status="passed",
+                    share_validation_error="",
+                )
+                return frozen
+
+            with patch.object(task_store, "compare_and_set_transition", side_effect=freeze_then_complete_share):
+                updated, result = bridge.start_series_update_from_link(
+                    target,
+                    bridge.ShareKey("new", "1212"),
+                    "https://115cdn.com/s/new?password=1212",
+                    "464100862",
+                    submission_store,
+                    task_store,
+                    source="并发修复",
+                )
+
+            current_row = submission_store.find_by_id(int(source_row["id"]))
+            self.assertEqual(result, "source_conflict")
+            self.assertEqual(updated.current_stage, TaskStage.NEEDS_ACTION)
+            self.assertEqual(updated.status, TaskStatus.NEEDS_ACTION)
+            self.assertEqual(updated.next_run_at, -1)
+            self.assertEqual(updated.error_type, "series_update_source_conflict")
+            self.assertEqual(current_row["own_share_file_id"], "remote-folder")
+            self.assertEqual(current_row["own_share_file_name"], "remote-series")
+            self.assertEqual(current_row["own_share_code"], "race-share")
+            self.assertEqual(current_row["own_share_receive_code"], "3434")
+            self.assertEqual(current_row["own_share_url"], "https://115cdn.com/s/race-share?password=3434")
+            self.assertEqual(current_row["share_sync_status"], "submitted")
+            self.assertEqual(current_row["canonical_manifest_json"], '{"remote": true}')
+            self.assertEqual(current_row["share_alias_name"], "remote-alias")
+            self.assertEqual(current_row["share_alias_level"], 1)
+            self.assertEqual(current_row["share_validation_status"], "passed")
+            self.assertEqual(current_row["share_validation_error"], "")
 
     def test_explicit_new_link_series_update_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
