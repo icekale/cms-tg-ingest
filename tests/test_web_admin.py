@@ -134,16 +134,24 @@ class WebAdminTests(unittest.TestCase):
             server = start_web_server(store, "127.0.0.1", 0)
             stderr = io.StringIO()
             reset_request_finished = Event()
+            unrelated_request_finished = Event()
+            reset_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            reset_client.settimeout(1)
+            reset_client.bind(("127.0.0.1", 0))
+            reset_client_address = reset_client.getsockname()
             reset_request = None
+            unrelated_request = None
             original_get_request = server.get_request
             original_shutdown_request = server.shutdown_request
 
             def get_request():
-                nonlocal reset_request
-                request = original_get_request()
-                if reset_request is None:
-                    reset_request = request[0]
-                return request
+                nonlocal reset_request, unrelated_request
+                request, client_address = original_get_request()
+                if client_address == reset_client_address:
+                    reset_request = request
+                elif unrelated_request is None:
+                    unrelated_request = request
+                return request, client_address
 
             def shutdown_request(request):
                 try:
@@ -151,6 +159,8 @@ class WebAdminTests(unittest.TestCase):
                 finally:
                     if request is reset_request:
                         reset_request_finished.set()
+                    elif request is unrelated_request:
+                        unrelated_request_finished.set()
 
             try:
                 with (
@@ -159,22 +169,25 @@ class WebAdminTests(unittest.TestCase):
                     patch.object(server, "get_request", side_effect=get_request),
                     patch.object(server, "shutdown_request", side_effect=shutdown_request),
                 ):
-                    client = socket.create_connection(server.server_address, timeout=1)
-                    try:
-                        client.sendall(
-                            b"\r\n".join(
-                                [
-                                    b"POST /history/clear HTTP/1.0",
-                                    b"Host: localhost",
-                                    b"Content-Length: 5",
-                                    b"",
-                                    b"abc",
-                                ]
-                            )
+                    response = post_empty_body(server)
+                    self.assertTrue(unrelated_request_finished.wait(1))
+                    self.assertFalse(reset_request_finished.is_set())
+                    self.assertTrue(response.startswith(b"HTTP/1.0 303"))
+
+                    reset_client.connect(server.server_address)
+                    reset_client.sendall(
+                        b"\r\n".join(
+                            [
+                                b"POST /history/clear HTTP/1.0",
+                                b"Host: localhost",
+                                b"Content-Length: 5",
+                                b"",
+                                b"abc",
+                            ]
                         )
-                        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
-                    finally:
-                        client.close()
+                    )
+                    reset_client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    reset_client.close()
 
                     self.assertTrue(reset_request_finished.wait(1))
                     self.assertFalse(handle_error.called)
@@ -183,6 +196,7 @@ class WebAdminTests(unittest.TestCase):
 
                 self.assertTrue(response.startswith(b"HTTP/1.0 303"))
             finally:
+                reset_client.close()
                 bridge.stop_web_server(server)
 
     def test_quality_page_reprocess_action_is_registered_and_orphan_is_not_linked(self):
