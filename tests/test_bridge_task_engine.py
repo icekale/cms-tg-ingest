@@ -54,6 +54,7 @@ class FakeP115:
         self.share_statuses = []
         self.share_list_states = {}
         self.files_by_parent = {}
+        self.list_file_calls = []
 
     def receive_share_to_cid(self, share_code, receive_code, receive_cid):
         intent = self.prepare_share_receive(share_code, receive_code, receive_cid)
@@ -147,6 +148,7 @@ class FakeP115:
         return {"owncode": {"share_state": "1", "have_vio_file": False, "create_time": 0}}
 
     def list_files(self, parent_id, limit=100):
+        self.list_file_calls.append((str(parent_id), limit))
         return list(self.files_by_parent.get(str(parent_id), []))
 
 
@@ -804,6 +806,153 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.DEFER)
             self.assertEqual(self.cms.auto_organize_calls, 1)
             self.assertIn("等待 CMS 整理", result.message)
+
+    def test_organizing_stage_rejects_folder_owned_by_different_tmdb_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="示例剧集 2025") or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": "示例剧集", "type": "tv", "tmdb_id": "273114", "category": "国产电视"},
+                "tmdb_resolved",
+            ) or row
+            owner = self.tasks.upsert_task("owner", "", "https://115cdn.com/s/owner")
+            self.tasks.record_event(
+                owner.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "owner",
+                metadata_patch={
+                    "own_share_file_id": "shared-folder",
+                    "tmdb_id": "9533",
+                    "recognition": {"tmdb_id": "9533"},
+                },
+            )
+            self.p115.folder = {
+                "file_id": "shared-folder",
+                "file_name": "S-示例剧集-2025-[tmdb=273114]",
+                "parent_id": "tv-parent",
+                "category": "国产电视",
+            }
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("其他 TMDB 任务", result.message)
+            self.assertFalse(stored["own_share_file_id"])
+
+    def test_organizing_stage_allows_folder_owned_by_same_tmdb_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="示例剧集 2025") or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": "示例剧集", "type": "tv", "tmdb_id": "273114", "category": "国产电视"},
+                "tmdb_resolved",
+            ) or row
+            owner = self.tasks.upsert_task("owner", "", "https://115cdn.com/s/owner")
+            self.tasks.record_event(
+                owner.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "owner",
+                metadata_patch={
+                    "own_share_file_id": "shared-folder",
+                    "tmdb_id": "273114",
+                    "recognition": {"tmdb_id": "273114"},
+                },
+            )
+            self.p115.folder = {
+                "file_id": "shared-folder",
+                "file_name": "S-示例剧集-2025-[tmdb=273114]",
+                "parent_id": "tv-parent",
+                "category": "国产电视",
+            }
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(stored["own_share_file_id"], "shared-folder")
+
+    def test_organizing_stage_rejects_folder_with_ambiguous_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="示例剧集 2025") or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": "示例剧集", "type": "tv", "tmdb_id": "273114", "category": "国产电视"},
+                "tmdb_resolved",
+            ) or row
+            owner = self.tasks.upsert_task("owner", "", "https://115cdn.com/s/owner")
+            self.tasks.record_event(
+                owner.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "owner",
+                metadata_patch={"own_share_file_id": "shared-folder"},
+            )
+            self.p115.folder = {
+                "file_id": "shared-folder",
+                "file_name": "S-示例剧集-2025-[tmdb=273114]",
+                "parent_id": "tv-parent",
+                "category": "国产电视",
+            }
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("其他 TMDB 任务", result.message)
+            self.assertFalse(stored["own_share_file_id"])
+
+    def test_recognizing_stage_stops_legacy_cross_tmdb_folder_before_share(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="示例剧集 2025") or row
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="organized_found",
+                own_share_file_id="shared-folder",
+                own_share_file_name="S-示例剧集-2025-[tmdb=273114]",
+            ) or row
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": "示例剧集", "type": "tv", "tmdb_id": "273114", "category": "国产电视"},
+                "tmdb_resolved",
+            ) or row
+            owner = self.tasks.upsert_task("owner", "", "https://115cdn.com/s/owner")
+            self.tasks.record_event(
+                owner.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "owner",
+                metadata_patch={
+                    "own_share_file_id": "shared-folder",
+                    "tmdb_id": "9533",
+                    "recognition": {"tmdb_id": "9533"},
+                },
+            )
+            task = self._claim_task("abc", "1234", TaskStage.RECOGNIZING, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("其他 TMDB 任务", result.message)
+            self.assertEqual(self.p115.list_file_calls, [])
+            self.assertEqual(self.p115.created_shares, [])
 
     def test_organizing_stage_normalizes_explicit_tmdb_name_before_cms(self):
         class ExplicitTmdbResolver:

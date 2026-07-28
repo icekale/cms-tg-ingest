@@ -252,6 +252,20 @@ def has_tmdb_folder_mismatch(folder: dict[str, Any], recognition: dict[str, Any]
     return bool(expected and actual and expected != actual)
 
 
+def task_tmdb_identity(task: Any) -> str:
+    metadata = getattr(task, "metadata", {}) or {}
+    recognition = metadata.get("recognition")
+    if not isinstance(recognition, dict):
+        recognition = {}
+    return str(
+        getattr(task, "tmdb_id", "")
+        or metadata.get("tmdb_id")
+        or recognition.get("tmdb_id")
+        or extract_tmdb_id_from_name(str(metadata.get("own_share_file_name") or ""))
+        or ""
+    ).strip()
+
+
 def has_explicit_task_tmdb_hint(recognition: dict[str, Any], row: dict[str, Any], share_name: str = "") -> bool:
     return bool(explicit_task_tmdb_id(recognition, row, share_name))
 
@@ -1449,6 +1463,11 @@ class BridgeSelfShareTaskWorkflow:
         if existing_library_category and not str(folder.get("category") or "").strip():
             folder = dict(folder)
             folder["category"] = existing_library_category
+        if self._conflicting_folder_owner(task, folder, recognition, row, title):
+            return StageResult.needs_action(
+                "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享",
+                {"submission_id": int(row["id"]), "own_share_file_id": ""},
+            )
         row = self.store.update_self_share(
             int(row["id"]),
             workflow_phase="organized_found",
@@ -1488,6 +1507,17 @@ class BridgeSelfShareTaskWorkflow:
                 "file_name": row.get("own_share_file_name"),
                 "parent_id": parent_id,
             }
+        if self._conflicting_folder_owner(
+            task,
+            folder,
+            recognition,
+            row,
+            str(folder.get("file_name") or task.title or task.share_code),
+        ):
+            return StageResult.needs_action(
+                "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享",
+                {"submission_id": int(row["id"]), "own_share_file_id": ""},
+            )
         if has_tmdb_folder_mismatch(
             folder,
             recognition,
@@ -1629,6 +1659,18 @@ class BridgeSelfShareTaskWorkflow:
                 "own_share_file_id": file_id,
             },
         )
+
+    def _conflicting_folder_owner(self, task, folder, recognition, row, share_name):
+        file_id = str(folder.get("file_id") or "").strip()
+        if not file_id:
+            return None
+        expected = expected_task_tmdb_id(recognition, row) or task_tmdb_identity(task)
+        owners = self.task_store.list_tasks_by_own_share_file_id(file_id, exclude_task_id=task.id)
+        for owner in owners:
+            owner_identity = task_tmdb_identity(owner)
+            if not expected or not owner_identity or owner_identity != expected:
+                return owner
+        return None
 
     def _folder_child_video_name(self, file_id: str) -> str:
         if not file_id or not hasattr(self.p115, "list_files"):
