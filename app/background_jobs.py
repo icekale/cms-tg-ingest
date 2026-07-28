@@ -39,7 +39,9 @@ class JobSubmission:
         }
 
 
-_AUTHORIZATION_VALUE = re.compile(r"(?i)\b(authorization)\s*[=:]\s*(?:bearer\s+)?[^\s,;]+")
+_AUTHORIZATION_VALUE = re.compile(
+    r"(?i)\b(authorization)\s*[=:]\s*(?:(?:basic|bearer)\s+)?[^\s,;]+"
+)
 _API_KEY_VALUE = re.compile(r"(?i)\b(x-api-key|api[-_ ]?key)\s*[=:]\s*[^\s,;]+")
 _BEARER_VALUE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 _COMPOUND_SECRET_VALUE = re.compile(
@@ -56,6 +58,12 @@ _EXPLICIT_CREDENTIAL_KEY_VALUE = re.compile(
 _COOKIE_HEADER_VALUE = re.compile(
     r"(?i)\b(cookie)\s*[:=]\s*((?:[^\s;=,]+=[^\s;,]*)(?:\s*;\s*[^\s;=,]+=[^\s;,]*)*)"
 )
+_STRUCTURED_CREDENTIAL_VALUE = re.compile(
+    r'''(?i)((?<![a-z0-9_-])(?:\\?["'])?'''
+    r'''(?:authorization|access_token|api_key|token|secret|password|set[-_]cookie|cookie)'''
+    r'''(?:\\?["'])?\s*:\s*)'''
+    r'''(?:\\?["'][^,}\]]*?\\?["']|[^\s,;}\]]+)'''
+)
 _SENSITIVE_VALUE = re.compile(r"(?i)\b(token|cookie|password|secret)\s*[=:]\s*[^\s,;]+")
 _URL = re.compile(r"https?://\S+")
 
@@ -64,6 +72,7 @@ def redact_background_text(value: object) -> str:
     text = _URL.sub("[redacted-url]", str(value))
     text = _COOKIE_HEADER_VALUE.sub(_redact_cookie_header, text)
     text = _AUTHORIZATION_VALUE.sub(r"\1=[redacted]", text)
+    text = _STRUCTURED_CREDENTIAL_VALUE.sub(r"\1[redacted]", text)
     text = _API_KEY_VALUE.sub(r"\1=[redacted]", text)
     text = _BEARER_VALUE.sub("Bearer [redacted]", text)
     text = _COMPOUND_SECRET_VALUE.sub(r"\1=[redacted]", text)

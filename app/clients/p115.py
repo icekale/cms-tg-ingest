@@ -633,7 +633,7 @@ class P115WebClient:
         *,
         min_create_time: float = 0,
         limit: int = 100,
-    ) -> dict[str, str] | None:
+    ) -> dict[str, Any] | None:
         expected_title = str(share_title or "").strip()
         if not expected_title:
             return None
@@ -676,6 +676,8 @@ class P115WebClient:
             )
         if not matches:
             return None
+        if len(matches) > 1:
+            return {"recovery_status": "ambiguous", "match_count": len(matches)}
         matches.sort(key=lambda value: value[0], reverse=True)
         return matches[0][1]
 

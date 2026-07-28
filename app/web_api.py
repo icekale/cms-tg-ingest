@@ -195,7 +195,7 @@ def serialize_background_job(background_jobs: Any | None, *, prefix: str = "") -
         return None
     snapshot = max(matches, key=lambda item: float(getattr(item, "queued_at", 0)))
     return {
-        "description": str(getattr(snapshot, "description", "")),
+        "description": redact_background_text(getattr(snapshot, "description", "")),
         "state": str(getattr(snapshot, "status", "")),
         "started_at": getattr(snapshot, "started_at", None),
         "finished_at": getattr(snapshot, "finished_at", None),

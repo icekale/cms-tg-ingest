@@ -1748,6 +1748,100 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.p115.settings, [("recovered-code", "1212")])
             self.assertEqual(stored["own_share_code"], "recovered-code")
 
+    def test_create_share_recovery_refuses_interleaved_same_title_candidates(self):
+        class InterleavedCreateP115(FakeP115):
+            def __init__(self):
+                super().__init__()
+                self.remote_shares = []
+                self.recovery_queries = []
+                self.settings = []
+
+            def create_share(self, file_id):
+                self.created_shares.append(file_id)
+                created = {
+                    "share_code": "task-a-share",
+                    "receive_code": "generated-a",
+                    "share_url": "https://115cdn.com/s/task-a-share",
+                    "create_time": "1000.0",
+                }
+                self.remote_shares.append(created)
+                return dict(created)
+
+            def find_own_share_by_title(self, title, min_create_time=0):
+                self.recovery_queries.append((title, min_create_time))
+                eligible = [
+                    share
+                    for share in self.remote_shares
+                    if float(share["create_time"]) >= float(min_create_time)
+                ]
+                if len(eligible) > 1:
+                    return {"recovery_status": "ambiguous", "match_count": len(eligible)}
+                return dict(eligible[0]) if eligible else None
+
+            def ensure_share_settings(self, share_code, receive_code):
+                self.settings.append((share_code, receive_code))
+                return {"share_code": share_code, "receive_code": receive_code}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            self.p115 = InterleavedCreateP115()
+            workflow.p115 = self.p115
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="Same title",
+            ) or row
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            self.tasks.record_event(
+                task.id,
+                TaskStage.OWN_SHARE_CREATED,
+                TaskStatus.RUNNING,
+                "metadata",
+                submission_id=row["id"],
+                metadata_patch={"submission_id": row["id"]},
+            )
+            self.tasks.enqueue_task(task.id, TaskStage.OWN_SHARE_CREATED, next_run_at=0)
+            workflow._now = lambda: 1000.0
+            runner = TaskRunner(self.tasks, workflow, worker_id="same-title-a", now=lambda: 1000.0)
+            complete_operation = self.tasks.complete_operation
+            save_attempts = 0
+
+            def fail_first_result_save(*args, **kwargs):
+                nonlocal save_attempts
+                save_attempts += 1
+                if save_attempts == 1:
+                    raise RuntimeError("simulated crash while saving task A share")
+                return complete_operation(*args, **kwargs)
+
+            with patch.object(self.tasks, "complete_operation", side_effect=fail_first_result_save):
+                with self.assertLogs("app.task_runner", level="WARNING"):
+                    runner.run_once()
+
+                self.p115.remote_shares.append(
+                    {
+                        "share_code": "task-b-share",
+                        "receive_code": "generated-b",
+                        "share_url": "https://115cdn.com/s/task-b-share",
+                        "create_time": "1001.0",
+                    }
+                )
+                self.tasks.enqueue_task(task.id, TaskStage.OWN_SHARE_CREATED, next_run_at=0)
+                runner.run_once()
+
+            recovered = self.tasks.find_task(task.id)
+            operation = self.tasks.find_operation(task.id, self._create_share_operation_key(task, "folder-id"))
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+        self.assertEqual(recovered.status, TaskStatus.NEEDS_ACTION)
+        self.assertEqual(recovered.current_stage, TaskStage.OWN_SHARE_CREATED)
+        self.assertIn("同名", recovered.error_summary)
+        self.assertEqual(operation.status, "started")
+        self.assertEqual(self.p115.created_shares, ["folder-id"])
+        self.assertEqual(self.p115.settings, [])
+        self.assertFalse(stored.get("own_share_code"))
+
     def test_direct_create_share_crash_recovers_by_actual_filename_without_second_send(self):
         class RecoveringDirectP115(FakeP115):
             def __init__(self):

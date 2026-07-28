@@ -3829,6 +3829,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
             cms=cms,
             store=store,
             move_config=move_config,
+            task_store=task_store,
             emby=emby,
         )
         source_share_workflow = SourceShareTaskWorkflow(
@@ -3836,6 +3837,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
             store=store,
             move_config=move_config,
             self_share_config=self_share_config,
+            task_store=task_store,
             emby=emby,
             tmdb_resolver=tmdb_resolver,
         )
