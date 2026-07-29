@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import bridge
@@ -174,6 +175,50 @@ class BridgeV02IntegrationTests(unittest.TestCase):
 
                 self.assertEqual(server, "server")
                 self.assertEqual(calls, [(task_store, "127.0.0.1", 8787, "", True)])
+
+    def test_maybe_start_web_server_passes_log_hub_only_to_supporting_starter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            with patch.dict(os.environ, env, clear=True):
+                config = bridge.Config.from_env()
+                store = bridge.create_task_store(config)
+                hub = object()
+                calls = []
+
+                def modern_starter(task_store, host, port, **kwargs):
+                    calls.append((task_store, host, port, kwargs))
+                    return "modern"
+
+                result = bridge.maybe_start_web_server(config, store, starter=modern_starter, log_hub=hub)
+
+            self.assertEqual(result, "modern")
+            self.assertIs(calls[0][3]["log_hub"], hub)
+
+    def test_maybe_start_web_server_does_not_break_legacy_starter_without_log_hub(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            with patch.dict(os.environ, env, clear=True):
+                config = bridge.Config.from_env()
+                store = bridge.create_task_store(config)
+
+                def legacy_starter(task_store, host, port, web_token="", task_engine_enabled=None):
+                    return (task_store, host, port, web_token, task_engine_enabled)
+
+                result = bridge.maybe_start_web_server(config, store, starter=legacy_starter, log_hub=object())
+
+            self.assertEqual(result[1:], ("127.0.0.1", 8787, "secret", True))
+
+    def test_main_configures_logging_once_and_injects_hub_into_runtime(self):
+        runtime = SimpleNamespace(hub=object())
+        config = SimpleNamespace()
+        with patch.object(bridge, "configure_logging", return_value=runtime) as configure, patch.object(
+            bridge.Config, "from_env", return_value=config
+        ), patch.object(bridge, "run_forever") as run, patch.object(bridge.signal, "signal"):
+            exit_code = bridge.main()
+
+        self.assertEqual(exit_code, 0)
+        configure.assert_called_once_with(os.environ.get("LOG_LEVEL", "INFO"))
+        self.assertIs(run.call_args.kwargs["log_hub"], runtime.hub)
 
     def test_stop_web_server_closes_server(self):
         class FakeServer:
