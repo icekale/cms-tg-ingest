@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import bridge
@@ -174,6 +175,129 @@ class BridgeV02IntegrationTests(unittest.TestCase):
 
                 self.assertEqual(server, "server")
                 self.assertEqual(calls, [(task_store, "127.0.0.1", 8787, "", True)])
+
+    def test_maybe_start_web_server_passes_log_hub_only_to_supporting_starter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            with patch.dict(os.environ, env, clear=True):
+                config = bridge.Config.from_env()
+                store = bridge.create_task_store(config)
+                hub = object()
+                calls = []
+
+                def modern_starter(task_store, host, port, **kwargs):
+                    calls.append((task_store, host, port, kwargs))
+                    return "modern"
+
+                result = bridge.maybe_start_web_server(config, store, starter=modern_starter, log_hub=hub)
+
+            self.assertEqual(result, "modern")
+            self.assertIs(calls[0][3]["log_hub"], hub)
+
+    def test_maybe_start_web_server_does_not_break_legacy_starter_without_log_hub(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            with patch.dict(os.environ, env, clear=True):
+                config = bridge.Config.from_env()
+                store = bridge.create_task_store(config)
+
+                def legacy_starter(task_store, host, port, web_token="", task_engine_enabled=None):
+                    return (task_store, host, port, web_token, task_engine_enabled)
+
+                result = bridge.maybe_start_web_server(config, store, starter=legacy_starter, log_hub=object())
+
+            self.assertEqual(result[1:], ("127.0.0.1", 8787, "secret", True))
+
+    def test_call_maybe_start_web_server_passes_only_log_hub_to_supporting_callee(self):
+        config = object()
+        task_store = object()
+        hub = object()
+
+        def log_hub_only(actual_config, actual_task_store, *, log_hub):
+            self.assertIs(actual_config, config)
+            self.assertIs(actual_task_store, task_store)
+            self.assertIs(log_hub, hub)
+            return "log-hub-only"
+
+        with patch.object(bridge, "maybe_start_web_server", log_hub_only):
+            result = bridge.call_maybe_start_web_server(
+                config,
+                task_store,
+                submission_store=object(),
+                quality_automation=object(),
+                hdhive_service=object(),
+                hdhive_scheduler=object(),
+                frontend_dist_path="/tmp/frontend",
+                background_jobs=object(),
+                log_hub=hub,
+            )
+
+        self.assertEqual(result, "log-hub-only")
+
+    def test_call_maybe_start_web_server_skips_positional_only_log_hub(self):
+        config = object()
+        task_store = object()
+
+        def positional_only_callee(actual_config, actual_task_store, log_hub=None, /):
+            self.assertIs(actual_config, config)
+            self.assertIs(actual_task_store, task_store)
+            return log_hub
+
+        with patch.object(bridge, "maybe_start_web_server", positional_only_callee):
+            result = bridge.call_maybe_start_web_server(config, task_store, log_hub=object())
+
+        self.assertIsNone(result)
+
+    def test_call_maybe_start_web_server_skips_positional_only_log_hub_even_with_var_keywords(self):
+        config = object()
+        task_store = object()
+
+        def positional_only_callee(actual_config, actual_task_store, log_hub=None, /, **kwargs):
+            self.assertIs(actual_config, config)
+            self.assertIs(actual_task_store, task_store)
+            return log_hub, kwargs.get("log_hub")
+
+        with patch.object(bridge, "maybe_start_web_server", positional_only_callee):
+            result = bridge.call_maybe_start_web_server(config, task_store, log_hub=object())
+
+        self.assertEqual(result, (None, None))
+
+    def test_call_maybe_start_web_server_keeps_two_argument_legacy_callee(self):
+        config = object()
+        task_store = object()
+        calls = []
+
+        def legacy_callee(actual_config, actual_task_store):
+            calls.append((actual_config, actual_task_store))
+            return "legacy"
+
+        with patch.object(bridge, "maybe_start_web_server", legacy_callee):
+            result = bridge.call_maybe_start_web_server(
+                config,
+                task_store,
+                submission_store=object(),
+                quality_automation=object(),
+                hdhive_service=object(),
+                hdhive_scheduler=object(),
+                frontend_dist_path="/tmp/frontend",
+                background_jobs=object(),
+                log_hub=object(),
+            )
+
+        self.assertEqual(result, "legacy")
+        self.assertEqual(calls, [(config, task_store)])
+
+    def test_main_configures_logging_once_and_injects_hub_into_runtime(self):
+        runtime = SimpleNamespace(hub=object())
+        config = SimpleNamespace()
+        with patch.object(bridge, "configure_logging", return_value=runtime) as configure, patch.object(
+            bridge.Config, "from_env", return_value=config
+        ), patch.object(bridge, "run_forever") as run, patch.object(bridge.signal, "signal"):
+            exit_code = bridge.main()
+
+        self.assertEqual(exit_code, 0)
+        configure.assert_called_once_with(os.environ.get("LOG_LEVEL", "INFO"))
+        self.assertIs(run.call_args.kwargs["log_hub"], runtime.hub)
 
     def test_stop_web_server_closes_server(self):
         class FakeServer:

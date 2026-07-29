@@ -45,6 +45,7 @@ from app.clients.p115 import (
 )
 from app.backup import BackupScheduler, start_backup_loop
 from app.background_jobs import BackgroundJobCoordinator
+from app.logging_system import LogHub, configure_logging
 
 from app.config import (
     Config,
@@ -460,6 +461,7 @@ def maybe_start_web_server(
     starter=start_web_server,
     *,
     background_jobs: BackgroundJobCoordinator | None = None,
+    log_hub: LogHub | None = None,
 ):
     if not config.web_enabled:
         return None
@@ -519,6 +521,23 @@ def maybe_start_web_server(
         supports_background_jobs = True
     if not supports_background_jobs:
         kwargs.pop("background_jobs", None)
+    try:
+        starter_parameters = inspect.signature(starter).parameters
+        log_hub_parameter = starter_parameters.get("log_hub")
+        if log_hub_parameter is None:
+            supports_log_hub = any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in starter_parameters.values()
+            )
+        else:
+            supports_log_hub = log_hub_parameter.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.VAR_KEYWORD,
+            )
+    except (TypeError, ValueError):
+        supports_log_hub = True
+    if supports_log_hub:
+        kwargs["log_hub"] = log_hub
     server = starter(task_store, config.web_host, config.web_port, **kwargs)
     LOG.info("v0.2 web admin started host=%s port=%s", config.web_host, config.web_port)
     return server
@@ -533,42 +552,50 @@ def call_maybe_start_web_server(
     hdhive_scheduler: HdhiveSubscriptionScheduler | None = None,
     frontend_dist_path: str | None = None,
     background_jobs: BackgroundJobCoordinator | None = None,
+    log_hub: LogHub | None = None,
 ):
     try:
         parameters = inspect.signature(maybe_start_web_server).parameters
     except (TypeError, ValueError):
         parameters = {}
-    supports_submission_store = "submission_store" in parameters or any(
+    accepts_var_keyword = any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     )
-    supports_quality_automation = "quality_automation" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-    supports_hdhive_service = "hdhive_service" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-    supports_hdhive_scheduler = "hdhive_scheduler" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-    supports_frontend_dist_path = "frontend_dist_path" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-    supports_max_retries = "max_retries" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-    supports_background_jobs = "background_jobs" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-    if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler or supports_frontend_dist_path or supports_max_retries or supports_background_jobs:
-        kwargs = {
-            "submission_store": submission_store if supports_submission_store else None,
-            "quality_automation": quality_automation if supports_quality_automation else None,
-            "hdhive_service": hdhive_service if supports_hdhive_service else None,
-            "hdhive_scheduler": hdhive_scheduler if supports_hdhive_scheduler else None,
-            "frontend_dist_path": frontend_dist_path if supports_frontend_dist_path else None,
-        }
+
+    def supports_keyword(name: str) -> bool:
+        parameter = parameters.get(name)
+        if parameter is None:
+            return accepts_var_keyword
+        return parameter.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.VAR_KEYWORD,
+        )
+
+    supports_submission_store = supports_keyword("submission_store")
+    supports_quality_automation = supports_keyword("quality_automation")
+    supports_hdhive_service = supports_keyword("hdhive_service")
+    supports_hdhive_scheduler = supports_keyword("hdhive_scheduler")
+    supports_frontend_dist_path = supports_keyword("frontend_dist_path")
+    supports_max_retries = supports_keyword("max_retries")
+    supports_background_jobs = supports_keyword("background_jobs")
+    supports_log_hub = supports_keyword("log_hub")
+    if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler or supports_frontend_dist_path or supports_max_retries or supports_background_jobs or supports_log_hub:
+        kwargs = {}
+        if supports_submission_store:
+            kwargs["submission_store"] = submission_store
+        if supports_quality_automation:
+            kwargs["quality_automation"] = quality_automation
+        if supports_hdhive_service:
+            kwargs["hdhive_service"] = hdhive_service
+        if supports_hdhive_scheduler:
+            kwargs["hdhive_scheduler"] = hdhive_scheduler
+        if supports_frontend_dist_path:
+            kwargs["frontend_dist_path"] = frontend_dist_path
         if supports_background_jobs:
             kwargs["background_jobs"] = background_jobs
+        if supports_log_hub:
+            kwargs["log_hub"] = log_hub
         return maybe_start_web_server(config, task_store, **kwargs)
     return maybe_start_web_server(config, task_store)
 
@@ -4334,7 +4361,12 @@ def handle_update(
         LOG.debug("Failed to write metrics snapshot", exc_info=True)
 
 
-def run_forever(config: Config, stop_event: threading.Event | None = None) -> None:
+def run_forever(
+    config: Config,
+    stop_event: threading.Event | None = None,
+    *,
+    log_hub: LogHub | None = None,
+) -> None:
     stop_event = stop_event or threading.Event()
     cms = CmsClient(config)
     telegram = TelegramClient(config.tg_bot_token, timeout=config.http_timeout)
@@ -4622,6 +4654,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         hdhive_scheduler=hdhive_subscription_scheduler,
         frontend_dist_path=getattr(config, "frontend_dist_path", "/app/frontend/dist"),
         background_jobs=background_jobs,
+        log_hub=log_hub,
     )
 
     try:
@@ -4685,7 +4718,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
 
 
 def main() -> int:
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
+    logging_runtime = configure_logging(os.environ.get("LOG_LEVEL", "INFO"))
     stop_event = threading.Event()
 
     def request_stop(signum, _frame):
@@ -4694,7 +4727,7 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
-    run_forever(Config.from_env(), stop_event=stop_event)
+    run_forever(Config.from_env(), stop_event=stop_event, log_hub=logging_runtime.hub)
     return 0
 
 

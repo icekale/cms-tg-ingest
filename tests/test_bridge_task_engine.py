@@ -5388,6 +5388,7 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
 
         def capture_web_server(*_args, **kwargs):
             captured["web_background_jobs"] = kwargs["background_jobs"]
+            captured["web_log_hub"] = kwargs.get("log_hub")
             return None
 
         def capture_update(*_args, **kwargs):
@@ -5396,6 +5397,7 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             stop_event = __import__("threading").Event()
+            hub = object()
             config = bridge.Config(
                 "token",
                 "chat",
@@ -5421,12 +5423,13 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
             ), patch.object(
                 bridge, "start_status_repair_loop", lambda *_args, **_kwargs: None
             ):
-                bridge.run_forever(config, stop_event=stop_event)
+                bridge.run_forever(config, stop_event=stop_event, log_hub=hub)
 
         self.assertTrue(captured["started"])
         self.assertTrue(captured["stopped"])
         self.assertIsNone(captured["p115_client"])
         self.assertIs(captured["web_background_jobs"], captured["update_background_jobs"])
+        self.assertIs(captured["web_log_hub"], hub)
         self.assertEqual(
             captured["update_background_jobs"].submit("after-shutdown", lambda: None).outcome,
             "closed",

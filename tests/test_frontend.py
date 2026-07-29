@@ -13,9 +13,39 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("naive-ui", package["dependencies"])
         self.assertIn("build", package["scripts"])
         router = (ROOT / "frontend/src/router.js").read_text(encoding="utf-8")
-        for route in ("/overview", "/tasks", "/quality", "/health", "/hdhive", "/settings"):
+        for route in ("/overview", "/tasks", "/quality", "/health", "/hdhive", "/logs", "/settings"):
             self.assertIn(route, router)
         self.assertIn("base: '/app/'", (ROOT / "frontend/vite.config.js").read_text(encoding="utf-8"))
+
+    def test_vue_admin_exposes_realtime_logs_route_and_lifecycle_controls(self):
+        router = (ROOT / "frontend/src/router.js").read_text(encoding="utf-8")
+        shell = (ROOT / "frontend/src/App.vue").read_text(encoding="utf-8")
+        page = (ROOT / "frontend/src/views/Logs.vue").read_text(encoding="utf-8")
+        helper = (ROOT / "frontend/src/logView.js").read_text(encoding="utf-8")
+
+        self.assertIn("/logs", router)
+        self.assertIn("实时日志", shell)
+        for text in ("重要", "错误", "全部", "1000", "2000", "5000", "重连", "清空"):
+            self.assertIn(text, page)
+        self.assertIn('maxlength="100"', page)
+        self.assertIn("slice(0, 100)", page)
+        for label in ("日志关键字", "实时日志输出"):
+            self.assertIn(f'aria-label="{label}"', page)
+        for label in ("日志级别", "日志行数"):
+            self.assertIn(f":input-props=\"{{ 'aria-label': '{label}' }}\"", page)
+        self.assertNotIn('n-select v-model:value="filterType" aria-label=', page)
+        self.assertNotIn('n-select v-model:value="lineLimit" aria-label=', page)
+        self.assertIn('tabindex="0"', page)
+        self.assertIn("onBeforeUnmount", page)
+        self.assertIn("preservedScrollTop", page)
+        self.assertIn("withCredentials: true", helper)
+        self.assertNotIn("WEB_TOKEN", helper)
+
+    def test_vue_log_selects_use_filterable_input_props_for_accessible_trigger(self):
+        page = (ROOT / "frontend/src/views/Logs.vue").read_text(encoding="utf-8")
+
+        self.assertIn('<n-select v-model:value="filterType" filterable :input-props="{ \'aria-label\': \'日志级别\' }" :options="filterOptions" style="width: 120px" />', page)
+        self.assertIn('<n-select v-model:value="lineLimit" filterable :input-props="{ \'aria-label\': \'日志行数\' }" :options="lineOptions" style="width: 120px" />', page)
 
     def test_vue_admin_exposes_migrated_operational_controls(self):
         api = (ROOT / "frontend/src/api.js").read_text(encoding="utf-8")
