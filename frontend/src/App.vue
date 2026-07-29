@@ -14,6 +14,7 @@ const menuOptions = [
   { label: '质量巡检', key: '/quality' },
   { label: '本地健康', key: '/health' },
   { label: 'HDHive 订阅', key: '/hdhive' },
+  { label: '实时日志', key: '/logs' },
   { label: '设置', key: '/settings' },
 ]
 const activeKey = computed(() => route.path.startsWith('/tasks/') ? '/tasks' : route.path)
