@@ -951,7 +951,7 @@ class WebApiTests(unittest.TestCase):
             task = store.upsert_task(
                 "ed2k-safe-url",
                 "",
-                "ed2k://|file|攻壳机动队：崛起4.mkv|16804289284|28972F18CB6BB3ADF65B543DA3BE63BF|/",
+                "ed2k://|file|攻壳机动队：崛起4.mkv|16804289284|ED2K-TEST-HASH|/",
             )
 
             payload = serialize_task(task)
