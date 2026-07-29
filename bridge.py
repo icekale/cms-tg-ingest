@@ -550,30 +550,25 @@ def call_maybe_start_web_server(
         parameters = inspect.signature(maybe_start_web_server).parameters
     except (TypeError, ValueError):
         parameters = {}
-    supports_submission_store = "submission_store" in parameters or any(
+    accepts_var_keyword = any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     )
-    supports_quality_automation = "quality_automation" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-    supports_hdhive_service = "hdhive_service" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-    supports_hdhive_scheduler = "hdhive_scheduler" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-    supports_frontend_dist_path = "frontend_dist_path" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-    supports_max_retries = "max_retries" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-    supports_background_jobs = "background_jobs" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-    supports_log_hub = "log_hub" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
+
+    def supports_keyword(name: str) -> bool:
+        parameter = parameters.get(name)
+        return accepts_var_keyword or (
+            parameter is not None
+            and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        )
+
+    supports_submission_store = supports_keyword("submission_store")
+    supports_quality_automation = supports_keyword("quality_automation")
+    supports_hdhive_service = supports_keyword("hdhive_service")
+    supports_hdhive_scheduler = supports_keyword("hdhive_scheduler")
+    supports_frontend_dist_path = supports_keyword("frontend_dist_path")
+    supports_max_retries = supports_keyword("max_retries")
+    supports_background_jobs = supports_keyword("background_jobs")
+    supports_log_hub = supports_keyword("log_hub")
     if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler or supports_frontend_dist_path or supports_max_retries or supports_background_jobs or supports_log_hub:
         kwargs = {}
         if supports_submission_store:

@@ -234,6 +234,20 @@ class BridgeV02IntegrationTests(unittest.TestCase):
 
         self.assertEqual(result, "log-hub-only")
 
+    def test_call_maybe_start_web_server_skips_positional_only_log_hub(self):
+        config = object()
+        task_store = object()
+
+        def positional_only_callee(actual_config, actual_task_store, log_hub=None, /):
+            self.assertIs(actual_config, config)
+            self.assertIs(actual_task_store, task_store)
+            return log_hub
+
+        with patch.object(bridge, "maybe_start_web_server", positional_only_callee):
+            result = bridge.call_maybe_start_web_server(config, task_store, log_hub=object())
+
+        self.assertIsNone(result)
+
     def test_call_maybe_start_web_server_keeps_two_argument_legacy_callee(self):
         config = object()
         task_store = object()
