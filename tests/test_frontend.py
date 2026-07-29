@@ -41,6 +41,19 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("withCredentials: true", helper)
         self.assertNotIn("WEB_TOKEN", helper)
 
+    def test_vue_log_selects_use_filterable_input_props_for_accessible_trigger(self):
+        page = (ROOT / "frontend/src/views/Logs.vue").read_text(encoding="utf-8")
+        select = (ROOT / "frontend/node_modules/naive-ui/es/select/src/Select.mjs").read_text(encoding="utf-8")
+        selection = (ROOT / "frontend/node_modules/naive-ui/es/_internal/selection/src/Selection.mjs").read_text(encoding="utf-8")
+
+        self.assertIn('<n-select v-model:value="filterType" filterable :input-props="{ \'aria-label\': \'日志级别\' }" :options="filterOptions" style="width: 120px" />', page)
+        self.assertIn('<n-select v-model:value="lineLimit" filterable :input-props="{ \'aria-label\': \'日志行数\' }" :options="lineOptions" style="width: 120px" />', page)
+        self.assertIn("inputProps: this.inputProps", select)
+        self.assertIn("filterable: this.filterable", select)
+        filterable_start = selection.index("if (filterable) {")
+        non_filterable_start = selection.index("} else {", filterable_start)
+        self.assertIn('h("input", Object.assign({}, this.inputProps', selection[filterable_start:non_filterable_start])
+
     def test_vue_admin_exposes_migrated_operational_controls(self):
         api = (ROOT / "frontend/src/api.js").read_text(encoding="utf-8")
         task_detail = (ROOT / "frontend/src/views/TaskDetail.vue").read_text(encoding="utf-8")
