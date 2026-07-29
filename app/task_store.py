@@ -1645,8 +1645,9 @@ class TaskStore:
             TaskStatus.CANCELLED.value,
         )
         with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
-                "SELECT id FROM tasks WHERE status IN (?, ?, ?)",
+                "SELECT id FROM tasks WHERE status IN (?, ?, ?) AND claimed_by = ''",
                 terminal_statuses,
             ).fetchall()
             task_ids = [int(row["id"]) for row in rows]
@@ -1655,7 +1656,10 @@ class TaskStore:
             placeholders = ",".join("?" for _ in task_ids)
             conn.execute(f"DELETE FROM task_events WHERE task_id IN ({placeholders})", task_ids)
             conn.execute(f"DELETE FROM task_operations WHERE task_id IN ({placeholders})", task_ids)
-            cursor = conn.execute(f"DELETE FROM tasks WHERE id IN ({placeholders})", task_ids)
+            cursor = conn.execute(
+                f"DELETE FROM tasks WHERE id IN ({placeholders}) AND claimed_by = ''",
+                task_ids,
+            )
         return int(cursor.rowcount or 0)
 
     def delete_finished_task(self, task_id: int, *, expected_updated_at: float) -> bool:

@@ -141,6 +141,25 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(store.clear_finished_tasks(), 1)
             self.assertIsNone(store.find_task(task.id))
 
+    def test_clear_finished_tasks_keeps_quality_claimed_terminal_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            claimed = store.upsert_task("clear-claimed", "", "https://115cdn.com/s/clear-claimed")
+            store.record_event(claimed.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            claimed = store.claim_quality_cleanup(claimed.id, "cleanup-run", now=10)
+            succeeded = store.upsert_task("clear-succeeded", "", "https://115cdn.com/s/clear-succeeded")
+            store.record_event(succeeded.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            failed = store.upsert_task("clear-failed", "", "https://115cdn.com/s/clear-failed")
+            store.record_event(failed.id, TaskStage.FAILED, TaskStatus.FAILED, "failed")
+            cancelled = store.upsert_task("clear-cancelled-2", "", "https://115cdn.com/s/clear-cancelled-2")
+            store.request_task_termination(cancelled.id, "Web", now=10)
+
+            self.assertEqual(store.clear_finished_tasks(), 3)
+            self.assertEqual(store.find_task(claimed.id).claimed_by, "quality-cleanup:cleanup-run")
+            self.assertIsNone(store.find_task(succeeded.id))
+            self.assertIsNone(store.find_task(failed.id))
+            self.assertIsNone(store.find_task(cancelled.id))
+
     def test_unclaimed_task_termination_is_immediate_and_not_runnable(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
