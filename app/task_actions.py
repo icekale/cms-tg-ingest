@@ -102,6 +102,20 @@ def _failed_result(task: TaskSnapshot, reason: str) -> TaskActionResult:
     return TaskActionResult(False, task, reason)
 
 
+def delete_task_record(store: TaskStore, task_id: int) -> TaskActionResult:
+    """Delete one terminal, unclaimed task using its current snapshot."""
+    task = store.find_task(task_id)
+    if task is None:
+        return TaskActionResult(False, None, "任务不存在或已过期")
+    if "delete" not in available_lifecycle_actions(task):
+        if str(task.claimed_by or "").strip():
+            return _failed_result(task, "任务正在执行，请稍后再试")
+        return _failed_result(task, "任务尚未结束，无法删除")
+    if not store.delete_finished_task(task.id, expected_updated_at=task.updated_at):
+        return _failed_result(task, "任务状态已变化，请刷新后重试")
+    return TaskActionResult(True, task, "任务已删除")
+
+
 def apply_task_action(
     store: TaskStore,
     task_id: int,

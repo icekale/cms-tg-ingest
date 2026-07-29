@@ -15,6 +15,7 @@ from .task_diagnostics import explain_task_slowness, format_stage_observability
 from .task_health import build_task_health
 from .quality import redact_quality_detail, scan_task_quality
 from .strm_mode import effective_task_strm_mode
+from .task_actions import available_lifecycle_actions, task_termination_requested
 from .task_store import TaskStore
 
 
@@ -114,6 +115,8 @@ def _safe_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
 def serialize_task(task: TaskSnapshot, *, now: float | None = None) -> dict[str, Any]:
     current_time = time.time() if now is None else float(now)
     elapsed, p115_calls = format_stage_observability(task)
+    termination_requested = task_termination_requested(task)
+    available_actions = sorted(available_lifecycle_actions(task))
     return {
         "id": task.id,
         "title": task.title or task.share_code,
@@ -128,6 +131,8 @@ def serialize_task(task: TaskSnapshot, *, now: float | None = None) -> dict[str,
         "retry_count": task.retry_count,
         "next_run_at": task.next_run_at,
         "claimed": bool(task.claimed_by),
+        "available_actions": available_actions,
+        "termination_requested": termination_requested,
         "why_slow": explain_task_slowness(task, now=current_time),
         "stage_elapsed": elapsed,
         "stage_p115_calls": p115_calls,

@@ -20,6 +20,82 @@ from app.web_api import _safe_error, _safe_url, api_quality, serialize_hdhive, s
 
 
 class WebApiTests(unittest.TestCase):
+    def test_task_api_exposes_backend_lifecycle_actions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("actions", "", "https://115cdn.com/s/actions")
+            app = WebApp(store)
+
+            status, _headers, body = app.handle_request("GET", f"/api/v1/tasks/{task.id}", {}, b"")
+            payload = json.loads(body)
+
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["available_actions"], ["terminate"])
+            self.assertFalse(payload["termination_requested"])
+
+    def test_terminate_api_is_idempotent_for_claimed_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("api-terminate", "", "https://115cdn.com/s/api-terminate")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            store.claim_next_runnable("worker", now=1)
+            app = WebApp(store)
+
+            first_status, _headers, first_body = app.handle_request(
+                "POST", f"/api/v1/tasks/{task.id}/actions/terminate", {}, b""
+            )
+            second_status, _headers, second_body = app.handle_request(
+                "POST", f"/api/v1/tasks/{task.id}/actions/terminate", {}, b""
+            )
+
+            self.assertEqual(first_status, 200)
+            self.assertEqual(second_status, 200)
+            self.assertTrue(json.loads(first_body)["termination_requested"])
+            self.assertTrue(json.loads(second_body)["termination_requested"])
+
+    def test_delete_task_api_rejects_active_and_deletes_terminal_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("api-delete", "", "https://115cdn.com/s/api-delete")
+            app = WebApp(store)
+
+            conflict_status, _headers, conflict_body = app.handle_request(
+                "DELETE", f"/api/v1/tasks/{task.id}", {}, b""
+            )
+            store.request_task_termination(task.id, "Web", now=1)
+            deleted_status, _headers, deleted_body = app.handle_request(
+                "DELETE", f"/api/v1/tasks/{task.id}", {}, b""
+            )
+            missing_status, _headers, missing_body = app.handle_request(
+                "DELETE", f"/api/v1/tasks/{task.id}", {}, b""
+            )
+
+            self.assertEqual(conflict_status, 409)
+            self.assertEqual(json.loads(conflict_body)["error"], "delete_not_allowed")
+            self.assertEqual(deleted_status, 200)
+            self.assertEqual(json.loads(deleted_body)["deleted"], task.id)
+            self.assertEqual(missing_status, 404)
+            self.assertEqual(json.loads(missing_body)["error"], "task_not_found")
+
+    def test_terminate_api_rejects_finished_task_and_reports_missing_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("terminate-finished", "", "https://115cdn.com/s/terminate-finished")
+            store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            app = WebApp(store)
+
+            conflict_status, _headers, conflict_body = app.handle_request(
+                "POST", f"/api/v1/tasks/{task.id}/actions/terminate", {}, b""
+            )
+            missing_status, _headers, missing_body = app.handle_request(
+                "POST", "/api/v1/tasks/999/actions/terminate", {}, b""
+            )
+
+            self.assertEqual(conflict_status, 409)
+            self.assertEqual(json.loads(conflict_body)["error"], "action_not_allowed")
+            self.assertEqual(missing_status, 404)
+            self.assertEqual(json.loads(missing_body)["error"], "task_not_found")
+
     def test_body_limit_rejects_oversized_direct_request(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = WebApp(TaskStore(Path(tmp) / "tasks.db"), web_token="")

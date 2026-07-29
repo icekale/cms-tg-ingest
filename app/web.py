@@ -26,7 +26,7 @@ from .task_diagnostics import (
     is_dispatchable_active_task,
     is_unscheduled_active_task,
 )
-from .task_actions import TASK_ACTIONS, apply_task_action, available_task_actions
+from .task_actions import TASK_ACTIONS, apply_task_action, available_task_actions, delete_task_record
 from .config import normalize_task_max_retries
 from .task_engine import decide_retry, stage_display_name
 from .task_health import build_task_health, format_task_health
@@ -1596,6 +1596,21 @@ class WebApp:
                     )
                     return status, {**response_headers, **auth_headers}, response_body
                 status, response_headers, response_body = api_response(api_task_detail(self.store, task_id))
+                return status, {**response_headers, **auth_headers}, response_body
+        if method == "DELETE" and path.startswith("/api/v1/tasks/"):
+            raw_id = path.removeprefix("/api/v1/tasks/")
+            if raw_id.isdigit():
+                result = delete_task_record(self.store, int(raw_id))
+                if result.task is None:
+                    status, response_headers, response_body = api_response({"error": "task_not_found"}, status=404)
+                    return status, {**response_headers, **auth_headers}, response_body
+                if not result.applied:
+                    status, response_headers, response_body = api_response(
+                        {"error": "delete_not_allowed", "reason": result.reason},
+                        status=409,
+                    )
+                    return status, {**response_headers, **auth_headers}, response_body
+                status, response_headers, response_body = api_response({"deleted": int(raw_id), "message": result.reason})
                 return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path == "/api/v1/history/clear":
             cleared = self.store.clear_finished_tasks()
