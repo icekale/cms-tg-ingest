@@ -51,7 +51,10 @@ def _safe_error(value: Any) -> str:
 
 def _safe_url(value: str) -> str:
     """Keep links useful to the UI without returning share passwords or tokens."""
-    parsed = urlsplit(str(value or ""))
+    try:
+        parsed = urlsplit(str(value or ""))
+    except ValueError:
+        return ""
     if not parsed.scheme or not parsed.netloc:
         return ""
     try:

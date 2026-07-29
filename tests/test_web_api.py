@@ -945,6 +945,19 @@ class WebApiTests(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(payload, ensure_ascii=False))
         self.assertEqual(payload["metadata"]["source_path"], "/safe")
 
+    def test_serialize_task_rejects_non_normalizable_ed2k_url_without_crashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task(
+                "ed2k-safe-url",
+                "",
+                "ed2k://|file|攻壳机动队：崛起4.mkv|16804289284|28972F18CB6BB3ADF65B543DA3BE63BF|/",
+            )
+
+            payload = serialize_task(task)
+
+        self.assertEqual(payload["safe_url"], "")
+
     def test_serialize_task_reports_effective_shared_mode_for_cloud_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db", default_strm_mode="direct")
