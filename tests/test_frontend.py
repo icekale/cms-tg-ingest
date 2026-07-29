@@ -27,6 +27,11 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("实时日志", shell)
         for text in ("重要", "错误", "全部", "1000", "2000", "5000", "重连", "清空"):
             self.assertIn(text, page)
+        self.assertIn('maxlength="100"', page)
+        self.assertIn("slice(0, 100)", page)
+        for label in ("日志级别", "日志行数", "日志关键字", "实时日志输出"):
+            self.assertIn(f'aria-label="{label}"', page)
+        self.assertIn('tabindex="0"', page)
         self.assertIn("onBeforeUnmount", page)
         self.assertIn("preservedScrollTop", page)
         self.assertIn("withCredentials: true", helper)

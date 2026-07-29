@@ -70,7 +70,8 @@ function reconnect() {
   controller.connect(currentFilters())
 }
 function applyKeyword() {
-  keyword.value = keywordDraft.value.trim()
+  keyword.value = keywordDraft.value.trim().slice(0, 100)
+  keywordDraft.value = keyword.value
   reconnect()
 }
 function clearVisibleLogs() {
@@ -97,16 +98,16 @@ onBeforeUnmount(() => {
   </div>
   <n-card>
     <div class="log-toolbar">
-      <n-select v-model:value="filterType" :options="filterOptions" style="width: 120px" />
-      <n-select v-model:value="lineLimit" :options="lineOptions" style="width: 120px" />
-      <n-input v-model:value="keywordDraft" clearable placeholder="关键字" style="max-width: 280px" @keyup.enter="applyKeyword" />
+      <n-select v-model:value="filterType" aria-label="日志级别" :options="filterOptions" style="width: 120px" />
+      <n-select v-model:value="lineLimit" aria-label="日志行数" :options="lineOptions" style="width: 120px" />
+      <n-input v-model:value="keywordDraft" aria-label="日志关键字" maxlength="100" clearable placeholder="关键字" style="max-width: 280px" @keyup.enter="applyKeyword" />
       <n-space>
         <n-button secondary @click="applyKeyword">筛选</n-button>
         <n-button secondary @click="reconnect">重连</n-button>
         <n-button secondary @click="clearVisibleLogs">清空</n-button>
       </n-space>
     </div>
-    <div ref="logViewport" class="log-viewport">
+    <div ref="logViewport" class="log-viewport" role="log" tabindex="0" aria-label="实时日志输出">
       <pre v-for="entry in entries" :key="entry.id" class="log-entry" :class="levelClass(entry.level)">{{ entry.text }}</pre>
       <div v-if="!entries.length" class="log-empty">当前页面暂无日志</div>
     </div>

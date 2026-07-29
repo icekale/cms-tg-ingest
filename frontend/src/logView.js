@@ -8,8 +8,14 @@ export function buildLogStreamUrl({ filterType = 'main', lines = 1000, keyword =
 }
 
 export function parseLogEvent(event) {
-  const payload = JSON.parse(event.data || '{}')
-  if (!payload || typeof payload !== 'object') throw new Error('日志事件格式无效')
+  if (typeof event?.data !== 'string' || !event.data.trim()) throw new Error('日志事件格式无效')
+  let payload
+  try {
+    payload = JSON.parse(event.data)
+  } catch (_) {
+    throw new Error('日志事件格式无效')
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('日志事件格式无效')
   return payload
 }
 
@@ -21,28 +27,77 @@ export function preservedScrollTop(readingOlder, previousTop, previousHeight, ne
   return readingOlder ? previousTop + Math.max(0, nextHeight - previousHeight) : 0
 }
 
+function parseLogEntry(payload) {
+  if (!Number.isInteger(payload.id) || typeof payload.level !== 'string' || typeof payload.text !== 'string') {
+    throw new Error('日志事件格式无效')
+  }
+  return payload
+}
+
+function parseSnapshotEntry(payload) {
+  if (!payload || typeof payload !== 'object' || !Number.isInteger(payload.id)) {
+    throw new Error('日志事件格式无效')
+  }
+  return payload
+}
+
+function parseSnapshot(event) {
+  const payload = parseLogEvent(event)
+  if (!Array.isArray(payload.entries)) throw new Error('日志事件格式无效')
+  return payload.entries.map(parseSnapshotEntry)
+}
+
+function parseHeartbeat(event) {
+  const payload = parseLogEvent(event)
+  if (!Number.isFinite(payload.time)) throw new Error('日志事件格式无效')
+  return payload
+}
+
+function parseGap(event) {
+  const payload = parseLogEvent(event)
+  if (typeof payload.reason !== 'string' || !payload.reason) throw new Error('日志事件格式无效')
+  return payload
+}
+
 export function createLogStreamController(callbacks = {}, sourceFactory) {
   const factory = sourceFactory || ((url, options) => new EventSource(url, options))
   let source = null
 
   function close() {
-    if (source) source.close()
+    const current = source
     source = null
+    if (current) current.close()
+  }
+
+  function addCurrentListener(current, name, parse, callback) {
+    current.addEventListener(name, (event) => {
+      if (source !== current) return
+      let payload
+      try {
+        payload = parse(event)
+      } catch (_) {
+        callbacks.onError?.()
+        return
+      }
+      callback?.(payload)
+    })
   }
 
   function connect(filters) {
     close()
     const current = factory(buildLogStreamUrl(filters), { withCredentials: true })
     source = current
-    current.onopen = () => callbacks.onOpen?.()
-    current.onerror = () => callbacks.onError?.()
-    current.addEventListener('snapshot', (event) => {
-      const payload = parseLogEvent(event)
-      callbacks.onSnapshot?.(Array.isArray(payload.entries) ? payload.entries : [])
-    })
-    current.addEventListener('log', (event) => callbacks.onLog?.(parseLogEvent(event)))
-    current.addEventListener('heartbeat', (event) => callbacks.onHeartbeat?.(parseLogEvent(event)))
-    current.addEventListener('gap', (event) => callbacks.onGap?.(parseLogEvent(event)))
+    current.onopen = () => {
+      if (source === current) callbacks.onOpen?.()
+    }
+    current.onerror = () => {
+      if (source === current) callbacks.onError?.()
+    }
+    // Invalid current-source frames report through onError without reaching view callbacks.
+    addCurrentListener(current, 'snapshot', parseSnapshot, callbacks.onSnapshot)
+    addCurrentListener(current, 'log', (event) => parseLogEntry(parseLogEvent(event)), callbacks.onLog)
+    addCurrentListener(current, 'heartbeat', parseHeartbeat, callbacks.onHeartbeat)
+    addCurrentListener(current, 'gap', parseGap, callbacks.onGap)
     return current
   }
 
