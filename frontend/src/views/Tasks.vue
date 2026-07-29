@@ -30,11 +30,17 @@ const columns = [
     render: (row) => {
       const { canTerminate, canDelete, terminationRequested } = taskLifecycleState(row)
       const actions = []
-      if (canTerminate) actions.push(h(NPopconfirm, { onPositiveClick: () => runLifecycleAction(row, 'terminate') }, {
+      if (canTerminate) actions.push(h(NPopconfirm, {
+        positiveButtonProps: { loading: isActionBusy(row, 'terminate'), disabled: isActionBusy(row, 'terminate') },
+        onPositiveClick: () => runLifecycleAction(row, 'terminate'),
+      }, {
         trigger: () => h(NButton, { type: 'warning', size: 'small', loading: isActionBusy(row, 'terminate') }, { default: () => '终止' }),
         default: () => '终止只会阻止后续阶段，当前已发出的 CMS/115 请求可能仍会完成。确认终止？',
       }))
-      if (canDelete) actions.push(h(NPopconfirm, { onPositiveClick: () => runLifecycleAction(row, 'delete') }, {
+      if (canDelete) actions.push(h(NPopconfirm, {
+        positiveButtonProps: { loading: isActionBusy(row, 'delete'), disabled: isActionBusy(row, 'delete') },
+        onPositiveClick: () => runLifecycleAction(row, 'delete'),
+      }, {
         trigger: () => h(NButton, { type: 'error', ghost: true, size: 'small', loading: isActionBusy(row, 'delete') }, { default: () => '删除' }),
         default: () => '将永久删除本地任务、时间线和操作记录，不会删除网盘或媒体内容。确认删除？',
       }))
@@ -45,6 +51,7 @@ const columns = [
 ]
 async function load() { loading.value = true; try { tasks.value = (await api.tasks()).items } catch (err) { message.error(err.message) } finally { loading.value = false } }
 async function runLifecycleAction(row, action) {
+  if (isActionBusy(row, action)) return
   setActionBusy(row, action, true)
   try {
     if (action === 'terminate') {
