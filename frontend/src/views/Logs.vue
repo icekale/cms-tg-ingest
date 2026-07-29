@@ -43,14 +43,20 @@ const controller = createLogStreamController({
     const readingOlder = Boolean(viewport && viewport.scrollTop > 24)
     const previousTop = viewport?.scrollTop || 0
     const previousHeight = viewport?.scrollHeight || 0
+    const anchor = readingOlder ? viewport?.firstElementChild : null
+    const previousAnchorTop = anchor?.offsetTop
     entries.value = prependLog(entries.value, entry, lineLimit.value)
     await nextTick()
     if (logViewport.value) {
+      const anchorOffsetDelta = anchor?.isConnected && Number.isFinite(previousAnchorTop)
+        ? anchor.offsetTop - previousAnchorTop
+        : undefined
       logViewport.value.scrollTop = preservedScrollTop(
         readingOlder,
         previousTop,
         previousHeight,
         logViewport.value.scrollHeight,
+        anchorOffsetDelta,
       )
     }
   },

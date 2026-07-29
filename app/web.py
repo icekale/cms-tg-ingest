@@ -8,7 +8,7 @@ import time
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Thread
+from threading import BoundedSemaphore, Thread
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
@@ -55,6 +55,7 @@ MAX_REQUEST_BODY_BYTES = 64 * 1024
 REQUEST_BODY_READ_TIMEOUT_SECONDS = 2
 SSE_HEARTBEAT_SECONDS = 15.0
 SSE_CLIENT_QUEUE_SIZE = 256
+SSE_MAX_CLIENTS = 8
 SSE_WRITE_TIMEOUT_SECONDS = 5.0
 LEGACY_LIFECYCLE_REASON = "旧版任务引擎模式不支持终止或删除任务"
 TASK_NOT_FOUND_MESSAGE = "任务不存在或已过期"
@@ -2052,6 +2053,7 @@ def start_web_server(
         background_jobs=background_jobs,
         log_hub=log_hub,
     )
+    sse_capacity = BoundedSemaphore(max(1, int(SSE_MAX_CLIENTS)))
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -2141,10 +2143,15 @@ def start_web_server(
                     pass
                 return
 
-            stream = app.log_hub.open_stream(spec, queue_size=SSE_CLIENT_QUEUE_SIZE)
+            if not sse_capacity.acquire(blocking=False):
+                self._request_body_error(429, b"Too Many Requests")
+                return
+
+            stream = None
             previous_timeout: float | None = None
             restore_timeout = False
             try:
+                stream = app.log_hub.open_stream(spec, queue_size=SSE_CLIENT_QUEUE_SIZE)
                 previous_timeout = self.connection.gettimeout()
                 restore_timeout = True
                 self.connection.settimeout(SSE_WRITE_TIMEOUT_SECONDS)
@@ -2177,12 +2184,20 @@ def start_web_server(
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
                 self.close_connection = True
             finally:
-                if restore_timeout:
+                try:
+                    if restore_timeout:
+                        try:
+                            self.connection.settimeout(previous_timeout)
+                        except OSError:
+                            self.close_connection = True
+                finally:
                     try:
-                        self.connection.settimeout(previous_timeout)
-                    except OSError:
+                        if stream is not None:
+                            stream.close()
+                    except Exception:
                         self.close_connection = True
-                stream.close()
+                    finally:
+                        sse_capacity.release()
 
         def _serve(self, body: bytes = b""):
             status, headers, payload = app.handle_request(self.command, self.path, dict(self.headers), body)

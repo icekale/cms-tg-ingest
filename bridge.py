@@ -523,9 +523,17 @@ def maybe_start_web_server(
         kwargs.pop("background_jobs", None)
     try:
         starter_parameters = inspect.signature(starter).parameters
-        supports_log_hub = "log_hub" in starter_parameters or any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in starter_parameters.values()
-        )
+        log_hub_parameter = starter_parameters.get("log_hub")
+        if log_hub_parameter is None:
+            supports_log_hub = any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in starter_parameters.values()
+            )
+        else:
+            supports_log_hub = log_hub_parameter.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.VAR_KEYWORD,
+            )
     except (TypeError, ValueError):
         supports_log_hub = True
     if supports_log_hub:
@@ -556,9 +564,12 @@ def call_maybe_start_web_server(
 
     def supports_keyword(name: str) -> bool:
         parameter = parameters.get(name)
-        return accepts_var_keyword or (
-            parameter is not None
-            and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        if parameter is None:
+            return accepts_var_keyword
+        return parameter.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.VAR_KEYWORD,
         )
 
     supports_submission_store = supports_keyword("submission_store")

@@ -56,6 +56,108 @@ class LoggingSystemTests(unittest.TestCase):
             self.assertNotIn(secret, redacted)
         self.assertIn("[REDACTED]", redacted)
 
+    def test_project_credential_aliases_are_redacted_from_every_log_sink(self):
+        secrets = (
+            "query-code-leak",
+            "share-password-leak",
+            "p115-cookie-leak",
+            "web-token-leak",
+            "emby-token-leak",
+            "extract-code-leak",
+            "userinfo-leak",
+            "telegram-token-leak",
+            "cms-password-leak",
+            "own-share-password-leak",
+            "emby-api-key-leak",
+            "openai-api-key-leak",
+            "tmdb-api-key-leak",
+            "tmdb-bearer-token-leak",
+        )
+        source = " ".join(
+            (
+                "https://example.invalid/item?code=query-code-leak&share_pwd=share-password-leak",
+                "P115_COOKIE=p115-cookie-leak",
+                '{"X-Web-Token":"web-token-leak","X-Emby-Token":"emby-token-leak"}',
+                "提取码：extract-code-leak",
+                "https://safe-user:userinfo-leak@example.invalid/path",
+                "https://api.telegram.org/bottelegram-token-leak/getMe",
+                "CMS_PASSWORD=cms-password-leak",
+                "SELF_SHARE_OWN_SHARE_PASSWORD=own-share-password-leak",
+                "EMBY_API_KEY=emby-api-key-leak",
+                "OPENAI_API_KEY=openai-api-key-leak",
+                "TMDB_API_KEY=tmdb-api-key-leak",
+                "TMDB_BEARER_TOKEN=tmdb-bearer-token-leak",
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stream = io.StringIO()
+            logger = logging.Logger("project-credentials", logging.INFO)
+            logger.propagate = False
+            path = Path(tmp) / "app.log"
+            runtime = configure_logging("INFO", log_path=path, stream=stream, root_logger=logger)
+
+            logger.info(source)
+
+            entry = runtime.hub.snapshot(LogFilter("all", 1000, ""))[0]
+            outputs = (
+                stream.getvalue(),
+                path.read_text(encoding="utf-8"),
+                entry.text,
+                encode_sse_event("log", entry.payload(), event_id=entry.id).decode("utf-8"),
+            )
+            runtime.close()
+
+        for output in outputs:
+            for secret in secrets:
+                self.assertNotIn(secret, output)
+
+    def test_malformed_url_does_not_disable_log_sinks_or_drop_later_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stream = io.StringIO()
+            logger = logging.Logger("malformed-url", logging.INFO)
+            logger.propagate = False
+            path = Path(tmp) / "app.log"
+            runtime = configure_logging("INFO", log_path=path, stream=stream, root_logger=logger)
+
+            logger.info("malformed URL http://[")
+            logger.info("logging remains available")
+            for handler in logger.handlers:
+                handler.flush()
+
+            rows = runtime.hub.snapshot(LogFilter("all", 1000, ""))
+            outputs = (stream.getvalue(), path.read_text(encoding="utf-8"), "\n".join(row.text for row in rows))
+            runtime.close()
+
+        for output in outputs:
+            self.assertIn("logging remains available", output)
+            self.assertIn("malformed URL", output)
+
+    def test_unpaired_surrogate_does_not_disable_utf8_stream_or_file_logging(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_stream = io.BytesIO()
+            encoded_stream = io.TextIOWrapper(raw_stream, encoding="utf-8", errors="strict")
+            logger = logging.Logger("surrogate-output", logging.INFO)
+            logger.propagate = False
+            path = Path(tmp) / "app.log"
+            runtime = configure_logging("INFO", log_path=path, stream=encoded_stream, root_logger=logger)
+            text = "surrogate " + chr(0xD800)
+
+            logger.info(text)
+            logger.info("logging remains available")
+            for handler in logger.handlers:
+                handler.flush()
+
+            stream_output = raw_stream.getvalue()
+            file_output = path.read_bytes()
+            rows = runtime.hub.snapshot(LogFilter("all", 1000, ""))
+            runtime.close()
+
+        for output in (stream_output, file_output):
+            self.assertIn(b"\\ud800", output)
+            self.assertIn(b"logging remains available", output)
+        self.assertIn(chr(0xD800), rows[-1].text)
+
     def test_configure_logging_redacts_structured_credentials_from_every_sink(self):
         with tempfile.TemporaryDirectory() as tmp:
             stream = io.StringIO()
@@ -149,6 +251,26 @@ class LoggingSystemTests(unittest.TestCase):
         self.assertEqual([entry.level for entry in errors], ["ERROR"])
         self.assertEqual([entry.id for entry in all_rows], [4, 3, 2, 1])
 
+    def test_publish_truncates_single_entry_to_utf8_byte_limit(self):
+        hub = LogHub(capacity=200)
+
+        hub.publish(1, "INFO", "worker", "日志" * (128 * 1024))
+
+        text = hub.snapshot(LogFilter("all", 1000, ""))[0].text
+        self.assertLessEqual(len(text.encode("utf-8")), 64 * 1024)
+        self.assertIn("[TRUNCATED]", text)
+
+    def test_publish_evicts_oldest_entries_to_keep_history_within_byte_budget(self):
+        hub = LogHub(capacity=200)
+
+        for index in range(100):
+            hub.publish(index + 1, "INFO", "worker", f"entry-{index} " + ("x" * (64 * 1024)))
+
+        rows = hub.snapshot(LogFilter("all", 1000, ""))
+        self.assertLessEqual(sum(len(row.text.encode("utf-8")) for row in rows), 5 * 1024 * 1024)
+        self.assertLess(len(rows), 100)
+        self.assertTrue(rows[0].text.startswith("entry-99 "))
+
     def test_open_stream_has_atomic_snapshot_and_nonblocking_gap(self):
         hub = LogHub(capacity=10)
         hub.publish(1, "INFO", "worker", "first")
@@ -189,6 +311,18 @@ class LoggingSystemTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(rows[-1].logger, "history")
+
+    def test_restore_bounds_oversized_physical_log_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cms-tg-ingest.log"
+            path.write_text("超" * (1024 * 1024), encoding="utf-8")
+            hub = LogHub(capacity=10)
+
+            hub.restore(path)
+
+            text = hub.snapshot(LogFilter("all", 1000, ""))[0].text
+            self.assertLessEqual(len(text.encode("utf-8")), 64 * 1024)
+            self.assertIn("[TRUNCATED]", text)
 
     def test_configure_logging_is_idempotent_and_redacts_all_three_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:

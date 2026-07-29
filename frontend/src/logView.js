@@ -23,8 +23,11 @@ export function prependLog(entries, entry, limit) {
   return [entry, ...entries.filter((item) => item.id !== entry.id)].slice(0, Number(limit) || 1000)
 }
 
-export function preservedScrollTop(readingOlder, previousTop, previousHeight, nextHeight) {
-  return readingOlder ? previousTop + Math.max(0, nextHeight - previousHeight) : 0
+export function preservedScrollTop(readingOlder, previousTop, previousHeight, nextHeight, anchorOffsetDelta) {
+  if (!readingOlder) return 0
+  const heightDelta = Math.max(0, nextHeight - previousHeight)
+  const contentDelta = Number.isFinite(anchorOffsetDelta) ? Math.max(0, anchorOffsetDelta) : heightDelta
+  return previousTop + contentDelta
 }
 
 function parseLogEntry(payload) {

@@ -11,11 +11,15 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, TextIO
+from typing import BinaryIO, Iterator, Literal, TextIO
+
+from .clients.http import _redact_url
 
 
 DEFAULT_LOG_PATH = Path("/data/logs/cms-tg-ingest.log")
 LOG_HISTORY_LIMIT = 5000
+LOG_ENTRY_MAX_BYTES = 64 * 1024
+LOG_HISTORY_MAX_BYTES = 5 * 1024 * 1024
 LOG_MAX_BYTES = 20 * 1024 * 1024
 LOG_BACKUP_COUNT = 4
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -30,13 +34,15 @@ _LEVEL_VALUES = {
 }
 _ALLOWED_LINE_LIMITS = frozenset({1000, 2000, 5000})
 _HANDLER_MARKER = "_cms_tg_ingest_logging_handler"
+_TRUNCATION_MARKER = " [TRUNCATED]"
 
 _URL_SECRET_RE = re.compile(
-    r"([?&](?:password|passwd|pwd|receive_code|access_code|token|access_token|refresh_token|api_key|apikey|key|secret)=)[^&#\s]+",
+    r"([?&](?:password|passwd|pwd|code|receive_code|access_code|share_password|share_pwd|cms_password|self_share_own_share_password|token|access_token|refresh_token|auth_token|bearer_token|csrf_token|hdhive_token|session_token|web_token|emby_token|tmdb_bearer_token|p115_cookie|sessdata|api_key|apikey|emby_api_key|openai_api_key|tmdb_api_key|key|secret)=)[^&#\s]+",
     re.IGNORECASE,
 )
+_HTTP_URL_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
 _HEADER_SECRET_RE = re.compile(
-    r"\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key)\b\s*[:=]\s*([^\r\n]+)",
+    r"\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-web-token|x-emby-token)\b\s*[:=]\s*([^\r\n]+)",
     re.IGNORECASE,
 )
 _SENSITIVE_MAPPING_KEYS = (
@@ -45,6 +51,8 @@ _SENSITIVE_MAPPING_KEYS = (
     "cookie",
     "set-cookie",
     "x-api-key",
+    "x-web-token",
+    "x-emby-token",
     "password",
     "passwd",
     "pwd",
@@ -56,6 +64,23 @@ _SENSITIVE_MAPPING_KEYS = (
     "key",
     "access_token",
     "refresh_token",
+    "auth_token",
+    "bearer_token",
+    "csrf_token",
+    "hdhive_token",
+    "session_token",
+    "web_token",
+    "emby_token",
+    "p115_cookie",
+    "sessdata",
+    "share_password",
+    "share_pwd",
+    "cms_password",
+    "self_share_own_share_password",
+    "emby_api_key",
+    "openai_api_key",
+    "tmdb_api_key",
+    "tmdb_bearer_token",
     "secret",
 )
 
@@ -79,16 +104,16 @@ _MAPPING_SECRET_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 _VALUE_SECRET_RE = re.compile(
-    r"\b(password|passwd|pwd|receive_code|access_code|token|api_key|apikey|access_token|refresh_token|secret)\b\s*[:=]\s*"
+    r"\b(password|passwd|pwd|receive_code|access_code|share_password|share_pwd|cms_password|self_share_own_share_password|token|api_key|apikey|emby_api_key|openai_api_key|tmdb_api_key|access_token|refresh_token|auth_token|bearer_token|tmdb_bearer_token|csrf_token|hdhive_token|session_token|web_token|emby_token|p115_cookie|sessdata|secret)\b\s*[:=]\s*"
     r"(.*?)(?=(?:\s+https?://)|[,;&\r\n]|$)",
     re.IGNORECASE,
 )
 _QUOTED_VALUE_SECRET_RE = re.compile(
-    r"""((?:["'])(?:password|passwd|pwd|receive_code|access_code|token|api_key|apikey|access_token|refresh_token|secret)(?:["'])\s*[:=]\s*["'])([^"'\r\n]*)(["'])""",
+    r"""((?:["'])(?:password|passwd|pwd|receive_code|access_code|share_password|share_pwd|cms_password|self_share_own_share_password|token|api_key|apikey|emby_api_key|openai_api_key|tmdb_api_key|access_token|refresh_token|auth_token|bearer_token|tmdb_bearer_token|csrf_token|hdhive_token|session_token|web_token|emby_token|p115_cookie|sessdata|secret)(?:["'])\s*[:=]\s*["'])([^"'\r\n]*)(["'])""",
     re.IGNORECASE,
 )
 _BOT_TOKEN_RE = re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{20,}\b")
-_CHINESE_CODE_RE = re.compile(r"((?:访问码|接收码)\s*[：:]\s*)[^\s,，;；]+")
+_CHINESE_CODE_RE = re.compile(r"((?:访问码|接收码|提取码)\s*[：:]\s*)[^\s,，;；]+")
 _HISTORY_RE = re.compile(
     r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d{3})?) "
     r"(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL) (?P<logger>\S+) (?P<text>.*)$"
@@ -154,6 +179,13 @@ def _replace_captured_value(match: re.Match[str]) -> str:
     value_start = match.start(2) - match.start()
     value_end = match.end(2) - match.start()
     return f"{match.group(0)[:value_start]}[REDACTED]{match.group(0)[value_end:]}"
+
+
+def _redact_http_url(match: re.Match[str]) -> str:
+    try:
+        return _redact_url(match.group(0))
+    except (TypeError, UnicodeError, ValueError):
+        return "[REDACTED_URL]"
 
 
 def _structured_value_end(text: str, start: int) -> int:
@@ -223,7 +255,42 @@ def redact_text(value: object) -> str:
     text = _QUOTED_VALUE_SECRET_RE.sub(_replace_captured_value, text)
     text = _VALUE_SECRET_RE.sub(_replace_captured_value, text)
     text = _BOT_TOKEN_RE.sub("[REDACTED]", text)
-    return _CHINESE_CODE_RE.sub(r"\1[REDACTED]", text)
+    text = _CHINESE_CODE_RE.sub(r"\1[REDACTED]", text)
+    return _HTTP_URL_RE.sub(_redact_http_url, text)
+
+
+def _utf8_size(text: str) -> int:
+    return len(text.encode("utf-8", errors="backslashreplace"))
+
+
+def _truncate_utf8(text: str, max_bytes: int = LOG_ENTRY_MAX_BYTES) -> str:
+    if _utf8_size(text) <= max_bytes:
+        return text
+    prefix_budget = max(0, max_bytes - _utf8_size(_TRUNCATION_MARKER))
+    low, high = 0, len(text)
+    while low < high:
+        midpoint = (low + high + 1) // 2
+        if _utf8_size(text[:midpoint]) <= prefix_budget:
+            low = midpoint
+        else:
+            high = midpoint - 1
+    return text[:low] + _TRUNCATION_MARKER
+
+
+def _bounded_history_lines(handle: BinaryIO) -> Iterator[str]:
+    read_limit = LOG_ENTRY_MAX_BYTES + 1
+    while True:
+        chunk = handle.readline(read_limit)
+        if not chunk:
+            return
+        oversized = len(chunk) > LOG_ENTRY_MAX_BYTES and not chunk.endswith(b"\n")
+        if oversized:
+            head = chunk
+            while chunk and not chunk.endswith(b"\n"):
+                chunk = handle.readline(read_limit)
+            yield _truncate_utf8(head.decode("utf-8", errors="replace"))
+        else:
+            yield chunk.decode("utf-8", errors="replace")
 
 
 def _history_paths_newest_first(log_path: Path, backup_count: int) -> tuple[Path, ...]:
@@ -284,6 +351,7 @@ class LogStream:
 class LogHub:
     def __init__(self, capacity: int = LOG_HISTORY_LIMIT):
         self._entries: deque[LogEntry] = deque(maxlen=max(1, capacity))
+        self._total_bytes = 0
         self._next_id = 1
         self._streams: set[LogStream] = set()
         self._lock = threading.RLock()
@@ -295,37 +363,51 @@ class LogHub:
 
     def publish(self, created_at: float, level: str, logger: str, text: str) -> LogEntry:
         with self._lock:
+            safe_text = _truncate_utf8(redact_text(text))
             entry = LogEntry(
                 id=self._next_id,
                 created_at=float(created_at),
                 timestamp=datetime.fromtimestamp(created_at).astimezone().isoformat(timespec="milliseconds"),
                 level=str(level or "INFO").upper(),
                 logger=str(logger or "root"),
-                text=redact_text(text),
+                text=safe_text,
             )
             self._next_id += 1
+            if len(self._entries) == self._entries.maxlen:
+                self._total_bytes -= _utf8_size(self._entries.popleft().text)
             self._entries.append(entry)
+            self._total_bytes += _utf8_size(safe_text)
+            while self._entries and self._total_bytes > LOG_HISTORY_MAX_BYTES:
+                self._total_bytes -= _utf8_size(self._entries.popleft().text)
             for stream in tuple(self._streams):
                 stream._offer(entry)
             return entry
 
     def restore(self, log_path: Path, backup_count: int = LOG_BACKUP_COUNT) -> None:
         remaining = self._entries.maxlen
+        remaining_bytes = LOG_HISTORY_MAX_BYTES
         blocks: list[deque[str]] = []
         for path in _history_paths_newest_first(Path(log_path), backup_count):
-            if remaining == 0:
+            if remaining == 0 or remaining_bytes == 0:
                 break
             try:
-                with path.open(encoding="utf-8", errors="replace") as handle:
-                    block = deque(handle, maxlen=remaining)
-            except (OSError, UnicodeError):
+                with path.open("rb") as handle:
+                    block: deque[str] = deque()
+                    block_bytes = 0
+                    for line in _bounded_history_lines(handle):
+                        stripped = line.strip()
+                        block.append(stripped)
+                        block_bytes += _utf8_size(stripped)
+                        while len(block) > remaining or block_bytes > remaining_bytes:
+                            block_bytes -= _utf8_size(block.popleft())
+            except OSError:
                 continue
             blocks.append(block)
             remaining -= len(block)
+            remaining_bytes -= block_bytes
 
         for block in reversed(blocks):
-            for line in block:
-                stripped = line.strip()
+            for stripped in block:
                 match = _HISTORY_RE.match(stripped)
                 if match is None:
                     self.publish(time.time(), "INFO", "history", stripped)
@@ -354,8 +436,15 @@ class LogHub:
 
 
 class RedactingFormatter(logging.Formatter):
+    def __init__(self, *args, escape_invalid_unicode: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.escape_invalid_unicode = escape_invalid_unicode
+
     def format(self, record: logging.LogRecord) -> str:
-        return redact_text(super().format(record))
+        text = redact_text(super().format(record))
+        if self.escape_invalid_unicode:
+            return text.encode("utf-8", errors="backslashreplace").decode("utf-8")
+        return text
 
 
 class LogHubHandler(logging.Handler):
@@ -501,13 +590,14 @@ def configure_logging(
         for handler in tuple(logger.handlers):
             _close_handler(logger, handler)
 
-        formatter = RedactingFormatter(LOG_FORMAT, LOG_DATE_FORMAT)
+        output_formatter = RedactingFormatter(LOG_FORMAT, LOG_DATE_FORMAT, escape_invalid_unicode=True)
+        hub_formatter = RedactingFormatter(LOG_FORMAT, LOG_DATE_FORMAT)
         handlers: list[logging.Handler] = []
         stream_handler = SafeStreamHandler(stream if stream is not None else sys.stdout)
-        stream_handler.setFormatter(formatter)
+        stream_handler.setFormatter(output_formatter)
         handlers.append(stream_handler)
         hub_handler = LogHubHandler(hub)
-        hub_handler.setFormatter(formatter)
+        hub_handler.setFormatter(hub_formatter)
         handlers.append(hub_handler)
 
         file_handler: SafeRotatingFileHandler | None = None
@@ -520,7 +610,7 @@ def configure_logging(
                 backupCount=backup_count,
                 encoding="utf-8",
             )
-            file_handler.setFormatter(formatter)
+            file_handler.setFormatter(output_formatter)
             handlers.append(file_handler)
         except (OSError, UnicodeError):
             file_error = "file logging unavailable"

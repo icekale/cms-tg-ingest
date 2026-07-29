@@ -119,6 +119,71 @@ class HdhiveWebTests(unittest.TestCase):
 
         self.assertEqual(result, "legacy-server")
         self.assertEqual(len(calls), 1)
+
+    def test_maybe_start_web_server_skips_positional_only_log_hub_for_starter(self):
+        config = SimpleNamespace(
+            web_enabled=True,
+            web_token="secret",
+            task_engine_enabled=True,
+            task_max_retries=3,
+            web_host="127.0.0.1",
+            web_port=0,
+            frontend_dist_path="/tmp/frontend",
+            self_share_receive_cid="",
+            self_share_own_share_password="",
+            cms_state_db_path="/tmp/cms.db",
+        )
+
+        def positional_only_starter(
+            task_store,
+            host,
+            port,
+            log_hub=None,
+            /,
+            *,
+            web_token,
+            task_engine_enabled,
+            max_retries,
+            frontend_dist_path,
+            self_share_config,
+        ):
+            return log_hub
+
+        result = bridge.maybe_start_web_server(
+            config,
+            object(),
+            starter=positional_only_starter,
+            log_hub=object(),
+        )
+
+        self.assertIsNone(result)
+
+    def test_maybe_start_web_server_skips_positional_only_log_hub_even_with_var_keywords(self):
+        config = SimpleNamespace(
+            web_enabled=True,
+            web_token="secret",
+            task_engine_enabled=True,
+            task_max_retries=3,
+            web_host="127.0.0.1",
+            web_port=0,
+            frontend_dist_path="/tmp/frontend",
+            self_share_receive_cid="",
+            self_share_own_share_password="",
+            cms_state_db_path="/tmp/cms.db",
+        )
+
+        def positional_only_starter(task_store, host, port, log_hub=None, /, **kwargs):
+            return log_hub, kwargs.get("log_hub")
+
+        result = bridge.maybe_start_web_server(
+            config,
+            object(),
+            starter=positional_only_starter,
+            log_hub=object(),
+        )
+
+        self.assertEqual(result, (None, None))
+
     def make_app(self, *, background_jobs=None):
         directory = tempfile.TemporaryDirectory()
         store = HdhiveSubscriptionStore(Path(directory.name) / "tasks.db")

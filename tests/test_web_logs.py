@@ -178,6 +178,88 @@ class WebLogTests(unittest.TestCase):
             finally:
                 bridge.stop_web_server(server)
 
+    def test_sse_connection_limit_rejects_excess_clients_and_releases_capacity(self):
+        with tempfile.TemporaryDirectory() as tmp, patch("app.web.SSE_MAX_CLIENTS", 1, create=True), patch(
+            "app.web.SSE_HEARTBEAT_SECONDS", 0.05
+        ):
+            hub = LogHub()
+            server = start_web_server(TaskStore(Path(tmp) / "tasks.db"), "127.0.0.1", 0, log_hub=hub)
+            first_connection = first_response = None
+            second_connection = second_response = None
+            third_connection = third_response = None
+            try:
+                first_connection, first_response = self.open_stream(server)
+                self.read_event(first_response)
+
+                second_connection, second_response = self.open_stream(server)
+                self.assertEqual(second_response.status, 429)
+                second_response.read()
+                second_response.close()
+                second_connection.close()
+                second_response = second_connection = None
+
+                first_response.close()
+                first_connection.close()
+                first_response = first_connection = None
+                deadline = time.monotonic() + 1
+                while hub.subscriber_count and time.monotonic() < deadline:
+                    time.sleep(0.02)
+
+                third_connection, third_response = self.open_stream(server)
+                self.assertEqual(third_response.status, 200)
+                self.read_event(third_response)
+            finally:
+                for response in (first_response, second_response, third_response):
+                    if response is not None:
+                        response.close()
+                for connection in (first_connection, second_connection, third_connection):
+                    if connection is not None:
+                        connection.close()
+                bridge.stop_web_server(server)
+
+    def test_sse_stream_close_failure_still_releases_connection_capacity(self):
+        close_attempted = Event()
+
+        class FailingCloseStream:
+            snapshot = ()
+
+            def next_event(self, _timeout):
+                return LogEvent("gap")
+
+            def close(self):
+                close_attempted.set()
+                raise RuntimeError("simulated close failure")
+
+        class FailingCloseHub:
+            def open_stream(self, _spec, queue_size=256):
+                return FailingCloseStream()
+
+        with tempfile.TemporaryDirectory() as tmp, patch("app.web.SSE_MAX_CLIENTS", 1, create=True):
+            server = start_web_server(
+                TaskStore(Path(tmp) / "tasks.db"),
+                "127.0.0.1",
+                0,
+                log_hub=FailingCloseHub(),
+            )
+            first_connection = first_response = None
+            second_connection = second_response = None
+            try:
+                first_connection, first_response = self.open_stream(server)
+                self.read_event(first_response)
+                self.read_event(first_response)
+                self.assertTrue(close_attempted.wait(1))
+
+                second_connection, second_response = self.open_stream(server)
+                self.assertEqual(second_response.status, 200)
+            finally:
+                for response in (first_response, second_response):
+                    if response is not None:
+                        response.close()
+                for connection in (first_connection, second_connection):
+                    if connection is not None:
+                        connection.close()
+                bridge.stop_web_server(server)
+
     def test_sse_write_timeout_releases_nonreading_subscription(self):
         class TrackingHub(LogHub):
             def __init__(self):

@@ -48,6 +48,17 @@ test('log state keeps newest first, enforces limit, and parses multiline payload
   assert.equal(preservedScrollTop(false, 120, 800, 860), 0)
 })
 
+test('full log list preserves the reading position when prepend keeps total height unchanged', () => {
+  const previousTop = 120
+  const unchangedHeight = 800
+  const insertedRowHeight = 36
+
+  assert.equal(
+    preservedScrollTop(true, previousTop, unchangedHeight, unchangedHeight, insertedRowHeight),
+    previousTop + insertedRowHeight,
+  )
+})
+
 test('controller closes the previous EventSource on reconnect and on disposal', () => {
   const sources = []
   const snapshots = []
