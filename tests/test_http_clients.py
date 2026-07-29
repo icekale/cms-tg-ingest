@@ -186,6 +186,37 @@ class HttpClientTests(unittest.TestCase):
         self.assertTrue(all(method == "GET" for _url, method, _data, _params in http.calls))
         self.assertFalse(any(url.endswith("/share/receive") for url, *_rest in http.calls))
 
+    def test_prepare_share_receive_snapshots_real_file_id_not_parent_cid(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                if url.endswith("/share/snap"):
+                    return {
+                        "state": True,
+                        "data": {
+                            "shareinfo": {"share_title": "123 (2026) {tmdb-1228710}"},
+                            "list": [{"fid": "source-id", "n": "123 (2026) {tmdb-1228710}.mkv"}],
+                        },
+                    }
+                if url.endswith("/files"):
+                    return {
+                        "state": True,
+                        "data": [
+                            {
+                                "fid": "old-local-id",
+                                "cid": "pending-cid",
+                                "n": "123 (2026) {tmdb-1228710}.mkv",
+                                "fc": 1,
+                            }
+                        ],
+                    }
+                raise AssertionError(url)
+
+        client = P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        intent = client.prepare_share_receive("abc", "1234", "pending-cid")
+
+        self.assertEqual(intent["target_pre_call_file_ids"], ["old-local-id"])
+
     def test_prepare_share_receive_bypasses_preseeded_source_and_target_caches(self):
         class FakeHttp:
             def __init__(self):

@@ -731,7 +731,7 @@ class P115WebClient:
             existing_items = self.list_files(str(target_cid), limit=500, use_cache=False)
             existing_file_ids = [
                 file_id
-                for file_id in (p115_file_id(item) for item in existing_items)
+                for file_id in (p115_item_id(item) for item in existing_items)
                 if file_id
             ]
             snapshot_complete = len(existing_items) < 500
