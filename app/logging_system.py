@@ -39,8 +39,48 @@ _HEADER_SECRET_RE = re.compile(
     r"\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key)\b\s*[:=]\s*([^\r\n]+)",
     re.IGNORECASE,
 )
+_SENSITIVE_MAPPING_KEYS = (
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "password",
+    "passwd",
+    "pwd",
+    "receive_code",
+    "access_code",
+    "token",
+    "api_key",
+    "apikey",
+    "key",
+    "access_token",
+    "refresh_token",
+    "secret",
+)
+
+
+def _mapping_key_pattern(key: str) -> str:
+    parts = []
+    for character in key:
+        codepoints = [ord(character)]
+        if character.isalpha():
+            codepoints.append(ord(character.upper()))
+        alternatives = [re.escape(character), *(rf"\\u{codepoint:04x}" for codepoint in codepoints)]
+        parts.append("(?:" + "|".join(dict.fromkeys(alternatives)) + ")")
+    return "".join(parts)
+
+
+_SENSITIVE_MAPPING_KEY_RE = "(?:" + "|".join(_mapping_key_pattern(key) for key in _SENSITIVE_MAPPING_KEYS) + ")"
+_MAPPING_SECRET_KEY_RE = re.compile(
+    r"(?P<prefix>(?P<key_quote>[\"'])"
+    + _SENSITIVE_MAPPING_KEY_RE
+    + r"(?P=key_quote)\s*[:=]\s*)",
+    re.IGNORECASE,
+)
 _VALUE_SECRET_RE = re.compile(
-    r"\b(password|passwd|pwd|receive_code|access_code|token|api_key|apikey|access_token|refresh_token|secret)\b\s*[:=]\s*([^\s,;&]+)",
+    r"\b(password|passwd|pwd|receive_code|access_code|token|api_key|apikey|access_token|refresh_token|secret)\b\s*[:=]\s*"
+    r"(.*?)(?=(?:\s+https?://)|[,;&\r\n]|$)",
     re.IGNORECASE,
 )
 _QUOTED_VALUE_SECRET_RE = re.compile(
@@ -116,10 +156,70 @@ def _replace_captured_value(match: re.Match[str]) -> str:
     return f"{match.group(0)[:value_start]}[REDACTED]{match.group(0)[value_end:]}"
 
 
+def _structured_value_end(text: str, start: int) -> int:
+    if start >= len(text):
+        return start
+    quote = text[start]
+    if quote in {"'", '"'}:
+        cursor = start + 1
+        while cursor < len(text):
+            if text[cursor] == "\\":
+                cursor += 2
+            elif text[cursor] == quote:
+                return cursor + 1
+            else:
+                cursor += 1
+        return len(text)
+
+    pairs = {"{": "}", "[": "]", "(": ")"}
+    if quote in pairs:
+        stack = [pairs[quote]]
+        cursor = start + 1
+        while cursor < len(text) and stack:
+            character = text[cursor]
+            if character in {"'", '"'}:
+                cursor = _structured_value_end(text, cursor)
+                continue
+            if character in pairs:
+                stack.append(pairs[character])
+            elif character == stack[-1]:
+                stack.pop()
+            cursor += 1
+        return cursor if not stack else len(text)
+
+    cursor = start
+    while cursor < len(text) and text[cursor] not in ",;;&\r\n]}":
+        cursor += 1
+    return cursor
+
+
+def _redact_mapping_values(text: str) -> str:
+    parts: list[str] = []
+    cursor = 0
+    for match in _MAPPING_SECRET_KEY_RE.finditer(text):
+        if match.start() < cursor:
+            continue
+        value_start = match.end()
+        value_end = _structured_value_end(text, value_start)
+        if value_end <= value_start:
+            continue
+        parts.append(text[cursor:value_start])
+        value = text[value_start:value_end]
+        if len(value) >= 2 and value[0] in {"'", '"'} and value[-1] == value[0]:
+            value = f"{value[0]}[REDACTED]{value[-1]}"
+        else:
+            value = "[REDACTED]"
+        parts.append(value)
+        cursor = value_end
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
 def redact_text(value: object) -> str:
     text = str(value)
     text = _URL_SECRET_RE.sub(r"\1[REDACTED]", text)
     text = _HEADER_SECRET_RE.sub(_replace_captured_value, text)
+    text = _redact_mapping_values(text)
     text = _QUOTED_VALUE_SECRET_RE.sub(_replace_captured_value, text)
     text = _VALUE_SECRET_RE.sub(_replace_captured_value, text)
     text = _BOT_TOKEN_RE.sub("[REDACTED]", text)
@@ -129,6 +229,23 @@ def redact_text(value: object) -> str:
 def _history_paths_newest_first(log_path: Path, backup_count: int) -> tuple[Path, ...]:
     rotated = tuple(log_path.with_name(f"{log_path.name}.{index}") for index in range(1, backup_count + 1))
     return (log_path, *rotated)
+
+
+def _prune_stale_backups(log_path: Path, backup_count: int) -> None:
+    try:
+        candidates = tuple(log_path.parent.glob(f"{log_path.name}.*"))
+    except OSError:
+        return
+    for candidate in candidates:
+        try:
+            index = int(candidate.name.rsplit(".", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        if index > max(0, backup_count):
+            try:
+                candidate.unlink()
+            except OSError:
+                continue
 
 
 class LogStream:
@@ -253,6 +370,26 @@ class LogHubHandler(logging.Handler):
             return
 
 
+class SafeStreamHandler(logging.StreamHandler):
+    def __init__(self, stream: TextIO | None = None):
+        self._logging_disabled = False
+        self._failure_reported = False
+        super().__init__(stream)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if not self._logging_disabled:
+            super().emit(record)
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        self._logging_disabled = True
+        if not self._failure_reported:
+            self._failure_reported = True
+            try:
+                sys.__stderr__.write("cms-tg-ingest: stdout logging disabled after write failure\n")
+            except Exception:
+                pass
+
+
 class SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
     def __init__(self, *args, **kwargs):
         self._logging_disabled = False
@@ -358,6 +495,7 @@ def configure_logging(
 
         hub = LogHub(history_limit)
         path = Path(log_path)
+        _prune_stale_backups(path, backup_count)
         hub.restore(path, backup_count)
 
         for handler in tuple(logger.handlers):
@@ -365,7 +503,7 @@ def configure_logging(
 
         formatter = RedactingFormatter(LOG_FORMAT, LOG_DATE_FORMAT)
         handlers: list[logging.Handler] = []
-        stream_handler = logging.StreamHandler(stream if stream is not None else sys.stdout)
+        stream_handler = SafeStreamHandler(stream if stream is not None else sys.stdout)
         stream_handler.setFormatter(formatter)
         handlers.append(stream_handler)
         hub_handler = LogHubHandler(hub)

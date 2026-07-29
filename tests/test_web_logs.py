@@ -65,6 +65,18 @@ class WebLogTests(unittest.TestCase):
         self.assertEqual(body, b"")
         self.assertIsNone(spec)
 
+    def test_special_character_token_round_trips_through_cookie_and_case_insensitive_headers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self.make_app(tmp, token="a/b", hub=LogHub())
+            redirect = app.prepare_log_stream("/api/v1/logs/stream?token=a%2Fb", {})
+            cookie = redirect[1]["Set-Cookie"].split(";", 1)[0]
+            cookie_auth = app.prepare_log_stream("/api/v1/logs/stream", {"cOoKiE": cookie})
+            header_auth = app.prepare_log_stream("/api/v1/logs/stream", {"X-WEB-TOKEN": "a/b"})
+
+        self.assertEqual(redirect[0], 303)
+        self.assertEqual(cookie_auth[0], 200)
+        self.assertEqual(header_auth[0], 200)
+
     def test_encode_sse_event_is_single_json_data_frame(self):
         frame = encode_sse_event("log", {"text": "line one\nline two"}, event_id=7)
         self.assertEqual(
@@ -235,6 +247,36 @@ class WebLogTests(unittest.TestCase):
                 self.assertEqual(gap["data"], {"reason": "slow_client"})
                 self.assertTrue(closed.wait(1))
                 self.assertEqual(response.fp.readline(), b"")
+            finally:
+                if response is not None:
+                    response.close()
+                if connection is not None:
+                    connection.close()
+                bridge.stop_web_server(server)
+
+    def test_malformed_get_target_returns_400_and_server_remains_usable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            hub = LogHub()
+            server = start_web_server(TaskStore(Path(tmp) / "tasks.db"), "127.0.0.1", 0, log_hub=hub)
+            connection = response = None
+            try:
+                for target in (
+                    b"http://[",
+                    b"http://localhost:bad",
+                    b"http:///api/v1/logs/stream",
+                    b"http://@/api/v1/logs/stream",
+                    b"http://:80/api/v1/logs/stream",
+                ):
+                    with socket.create_connection(server.server_address, timeout=1) as client:
+                        client.sendall(b"GET " + target + b" HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                        malformed_response = client.recv(512)
+                    self.assertTrue(malformed_response.startswith(b"HTTP/1.0 400"))
+                connection = http.client.HTTPConnection(*server.server_address, timeout=1)
+                connection.request("GET", "/")
+                response = connection.getresponse()
+
+                self.assertEqual(hub.subscriber_count, 0)
+                self.assertEqual(response.status, 302)
             finally:
                 if response is not None:
                     response.close()

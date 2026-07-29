@@ -1,5 +1,7 @@
+import contextlib
 import io
 import logging
+import sys
 import tempfile
 import unittest
 import unittest.mock
@@ -12,6 +14,7 @@ from app.logging_system import (
     parse_log_filter,
     redact_text,
 )
+from app.web import encode_sse_event
 
 
 class LoggingSystemTests(unittest.TestCase):
@@ -37,6 +40,12 @@ class LoggingSystemTests(unittest.TestCase):
             self.assertNotIn(secret, redacted)
         self.assertIn("safe=yes", redacted)
         self.assertIn("[REDACTED]", redacted)
+
+    def test_redact_text_removes_the_full_multiword_plain_secret_value(self):
+        redacted = redact_text("password: correct horse safe=blue battery-staple")
+
+        for secret in ("correct horse", "safe=blue", "battery-staple"):
+            self.assertNotIn(secret, redacted)
 
     def test_redact_text_removes_structured_mapping_credentials_and_receive_codes(self):
         source = '{"password": "json-secret", "token": "json-token"} {\'api_key\': \'python-secret\'} 接收码：1212'
@@ -65,6 +74,55 @@ class LoggingSystemTests(unittest.TestCase):
             ):
                 for secret in ("json-secret", "python-secret", "1212"):
                     self.assertNotIn(secret, output)
+            runtime.close()
+
+    def test_structured_header_credentials_and_numeric_codes_are_redacted_from_every_sink(self):
+        source = (
+            '{"Authorization":"Bearer bearer-secret","Cookie":"session=cookie-secret",'
+            '"receive_code":1212,"access_code":1234,"key":"generic-key-secret"} '
+            "{'proxy-authorization': 'Bearer proxy-secret', 'x-api-key': 'api-secret', "
+            "'receive_code': 5678, 'access_code': 9876} "
+            "{'Cookie': {'session': 'nested-cookie-secret', 'other': 'nested-value-secret'}} "
+            "{'Authorization': Bearer bare-bearer-secret} "
+            r'{"C\u006fokie":"escaped-cookie-secret","\u0041uthorization":"escaped-auth-secret"}'
+        )
+        secrets = (
+            "bearer-secret",
+            "cookie-secret",
+            "1212",
+            "1234",
+            "generic-key-secret",
+            "proxy-secret",
+            "api-secret",
+            "5678",
+            "9876",
+            "nested-cookie-secret",
+            "nested-value-secret",
+            "bare-bearer-secret",
+            "escaped-cookie-secret",
+            "escaped-auth-secret",
+        )
+
+        direct_redacted = redact_text(source)
+        for secret in secrets:
+            self.assertNotIn(secret, direct_redacted)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stream = io.StringIO()
+            logger = logging.Logger("structured-headers", logging.INFO)
+            logger.propagate = False
+            path = Path(tmp) / "app.log"
+            runtime = configure_logging("INFO", log_path=path, stream=stream, root_logger=logger)
+            logger.info(source)
+            for handler in logger.handlers:
+                handler.flush()
+
+            hub_text = runtime.hub.snapshot(LogFilter("all", 1000, ""))[0].text
+            sse_frame = encode_sse_event("log", {"text": hub_text})
+            for output in (stream.getvalue(), path.read_text(encoding="utf-8"), hub_text, sse_frame.decode("utf-8")):
+                for secret in secrets:
+                    self.assertNotIn(secret, output)
+                self.assertIn("[REDACTED]", output)
             runtime.close()
 
     def test_parse_log_filter_accepts_only_documented_values(self):
@@ -182,6 +240,39 @@ class LoggingSystemTests(unittest.TestCase):
                 ["app.log.1", "app.log.2", "app.log.3", "app.log.4"],
             )
 
+    def test_configure_logging_prunes_stale_numeric_backups_beyond_configured_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "app.log"
+            for index in range(1, 7):
+                path.with_name(f"{path.name}.{index}").write_text(str(index), encoding="utf-8")
+            logger = logging.Logger("stale-rotation", logging.INFO)
+            logger.propagate = False
+
+            runtime = configure_logging("INFO", log_path=path, stream=io.StringIO(), root_logger=logger)
+
+            self.assertEqual(
+                sorted(item.name for item in path.parent.glob("app.log.*")),
+                ["app.log.1", "app.log.2", "app.log.3", "app.log.4"],
+            )
+            runtime.close()
+
+    def test_stale_backup_pruning_failure_does_not_block_logging_startup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "app.log"
+            path.with_name(f"{path.name}.5").write_text("stale", encoding="utf-8")
+            path.with_name(f"{path.name}.6").mkdir()
+            stream = io.StringIO()
+            logger = logging.Logger("stale-pruning-failure", logging.INFO)
+            logger.propagate = False
+
+            runtime = configure_logging("INFO", log_path=path, stream=stream, root_logger=logger)
+            logger.info("logging remains available")
+
+            self.assertFalse(path.with_name(f"{path.name}.5").exists())
+            self.assertTrue(path.with_name(f"{path.name}.6").is_dir())
+            self.assertIn("logging remains available", stream.getvalue())
+            runtime.close()
+
     def test_file_handler_creation_failure_keeps_stdout_and_hub_alive(self):
         with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch(
             "app.logging_system.SafeRotatingFileHandler", side_effect=OSError("read only")
@@ -226,5 +317,35 @@ class LoggingSystemTests(unittest.TestCase):
             self.assertEqual(
                 runtime.hub.snapshot(LogFilter("main", 1000, ""))[0].text.endswith("still reaches memory"),
                 True,
+            )
+            runtime.close()
+
+    def test_broken_stdout_never_leaks_log_records_to_stderr_and_keeps_other_sinks_alive(self):
+        class BrokenStream:
+            def write(self, _text):
+                raise OSError("stdout unavailable")
+
+            def flush(self):
+                raise OSError("stdout unavailable")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stderr = io.StringIO()
+            logger = logging.Logger("broken-stdout", logging.INFO)
+            logger.propagate = False
+            path = Path(tmp) / "app.log"
+            runtime = configure_logging("INFO", log_path=path, stream=BrokenStream(), root_logger=logger)
+            previous_raise_exceptions = logging.raiseExceptions
+            logging.raiseExceptions = True
+            try:
+                with contextlib.redirect_stderr(stderr), unittest.mock.patch.object(sys, "__stderr__", stderr):
+                    logger.info("Authorization: Bearer %s", "stdout-leak-secret")
+            finally:
+                logging.raiseExceptions = previous_raise_exceptions
+
+            self.assertNotIn("stdout-leak-secret", stderr.getvalue())
+            self.assertNotIn("stdout-leak-secret", path.read_text(encoding="utf-8"))
+            self.assertNotIn(
+                "stdout-leak-secret",
+                runtime.hub.snapshot(LogFilter("all", 1000, ""))[0].text,
             )
             runtime.close()

@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 from typing import Any
-from urllib.parse import parse_qs, quote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from . import __version__
 from .background_jobs import BackgroundJobCoordinator, JobSubmission, redact_background_text
@@ -60,6 +60,14 @@ LEGACY_LIFECYCLE_REASON = "旧版任务引擎模式不支持终止或删除任�
 TASK_NOT_FOUND_MESSAGE = "任务不存在或已过期"
 _LOG_STREAM_PATH = "/api/v1/logs/stream"
 _LOG_QUERY_KEYS = frozenset({"filter_type", "lines", "keyword", "token"})
+
+
+def _parse_request_target(path: str):
+    parsed = urlparse(path)
+    if parsed.scheme and (not parsed.netloc or not parsed.hostname):
+        raise ValueError("absolute request target requires an authority")
+    _ = parsed.port
+    return parsed
 
 
 class RequestBodyTooLarge(ValueError):
@@ -1380,18 +1388,29 @@ class WebApp:
     def _authorization_source(self, path: str, headers: dict[str, str]) -> str:
         if not self.web_token:
             return "anonymous"
-        query = parse_qs(urlparse(path).query)
+        try:
+            query = parse_qs(_parse_request_target(path).query)
+        except (TypeError, ValueError):
+            return ""
         if query.get("token", [""])[0] == self.web_token:
             return "query"
-        if (headers.get("X-Web-Token") or headers.get("x-web-token")) == self.web_token:
+        if self._header_value(headers, "X-Web-Token") == self.web_token:
             return "header"
         cookie = SimpleCookie()
         try:
-            cookie.load(headers.get("Cookie") or headers.get("cookie") or "")
+            cookie.load(self._header_value(headers, "Cookie"))
         except CookieError:
             return ""
-        if cookie.get("cms_web_token") and cookie["cms_web_token"].value == self.web_token:
+        if cookie.get("cms_web_token") and unquote(cookie["cms_web_token"].value) == self.web_token:
             return "cookie"
+        return ""
+
+    @staticmethod
+    def _header_value(headers: dict[str, str], name: str) -> str:
+        normalized_name = name.casefold()
+        for header_name, value in headers.items():
+            if header_name.casefold() == normalized_name:
+                return value
         return ""
 
     def _authorized(self, path: str, headers: dict[str, str]) -> bool:
@@ -1406,7 +1425,7 @@ class WebApp:
         headers: dict[str, str],
     ) -> tuple[int, dict[str, str], bytes, LogFilter | None]:
         try:
-            parsed = urlparse(path)
+            parsed = _parse_request_target(path)
         except (TypeError, ValueError):
             return 400, {"Content-Type": "text/plain; charset=utf-8"}, b"Bad Request", None
         if parsed.path != _LOG_STREAM_PATH:
@@ -1454,10 +1473,13 @@ class WebApp:
     ) -> tuple[int, dict[str, str], bytes]:
         if len(body) > MAX_REQUEST_BODY_BYTES:
             return 413, {"Content-Type": "text/plain; charset=utf-8"}, b"Payload Too Large"
+        try:
+            parsed = _parse_request_target(path)
+        except (TypeError, ValueError):
+            return 400, {"Content-Type": "text/plain; charset=utf-8"}, b"Bad Request"
         authorization_source = self._authorization_source(path, headers)
         if not authorization_source:
             return 403, {"Content-Type": "text/plain; charset=utf-8"}, b"Forbidden"
-        parsed = urlparse(path)
         if method == "GET" and authorization_source == "query":
             return 303, {"Location": parsed.path or "/", "Set-Cookie": self._web_token_cookie()}, b""
         auth_headers = {"Set-Cookie": self._web_token_cookie()} if authorization_source in {"query", "header"} else {}
@@ -2033,7 +2055,12 @@ def start_web_server(
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            if urlparse(self.path).path == _LOG_STREAM_PATH:
+            try:
+                parsed = _parse_request_target(self.path)
+            except (TypeError, ValueError):
+                self._request_body_error(400, b"Bad Request")
+                return
+            if parsed.path == _LOG_STREAM_PATH:
                 self._serve_log_stream()
                 return
             self._serve()
