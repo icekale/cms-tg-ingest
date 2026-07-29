@@ -455,11 +455,19 @@ def find_recent_direct_library_strm_source_dir(
     row: dict[str, Any],
     recognition: dict[str, Any],
     share_name: str = "",
+    *,
+    min_update_time: float = 0,
 ) -> tuple[Path, str] | None:
     try:
         since = float(row.get("created_at") or row.get("updated_at") or 0) - 60
     except (TypeError, ValueError):
         since = 0
+    try:
+        explicit_since = float(min_update_time or 0)
+    except (TypeError, ValueError):
+        explicit_since = 0
+    if explicit_since > 0:
+        since = max(since, explicit_since)
     explicit_tmdb = explicit_task_tmdb_id(recognition, row, share_name)
     expected_tmdb = expected_task_tmdb_id(recognition, row)
     tokens = candidate_tokens(recognition, share_name)

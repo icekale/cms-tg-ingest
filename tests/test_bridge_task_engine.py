@@ -4322,6 +4322,62 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(recognizing.metadata["category"], "亚洲电影")
             self.assertEqual(self.telegram.messages, [])
 
+    def test_organizing_reprocess_ignores_direct_strm_older_than_current_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            western_root = Path(tmp) / "library" / "western"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"欧美电影": western_root}),
+            )
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="悬案 (2026)") or row
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="auto_organize_submitted",
+            ) or row
+            recognition = {
+                "ok": True,
+                "title": "悬案",
+                "share_name": "悬案 (2026)",
+                "tmdb_id": "273114",
+                "type": "tv",
+                "category": "国产电视",
+                "category_status": "self_share_resolved",
+            }
+            row = self.submissions.update_recognition(
+                int(row["id"]), recognition, "self_share_resolved"
+            ) or row
+            row = self.submissions.update_category(int(row["id"]), "国产电视", "selected") or row
+            stale_dir = western_root / "unmatched-old-folder"
+            self._write_strm(stale_dir, content="http://cms/d/stale/movie.mkv")
+            stale_time = float(row["created_at"]) + 10
+            os.utime(stale_dir / "movie.strm", (stale_time, stale_time))
+            os.utime(stale_dir, (stale_time, stale_time))
+            update_started_at = stale_time + 120
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "recognition": recognition,
+                    "update_started_at": update_started_at,
+                    "reprocess_started_at": update_started_at,
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            stored_recognition = bridge.parse_recognition_json(stored)
+
+        self.assertEqual(result.outcome, StageOutcome.DEFER)
+        self.assertEqual(stored["category_choice"], "国产电视")
+        self.assertEqual(stored["category_status"], "selected")
+        self.assertEqual(stored_recognition["category"], "国产电视")
+        self.assertEqual(stored_recognition["category_status"], "self_share_resolved")
+
     def test_organizing_stage_uses_recent_direct_strm_to_recover_wrong_tmdb_search(self):
         with tempfile.TemporaryDirectory() as tmp:
             bangumi_root = Path(tmp) / "library" / "bangumi"

@@ -1317,6 +1317,10 @@ class BridgeSelfShareTaskWorkflow:
         reprocess_started_at = as_float(stage_metadata.get("reprocess_started_at"), 0)
         if reprocess_started_at:
             min_update_time = max(min_update_time, reprocess_started_at - 5)
+        direct_min_update_time = max(
+            update_started_at - 5 if update_started_at else 0,
+            reprocess_started_at - 5 if reprocess_started_at else 0,
+        )
         organized_scan_cursor = stage_metadata.get("organized_scan_cursor")
         if not isinstance(organized_scan_cursor, dict):
             organized_scan_cursor = None
@@ -1359,6 +1363,7 @@ class BridgeSelfShareTaskWorkflow:
                     row,
                     {**recognition, "tmdb_id": folder_tmdb},
                     title,
+                    min_update_time=direct_min_update_time,
                 )
                 if direct_signal:
                     direct_source, _direct_category = direct_signal
@@ -1374,7 +1379,13 @@ class BridgeSelfShareTaskWorkflow:
                                 folder = dict(folder)
                                 folder["direct_relative_path"] = relative_path
         if folder is None:
-            direct_signal = find_recent_direct_library_strm_source_dir(self.move_config, row, recognition, title)
+            direct_signal = find_recent_direct_library_strm_source_dir(
+                self.move_config,
+                row,
+                recognition,
+                title,
+                min_update_time=direct_min_update_time,
+            )
             if direct_signal:
                 direct_source, direct_category = direct_signal
                 direct_tmdb = extract_tmdb_id_from_name(str(direct_source))
@@ -1440,9 +1451,10 @@ class BridgeSelfShareTaskWorkflow:
                 if folder and has_tmdb_folder_mismatch(folder, recognition, row, title):
                     folder = None
                 category = str(recognition.get("category") or "").strip()
-                if category and hasattr(self.store, "update_category"):
+                preserve_authoritative_category = not folder and has_authoritative_category(row, recognition)
+                if category and hasattr(self.store, "update_category") and not preserve_authoritative_category:
                     row = self.store.update_category(int(row["id"]), category, "selected") or row
-                if hasattr(self.store, "update_recognition"):
+                if hasattr(self.store, "update_recognition") and not preserve_authoritative_category:
                     row = self.store.update_recognition(
                         int(row["id"]),
                         recognition,
