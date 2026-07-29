@@ -16,7 +16,7 @@ from .task_store import (
 )
 
 
-TASK_ACTIONS = frozenset({"retry", "emby", "restore", "reprocess"})
+TASK_ACTIONS = frozenset({"retry", "emby", "restore", "reprocess", "terminate"})
 _DOWNSTREAM_RECOVERY_STAGES = frozenset({TaskStage.MOVED, TaskStage.EMBY_CONFIRMED, TaskStage.CLEANED})
 _TERMINAL_ACTION_STATUSES = frozenset({TaskStatus.FAILED, TaskStatus.NEEDS_ACTION, TaskStatus.SUCCEEDED})
 
@@ -28,12 +28,38 @@ class TaskActionResult:
     reason: str
 
 
+def task_termination_requested(task: TaskSnapshot) -> bool:
+    value = task.metadata.get("termination_requested_at")
+    if isinstance(value, bool):
+        return value
+    try:
+        return float(value or 0) > 0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def available_lifecycle_actions(task: TaskSnapshot) -> frozenset[str]:
+    requested = task_termination_requested(task)
+    if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+        return frozenset() if requested else frozenset({"terminate"})
+    if task.status in {
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.NEEDS_ACTION,
+        TaskStatus.CANCELLED,
+    } and not str(task.claimed_by or "").strip():
+        return frozenset({"delete"})
+    return frozenset()
+
+
 def available_task_actions(task: TaskSnapshot, max_retries: int) -> frozenset[str]:
     """Return actions valid for this snapshot without mutating the task."""
-    if str(task.claimed_by or "").strip():
-        return frozenset()
-
     actions: set[str] = set()
+    if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING} and not task_termination_requested(task):
+        actions.add("terminate")
+    if str(task.claimed_by or "").strip():
+        return frozenset(actions)
+
     decision = decide_retry(task, max_retries=max_retries)
     if task.status == TaskStatus.FAILED and decision.action == RetryAction.RETRY_CURRENT_STAGE:
         actions.add("retry")
@@ -91,6 +117,15 @@ def apply_task_action(
         return TaskActionResult(False, None, "任务不存在或已过期")
     if action not in TASK_ACTIONS:
         return TaskActionResult(False, task, "不支持的任务操作")
+    if action == "terminate":
+        if task.status == TaskStatus.CANCELLED:
+            return TaskActionResult(True, task, "任务已终止")
+        if task.status not in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+            return _failed_result(task, "任务已经结束，无需终止")
+        updated = store.request_task_termination(task.id, actor)
+        if updated is None:
+            return _failed_result(task, "操作未执行，任务状态已变化")
+        return TaskActionResult(True, updated, "任务终止已请求")
     actions = available_task_actions(task, max_retries)
     if action not in actions:
         if str(task.claimed_by or "").strip():

@@ -1675,6 +1675,36 @@ class TaskStoreTests(unittest.TestCase):
             self.assertNotIn("_lock_waiting", current.metadata)
             self.assertEqual(store.list_events(task.id), events_before)
 
+    def test_claim_task_lock_returns_released_waiter_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            holder = store.upsert_task("holder", "", "https://115cdn.com/s/holder")
+            store.patch_metadata(holder.id, {"_lock_key": "115:global"})
+            store.enqueue_task(holder.id, TaskStage.ORGANIZING, next_run_at=0)
+            store.claim_next_runnable("holder-worker", now=100.0)
+            waiter = store.upsert_task("waiter", "", "https://115cdn.com/s/waiter")
+            store.enqueue_task(waiter.id, TaskStage.ORGANIZING, next_run_at=0)
+            claimed = store.claim_next_runnable("waiter-worker", now=100.0)
+
+            result = store.claim_task_lock(
+                waiter.id,
+                {"_lock_key": "115:global", "_lock_waiting": False},
+                lambda candidate: candidate.id == holder.id,
+                expected_stage=claimed.current_stage,
+                expected_claimed_by=claimed.claimed_by,
+                expected_claimed_at=claimed.claimed_at,
+                expected_claim_token=claimed.claim_token,
+                expected_updated_at=claimed.updated_at,
+                wait_message="waiting",
+                next_run_at=200.0,
+                now=101.0,
+            )
+
+            self.assertEqual(result.holder.id, holder.id)
+            self.assertEqual(result.task.id, waiter.id)
+            self.assertEqual(result.task.claimed_by, "")
+            self.assertTrue(result.task.metadata["_lock_waiting"])
+
     def test_record_event_preserves_claim_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

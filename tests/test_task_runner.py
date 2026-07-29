@@ -87,6 +87,88 @@ class TimeAdvancingCountingWorkflow:
 
 
 class TaskRunnerTests(unittest.TestCase):
+    def test_termination_after_claim_skips_workflow(self):
+        class TerminateAfterClaimStore(TaskStore):
+            def claim_next_runnable(self, worker_id, now=None, stale_after_seconds=21600):
+                claimed = super().claim_next_runnable(worker_id, now, stale_after_seconds)
+                if claimed is not None:
+                    self.request_task_termination(claimed.id, "Web", now=2)
+                return claimed
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TerminateAfterClaimStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("before-stage", "", "https://115cdn.com/s/before-stage")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1)
+            workflow = FakeWorkflow([])
+            runner = TaskRunner(store, workflow, worker_id="worker", now=lambda: 2)
+
+            self.assertTrue(runner.run_once())
+            self.assertEqual(workflow.calls, [])
+            self.assertEqual(store.find_task(task.id).status, TaskStatus.CANCELLED)
+
+    def test_termination_during_stage_discards_success_result(self):
+        class TerminatingWorkflow:
+            def __init__(self, store):
+                self.store = store
+
+            def run_stage(self, task):
+                self.store.request_task_termination(task.id, "Web", now=3)
+                return StageResult.complete("must not advance")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("during-stage", "", "https://115cdn.com/s/during-stage")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1)
+            runner = TaskRunner(store, TerminatingWorkflow(store), worker_id="worker", now=lambda: 3)
+
+            self.assertTrue(runner.run_once())
+            current = store.find_task(task.id)
+            self.assertEqual(current.status, TaskStatus.CANCELLED)
+            self.assertEqual(current.current_stage, TaskStage.ORGANIZING)
+
+    def test_termination_during_stage_exception_records_error_as_cancelled(self):
+        class TerminatingFailure:
+            def __init__(self, store):
+                self.store = store
+
+            def run_stage(self, task):
+                self.store.request_task_termination(task.id, "Web", now=3)
+                raise RuntimeError("boom")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("cancel-error", "", "https://115cdn.com/s/cancel-error")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1)
+            runner = TaskRunner(store, TerminatingFailure(store), worker_id="worker", now=lambda: 3)
+
+            self.assertTrue(runner.run_once())
+            current = store.find_task(task.id)
+            self.assertEqual(current.status, TaskStatus.CANCELLED)
+            self.assertEqual(current.error_type, "stage_exception")
+            self.assertEqual(current.error_summary, "boom")
+
+    def test_termination_during_lock_wait_is_finalized_after_claim_release(self):
+        class TerminateDuringLockStore(TaskStore):
+            def claim_task_lock(self, task_id, *args, **kwargs):
+                self.request_task_termination(task_id, "Web", now=2)
+                return super().claim_task_lock(task_id, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TerminateDuringLockStore(Path(tmp) / "tasks.db")
+            holder = store.upsert_task("lock-holder", "", "https://115cdn.com/s/lock-holder")
+            store.enqueue_task(holder.id, TaskStage.ORGANIZING, next_run_at=1)
+            store.claim_next_runnable("holder-worker", now=1)
+            waiter = store.upsert_task("lock-waiter", "", "https://115cdn.com/s/lock-waiter")
+            store.enqueue_task(waiter.id, TaskStage.ORGANIZING, next_run_at=1)
+            workflow = FakeWorkflow([])
+            runner = TaskRunner(store, workflow, worker_id="waiter-worker", now=lambda: 2)
+
+            self.assertTrue(runner.run_once())
+            current = store.find_task(waiter.id)
+            self.assertEqual(workflow.calls, [])
+            self.assertEqual(current.status, TaskStatus.CANCELLED)
+            self.assertEqual(current.claimed_by, "")
+
     def test_default_worker_ids_are_unique_and_process_scoped(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

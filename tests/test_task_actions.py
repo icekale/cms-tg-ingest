@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.models import TaskStage, TaskStatus
-from app.task_actions import apply_task_action, available_task_actions
+from app.task_actions import apply_task_action, available_lifecycle_actions, available_task_actions
 from app.task_store import TaskStore
 
 
@@ -14,17 +14,30 @@ class TaskActionsTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         return TaskStore(Path(tmp.name) / "tasks.db")
 
-    def test_claimed_running_task_has_no_mutating_actions(self):
+    def test_claimed_running_task_allows_only_terminate(self):
         store = self.make_store()
         task = store.upsert_task("claimed", "", "https://115cdn.com/s/claimed")
         store.enqueue_task(task.id, TaskStage.STRM_READY, next_run_at=0)
         store.claim_next_runnable("worker", now=0)
         task = store.find_task(task.id)
 
-        self.assertEqual(available_task_actions(task, 3), frozenset())
-        result = apply_task_action(store, task.id, "retry", max_retries=3, actor="test")
-        self.assertFalse(result.applied)
-        self.assertEqual(result.task, task)
+        self.assertEqual(available_task_actions(task, 3), frozenset({"terminate"}))
+        result = apply_task_action(store, task.id, "terminate", max_retries=3, actor="Web")
+
+        self.assertTrue(result.applied)
+        self.assertEqual(result.task.status, TaskStatus.RUNNING)
+        self.assertTrue(result.task.metadata["termination_requested_at"] > 0)
+
+    def test_cancelled_task_is_delete_only_and_repeat_terminate_is_idempotent(self):
+        store = self.make_store()
+        task = store.upsert_task("cancelled", "", "https://115cdn.com/s/cancelled")
+
+        first = apply_task_action(store, task.id, "terminate", max_retries=3, actor="Web")
+        repeated = apply_task_action(store, task.id, "terminate", max_retries=3, actor="Web")
+
+        self.assertTrue(first.applied)
+        self.assertTrue(repeated.applied)
+        self.assertEqual(available_lifecycle_actions(repeated.task), frozenset({"delete"}))
 
     def test_failed_retryable_task_allows_retry_and_reprocess(self):
         store = self.make_store()

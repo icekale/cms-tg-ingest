@@ -1420,7 +1420,8 @@ class TaskStore:
                 """,
                 (TaskStatus.RUNNING.value, merged_metadata, float(next_run_at), current_time, task_id),
             )
-        return TaskLockClaimResult(holder=holder)
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return TaskLockClaimResult(task=self._snapshot(row) if row else None, holder=holder)
 
     def list_events(self, task_id: int) -> list[dict[str, Any]]:
         with self._lock, self._connection() as conn:

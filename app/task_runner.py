@@ -315,10 +315,14 @@ class TaskRunner:
         task = self.store.claim_next_runnable(self.worker_id, now=self.now())
         if task is None:
             return False
+        if self._settle_requested_termination(task):
+            return True
         if self._defer_for_p115_risk_cooldown(task):
             return True
         task = self._prepare_lock(task)
         if task is None:
+            return True
+        if self._settle_requested_termination(task):
             return True
         p115_before = _p115_request_count(self.p115_client)
         self._set_active_claim(task)
@@ -332,6 +336,13 @@ class TaskRunner:
                 updated_at=self.now(),
             )
             message = "115 风控/频率限制，已暂停自动重试；请稍后在 TG/Web 手动重试。"
+            if self._settle_requested_termination(
+                task,
+                error_type="p115_risk_control",
+                error_summary=message,
+                error_detail=str(exc),
+            ):
+                return True
             p115_metadata = _p115_request_metadata(task, p115_before, _p115_request_count(self.p115_client))
             observability_metadata = {}
             if "p115_stage_request_count" in p115_metadata:
@@ -364,6 +375,14 @@ class TaskRunner:
             return True
         except Exception as exc:
             LOG.exception("Task stage failed task_id=%s stage=%s", task.id, task.current_stage.value)
+            error_summary = str(exc) or exc.__class__.__name__
+            if self._settle_requested_termination(
+                task,
+                error_type="stage_exception",
+                error_summary=error_summary,
+                error_detail=repr(exc),
+            ):
+                return True
             p115_metadata = _p115_request_metadata(task, p115_before, _p115_request_count(self.p115_client))
             observability_metadata = {}
             if "p115_stage_request_count" in p115_metadata:
@@ -376,18 +395,45 @@ class TaskRunner:
                 task,
                 task.current_stage,
                 TaskStatus.FAILED,
-                str(exc) or exc.__class__.__name__,
+                error_summary,
                 metadata_patch=p115_metadata | observability_metadata,
                 error_type="stage_exception",
-                error_summary=str(exc) or exc.__class__.__name__,
+                error_summary=error_summary,
                 error_detail=repr(exc),
                 clear_claim=True,
             )
             return True
         finally:
             self._clear_active_claim(task)
+        if self._settle_requested_termination(task):
+            return True
         self._apply_result(task, result, p115_before=p115_before, p115_after=_p115_request_count(self.p115_client))
         return True
+
+    def _settle_requested_termination(
+        self,
+        task: TaskSnapshot,
+        *,
+        error_type: str = "",
+        error_summary: str = "",
+        error_detail: str = "",
+    ) -> bool:
+        settled = self.store.settle_requested_termination(
+            task.id,
+            self.worker_id,
+            task.claim_token,
+            error_type=error_type,
+            error_summary=error_summary,
+            error_detail=error_detail,
+            now=self.now(),
+        )
+        return settled is not None
+
+    def _finish_released_termination(self, task: TaskSnapshot | None) -> None:
+        if task is None or not task.metadata.get("termination_requested_at"):
+            return
+        actor = str(task.metadata.get("termination_requested_by") or "Web")
+        self.store.request_task_termination(task.id, actor, now=self.now())
 
     def _defer_for_p115_risk_cooldown(self, task: TaskSnapshot) -> bool:
         self._refresh_p115_risk_cooldown()
@@ -395,7 +441,7 @@ class TaskRunner:
         if task.current_stage not in _GLOBAL_115_LOCK_STAGES or now >= self._p115_risk_cooldown_until:
             return False
         message = "115 风控冷却中，暂停 115/CMS 阶段自动执行"
-        self._record_claimed_event(
+        released = self._record_claimed_event(
             task,
             task.current_stage,
             TaskStatus.RUNNING,
@@ -411,6 +457,7 @@ class TaskRunner:
             error_summary=message,
             clear_claim=True,
         )
+        self._finish_released_termination(released)
         return True
 
     def _record_claimed_event(
@@ -477,6 +524,7 @@ class TaskRunner:
             )
             return None
         if result.holder:
+            self._finish_released_termination(result.task)
             return None
         return result.task
 
