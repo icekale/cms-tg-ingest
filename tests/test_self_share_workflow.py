@@ -567,11 +567,44 @@ class CmsPlaybackProbeTests(unittest.TestCase):
 
         client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3, share_list_cache_ttl_seconds=0)
 
-        result = client.find_own_share_by_title("H-后天(2024)[tmdbid=435]")
+        result = client.find_own_share_by_title(
+            "H-后天(2024)[tmdbid=435]",
+            min_create_time=45,
+        )
 
         self.assertEqual(result["share_code"], "latest")
         self.assertEqual(result["receive_code"], "1212")
         self.assertEqual(result["create_time"], "50.0")
+
+    def test_find_own_share_by_title_returns_explicit_ambiguity_for_multiple_eligible_matches(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                assert url == "https://webapi.115.com/share/slist"
+                return {
+                    "state": True,
+                    "data": {
+                        "list": [
+                            {
+                                "share_code": "task-a-share",
+                                "share_title": "Same title",
+                                "receive_code": "1111",
+                                "create_time": 1000,
+                            },
+                            {
+                                "share_code": "task-b-share",
+                                "share_title": "Same title",
+                                "receive_code": "2222",
+                                "create_time": 1001,
+                            },
+                        ]
+                    },
+                }
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3, share_list_cache_ttl_seconds=0)
+
+        result = client.find_own_share_by_title("Same title", min_create_time=1000)
+
+        self.assertEqual(result, {"recovery_status": "ambiguous", "match_count": 2})
 
     def test_find_own_share_by_title_rejects_missing_time_when_minimum_is_required(self):
         class FakeHttp:

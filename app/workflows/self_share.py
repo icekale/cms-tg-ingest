@@ -1767,6 +1767,15 @@ class BridgeSelfShareTaskWorkflow:
                     min_create_time=self._positive_timestamp(task.metadata.get("share_create_requested_at")),
                 )
                 if recovered:
+                    if recovered.get("recovery_status") == "ambiguous":
+                        return StageResult.needs_action(
+                            "发现多个符合恢复条件的同名 115 分享，无法安全确认归属，请人工检查",
+                            self._own_share_metadata(row)
+                            | {
+                                "share_recovery_status": "ambiguous",
+                                "share_recovery_match_count": int(recovered.get("match_count") or 0),
+                            },
+                        )
                     receive_code = resolve_own_share_receive_code(self.task_store, self.self_share_config).value
                     settings = self.p115.ensure_share_settings(str(recovered.get("share_code") or ""), receive_code)
                     recovered = {**recovered, **settings}
@@ -1845,6 +1854,15 @@ class BridgeSelfShareTaskWorkflow:
                     recovery_metadata=direct_metadata,
                 )
                 direct_file_share = True
+            if share.get("recovery_status") == "ambiguous":
+                return StageResult.needs_action(
+                    "发现多个符合恢复条件的同名 115 分享，无法安全确认归属，请人工检查",
+                    self._own_share_metadata(row)
+                    | {
+                        "share_recovery_status": "ambiguous",
+                        "share_recovery_match_count": int(share.get("match_count") or 0),
+                    },
+                )
             row = self.store.update_self_share(
                 int(row["id"]),
                 workflow_phase="own_share_created",
@@ -1926,6 +1944,8 @@ class BridgeSelfShareTaskWorkflow:
             if not recovered:
                 raise P115SharePendingError("115 create share outcome is not visible yet")
             created = recovered
+            if recovered.get("recovery_status") == "ambiguous":
+                return recovered
             if operation.status == "started":
                 completed = self.task_store.complete_operation(int(task.id), operation_key, recovered)
                 operation = completed or operation

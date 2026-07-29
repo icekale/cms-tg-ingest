@@ -3,13 +3,14 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.config import MoveConfig
 from app.media.classify import media_type_for_category
 from app.media.strm import find_recent_direct_library_strm_source_dir
 from app.models import TaskStage, TaskStatus
 from app.task_runner import StageOutcome, TaskRunner
-from app.task_store import TaskStore
+from app.task_store import TaskStore, operation_scope
 from app.workflows.direct import DirectTaskWorkflow
 import bridge
 
@@ -108,12 +109,20 @@ class DirectWorkflowTests(unittest.TestCase):
     def _workflow(self, tmp, emby=None, source_roots=None, library_roots=None):
         cms = CmsFake()
         submissions = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+        task_store = TaskStore(Path(tmp) / "tasks.db")
         move_config = MoveConfig(
             source_roots=source_roots or [],
             library_roots=library_roots or {},
             stable_seconds=0,
         )
-        workflow = DirectTaskWorkflow(cms, submissions, move_config, emby=emby, now=lambda: 100.0)
+        workflow = DirectTaskWorkflow(
+            cms,
+            submissions,
+            move_config,
+            task_store=task_store,
+            emby=emby,
+            now=lambda: 100.0,
+        )
         workflow.forbidden_p115 = ForbiddenP115()
         workflow.openai_classifier = OpenAIFake()
         return workflow, cms, submissions
@@ -146,6 +155,66 @@ class DirectWorkflowTests(unittest.TestCase):
         self.assertEqual(cms.add_calls, ["https://115cdn.com/s/abc?password=1234"])
         self.assertEqual(row["cms_task_id"], "cms-1")
         self.assertEqual(workflow.forbidden_p115.calls, [])
+
+    def test_received_resumes_journaled_cms_result_after_submission_persistence_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow, cms, submissions = self._workflow(tmp)
+            tasks = TaskStore(Path(tmp) / "tasks.db")
+            workflow.task_store = tasks
+            task = self._task(tasks, TaskStage.RECEIVED)
+            operation_key = f"{operation_scope(task)}:cms_direct_submit:direct:{task.share_code}"
+            upsert_submission = submissions.upsert_submission
+            save_attempts = 0
+
+            def fail_first_submission_save(*args, **kwargs):
+                nonlocal save_attempts
+                save_attempts += 1
+                if save_attempts == 1:
+                    upsert_submission(args[0], args[1], "received", title=kwargs.get("title"))
+                    raise RuntimeError("simulated crash while saving direct submission")
+                return upsert_submission(*args, **kwargs)
+
+            with patch.object(submissions, "upsert_submission", side_effect=fail_first_submission_save):
+                with self.assertRaisesRegex(RuntimeError, "simulated crash"):
+                    workflow.run_stage(task)
+                result = workflow.run_stage(task)
+
+            operation = tasks.find_operation(task.id, operation_key)
+
+        self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+        self.assertEqual(cms.add_calls, [task.url])
+        self.assertEqual(operation.status, "succeeded")
+        self.assertEqual(operation.request["strm_mode"], "direct")
+        self.assertEqual(operation.result["data"]["id"], "cms-1")
+
+    def test_received_started_cms_operation_requires_action_without_second_post(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow, cms, _submissions = self._workflow(tmp)
+            tasks = TaskStore(Path(tmp) / "tasks.db")
+            workflow.task_store = tasks
+            task = self._task(tasks, TaskStage.RECEIVED)
+            operation_key = f"{operation_scope(task)}:cms_direct_submit:direct:{task.share_code}"
+            tasks.prepare_operation(
+                task.id,
+                operation_key,
+                "cms_direct_submit",
+                {
+                    "strm_mode": "direct",
+                    "share_code": task.share_code,
+                    "receive_code": task.receive_code,
+                    "url": task.url,
+                },
+            )
+            tasks.start_operation(task.id, operation_key)
+            cms.add_calls.append(task.url)
+
+            result = workflow.run_stage(task)
+            operation = tasks.find_operation(task.id, operation_key)
+
+        self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+        self.assertIn("人工", result.message)
+        self.assertEqual(cms.add_calls, [task.url])
+        self.assertEqual(operation.status, "uncertain")
 
     def test_received_reuses_existing_cms_submission_before_adding_again(self):
         with tempfile.TemporaryDirectory() as tmp:

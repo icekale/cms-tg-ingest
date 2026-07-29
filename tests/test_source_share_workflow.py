@@ -2,11 +2,12 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from app.config import MoveConfig, SelfShareConfig
 from app.models import TaskStage
 from app.task_runner import StageOutcome
-from app.task_store import TaskStore
+from app.task_store import TaskStore, operation_scope
 from app.workflows.direct import SourceShareTaskWorkflow
 from bridge import SubmissionStore
 
@@ -54,6 +55,7 @@ class SourceShareTaskWorkflowTests(unittest.TestCase):
                 store=submissions,
                 move_config=MoveConfig(source_roots=[], library_roots={"欧美电影": root / "library"}),
                 self_share_config=SelfShareConfig(strm_root=share_root, cms_cid="0", cms_local_path="/media/share"),
+                task_store=task_store,
                 tmdb_resolver=FakeTmdbResolver(),
             )
             task = task_store.upsert_task(
@@ -101,6 +103,117 @@ class SourceShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(row["own_share_receive_code"], "7788")
             self.assertEqual(row["own_share_file_name"], source.name)
             self.assertTrue((root / "library" / source.name / "红龙.strm").is_file())
+
+    def test_share_sync_resumes_journaled_result_after_submission_persistence_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_store = TaskStore(root / "tasks.db")
+            submissions = SubmissionStore(root / "submissions.db")
+            cms = FakeCms()
+            workflow = SourceShareTaskWorkflow(
+                cms=cms,
+                store=submissions,
+                move_config=MoveConfig(source_roots=[], library_roots={}),
+                self_share_config=SelfShareConfig(
+                    strm_root=root / "share",
+                    cms_cid="0",
+                    cms_local_path="/media/share",
+                ),
+                task_store=task_store,
+                tmdb_resolver=FakeTmdbResolver(),
+            )
+            workflow.task_store = task_store
+            task = task_store.upsert_task(
+                "sourcecode",
+                "7788",
+                "https://115cdn.com/s/sourcecode?password=7788",
+                strm_mode="source_shared",
+            )
+            received = workflow.run_stage(task)
+            sync_task = replace(
+                task,
+                current_stage=TaskStage.SHARE_SYNC_SUBMITTED,
+                metadata={**task.metadata, **received.metadata},
+            )
+            operation_key = f"{operation_scope(sync_task)}:cms_source_share_sync:source_shared:{task.share_code}"
+            update_self_share = submissions.update_self_share
+            save_attempts = 0
+
+            def fail_first_submission_save(*args, **kwargs):
+                nonlocal save_attempts
+                save_attempts += 1
+                if save_attempts == 1:
+                    raise RuntimeError("simulated crash while saving source-share submission")
+                return update_self_share(*args, **kwargs)
+
+            with patch.object(submissions, "update_self_share", side_effect=fail_first_submission_save):
+                with self.assertRaisesRegex(RuntimeError, "simulated crash"):
+                    workflow.run_stage(sync_task)
+                result = workflow.run_stage(sync_task)
+
+            operation = task_store.find_operation(task.id, operation_key)
+
+        self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+        self.assertEqual(cms.share_sync_calls, [("sourcecode", "7788", "0", "/media/share")])
+        self.assertEqual(operation.status, "succeeded")
+        self.assertEqual(operation.request["strm_mode"], "source_shared")
+        self.assertEqual(operation.result, {"code": 200})
+
+    def test_share_sync_started_operation_requires_action_without_second_post(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_store = TaskStore(root / "tasks.db")
+            submissions = SubmissionStore(root / "submissions.db")
+            cms = FakeCms()
+            config = SelfShareConfig(
+                strm_root=root / "share",
+                cms_cid="0",
+                cms_local_path="/media/share",
+            )
+            workflow = SourceShareTaskWorkflow(
+                cms=cms,
+                store=submissions,
+                move_config=MoveConfig(source_roots=[], library_roots={}),
+                self_share_config=config,
+                task_store=task_store,
+                tmdb_resolver=FakeTmdbResolver(),
+            )
+            workflow.task_store = task_store
+            task = task_store.upsert_task(
+                "sourcecode",
+                "7788",
+                "https://115cdn.com/s/sourcecode?password=7788",
+                strm_mode="source_shared",
+            )
+            received = workflow.run_stage(task)
+            sync_task = replace(
+                task,
+                current_stage=TaskStage.SHARE_SYNC_SUBMITTED,
+                metadata={**task.metadata, **received.metadata},
+            )
+            operation_key = f"{operation_scope(sync_task)}:cms_source_share_sync:source_shared:{task.share_code}"
+            task_store.prepare_operation(
+                task.id,
+                operation_key,
+                "cms_source_share_sync",
+                {
+                    "strm_mode": "source_shared",
+                    "share_code": task.share_code,
+                    "receive_code": task.receive_code,
+                    "cid": config.cms_cid,
+                    "local_path": config.cms_local_path,
+                },
+            )
+            task_store.start_operation(task.id, operation_key)
+            cms.share_sync_calls.append(("sourcecode", "7788", "0", "/media/share"))
+
+            result = workflow.run_stage(sync_task)
+            operation = task_store.find_operation(task.id, operation_key)
+
+        self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+        self.assertIn("人工", result.message)
+        self.assertEqual(cms.share_sync_calls, [("sourcecode", "7788", "0", "/media/share")])
+        self.assertEqual(operation.status, "uncertain")
 
 
 if __name__ == "__main__":

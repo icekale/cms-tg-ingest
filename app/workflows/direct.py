@@ -27,6 +27,7 @@ from app.media.strm import (
 from app.models import TaskSnapshot, TaskStage
 from app.strm_mode import effective_task_strm_mode
 from app.task_runner import StageResult
+from app.task_store import operation_scope
 from app.workflows.self_share import BridgeSelfShareTaskWorkflow, emby_parent_label, match_emby_item
 
 
@@ -119,12 +120,14 @@ class DirectTaskWorkflow:
         store: Any,
         move_config: MoveConfig,
         *,
+        task_store: Any,
         emby: Any | None = None,
         now: Callable[[], float] | None = None,
         emby_retry_seconds: int = 15,
     ):
         self.cms = cms
         self.store = store
+        self.task_store = task_store
         self.move_config = move_config
         self.emby = emby
         self.now = now or time.time
@@ -194,12 +197,31 @@ class DirectTaskWorkflow:
     def _stage_received(self, task: TaskSnapshot) -> StageResult:
         row = self._submission_row(task)
         key = _ShareKey(task.share_code, task.receive_code)
+        operation_key = f"{operation_scope(task)}:cms_direct_submit:direct:{task.share_code}"
+        operation_request = {
+            "strm_mode": "direct",
+            "share_code": task.share_code,
+            "receive_code": task.receive_code,
+            "url": task.url,
+        }
+        operation = self.task_store.find_operation(int(task.id), operation_key)
+        if operation is not None:
+            operation = self.task_store.prepare_operation(
+                int(task.id),
+                operation_key,
+                "cms_direct_submit",
+                operation_request,
+            )
         cms_task_id = str(
             (row or {}).get("cms_task_id") or task.metadata.get("cms_task_id") or ""
         ).strip()
         title = str((row or {}).get("title") or task.title or task.share_code).strip()
         recovered_existing = False
-        if not cms_task_id and not (row and self._accepted_without_task_id(task, row)):
+        if (
+            not cms_task_id
+            and not (row and self._accepted_without_task_id(task, row))
+            and (operation is None or operation.status != "succeeded")
+        ):
             existing = self._lookup_cms_task(task)
             existing_status = _cms_status(existing)
             if (
@@ -210,11 +232,15 @@ class DirectTaskWorkflow:
                 cms_task_id = self._cms_task_id(existing)
                 title = str(_detail_value(existing, "name", "title", "share_name", "file_name") or title).strip()
                 recovered_existing = bool(cms_task_id)
+                if recovered_existing and operation is not None and operation.status == "started":
+                    completed = self.task_store.complete_operation(int(task.id), operation_key, existing)
+                    operation = completed or self.task_store.find_operation(int(task.id), operation_key)
         if (
             row
             and not cms_task_id
             and not self._accepted_without_task_id(task, row)
             and str(row.get("status") or "").lower() not in {"failed", "error"}
+            and (operation is None or operation.status == "prepared")
         ):
             return StageResult.failed(
                 "已有 CMS 提交记录但缺少任务 ID",
@@ -222,6 +248,22 @@ class DirectTaskWorkflow:
                 metadata=self._submission_metadata(row),
             )
         if not cms_task_id:
+            if operation is not None and operation.status in {"started", "uncertain"}:
+                if operation.status == "started":
+                    uncertain = self.task_store.mark_operation_uncertain(
+                        int(task.id),
+                        operation_key,
+                        "CMS direct submission result was not persisted",
+                    )
+                    operation = uncertain or operation
+                return StageResult.needs_action(
+                    "CMS 直链提交结果未持久化，禁止自动重复提交，请人工检查",
+                    {
+                        "strm_mode": "direct",
+                        "cms_operation_key": operation_key,
+                        "cms_submission_outcome": "unknown",
+                    },
+                )
             if row and self._accepted_without_task_id(task, row):
                 return StageResult.complete(
                     "CMS 已接受（同步响应未提供任务 ID）",
@@ -232,7 +274,58 @@ class DirectTaskWorkflow:
                         cms_task_id_optional=True,
                     ),
                 )
-            response = self.cms.add_share_down(task.url)
+            operation = self.task_store.prepare_operation(
+                int(task.id),
+                operation_key,
+                "cms_direct_submit",
+                operation_request,
+            )
+            if operation.status == "prepared":
+                started = self.task_store.start_operation(int(task.id), operation_key)
+                operation = started or self.task_store.find_operation(int(task.id), operation_key)
+                if started is not None:
+                    try:
+                        response = self.cms.add_share_down(str(started.request.get("url") or task.url))
+                    except Exception as exc:
+                        uncertain = self.task_store.mark_operation_uncertain(
+                            int(task.id),
+                            operation_key,
+                            str(exc),
+                        )
+                        operation = uncertain or self.task_store.find_operation(int(task.id), operation_key)
+                        return StageResult.needs_action(
+                            "CMS 直链提交结果无法确认，禁止自动重复提交，请人工检查",
+                            {
+                                "strm_mode": "direct",
+                                "cms_operation_key": operation_key,
+                                "cms_submission_outcome": "unknown",
+                            },
+                        )
+                    completed = self.task_store.complete_operation(
+                        int(task.id),
+                        operation_key,
+                        response if isinstance(response, dict) else {},
+                    )
+                    operation = completed or self.task_store.find_operation(int(task.id), operation_key)
+            if operation is None:
+                raise RuntimeError("CMS direct submission operation disappeared")
+            if operation.status == "started":
+                uncertain = self.task_store.mark_operation_uncertain(
+                    int(task.id),
+                    operation_key,
+                    "CMS direct submission result was not persisted",
+                )
+                operation = uncertain or operation
+            if operation.status != "succeeded":
+                return StageResult.needs_action(
+                    "CMS 直链提交结果无法安全恢复，禁止自动重复提交，请人工检查",
+                    {
+                        "strm_mode": "direct",
+                        "cms_operation_key": operation_key,
+                        "cms_submission_outcome": "unknown",
+                    },
+                )
+            response = operation.result
             cms_task_id, response_title = _extract_cms_task_info(response)
             title = response_title or title
             if not cms_task_id:
@@ -626,6 +719,7 @@ class SourceShareTaskWorkflow(DirectTaskWorkflow):
         move_config: MoveConfig,
         self_share_config: SelfShareConfig,
         *,
+        task_store: Any,
         emby: Any | None = None,
         tmdb_resolver: Any | None = None,
         now: Callable[[], float] | None = None,
@@ -647,6 +741,7 @@ class SourceShareTaskWorkflow(DirectTaskWorkflow):
                 conflict_policy=move_config.conflict_policy,
                 stable_seconds=move_config.stable_seconds,
             ),
+            task_store=task_store,
             emby=emby,
             now=now,
             emby_retry_seconds=emby_retry_seconds,
@@ -738,13 +833,72 @@ class SourceShareTaskWorkflow(DirectTaskWorkflow):
         row = self._submission_row(task)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
-        if str(row.get("share_sync_status") or "") != "submitted":
-            self.cms.add_share115_sync_task(
-                task.share_code,
-                task.receive_code,
-                self.self_share_config.cms_cid,
-                self.self_share_config.cms_local_path,
+        operation_key = f"{operation_scope(task)}:cms_source_share_sync:source_shared:{task.share_code}"
+        operation_request = {
+            "strm_mode": "source_shared",
+            "share_code": task.share_code,
+            "receive_code": task.receive_code,
+            "cid": self.self_share_config.cms_cid,
+            "local_path": self.self_share_config.cms_local_path,
+        }
+        operation = self.task_store.find_operation(int(task.id), operation_key)
+        if str(row.get("share_sync_status") or "") != "submitted" or operation is not None:
+            operation = self.task_store.prepare_operation(
+                int(task.id),
+                operation_key,
+                "cms_source_share_sync",
+                operation_request,
             )
+            if operation.status == "prepared":
+                started = self.task_store.start_operation(int(task.id), operation_key)
+                operation = started or self.task_store.find_operation(int(task.id), operation_key)
+                if started is not None:
+                    try:
+                        response = self.cms.add_share115_sync_task(
+                            str(started.request.get("share_code") or task.share_code),
+                            str(started.request.get("receive_code") or task.receive_code),
+                            str(started.request.get("cid") or self.self_share_config.cms_cid),
+                            str(started.request.get("local_path") or self.self_share_config.cms_local_path),
+                        )
+                    except Exception as exc:
+                        uncertain = self.task_store.mark_operation_uncertain(
+                            int(task.id),
+                            operation_key,
+                            str(exc),
+                        )
+                        operation = uncertain or self.task_store.find_operation(int(task.id), operation_key)
+                        return StageResult.needs_action(
+                            "CMS 原始分享同步结果无法确认，禁止自动重复提交，请人工检查",
+                            self._submission_metadata(
+                                row,
+                                cms_operation_key=operation_key,
+                                cms_share_sync_outcome="unknown",
+                            ),
+                        )
+                    completed = self.task_store.complete_operation(
+                        int(task.id),
+                        operation_key,
+                        response if isinstance(response, dict) else {},
+                    )
+                    operation = completed or self.task_store.find_operation(int(task.id), operation_key)
+            if operation is None:
+                raise RuntimeError("CMS source-share sync operation disappeared")
+            if operation.status == "started":
+                uncertain = self.task_store.mark_operation_uncertain(
+                    int(task.id),
+                    operation_key,
+                    "CMS source-share sync result was not persisted",
+                )
+                operation = uncertain or operation
+            if operation.status != "succeeded":
+                return StageResult.needs_action(
+                    "CMS 原始分享同步结果无法安全恢复，禁止自动重复提交，请人工检查",
+                    self._submission_metadata(
+                        row,
+                        cms_operation_key=operation_key,
+                        cms_share_sync_outcome="unknown",
+                    ),
+                )
             row = self.store.update_self_share(
                 int(row["id"]),
                 workflow_phase="source_share_sync_submitted",

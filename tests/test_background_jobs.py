@@ -186,8 +186,78 @@ class BackgroundJobCoordinatorTests(unittest.TestCase):
                     LOG.removeHandler(handler)
                     coordinator.shutdown(wait=True)
 
+    def test_redacts_basic_and_quoted_credential_families_everywhere(self):
+        class StateStore:
+            def __init__(self):
+                self.values = {}
+
+            def set_runtime_state(self, key, value):
+                self.values[key] = value
+
+        from app.task_store import TaskStore
+        from app.web_api import api_quality
+        from pathlib import Path
+        import tempfile
+
+        credentials = (
+            ("Authorization: Basic QWxhZGRpbjpvcGVuLXNlc2FtZQ==", "QWxhZGRpbjpvcGVuLXNlc2FtZQ=="),
+            ("{'authorization': 'Basic python-auth-value'}", "python-auth-value"),
+            ('{"token":"json-token-value"}', "json-token-value"),
+            ("{'access_token': 'python-access-value'}", "python-access-value"),
+            ('{"api_key":"json-api-value"}', "json-api-value"),
+            ("{'secret': 'python-secret-value'}", "python-secret-value"),
+            ('{"password":"json-password-value"}', "json-password-value"),
+            ("{'cookie': 'python-cookie-value'}", "python-cookie-value"),
+            ('{"set-cookie":"json-set-cookie-value"}', "json-set-cookie-value"),
+            (r'{\"token\":\"escaped-token-value\"}', "escaped-token-value"),
+            (r"\{'set-cookie': \'escaped-set-cookie-value\'\}", "escaped-set-cookie-value"),
+            ('{"password":"alpha-secret,beta-secret"}', "beta-secret"),
+            (r'{\"token\":\"left-secret,right-secret\"}', "right-secret"),
+            ('{"secret":"prefix-secret}middle-secret]suffix-secret"}', "suffix-secret"),
+        )
+
+        for credential, secret in credentials:
+            with self.subTest(credential=credential):
+                state_store = StateStore()
+                coordinator = BackgroundJobCoordinator(state_store=state_store)
+                completed = []
+                stream = io.StringIO()
+                handler = logging.StreamHandler(stream)
+                LOG.addHandler(handler)
+                diagnostic = f"token_count=7 password_policy=strict {credential}"
+                try:
+                    coordinator.submit(
+                        "quality:run",
+                        lambda: (_ for _ in ()).throw(RuntimeError(f"request failed {diagnostic}")),
+                        description=f"run with {diagnostic}",
+                        on_complete=completed.append,
+                    )
+                    coordinator.shutdown(wait=True)
+                    with tempfile.TemporaryDirectory() as tmp:
+                        api_payload = json.dumps(
+                            api_quality(TaskStore(Path(tmp) / "tasks.db"), background_jobs=coordinator)
+                        )
+                    snapshot = coordinator.snapshot("quality:run")
+                    values = (
+                        snapshot.description,
+                        snapshot.error,
+                        json.dumps(completed[0].payload()),
+                        state_store.values["background_job:quality:run"],
+                        api_payload,
+                        stream.getvalue(),
+                    )
+                    self.assertTrue(all(secret not in value for value in values))
+                    self.assertIn("token_count=7", snapshot.error)
+                    self.assertIn("password_policy=strict", snapshot.error)
+                finally:
+                    LOG.removeHandler(handler)
+                    coordinator.shutdown(wait=True)
+
     def test_redactor_preserves_ordinary_diagnostic_key_names(self):
-        text = "task_key=task operation_key=operation primary_key=primary sort_key=sort monkey=banana"
+        text = (
+            "task_key=task operation_key=operation primary_key=primary sort_key=sort monkey=banana "
+            "token_count=7 password_policy=strict authorization_latency_ms=4 cookie_jar_size=2"
+        )
 
         self.assertEqual(redact_background_text(text), text)
 
