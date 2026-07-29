@@ -25,6 +25,7 @@ export const api = {
   setSelfShareReview: (mode) => request('settings/self-share-review', { method: 'POST', body: JSON.stringify({ mode }) }),
   setTaskMode: (id, mode) => request(`tasks/${id}/strm-mode`, { method: 'POST', body: JSON.stringify({ mode }) }),
   taskAction: (id, action) => request(`tasks/${id}/actions/${action}`, { method: 'POST' }),
+  deleteTask: (id) => request(`tasks/${id}`, { method: 'DELETE' }),
   clearHistory: () => request('history/clear', { method: 'POST' }),
   qualityFix: () => request('quality/fix', { method: 'POST' }),
   qualityRun: () => request('quality/run', { method: 'POST' }),
