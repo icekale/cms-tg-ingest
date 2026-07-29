@@ -10,11 +10,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 from typing import Any
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 from . import __version__
 from .background_jobs import BackgroundJobCoordinator, JobSubmission, redact_background_text
 from .config import SelfShareConfig
+from .logging_system import LogFilter, LogHub, parse_log_filter
 from .models import TaskStage, TaskStatus
 from .quality import QualityIssue, format_task_quality_report, scan_task_quality
 from .quality_automation import QualityAutomation
@@ -52,8 +53,12 @@ from .web_api import (
 
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 REQUEST_BODY_READ_TIMEOUT_SECONDS = 2
+SSE_HEARTBEAT_SECONDS = 15.0
+SSE_CLIENT_QUEUE_SIZE = 256
 LEGACY_LIFECYCLE_REASON = "旧版任务引擎模式不支持终止或删除任务"
 TASK_NOT_FOUND_MESSAGE = "任务不存在或已过期"
+_LOG_STREAM_PATH = "/api/v1/logs/stream"
+_LOG_QUERY_KEYS = frozenset({"filter_type", "lines", "keyword", "token"})
 
 
 class RequestBodyTooLarge(ValueError):
@@ -62,6 +67,15 @@ class RequestBodyTooLarge(ValueError):
 
 class RequestBodyDisconnected(Exception):
     pass
+
+
+def encode_sse_event(event: str, payload: dict[str, object], event_id: int | None = None) -> bytes:
+    lines = []
+    if event_id is not None:
+        lines.append(f"id: {event_id}")
+    lines.append(f"event: {event}")
+    lines.append("data: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    return ("\n".join(lines) + "\n\n").encode("utf-8")
 
 
 def parse_content_length(value: str | None, limit: int = MAX_REQUEST_BODY_BYTES) -> int:
@@ -1321,6 +1335,7 @@ class WebApp:
         frontend_dist_path: str | Path = "/app/frontend/dist",
         max_retries: int = 3,
         background_jobs: BackgroundJobCoordinator | None = None,
+        log_hub: LogHub | None = None,
     ):
         self.store = store
         self.web_token = web_token
@@ -1334,6 +1349,7 @@ class WebApp:
         self.max_retries = normalize_task_max_retries(max_retries)
         self._owns_background_jobs = background_jobs is None
         self.background_jobs = background_jobs or BackgroundJobCoordinator()
+        self.log_hub = log_hub
 
     def _submit_background(self, key: str, callable: Any, *, description: str) -> JobSubmission:
         return self.background_jobs.submit(key, callable, description=description)
@@ -1382,6 +1398,51 @@ class WebApp:
 
     def _web_token_cookie(self) -> str:
         return f"cms_web_token={quote(self.web_token, safe='')}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800"
+
+    def prepare_log_stream(
+        self,
+        path: str,
+        headers: dict[str, str],
+    ) -> tuple[int, dict[str, str], bytes, LogFilter | None]:
+        try:
+            parsed = urlparse(path)
+        except (TypeError, ValueError):
+            return 400, {"Content-Type": "text/plain; charset=utf-8"}, b"Bad Request", None
+        if parsed.path != _LOG_STREAM_PATH:
+            return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"Not Found", None
+
+        authorization_source = self._authorization_source(path, headers)
+        if not authorization_source:
+            return 403, {"Content-Type": "text/plain; charset=utf-8"}, b"Forbidden", None
+
+        try:
+            query = parse_qs(parsed.query, keep_blank_values=True)
+        except (TypeError, ValueError):
+            return 400, {"Content-Type": "text/plain; charset=utf-8"}, b"Bad Request", None
+        if set(query) - _LOG_QUERY_KEYS or any(len(values) != 1 for values in query.values()):
+            return 400, {"Content-Type": "text/plain; charset=utf-8"}, b"Bad Request", None
+
+        if authorization_source == "query":
+            query.pop("token", None)
+            location = parsed.path
+            if encoded_query := urlencode(query, doseq=True):
+                location += f"?{encoded_query}"
+            return 303, {"Location": location, "Set-Cookie": self._web_token_cookie()}, b"", None
+
+        if self.log_hub is None:
+            return 503, {"Content-Type": "text/plain; charset=utf-8"}, b"Service Unavailable", None
+
+        try:
+            spec = parse_log_filter(
+                query.get("filter_type", ["main"])[0],
+                query.get("lines", [1000])[0],
+                query.get("keyword", [""])[0],
+            )
+        except ValueError:
+            return 400, {"Content-Type": "text/plain; charset=utf-8"}, b"Bad Request", None
+
+        auth_headers = {"Set-Cookie": self._web_token_cookie()} if authorization_source == "header" else {}
+        return 200, auth_headers, b"", spec
 
     def handle_request(
         self,
@@ -1952,6 +2013,7 @@ def start_web_server(
     frontend_dist_path: str | Path = "/app/frontend/dist",
     max_retries: int = 3,
     background_jobs: BackgroundJobCoordinator | None = None,
+    log_hub: LogHub | None = None,
 ) -> ThreadingHTTPServer:
     app = WebApp(
         store,
@@ -1965,10 +2027,14 @@ def start_web_server(
         frontend_dist_path=frontend_dist_path,
         max_retries=max_retries,
         background_jobs=background_jobs,
+        log_hub=log_hub,
     )
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
+            if urlparse(self.path).path == _LOG_STREAM_PATH:
+                self._serve_log_stream()
+                return
             self._serve()
 
         def do_POST(self):
@@ -2030,6 +2096,56 @@ def start_web_server(
             self.end_headers()
             self.wfile.write(payload)
 
+        def _serve_log_stream(self) -> None:
+            status, headers, body, spec = app.prepare_log_stream(self.path, dict(self.headers))
+            if status != 200 or spec is None or app.log_hub is None:
+                self.close_connection = True
+                try:
+                    self.send_response(status)
+                    for name, value in headers.items():
+                        self.send_header(name, value)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    if body:
+                        self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                    pass
+                return
+
+            stream = app.log_hub.open_stream(spec, queue_size=SSE_CLIENT_QUEUE_SIZE)
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache, no-transform")
+                self.send_header("X-Accel-Buffering", "no")
+                for name, value in headers.items():
+                    self.send_header(name, value)
+                self.end_headers()
+                self.wfile.write(encode_sse_event("snapshot", {
+                    "entries": [entry.payload() for entry in stream.snapshot],
+                    "filter_type": spec.filter_type,
+                    "lines": spec.lines,
+                    "keyword": spec.keyword,
+                }))
+                self.wfile.flush()
+                while True:
+                    event = stream.next_event(SSE_HEARTBEAT_SECONDS)
+                    if event is None:
+                        frame = encode_sse_event("heartbeat", {"time": time.time()})
+                    elif event.kind == "gap":
+                        self.wfile.write(encode_sse_event("gap", {"reason": "slow_client"}))
+                        self.wfile.flush()
+                        break
+                    else:
+                        frame = encode_sse_event("log", event.entry.payload(), event_id=event.entry.id)
+                    self.wfile.write(frame)
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                self.close_connection = True
+            finally:
+                stream.close()
+
         def _serve(self, body: bytes = b""):
             status, headers, payload = app.handle_request(self.command, self.path, dict(self.headers), body)
             self.send_response(status)
@@ -2042,6 +2158,8 @@ def start_web_server(
             return
 
     server = ThreadingHTTPServer((host, port), Handler)
+    server.daemon_threads = True
+    server.block_on_close = False
     server._cms_background_jobs = app.background_jobs
     server._cms_owns_background_jobs = app._owns_background_jobs
     thread = Thread(target=server.serve_forever, daemon=True)
