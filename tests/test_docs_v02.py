@@ -81,6 +81,18 @@ class V02DocsTests(unittest.TestCase):
         self.assertIn("分层搜索早停", readme)
         self.assertIn("整理目录扫描预算", readme)
 
+    def test_realtime_logging_is_documented_without_new_volume(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        dockerhub = (ROOT / "docs/dockerhub-overview.md").read_text(encoding="utf-8")
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+        for document in (readme, dockerhub):
+            for text in ("实时日志", "/app/logs", "/data/logs/cms-tg-ingest.log", "20 MiB", "4 个备份"):
+                self.assertIn(text, document)
+            self.assertIn("只清空当前浏览器", document)
+        self.assertIn("./data:/data", compose)
+        self.assertNotIn("/data/logs:/data/logs", compose)
+
 
 if __name__ == "__main__":
     unittest.main()

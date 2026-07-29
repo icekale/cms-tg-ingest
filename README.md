@@ -398,6 +398,15 @@ docker compose exec cms-tg-ingest python /app/doctor.py
 docker compose exec cms-tg-ingest python /app/doctor.py --quiet
 ```
 
+### 实时日志
+
+- 打开 `http://<unraid-ip>:8788/app/logs` 查看本程序日志；页面支持重要/错误/全部、关键字和 1000/2000/5000 行筛选。
+- “清空”只清空当前浏览器内容，不删除磁盘日志。
+- 日志同时输出到 `docker logs` 和 `/data/logs/cms-tg-ingest.log`；当前文件达到 20 MiB 后轮转，保留 4 个备份。
+- 容器继续使用现有 `./data:/data` 挂载，不需要增加日志 volume；重启后恢复最近最多 5000 行。
+- 配置 `WEB_TOKEN` 时，先通过 `/app/?token=...` 建立 HttpOnly Cookie，再进入 `/app/logs`；EventSource URL 不携带 Token。
+- `/api/v1/logs/stream` 是仅供页面读取实时流的内部只读 SSE 端点。
+
 如果任务卡住：
 
 1. 先看 `/status` 或 Web 当前队列，确认卡在哪个阶段。
