@@ -1627,10 +1627,16 @@ class WebApp:
         if method == "DELETE" and path.startswith("/api/v1/tasks/"):
             raw_id = path.removeprefix("/api/v1/tasks/")
             if raw_id.isdigit():
-                if not self.task_engine_enabled and self.store.find_task(int(raw_id)) is not None:
+                if not self.task_engine_enabled:
+                    task = self.store.find_task(int(raw_id))
+                    payload = (
+                        {"error": "delete_not_allowed", "reason": LEGACY_LIFECYCLE_REASON}
+                        if task is not None
+                        else {"error": "task_not_found", "message": TASK_NOT_FOUND_MESSAGE}
+                    )
                     status, response_headers, response_body = api_response(
-                        {"error": "delete_not_allowed", "reason": LEGACY_LIFECYCLE_REASON},
-                        status=409,
+                        payload,
+                        status=409 if task is not None else 404,
                     )
                     return status, {**response_headers, **auth_headers}, response_body
                 result = delete_task_record(self.store, int(raw_id))

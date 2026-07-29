@@ -64,6 +64,25 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(store.find_task(active.id).status, TaskStatus.PENDING)
             self.assertIsNotNone(store.find_task(finished.id))
 
+    def test_legacy_engine_delete_does_not_recheck_or_mutate_after_missing_lookup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("legacy-race", "", "https://115cdn.com/s/legacy-race")
+            store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            persisted = store.find_task(task.id)
+            original_find_task = store.find_task
+            store.find_task = Mock(side_effect=[None, persisted])
+            app = WebApp(store, task_engine_enabled=False)
+
+            status, _headers, body = app.handle_request(
+                "DELETE", f"/api/v1/tasks/{task.id}", {}, b""
+            )
+
+            self.assertEqual(status, 404)
+            self.assertEqual(json.loads(body)["message"], "任务不存在或已过期")
+            self.assertEqual(store.find_task.call_count, 1)
+            self.assertIsNotNone(original_find_task(task.id))
+
     def test_terminate_api_is_idempotent_for_claimed_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
