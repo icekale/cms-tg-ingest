@@ -4,7 +4,7 @@ async function request(path, options = {}) {
     ...options,
   })
   const payload = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(payload.error || payload.message || `请求失败 (${response.status})`)
+  if (!response.ok) throw new Error(payload.reason || payload.message || payload.error || `请求失败 (${response.status})`)
   return payload
 }
 

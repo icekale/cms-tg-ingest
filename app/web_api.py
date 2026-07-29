@@ -112,11 +112,16 @@ def _safe_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def serialize_task(task: TaskSnapshot, *, now: float | None = None) -> dict[str, Any]:
+def serialize_task(
+    task: TaskSnapshot,
+    *,
+    now: float | None = None,
+    lifecycle_actions_enabled: bool = True,
+) -> dict[str, Any]:
     current_time = time.time() if now is None else float(now)
     elapsed, p115_calls = format_stage_observability(task)
     termination_requested = task_termination_requested(task)
-    available_actions = sorted(available_lifecycle_actions(task))
+    available_actions = sorted(available_lifecycle_actions(task)) if lifecycle_actions_enabled else []
     return {
         "id": task.id,
         "title": task.title or task.share_code,
@@ -186,8 +191,24 @@ def serialize_health(store: TaskStore, *, enabled: bool = True, now: float | Non
         "runner_state": summary.runner_state,
         "backup": backup,
         "wait_details": list(summary.wait_details),
-        "latest_problem": serialize_task(summary.latest_problem, now=current_time) if summary.latest_problem else None,
-        "latest_lock_wait": serialize_task(summary.latest_lock_wait, now=current_time) if summary.latest_lock_wait else None,
+        "latest_problem": (
+            serialize_task(
+                summary.latest_problem,
+                now=current_time,
+                lifecycle_actions_enabled=enabled,
+            )
+            if summary.latest_problem
+            else None
+        ),
+        "latest_lock_wait": (
+            serialize_task(
+                summary.latest_lock_wait,
+                now=current_time,
+                lifecycle_actions_enabled=enabled,
+            )
+            if summary.latest_lock_wait
+            else None
+        ),
     }
 
 
@@ -282,16 +303,34 @@ def api_response(payload: Any, *, status: int = 200) -> tuple[int, dict[str, str
     return status, {"Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store"}, body
 
 
-def api_tasks(store: TaskStore, *, limit: int = 100, now: float | None = None) -> dict[str, Any]:
+def api_tasks(
+    store: TaskStore,
+    *,
+    limit: int = 100,
+    now: float | None = None,
+    lifecycle_actions_enabled: bool = True,
+) -> dict[str, Any]:
     tasks = store.list_recent_tasks(limit=max(1, min(int(limit), 500)))
-    return {"items": [serialize_task(task, now=now) for task in tasks], "count": len(tasks)}
+    return {
+        "items": [
+            serialize_task(task, now=now, lifecycle_actions_enabled=lifecycle_actions_enabled)
+            for task in tasks
+        ],
+        "count": len(tasks),
+    }
 
 
-def api_task_detail(store: TaskStore, task_id: int, *, now: float | None = None) -> dict[str, Any] | None:
+def api_task_detail(
+    store: TaskStore,
+    task_id: int,
+    *,
+    now: float | None = None,
+    lifecycle_actions_enabled: bool = True,
+) -> dict[str, Any] | None:
     task = store.find_task(task_id)
     if task is None:
         return None
-    result = serialize_task(task, now=now)
+    result = serialize_task(task, now=now, lifecycle_actions_enabled=lifecycle_actions_enabled)
     result["events"] = [serialize_event(event) for event in store.list_events(task.id)]
     return result
 

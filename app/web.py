@@ -52,6 +52,8 @@ from .web_api import (
 
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 REQUEST_BODY_READ_TIMEOUT_SECONDS = 2
+LEGACY_LIFECYCLE_REASON = "旧版任务引擎模式不支持终止或删除任务"
+TASK_NOT_FOUND_MESSAGE = "任务不存在或已过期"
 
 
 class RequestBodyTooLarge(ValueError):
@@ -1535,6 +1537,12 @@ class WebApp:
         task_action = parse_task_action_path(parsed.path) if method == "POST" else None
         if task_action is not None:
             task_id, action = task_action
+            if action == "terminate" and not self.task_engine_enabled:
+                return (
+                    409,
+                    {"Content-Type": "text/plain; charset=utf-8", **auth_headers},
+                    LEGACY_LIFECYCLE_REASON.encode("utf-8"),
+                )
             task = self.store.find_task(task_id)
             if task:
                 apply_task_action(self.store, task_id, action, max_retries=self.max_retries, actor="Web")
@@ -1582,7 +1590,20 @@ class WebApp:
                 action = parts[6]
                 task = self.store.find_task(task_id)
                 if task is None:
-                    status, response_headers, response_body = api_response({"error": "task_not_found"}, status=404)
+                    status, response_headers, response_body = api_response(
+                        {"error": "task_not_found", "message": TASK_NOT_FOUND_MESSAGE},
+                        status=404,
+                    )
+                    return status, {**response_headers, **auth_headers}, response_body
+                if action == "terminate" and not self.task_engine_enabled:
+                    status, response_headers, response_body = api_response(
+                        {
+                            "error": "action_not_allowed",
+                            "action": action,
+                            "reason": LEGACY_LIFECYCLE_REASON,
+                        },
+                        status=409,
+                    )
                     return status, {**response_headers, **auth_headers}, response_body
                 result = apply_task_action(self.store, task_id, action, max_retries=self.max_retries, actor="Web") if action in TASK_ACTIONS else None
                 if result is None or not result.applied:
@@ -1595,14 +1616,29 @@ class WebApp:
                         status=409,
                     )
                     return status, {**response_headers, **auth_headers}, response_body
-                status, response_headers, response_body = api_response(api_task_detail(self.store, task_id))
+                status, response_headers, response_body = api_response(
+                    api_task_detail(
+                        self.store,
+                        task_id,
+                        lifecycle_actions_enabled=self.task_engine_enabled,
+                    )
+                )
                 return status, {**response_headers, **auth_headers}, response_body
         if method == "DELETE" and path.startswith("/api/v1/tasks/"):
             raw_id = path.removeprefix("/api/v1/tasks/")
             if raw_id.isdigit():
+                if not self.task_engine_enabled and self.store.find_task(int(raw_id)) is not None:
+                    status, response_headers, response_body = api_response(
+                        {"error": "delete_not_allowed", "reason": LEGACY_LIFECYCLE_REASON},
+                        status=409,
+                    )
+                    return status, {**response_headers, **auth_headers}, response_body
                 result = delete_task_record(self.store, int(raw_id))
                 if result.task is None:
-                    status, response_headers, response_body = api_response({"error": "task_not_found"}, status=404)
+                    status, response_headers, response_body = api_response(
+                        {"error": "task_not_found", "message": TASK_NOT_FOUND_MESSAGE},
+                        status=404,
+                    )
                     return status, {**response_headers, **auth_headers}, response_body
                 if not result.applied:
                     status, response_headers, response_body = api_response(
@@ -1748,7 +1784,11 @@ class WebApp:
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/overview":
             payload = {
-                "tasks": api_tasks(self.store, limit=20),
+                "tasks": api_tasks(
+                    self.store,
+                    limit=20,
+                    lifecycle_actions_enabled=self.task_engine_enabled,
+                ),
                 "health": serialize_health(self.store, enabled=self.task_engine_enabled),
                 "strm_default_mode": self.store.get_default_strm_mode(),
                 "own_share_receive_code": self._own_share_receive_code_payload(),
@@ -1776,14 +1816,20 @@ class WebApp:
             status, response_headers, response_body = api_response(payload)
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/tasks":
-            status, response_headers, response_body = api_response(api_tasks(self.store))
+            status, response_headers, response_body = api_response(
+                api_tasks(self.store, lifecycle_actions_enabled=self.task_engine_enabled)
+            )
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path.startswith("/api/v1/tasks/"):
             try:
                 task_id = int(path.removeprefix("/api/v1/tasks/"))
             except ValueError:
                 task_id = 0
-            detail = api_task_detail(self.store, task_id)
+            detail = api_task_detail(
+                self.store,
+                task_id,
+                lifecycle_actions_enabled=self.task_engine_enabled,
+            )
             status, response_headers, response_body = api_response(
                 detail if detail is not None else {"error": "task_not_found"},
                 status=200 if detail is not None else 404,
@@ -1872,7 +1918,15 @@ class WebApp:
             except (UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
                 status, response_headers, response_body = api_response({"error": str(exc)}, status=400)
                 return status, {**response_headers, **auth_headers}, response_body
-            status, response_headers, response_body = api_response({"task": api_task_detail(self.store, task.id)})
+            status, response_headers, response_body = api_response(
+                {
+                    "task": api_task_detail(
+                        self.store,
+                        task.id,
+                        lifecycle_actions_enabled=self.task_engine_enabled,
+                    )
+                }
+            )
             return status, {**response_headers, **auth_headers}, response_body
         status, response_headers, response_body = api_response({"error": "not_found"}, status=404)
         return status, {**response_headers, **auth_headers}, response_body

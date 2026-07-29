@@ -1,0 +1,23 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import { api } from '../src/api.js'
+
+test('lifecycle requests surface backend Chinese reasons for conflicts and missing tasks', async () => {
+  const originalFetch = globalThis.fetch
+  const responses = [
+    { status: 409, payload: { error: 'action_not_allowed', reason: '任务已经结束，无需终止' } },
+    { status: 404, payload: { error: 'task_not_found', message: '任务不存在或已过期' } },
+  ]
+  globalThis.fetch = async () => {
+    const response = responses.shift()
+    return { ok: false, status: response.status, json: async () => response.payload }
+  }
+
+  try {
+    await assert.rejects(api.taskAction(7, 'terminate'), { message: '任务已经结束，无需终止' })
+    await assert.rejects(api.deleteTask(8), { message: '任务不存在或已过期' })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})

@@ -33,6 +33,37 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(payload["available_actions"], ["terminate"])
             self.assertFalse(payload["termination_requested"])
 
+    def test_legacy_engine_hides_and_rejects_task_lifecycle_actions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            active = store.upsert_task("legacy-active", "", "https://115cdn.com/s/legacy-active")
+            finished = store.upsert_task("legacy-finished", "", "https://115cdn.com/s/legacy-finished")
+            store.record_event(finished.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            app = WebApp(store, task_engine_enabled=False)
+
+            list_status, _headers, list_body = app.handle_request("GET", "/api/v1/tasks", {}, b"")
+            terminate_status, _headers, terminate_body = app.handle_request(
+                "POST", f"/api/v1/tasks/{active.id}/actions/terminate", {}, b""
+            )
+            legacy_terminate_status, _headers, _body = app.handle_request(
+                "POST", f"/task/{active.id}/terminate", {}, b""
+            )
+            delete_status, _headers, delete_body = app.handle_request(
+                "DELETE", f"/api/v1/tasks/{finished.id}", {}, b""
+            )
+
+            tasks = {item["id"]: item for item in json.loads(list_body)["items"]}
+            self.assertEqual(list_status, 200)
+            self.assertEqual(tasks[active.id]["available_actions"], [])
+            self.assertEqual(tasks[finished.id]["available_actions"], [])
+            self.assertEqual(terminate_status, 409)
+            self.assertIn("旧版任务引擎", json.loads(terminate_body)["reason"])
+            self.assertEqual(legacy_terminate_status, 409)
+            self.assertEqual(delete_status, 409)
+            self.assertIn("旧版任务引擎", json.loads(delete_body)["reason"])
+            self.assertEqual(store.find_task(active.id).status, TaskStatus.PENDING)
+            self.assertIsNotNone(store.find_task(finished.id))
+
     def test_terminate_api_is_idempotent_for_claimed_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
@@ -72,10 +103,12 @@ class WebApiTests(unittest.TestCase):
 
             self.assertEqual(conflict_status, 409)
             self.assertEqual(json.loads(conflict_body)["error"], "delete_not_allowed")
+            self.assertEqual(json.loads(conflict_body)["reason"], "任务尚未结束，无法删除")
             self.assertEqual(deleted_status, 200)
             self.assertEqual(json.loads(deleted_body)["deleted"], task.id)
             self.assertEqual(missing_status, 404)
             self.assertEqual(json.loads(missing_body)["error"], "task_not_found")
+            self.assertEqual(json.loads(missing_body)["message"], "任务不存在或已过期")
 
     def test_terminate_api_rejects_finished_task_and_reports_missing_task(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -93,8 +126,10 @@ class WebApiTests(unittest.TestCase):
 
             self.assertEqual(conflict_status, 409)
             self.assertEqual(json.loads(conflict_body)["error"], "action_not_allowed")
+            self.assertEqual(json.loads(conflict_body)["reason"], "任务已经结束，无需终止")
             self.assertEqual(missing_status, 404)
             self.assertEqual(json.loads(missing_body)["error"], "task_not_found")
+            self.assertEqual(json.loads(missing_body)["message"], "任务不存在或已过期")
 
     def test_body_limit_rejects_oversized_direct_request(self):
         with tempfile.TemporaryDirectory() as tmp:
