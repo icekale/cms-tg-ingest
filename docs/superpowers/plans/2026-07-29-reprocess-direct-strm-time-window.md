@@ -30,7 +30,6 @@
 **Files:**
 - Modify: `app/media/strm.py:453-555`
 - Modify: `app/workflows/self_share.py:1300-1405`
-- Test: `tests/test_direct_workflow.py:1-410`
 - Test: `tests/test_bridge_task_engine.py:4200-4300`
 
 **Interfaces:**
@@ -38,42 +37,7 @@
 - Produces: `find_recent_direct_library_strm_source_dir(..., *, min_update_time: float = 0) -> tuple[Path, str] | None`.
 - Produces: organizing-stage calls that pass `max(update_started_at - 5, reprocess_started_at - 5)` without changing ordinary intake calls.
 
-- [ ] **Step 1: Add the failing finder cutoff tests**
-
-Add `import inspect` to `tests/test_direct_workflow.py`. Add this test next to `test_recent_direct_library_lookup_allows_old_exact_tmdb_folder`:
-
-```python
-def test_recent_direct_library_lookup_ignores_stale_unmatched_folder_after_cutoff(self):
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        library = root / "library"
-        media_root = library / "unmatched-old-folder"
-        media_root.mkdir(parents=True)
-        strm = media_root / "movie.strm"
-        strm.write_text("https://115.com/d/file-id/movie.mkv", encoding="utf-8")
-        os.utime(strm, (100, 100))
-        os.utime(media_root, (100, 100))
-        config = MoveConfig(source_roots=[], library_roots={"欧美电影": library}, stable_seconds=0)
-        row = {"created_at": 1, "title": "悬案 (2026)"}
-
-        self.assertIn(
-            "min_update_time",
-            inspect.signature(find_recent_direct_library_strm_source_dir).parameters,
-        )
-        found = find_recent_direct_library_strm_source_dir(
-            config,
-            row,
-            {"tmdb_id": "273114", "title": "悬案", "type": "tv"},
-            share_name="悬案 (2026)",
-            min_update_time=200,
-        )
-
-    self.assertIsNone(found)
-```
-
-Add the same signature assertion and `min_update_time=2000` argument to `test_recent_direct_library_lookup_allows_old_exact_tmdb_folder`. Its expected exact folder result remains unchanged.
-
-- [ ] **Step 2: Add the failing workflow regression**
+- [ ] **Step 1: Add the failing workflow regression**
 
 Add this test to `BridgeSelfShareTaskWorkflowTests` near the existing organizing direct-STRM tests:
 
@@ -135,20 +99,18 @@ def test_organizing_reprocess_ignores_direct_strm_older_than_current_run(self):
     self.assertEqual(stored_recognition["category_status"], "self_share_resolved")
 ```
 
-- [ ] **Step 3: Run the new tests and verify RED**
+- [ ] **Step 2: Run the regression and verify RED**
 
 Run:
 
 ```bash
 python3 -m unittest -v \
-  tests.test_direct_workflow.DirectWorkflowTests.test_recent_direct_library_lookup_ignores_stale_unmatched_folder_after_cutoff \
-  tests.test_direct_workflow.DirectWorkflowTests.test_recent_direct_library_lookup_allows_old_exact_tmdb_folder \
   tests.test_bridge_task_engine.BridgeSelfShareTaskWorkflowTests.test_organizing_reprocess_ignores_direct_strm_older_than_current_run
 ```
 
-Expected: finder tests fail because `min_update_time` is absent; the workflow test fails because the stale sole candidate changes the submission category to `欧美电影`.
+Expected: the test fails on the literal `国产电视` category/status assertions because the stale sole candidate changes the submission to `欧美电影` and `cms_direct_strm_resolved`. The test must not fail from fixture setup or an exception.
 
-- [ ] **Step 4: Implement the optional finder cutoff**
+- [ ] **Step 3: Implement the optional finder cutoff**
 
 Change the finder signature and normalize its cutoff:
 
@@ -175,7 +137,7 @@ def find_recent_direct_library_strm_source_dir(
 
 Leave both existing `and not exact_tmdb_folder` conditions unchanged.
 
-- [ ] **Step 5: Pass the current-run cutoff from organizing**
+- [ ] **Step 4: Pass the current-run cutoff from organizing**
 
 After parsing both stage timestamps, add:
 
@@ -188,7 +150,7 @@ direct_min_update_time = max(
 
 Pass `min_update_time=direct_min_update_time` to both organizing-stage calls to `find_recent_direct_library_strm_source_dir()`. Do not change the direct workflow caller in `app/workflows/direct.py`.
 
-- [ ] **Step 6: Run focused tests and verify GREEN**
+- [ ] **Step 5: Run focused tests and verify GREEN**
 
 Run the RED command again, then run:
 
@@ -200,19 +162,19 @@ python3 -W error::ResourceWarning -m unittest -v \
 
 Expected: all focused tests pass, including the existing exact-TMDB and ordinary organizing cases.
 
-- [ ] **Step 7: Review and commit the behavioral fix**
+- [ ] **Step 6: Review and commit the behavioral fix**
 
 Run:
 
 ```bash
 git diff --check
-git diff -- app/media/strm.py app/workflows/self_share.py tests/test_direct_workflow.py tests/test_bridge_task_engine.py
+git diff -- app/media/strm.py app/workflows/self_share.py tests/test_bridge_task_engine.py
 ```
 
 Commit only these four reviewed files:
 
 ```bash
-git add app/media/strm.py app/workflows/self_share.py tests/test_direct_workflow.py tests/test_bridge_task_engine.py
+git add app/media/strm.py app/workflows/self_share.py tests/test_bridge_task_engine.py
 git commit -m "fix: bound reprocess direct strm lookup"
 ```
 
