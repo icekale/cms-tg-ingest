@@ -21,6 +21,24 @@ STRM_DEFAULT_MODE_KEY = "strm_default_mode"
 OWN_SHARE_RECEIVE_CODE_KEY = "own_share_receive_code_override"
 SELF_SHARE_RECEIVE_CID_KEY = "self_share_receive_cid_override"
 SELF_SHARE_REVIEW_MODE_KEY = "self_share_review_mode_override"
+TERMINATION_REQUESTED_AT_KEY = "termination_requested_at"
+TERMINATION_REQUESTED_BY_KEY = "termination_requested_by"
+_TERMINATION_METADATA_DELETE_KEYS = (
+    TERMINATION_REQUESTED_AT_KEY,
+    TERMINATION_REQUESTED_BY_KEY,
+    "_lock_key",
+    "_lock_reason",
+    "_lock_waiting",
+    "_lock_owner_task_id",
+)
+_DELETABLE_TASK_STATUSES = frozenset(
+    {
+        TaskStatus.SUCCEEDED.value,
+        TaskStatus.FAILED.value,
+        TaskStatus.NEEDS_ACTION.value,
+        TaskStatus.CANCELLED.value,
+    }
+)
 REPROCESS_METADATA_DELETE_KEYS = (
     "_defer_stage",
     "_defer_message",
@@ -1621,10 +1639,14 @@ class TaskStore:
         )
 
     def clear_finished_tasks(self) -> int:
-        terminal_statuses = (TaskStatus.SUCCEEDED.value, TaskStatus.FAILED.value)
+        terminal_statuses = (
+            TaskStatus.SUCCEEDED.value,
+            TaskStatus.FAILED.value,
+            TaskStatus.CANCELLED.value,
+        )
         with self._lock, self._connection() as conn:
             rows = conn.execute(
-                "SELECT id FROM tasks WHERE status IN (?, ?)",
+                "SELECT id FROM tasks WHERE status IN (?, ?, ?)",
                 terminal_statuses,
             ).fetchall()
             task_ids = [int(row["id"]) for row in rows]
@@ -1635,6 +1657,181 @@ class TaskStore:
             conn.execute(f"DELETE FROM task_operations WHERE task_id IN ({placeholders})", task_ids)
             cursor = conn.execute(f"DELETE FROM tasks WHERE id IN ({placeholders})", task_ids)
         return int(cursor.rowcount or 0)
+
+    def delete_finished_task(self, task_id: int, *, expected_updated_at: float) -> bool:
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+            if row is None:
+                return False
+            if str(row["claimed_by"] or ""):
+                return False
+            if row["status"] not in _DELETABLE_TASK_STATUSES:
+                return False
+            if float(row["updated_at"] or 0) != float(expected_updated_at):
+                return False
+            conn.execute("DELETE FROM task_events WHERE task_id = ?", (int(task_id),))
+            conn.execute("DELETE FROM task_operations WHERE task_id = ?", (int(task_id),))
+            cursor = conn.execute("DELETE FROM tasks WHERE id = ?", (int(task_id),))
+        return int(cursor.rowcount or 0) == 1
+
+    def request_task_termination(
+        self,
+        task_id: int,
+        actor: str,
+        now: float | None = None,
+    ) -> TaskSnapshot | None:
+        current_time = time.time() if now is None else float(now)
+        actor = str(actor)
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+            if row is None:
+                return None
+            if row["status"] == TaskStatus.CANCELLED.value:
+                return self._snapshot(row)
+            if row["status"] in _DELETABLE_TASK_STATUSES:
+                return None
+            if str(row["claimed_by"] or ""):
+                try:
+                    metadata = json.loads(row["metadata_json"] or "{}")
+                except Exception:
+                    metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                if TERMINATION_REQUESTED_AT_KEY not in metadata:
+                    metadata = self._merge_metadata(
+                        row["metadata_json"],
+                        {
+                            TERMINATION_REQUESTED_AT_KEY: current_time,
+                            TERMINATION_REQUESTED_BY_KEY: actor,
+                        },
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at)
+                        VALUES (?, ?, ?, ?, '', '', ?)
+                        """,
+                        (
+                            int(task_id),
+                            row["current_stage"],
+                            row["status"],
+                            f"{actor} 已请求终止，等待当前阶段结束",
+                            current_time,
+                        ),
+                    )
+                    conn.execute(
+                        "UPDATE tasks SET metadata_json = ? WHERE id = ?",
+                        (metadata, int(task_id)),
+                    )
+                result = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+                return self._snapshot(result)
+
+            metadata = self._merge_metadata(
+                row["metadata_json"],
+                None,
+                delete_keys=_TERMINATION_METADATA_DELETE_KEYS,
+            )
+            conn.execute(
+                """
+                INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at)
+                VALUES (?, ?, ?, ?, '', '', ?)
+                """,
+                (
+                    int(task_id),
+                    row["current_stage"],
+                    TaskStatus.CANCELLED.value,
+                    f"{actor} 已终止任务",
+                    current_time,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = ?, metadata_json = ?, next_run_at = -1,
+                    claimed_by = '', claimed_at = 0, claim_token = '', claim_heartbeat_at = 0,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (TaskStatus.CANCELLED.value, metadata, current_time, int(task_id)),
+            )
+            result = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+        return self._snapshot(result)
+
+    def settle_requested_termination(
+        self,
+        task_id: int,
+        expected_claimed_by: str,
+        expected_claim_token: str,
+        *,
+        error_type: str = "",
+        error_summary: str = "",
+        error_detail: str = "",
+        now: float | None = None,
+    ) -> TaskSnapshot | None:
+        current_time = time.time() if now is None else float(now)
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+            if row is None:
+                return None
+            try:
+                termination_metadata = json.loads(row["metadata_json"] or "{}")
+                termination_requested_at = float(
+                    termination_metadata.get(TERMINATION_REQUESTED_AT_KEY, 0)
+                    if isinstance(termination_metadata, dict)
+                    else 0
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                termination_requested_at = 0
+            if (
+                row["status"] != TaskStatus.RUNNING.value
+                or str(row["claimed_by"] or "") != str(expected_claimed_by)
+                or str(row["claim_token"] or "") != str(expected_claim_token)
+                or termination_requested_at <= 0
+            ):
+                return None
+            metadata = self._merge_metadata(
+                row["metadata_json"],
+                None,
+                delete_keys=_TERMINATION_METADATA_DELETE_KEYS,
+            )
+            final_error_type = str(error_type) if error_type else str(row["error_type"] or "")
+            final_error_summary = str(error_summary) if error_summary else str(row["error_summary"] or "")
+            conn.execute(
+                """
+                INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(task_id),
+                    row["current_stage"],
+                    TaskStatus.CANCELLED.value,
+                    "已终止任务",
+                    final_error_type,
+                    str(error_detail),
+                    current_time,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = ?, error_type = ?, error_summary = ?, metadata_json = ?, next_run_at = -1,
+                    claimed_by = '', claimed_at = 0, claim_token = '', claim_heartbeat_at = 0,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    TaskStatus.CANCELLED.value,
+                    final_error_type,
+                    final_error_summary,
+                    metadata,
+                    current_time,
+                    int(task_id),
+                ),
+            )
+            result = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+        return self._snapshot(result)
 
     def clear_worker_claims(self, worker_id: str, now: float | None = None) -> int:
         worker_id = str(worker_id or "").strip()

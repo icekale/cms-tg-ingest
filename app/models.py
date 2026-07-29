@@ -32,6 +32,7 @@ class TaskStatus(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     NEEDS_ACTION = "needs_action"
+    CANCELLED = "cancelled"
 
 
 class RetryAction(str, Enum):

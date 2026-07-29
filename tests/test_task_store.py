@@ -104,6 +104,104 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(store.clear_finished_tasks(), 1)
             self.assertIsNone(store.find_operation(task.id, "g0:u0:submit"))
 
+    def test_delete_finished_task_removes_task_events_and_operations_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("delete-finished", "", "https://115cdn.com/s/delete-finished")
+            task = store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            store.prepare_operation(task.id, "delete-test", "cms_submit", {"id": 1})
+
+            deleted = store.delete_finished_task(task.id, expected_updated_at=task.updated_at)
+
+            self.assertTrue(deleted)
+            self.assertIsNone(store.find_task(task.id))
+            self.assertEqual(store.list_events(task.id), [])
+            self.assertIsNone(store.find_operation(task.id, "delete-test"))
+
+    def test_delete_finished_task_rejects_active_claim_and_stale_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("delete-active", "", "https://115cdn.com/s/delete-active")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            active = store.claim_next_runnable("worker", now=10)
+
+            self.assertFalse(store.delete_finished_task(active.id, expected_updated_at=active.updated_at))
+            store.clear_worker_claims("worker", now=11)
+            changed = store.find_task(active.id)
+            store.record_event(changed.id, TaskStage.FAILED, TaskStatus.FAILED, "failed")
+            self.assertFalse(store.delete_finished_task(changed.id, expected_updated_at=changed.updated_at))
+            self.assertIsNotNone(store.find_task(active.id))
+
+    def test_clear_finished_tasks_includes_cancelled_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("clear-cancelled", "", "https://115cdn.com/s/clear-cancelled")
+            store.request_task_termination(task.id, "Web", now=10)
+
+            self.assertEqual(store.clear_finished_tasks(), 1)
+            self.assertIsNone(store.find_task(task.id))
+
+    def test_unclaimed_task_termination_is_immediate_and_not_runnable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("terminate-pending", "", "https://115cdn.com/s/terminate-pending")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+
+            terminated = store.request_task_termination(task.id, "Web", now=10)
+
+            self.assertEqual(terminated.status, TaskStatus.CANCELLED)
+            self.assertEqual(terminated.current_stage, TaskStage.ORGANIZING)
+            self.assertEqual(terminated.next_run_at, -1)
+            self.assertEqual(terminated.claimed_by, "")
+            self.assertIsNone(store.claim_next_runnable("worker", now=10))
+            self.assertEqual(store.list_events(task.id)[-1]["message"], "Web 已终止任务")
+
+    def test_claimed_task_termination_preserves_claim_version_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("terminate-running", "", "https://115cdn.com/s/terminate-running")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            claimed = store.claim_next_runnable("worker", now=10)
+
+            requested = store.request_task_termination(task.id, "Web", now=11)
+            repeated = store.request_task_termination(task.id, "Web", now=12)
+
+            self.assertEqual(requested.status, TaskStatus.RUNNING)
+            self.assertEqual(requested.claim_token, claimed.claim_token)
+            self.assertEqual(requested.updated_at, claimed.updated_at)
+            self.assertEqual(requested.metadata["termination_requested_at"], 11)
+            self.assertEqual(repeated.metadata["termination_requested_at"], 11)
+            messages = [event["message"] for event in store.list_events(task.id)]
+            self.assertEqual(messages.count("Web 已请求终止，等待当前阶段结束"), 1)
+
+    def test_settle_requested_termination_requires_current_claim_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("settle", "", "https://115cdn.com/s/settle")
+            store.enqueue_task(task.id, TaskStage.STRM_READY, next_run_at=0)
+            claimed = store.claim_next_runnable("worker", now=10)
+            store.request_task_termination(task.id, "Web", now=11)
+
+            stale = store.settle_requested_termination(task.id, "worker", "stale-token", now=12)
+            settled = store.settle_requested_termination(
+                task.id,
+                "worker",
+                claimed.claim_token,
+                error_type="stage_exception",
+                error_summary="boom",
+                error_detail="RuntimeError('boom')",
+                now=13,
+            )
+
+            self.assertIsNone(stale)
+            self.assertEqual(settled.status, TaskStatus.CANCELLED)
+            self.assertEqual(settled.current_stage, TaskStage.STRM_READY)
+            self.assertEqual(settled.error_summary, "boom")
+            self.assertEqual(settled.claimed_by, "")
+            self.assertEqual(settled.next_run_at, -1)
+            self.assertNotIn("termination_requested_at", settled.metadata)
+            self.assertEqual(store.list_events(task.id)[-1]["status"], "cancelled")
+
     def test_operation_journal_migrates_and_reprocess_changes_operation_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "tasks.db"
