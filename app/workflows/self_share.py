@@ -20,10 +20,10 @@ from app.clients.p115 import (
     category_for_115_parent_id,
     is_p115_risk_control_message,
     normalize_cloud_status,
-    p115_file_id,
     p115_file_name,
     p115_is_folder,
-    p115_parent_id,
+    p115_item_id,
+    p115_item_parent_id,
 )
 from app.config import MovePlan, SelfShareConfig, default_library_roots, is_relative_to, safe_resolve
 from app.media.classify import (
@@ -1095,9 +1095,9 @@ class BridgeSelfShareTaskWorkflow:
             return []
         matches = []
         for item in items:
-            file_id = p115_file_id(item)
+            file_id = p115_item_id(item)
             file_name = p115_file_name(item)
-            parent_id = p115_parent_id(item)
+            parent_id = p115_item_parent_id(item)
             if not file_id or not file_name:
                 continue
             if file_id in existing_ids:
