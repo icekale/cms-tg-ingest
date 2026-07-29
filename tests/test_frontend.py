@@ -29,8 +29,12 @@ class FrontendTests(unittest.TestCase):
             self.assertIn(text, page)
         self.assertIn('maxlength="100"', page)
         self.assertIn("slice(0, 100)", page)
-        for label in ("日志级别", "日志行数", "日志关键字", "实时日志输出"):
+        for label in ("日志关键字", "实时日志输出"):
             self.assertIn(f'aria-label="{label}"', page)
+        for label in ("日志级别", "日志行数"):
+            self.assertIn(f":input-props=\"{{ 'aria-label': '{label}' }}\"", page)
+        self.assertNotIn('n-select v-model:value="filterType" aria-label=', page)
+        self.assertNotIn('n-select v-model:value="lineLimit" aria-label=', page)
         self.assertIn('tabindex="0"', page)
         self.assertIn("onBeforeUnmount", page)
         self.assertIn("preservedScrollTop", page)

@@ -57,10 +57,10 @@ test('controller closes the previous EventSource on reconnect and on disposal', 
   )
 
   controller.connect({ filterType: 'main', lines: 1000, keyword: '' })
-  sources[0].emit('snapshot', { entries: [{ id: 1 }] })
+  sources[0].emit('snapshot', { entries: [{ id: 1, level: 'INFO', text: 'snapshot' }] })
   controller.connect({ filterType: 'all', lines: 5000, keyword: '' })
 
-  assert.deepEqual(snapshots, [[{ id: 1 }]])
+  assert.deepEqual(snapshots, [[{ id: 1, level: 'INFO', text: 'snapshot' }]])
   assert.equal(sources[0].closed, true)
   assert.equal(sources[1].options.withCredentials, true)
   controller.close()
@@ -101,6 +101,26 @@ test('controller ignores stale lifecycle, snapshot, and gap events after reconne
 
 test('parseLogEvent rejects an empty SSE payload', () => {
   assert.throws(() => parseLogEvent({ data: '' }), /日志事件格式无效/)
+})
+
+test('controller rejects a partial snapshot without replacing current rows', () => {
+  const sources = []
+  const snapshots = []
+  let errors = 0
+  const controller = createLogStreamController(
+    {
+      onError: () => { errors += 1 },
+      onSnapshot: (rows) => snapshots.push(rows),
+    },
+    createFakeSourceFactory(sources),
+  )
+
+  controller.connect({ filterType: 'main', lines: 1000, keyword: '' })
+  sources[0].emit('snapshot', { entries: [{ id: 1, level: 'INFO', text: 'kept' }] })
+
+  assert.doesNotThrow(() => sources[0].emit('snapshot', { entries: [{ id: 2, level: 'INFO' }] }))
+  assert.deepEqual(snapshots, [[{ id: 1, level: 'INFO', text: 'kept' }]])
+  assert.equal(errors, 1)
 })
 
 test('controller isolates malformed frames and invalid payload shapes', () => {

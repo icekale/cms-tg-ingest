@@ -98,8 +98,8 @@ onBeforeUnmount(() => {
   </div>
   <n-card>
     <div class="log-toolbar">
-      <n-select v-model:value="filterType" aria-label="日志级别" :options="filterOptions" style="width: 120px" />
-      <n-select v-model:value="lineLimit" aria-label="日志行数" :options="lineOptions" style="width: 120px" />
+      <n-select v-model:value="filterType" :input-props="{ 'aria-label': '日志级别' }" :options="filterOptions" style="width: 120px" />
+      <n-select v-model:value="lineLimit" :input-props="{ 'aria-label': '日志行数' }" :options="lineOptions" style="width: 120px" />
       <n-input v-model:value="keywordDraft" aria-label="日志关键字" maxlength="100" clearable placeholder="关键字" style="max-width: 280px" @keyup.enter="applyKeyword" />
       <n-space>
         <n-button secondary @click="applyKeyword">筛选</n-button>

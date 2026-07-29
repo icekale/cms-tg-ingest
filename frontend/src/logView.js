@@ -34,17 +34,10 @@ function parseLogEntry(payload) {
   return payload
 }
 
-function parseSnapshotEntry(payload) {
-  if (!payload || typeof payload !== 'object' || !Number.isInteger(payload.id)) {
-    throw new Error('日志事件格式无效')
-  }
-  return payload
-}
-
 function parseSnapshot(event) {
   const payload = parseLogEvent(event)
   if (!Array.isArray(payload.entries)) throw new Error('日志事件格式无效')
-  return payload.entries.map(parseSnapshotEntry)
+  return payload.entries.map(parseLogEntry)
 }
 
 function parseHeartbeat(event) {
