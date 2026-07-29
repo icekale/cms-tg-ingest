@@ -575,13 +575,17 @@ def call_maybe_start_web_server(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     )
     if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler or supports_frontend_dist_path or supports_max_retries or supports_background_jobs or supports_log_hub:
-        kwargs = {
-            "submission_store": submission_store if supports_submission_store else None,
-            "quality_automation": quality_automation if supports_quality_automation else None,
-            "hdhive_service": hdhive_service if supports_hdhive_service else None,
-            "hdhive_scheduler": hdhive_scheduler if supports_hdhive_scheduler else None,
-            "frontend_dist_path": frontend_dist_path if supports_frontend_dist_path else None,
-        }
+        kwargs = {}
+        if supports_submission_store:
+            kwargs["submission_store"] = submission_store
+        if supports_quality_automation:
+            kwargs["quality_automation"] = quality_automation
+        if supports_hdhive_service:
+            kwargs["hdhive_service"] = hdhive_service
+        if supports_hdhive_scheduler:
+            kwargs["hdhive_scheduler"] = hdhive_scheduler
+        if supports_frontend_dist_path:
+            kwargs["frontend_dist_path"] = frontend_dist_path
         if supports_background_jobs:
             kwargs["background_jobs"] = background_jobs
         if supports_log_hub:

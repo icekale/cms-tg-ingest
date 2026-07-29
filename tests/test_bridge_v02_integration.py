@@ -208,6 +208,57 @@ class BridgeV02IntegrationTests(unittest.TestCase):
 
             self.assertEqual(result[1:], ("127.0.0.1", 8787, "secret", True))
 
+    def test_call_maybe_start_web_server_passes_only_log_hub_to_supporting_callee(self):
+        config = object()
+        task_store = object()
+        hub = object()
+
+        def log_hub_only(actual_config, actual_task_store, *, log_hub):
+            self.assertIs(actual_config, config)
+            self.assertIs(actual_task_store, task_store)
+            self.assertIs(log_hub, hub)
+            return "log-hub-only"
+
+        with patch.object(bridge, "maybe_start_web_server", log_hub_only):
+            result = bridge.call_maybe_start_web_server(
+                config,
+                task_store,
+                submission_store=object(),
+                quality_automation=object(),
+                hdhive_service=object(),
+                hdhive_scheduler=object(),
+                frontend_dist_path="/tmp/frontend",
+                background_jobs=object(),
+                log_hub=hub,
+            )
+
+        self.assertEqual(result, "log-hub-only")
+
+    def test_call_maybe_start_web_server_keeps_two_argument_legacy_callee(self):
+        config = object()
+        task_store = object()
+        calls = []
+
+        def legacy_callee(actual_config, actual_task_store):
+            calls.append((actual_config, actual_task_store))
+            return "legacy"
+
+        with patch.object(bridge, "maybe_start_web_server", legacy_callee):
+            result = bridge.call_maybe_start_web_server(
+                config,
+                task_store,
+                submission_store=object(),
+                quality_automation=object(),
+                hdhive_service=object(),
+                hdhive_scheduler=object(),
+                frontend_dist_path="/tmp/frontend",
+                background_jobs=object(),
+                log_hub=object(),
+            )
+
+        self.assertEqual(result, "legacy")
+        self.assertEqual(calls, [(config, task_store)])
+
     def test_main_configures_logging_once_and_injects_hub_into_runtime(self):
         runtime = SimpleNamespace(hub=object())
         config = SimpleNamespace()
