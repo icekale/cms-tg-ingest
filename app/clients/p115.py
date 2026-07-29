@@ -845,11 +845,11 @@ class P115WebClient:
 
     @staticmethod
     def _normalized_received_item(item: dict[str, Any], target_cid: str) -> dict[str, Any] | None:
-        file_id = p115_file_id(item)
+        file_id = p115_item_id(item)
         file_name = p115_file_name(item)
         if not file_id or not file_name or file_id == str(target_cid or "").strip():
             return None
-        parent_id = p115_parent_id(item) or str(target_cid or "").strip()
+        parent_id = p115_item_parent_id(item) or str(target_cid or "").strip()
         if parent_id and str(target_cid or "").strip() and parent_id != str(target_cid).strip():
             return None
         try:

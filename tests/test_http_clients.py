@@ -352,6 +352,58 @@ class HttpClientTests(unittest.TestCase):
         self.assertTrue(all(method == "GET" for _url, method, _data, _params in http.calls))
         self.assertFalse(any(url.endswith("/share/receive") for url, *_rest in http.calls))
 
+    def test_reconcile_prepared_share_receive_handles_real_file_records(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                if url.endswith("/files"):
+                    return {
+                        "state": True,
+                        "data": [
+                            {
+                                "fid": "old-local-id",
+                                "cid": "pending-cid",
+                                "n": "123 (2026) {tmdb-1228710}.mkv",
+                                "fc": 1,
+                            },
+                            {
+                                "fid": "new-local-id",
+                                "cid": "pending-cid",
+                                "n": "123 (2026) {tmdb-1228710}.mkv",
+                                "fc": 1,
+                            },
+                        ],
+                    }
+                raise AssertionError(url)
+
+        client = P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+        intent = {
+            "share_code": "abc",
+            "receive_code": "1234",
+            "target_cid": "pending-cid",
+            "source_file_ids": ["source-id"],
+            "source_file_names": ["123 (2026) {tmdb-1228710}.mkv"],
+            "title": "123 (2026) {tmdb-1228710}",
+            "target_pre_call_file_ids": ["old-local-id"],
+            "target_snapshot_complete": True,
+        }
+
+        result = client.reconcile_prepared_share_receive(intent)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            result["received_items"],
+            [
+                {
+                    "file_id": "new-local-id",
+                    "file_name": "123 (2026) {tmdb-1228710}.mkv",
+                    "is_folder": False,
+                    "parent_id": "pending-cid",
+                    "received_item_verified": True,
+                }
+            ],
+        )
+        self.assertTrue(result["received_items_complete"])
+
     def test_reconcile_prepared_share_receive_rejects_unrelated_single_delta(self):
         class FakeHttp:
             def request(self, url, method="GET", data=None, headers=None, params=None):
