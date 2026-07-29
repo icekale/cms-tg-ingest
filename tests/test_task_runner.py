@@ -86,6 +86,27 @@ class TimeAdvancingCountingWorkflow:
         return result
 
 
+class TerminateBeforeResultStore(TaskStore):
+    def __init__(self, db_path, event_status=None):
+        super().__init__(db_path)
+        self.event_status = event_status
+        self.requested = False
+
+    def _request_termination(self, task_id):
+        if not self.requested:
+            self.requested = True
+            self.request_task_termination(task_id, "Web", now=3)
+
+    def complete_claimed_stage(self, task_id, **kwargs):
+        self._request_termination(task_id)
+        return super().complete_claimed_stage(task_id, **kwargs)
+
+    def record_event(self, task_id, stage, status, message, **kwargs):
+        if kwargs.get("expected_claimed_by") and status == self.event_status:
+            self._request_termination(task_id)
+        return super().record_event(task_id, stage, status, message, **kwargs)
+
+
 class TaskRunnerTests(unittest.TestCase):
     def test_termination_after_claim_skips_workflow(self):
         class TerminateAfterClaimStore(TaskStore):
@@ -168,6 +189,112 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(workflow.calls, [])
             self.assertEqual(current.status, TaskStatus.CANCELLED)
             self.assertEqual(current.claimed_by, "")
+
+    def test_termination_after_final_check_cancels_complete_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TerminateBeforeResultStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("complete-race", "", "https://115cdn.com/s/complete-race")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1)
+            runner = TaskRunner(store, FakeWorkflow([StageResult.complete("must not advance")]), worker_id="worker", now=lambda: 3)
+
+            self.assertTrue(runner.run_once())
+            current = store.find_task(task.id)
+
+            self.assertTrue(store.requested)
+            self.assertEqual(current.status, TaskStatus.CANCELLED)
+            self.assertEqual(current.current_stage, TaskStage.ORGANIZING)
+            self.assertEqual(current.claimed_by, "")
+
+    def test_termination_after_final_check_cancels_defer_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TerminateBeforeResultStore(Path(tmp) / "tasks.db", event_status=TaskStatus.RUNNING)
+            task = store.upsert_task("defer-race", "", "https://115cdn.com/s/defer-race")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1)
+            runner = TaskRunner(store, FakeWorkflow([StageResult.defer("wait", delay_seconds=30)]), worker_id="worker", now=lambda: 3)
+
+            self.assertTrue(runner.run_once())
+            current = store.find_task(task.id)
+
+            self.assertTrue(store.requested)
+            self.assertEqual(current.status, TaskStatus.CANCELLED)
+            self.assertEqual(current.next_run_at, -1)
+            self.assertEqual(current.claimed_by, "")
+
+    def test_termination_after_final_check_cancels_failed_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TerminateBeforeResultStore(Path(tmp) / "tasks.db", event_status=TaskStatus.FAILED)
+            task = store.upsert_task("failed-race", "", "https://115cdn.com/s/failed-race")
+            store.enqueue_task(task.id, TaskStage.STRM_READY, next_run_at=1)
+            runner = TaskRunner(
+                store,
+                FakeWorkflow([StageResult.failed("stage failed", error_type="strm_missing")]),
+                worker_id="worker",
+                now=lambda: 3,
+            )
+
+            self.assertTrue(runner.run_once())
+            current = store.find_task(task.id)
+
+            self.assertTrue(store.requested)
+            self.assertEqual(current.status, TaskStatus.CANCELLED)
+            self.assertEqual(current.error_type, "strm_missing")
+            self.assertEqual(current.error_summary, "stage failed")
+
+    def test_termination_after_final_check_cancels_needs_action_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TerminateBeforeResultStore(Path(tmp) / "tasks.db", event_status=TaskStatus.NEEDS_ACTION)
+            task = store.upsert_task("needs-action-race", "", "https://115cdn.com/s/needs-action-race")
+            store.enqueue_task(task.id, TaskStage.RECOGNIZING, next_run_at=1)
+            runner = TaskRunner(store, FakeWorkflow([StageResult.needs_action("choose")]), worker_id="worker", now=lambda: 3)
+
+            self.assertTrue(runner.run_once())
+            current = store.find_task(task.id)
+
+            self.assertTrue(store.requested)
+            self.assertEqual(current.status, TaskStatus.CANCELLED)
+            self.assertEqual(current.error_type, "needs_action")
+            self.assertEqual(current.error_summary, "choose")
+
+    def test_termination_after_final_check_cancels_stage_exception(self):
+        class ExplodingWorkflow:
+            def run_stage(self, _task):
+                raise RuntimeError("boom")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TerminateBeforeResultStore(Path(tmp) / "tasks.db", event_status=TaskStatus.FAILED)
+            task = store.upsert_task("exception-race", "", "https://115cdn.com/s/exception-race")
+            store.enqueue_task(task.id, TaskStage.STRM_READY, next_run_at=1)
+            runner = TaskRunner(store, ExplodingWorkflow(), worker_id="worker", now=lambda: 3)
+
+            with self.assertLogs("app.task_runner", level="ERROR"):
+                self.assertTrue(runner.run_once())
+            current = store.find_task(task.id)
+
+            self.assertTrue(store.requested)
+            self.assertEqual(current.status, TaskStatus.CANCELLED)
+            self.assertEqual(current.error_type, "stage_exception")
+            self.assertEqual(current.error_summary, "boom")
+
+    def test_termination_after_final_check_cancels_p115_risk_result(self):
+        class RiskWorkflow:
+            def run_stage(self, _task):
+                raise P115RiskControlError("too fast")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TerminateBeforeResultStore(Path(tmp) / "tasks.db", event_status=TaskStatus.NEEDS_ACTION)
+            task = store.upsert_task("risk-race", "", "https://115cdn.com/s/risk-race")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1)
+            runner = TaskRunner(store, RiskWorkflow(), worker_id="worker", now=lambda: 3, risk_cooldown_seconds=60)
+
+            self.assertTrue(runner.run_once())
+            current = store.find_task(task.id)
+            cooldown = store.get_runtime_state("115:risk_cooldown_until")
+
+            self.assertTrue(store.requested)
+            self.assertEqual(current.status, TaskStatus.CANCELLED)
+            self.assertEqual(current.error_type, "p115_risk_control")
+            self.assertIn("115 风控", current.error_summary)
+            self.assertEqual(float(cooldown["value"]), 63.0)
 
     def test_default_worker_ids_are_unique_and_process_scoped(self):
         with tempfile.TemporaryDirectory() as tmp:

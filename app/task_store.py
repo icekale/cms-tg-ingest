@@ -1780,63 +1780,84 @@ class TaskStore:
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
             if row is None:
                 return None
-            try:
-                termination_metadata = json.loads(row["metadata_json"] or "{}")
-                termination_requested_at = float(
-                    termination_metadata.get(TERMINATION_REQUESTED_AT_KEY, 0)
-                    if isinstance(termination_metadata, dict)
-                    else 0
-                )
-            except (TypeError, ValueError, json.JSONDecodeError):
-                termination_requested_at = 0
             if (
                 row["status"] != TaskStatus.RUNNING.value
                 or str(row["claimed_by"] or "") != str(expected_claimed_by)
                 or str(row["claim_token"] or "") != str(expected_claim_token)
-                or termination_requested_at <= 0
+                or not self._termination_requested(row)
             ):
                 return None
-            metadata = self._merge_metadata(
-                row["metadata_json"],
-                None,
-                delete_keys=_TERMINATION_METADATA_DELETE_KEYS,
+            result = self._settle_requested_termination_in_transaction(
+                conn,
+                row,
+                error_type=error_type,
+                error_summary=error_summary,
+                error_detail=error_detail,
+                now=current_time,
             )
-            final_error_type = str(error_type) if error_type else str(row["error_type"] or "")
-            final_error_summary = str(error_summary) if error_summary else str(row["error_summary"] or "")
-            conn.execute(
-                """
-                INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    int(task_id),
-                    row["current_stage"],
-                    TaskStatus.CANCELLED.value,
-                    "已终止任务",
-                    final_error_type,
-                    str(error_detail),
-                    current_time,
-                ),
-            )
-            conn.execute(
-                """
-                UPDATE tasks
-                SET status = ?, error_type = ?, error_summary = ?, metadata_json = ?, next_run_at = -1,
-                    claimed_by = '', claimed_at = 0, claim_token = '', claim_heartbeat_at = 0,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    TaskStatus.CANCELLED.value,
-                    final_error_type,
-                    final_error_summary,
-                    metadata,
-                    current_time,
-                    int(task_id),
-                ),
-            )
-            result = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
         return self._snapshot(result)
+
+    @staticmethod
+    def _termination_requested(row: sqlite3.Row) -> bool:
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+            requested_at = float(
+                metadata.get(TERMINATION_REQUESTED_AT_KEY, 0) if isinstance(metadata, dict) else 0
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        return requested_at > 0
+
+    def _settle_requested_termination_in_transaction(
+        self,
+        conn: sqlite3.Connection,
+        row: sqlite3.Row,
+        *,
+        error_type: str = "",
+        error_summary: str = "",
+        error_detail: str = "",
+        now: float,
+    ) -> sqlite3.Row:
+        metadata = self._merge_metadata(
+            row["metadata_json"],
+            None,
+            delete_keys=_TERMINATION_METADATA_DELETE_KEYS,
+        )
+        final_error_type = str(error_type) if error_type else str(row["error_type"] or "")
+        final_error_summary = str(error_summary) if error_summary else str(row["error_summary"] or "")
+        conn.execute(
+            """
+            INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(row["id"]),
+                row["current_stage"],
+                TaskStatus.CANCELLED.value,
+                "已终止任务",
+                final_error_type,
+                str(error_detail),
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = ?, error_type = ?, error_summary = ?, metadata_json = ?, next_run_at = -1,
+                claimed_by = '', claimed_at = 0, claim_token = '', claim_heartbeat_at = 0,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                TaskStatus.CANCELLED.value,
+                final_error_type,
+                final_error_summary,
+                metadata,
+                now,
+                int(row["id"]),
+            ),
+        )
+        return conn.execute("SELECT * FROM tasks WHERE id = ?", (int(row["id"]),)).fetchone()
 
     def clear_worker_claims(self, worker_id: str, now: float | None = None) -> int:
         worker_id = str(worker_id or "").strip()
@@ -1902,6 +1923,9 @@ class TaskStore:
             ):
                 return None
             now = time.time()
+            if self._termination_requested(row):
+                result = self._settle_requested_termination_in_transaction(conn, row, now=now)
+                return self._snapshot(result)
             metadata = self._merge_metadata(row["metadata_json"], success_metadata, metadata_delete_keys)
             conn.execute(
                 "INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at) "
@@ -1983,6 +2007,16 @@ class TaskStore:
                     expected_updated_at,
                 ):
                     return None
+                if self._termination_requested(current):
+                    result = self._settle_requested_termination_in_transaction(
+                        conn,
+                        current,
+                        error_type=error_type,
+                        error_summary=error_summary,
+                        error_detail=error_detail,
+                        now=now,
+                    )
+                    return self._snapshot(result)
             else:
                 if expected_stage is not None and current["current_stage"] != expected_stage.value:
                     return None
