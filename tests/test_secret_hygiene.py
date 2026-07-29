@@ -4,7 +4,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 TEXT_FILE_GLOBS = ("*.md", "*.py", "*.sh", "*.yml", "*.yaml", "*.example", "Dockerfile")
-EXCLUDED_PARTS = {".git", ".worktrees", "__pycache__", "data"}
+EXCLUDED_PARTS = {".git", ".worktrees", "__pycache__", "data", "dist", "node_modules"}
 PUBLIC_SAMPLE_HEX = {"542a1c1fe6ac4a5aab152" + "369079596b5"}
 
 
@@ -17,6 +17,13 @@ class SecretHygieneTests(unittest.TestCase):
                 if path.relative_to(ROOT).as_posix() == "scripts/diagnostics.sh":
                     continue
                 yield path
+
+    def test_generated_frontend_directories_are_excluded(self):
+        generated_parts = {"node_modules", "dist"}
+
+        self.assertTrue(generated_parts.issubset(EXCLUDED_PARTS))
+        for path in self.iter_text_files():
+            self.assertFalse(generated_parts.intersection(path.relative_to(ROOT).parts), path)
 
     def test_repository_text_files_do_not_contain_known_secret_shapes(self):
         patterns = [

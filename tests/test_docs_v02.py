@@ -87,9 +87,25 @@ class V02DocsTests(unittest.TestCase):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
         for document in (readme, dockerhub):
-            for text in ("实时日志", "/app/logs", "/data/logs/cms-tg-ingest.log", "20 MiB", "4 个备份"):
+            for text in (
+                "实时日志",
+                "/app/logs",
+                "/data/logs/cms-tg-ingest.log",
+                "20 MiB",
+                "4 个备份",
+                "docker logs",
+                "恢复最近最多 5000 行",
+                "WEB_TOKEN",
+                "HttpOnly Cookie",
+                "EventSource URL 不携带 Token",
+                "/api/v1/logs/stream",
+                "内部只读 SSE",
+                "默认 Compose 使用 `8787:8787` 时，打开 `http://<host-ip>:8787/app/logs`",
+                "Unraid 改为 `8788:8787` 时，打开 `http://<unraid-ip>:8788/app/logs`",
+            ):
                 self.assertIn(text, document)
             self.assertIn("只清空当前浏览器", document)
+        self.assertIn('"8787:8787"', compose)
         self.assertIn("./data:/data", compose)
         self.assertNotIn("/data/logs:/data/logs", compose)
 
