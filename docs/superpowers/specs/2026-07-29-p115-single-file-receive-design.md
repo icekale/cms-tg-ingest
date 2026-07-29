@@ -27,17 +27,20 @@
 
 接收前快照同样必须记录条目的真实 ID，否则同名旧文件不能被排除。因此 `_prepare_share_receive()` 的 `target_pre_call_file_ids` 也使用 `p115_item_id()`。
 
+历史任务可能已经保存了不完整的 `received_items`，整理阶段会通过 `_recover_received_items_for_hint()` 再次读取待整理目录。该恢复函数也必须使用 `p115_item_id()` 和 `p115_item_parent_id()`，否则修复只能保护新任务，不能正确处理仍留在待整理目录中的历史普通文件。恢复范围仍限定为完整接收前快照之外、TMDB 标记精确匹配且数量符合预期的条目。
+
 ## 测试
 
-在 `tests/test_http_clients.py` 增加真实普通文件载荷：列表条目同时包含 `fid` 和 `cid`，且不包含人工构造的 `pid`。测试覆盖：
+在 `tests/test_http_clients.py` 和独立的 `tests/test_p115_single_file_receive.py` 增加真实普通文件载荷：列表条目同时包含 `fid` 和 `cid`，且不包含人工构造的 `pid`。测试覆盖：
 
 - 接收前快照保存旧文件的 `fid`，而不是父目录 `cid`。
 - 接收后能够选中新文件的 `fid`，父目录保持目标 `cid`。
 - 旧同名文件仍被排除，结果完整且已验证。
+- 历史 TMDB 提示恢复只返回不在旧快照中的新普通文件，并保留真实 `fid/cid`。
 - 现有文件夹接收测试保持通过。
 
 先运行新增测试确认其在当前代码上按预期失败，再实施最小修改并运行目标测试、P115/自分享相关测试以及 Python 全量测试。
 
 ## 并行开发与交付边界
 
-实时日志分支修改日志、Web、bridge 和对应测试；本修复限定为 `app/clients/p115.py` 与 `tests/test_http_clients.py`，没有文件重叠。修复在独立 worktree 中提交，完成后只报告可合并状态；本阶段不合并实时日志分支、不发布镜像、不部署 Unraid，也不操作 `#339`。
+实时日志分支修改日志、Web、bridge 和对应测试；本修复限定为 `app/clients/p115.py`、`app/workflows/self_share.py`、`tests/test_http_clients.py` 与新增独立测试文件，没有文件重叠。修复在独立 worktree 中提交，完成后只报告可合并状态；本阶段不合并实时日志分支、不发布镜像、不部署 Unraid，也不操作 `#339`。
