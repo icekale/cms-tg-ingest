@@ -43,8 +43,12 @@ _VALUE_SECRET_RE = re.compile(
     r"\b(password|passwd|pwd|receive_code|access_code|token|api_key|apikey|access_token|refresh_token|secret)\b\s*[:=]\s*([^\s,;&]+)",
     re.IGNORECASE,
 )
+_QUOTED_VALUE_SECRET_RE = re.compile(
+    r"""((?:["'])(?:password|passwd|pwd|receive_code|access_code|token|api_key|apikey|access_token|refresh_token|secret)(?:["'])\s*[:=]\s*["'])([^"'\r\n]*)(["'])""",
+    re.IGNORECASE,
+)
 _BOT_TOKEN_RE = re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{20,}\b")
-_CHINESE_CODE_RE = re.compile(r"(访问码\s*[：:]\s*)[^\s,，;；]+")
+_CHINESE_CODE_RE = re.compile(r"((?:访问码|接收码)\s*[：:]\s*)[^\s,，;；]+")
 _HISTORY_RE = re.compile(
     r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d{3})?) "
     r"(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL) (?P<logger>\S+) (?P<text>.*)$"
@@ -108,13 +112,15 @@ def parse_log_filter(filter_type: object = "main", lines: object = 1000, keyword
 
 def _replace_captured_value(match: re.Match[str]) -> str:
     value_start = match.start(2) - match.start()
-    return f"{match.group(0)[:value_start]}[REDACTED]"
+    value_end = match.end(2) - match.start()
+    return f"{match.group(0)[:value_start]}[REDACTED]{match.group(0)[value_end:]}"
 
 
 def redact_text(value: object) -> str:
     text = str(value)
     text = _URL_SECRET_RE.sub(r"\1[REDACTED]", text)
     text = _HEADER_SECRET_RE.sub(_replace_captured_value, text)
+    text = _QUOTED_VALUE_SECRET_RE.sub(_replace_captured_value, text)
     text = _VALUE_SECRET_RE.sub(_replace_captured_value, text)
     text = _BOT_TOKEN_RE.sub("[REDACTED]", text)
     return _CHINESE_CODE_RE.sub(r"\1[REDACTED]", text)

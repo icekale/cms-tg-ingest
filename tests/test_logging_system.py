@@ -38,6 +38,35 @@ class LoggingSystemTests(unittest.TestCase):
         self.assertIn("safe=yes", redacted)
         self.assertIn("[REDACTED]", redacted)
 
+    def test_redact_text_removes_structured_mapping_credentials_and_receive_codes(self):
+        source = '{"password": "json-secret", "token": "json-token"} {\'api_key\': \'python-secret\'} 接收码：1212'
+
+        redacted = redact_text(source)
+
+        for secret in ("json-secret", "json-token", "python-secret", "1212"):
+            self.assertNotIn(secret, redacted)
+        self.assertIn("[REDACTED]", redacted)
+
+    def test_configure_logging_redacts_structured_credentials_from_every_sink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stream = io.StringIO()
+            logger = logging.Logger("structured-runtime", logging.INFO)
+            logger.propagate = False
+            path = Path(tmp) / "app.log"
+            runtime = configure_logging("INFO", log_path=path, stream=stream, root_logger=logger)
+            logger.info('{"password": "json-secret"} {\'token\': \'python-secret\'} 接收码：1212')
+            for handler in logger.handlers:
+                handler.flush()
+
+            for output in (
+                stream.getvalue(),
+                path.read_text(encoding="utf-8"),
+                runtime.hub.snapshot(LogFilter("all", 1000, ""))[0].text,
+            ):
+                for secret in ("json-secret", "python-secret", "1212"):
+                    self.assertNotIn(secret, output)
+            runtime.close()
+
     def test_parse_log_filter_accepts_only_documented_values(self):
         self.assertEqual(parse_log_filter(), LogFilter("main", 1000, ""))
         self.assertEqual(parse_log_filter("ERROR", "2000", "CMS"), LogFilter("ERROR", 2000, "CMS"))
