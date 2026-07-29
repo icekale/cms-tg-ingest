@@ -55,6 +55,7 @@ MAX_REQUEST_BODY_BYTES = 64 * 1024
 REQUEST_BODY_READ_TIMEOUT_SECONDS = 2
 SSE_HEARTBEAT_SECONDS = 15.0
 SSE_CLIENT_QUEUE_SIZE = 256
+SSE_WRITE_TIMEOUT_SECONDS = 5.0
 LEGACY_LIFECYCLE_REASON = "旧版任务引擎模式不支持终止或删除任务"
 TASK_NOT_FOUND_MESSAGE = "任务不存在或已过期"
 _LOG_STREAM_PATH = "/api/v1/logs/stream"
@@ -75,7 +76,7 @@ def encode_sse_event(event: str, payload: dict[str, object], event_id: int | Non
         lines.append(f"id: {event_id}")
     lines.append(f"event: {event}")
     lines.append("data: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
-    return ("\n".join(lines) + "\n\n").encode("utf-8")
+    return ("\n".join(lines) + "\n\n").encode("utf-8", "backslashreplace")
 
 
 def parse_content_length(value: str | None, limit: int = MAX_REQUEST_BODY_BYTES) -> int:
@@ -2114,7 +2115,12 @@ def start_web_server(
                 return
 
             stream = app.log_hub.open_stream(spec, queue_size=SSE_CLIENT_QUEUE_SIZE)
+            previous_timeout: float | None = None
+            restore_timeout = False
             try:
+                previous_timeout = self.connection.gettimeout()
+                restore_timeout = True
+                self.connection.settimeout(SSE_WRITE_TIMEOUT_SECONDS)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache, no-transform")
@@ -2144,6 +2150,11 @@ def start_web_server(
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
                 self.close_connection = True
             finally:
+                if restore_timeout:
+                    try:
+                        self.connection.settimeout(previous_timeout)
+                    except OSError:
+                        self.close_connection = True
                 stream.close()
 
         def _serve(self, body: bytes = b""):

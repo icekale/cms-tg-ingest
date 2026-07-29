@@ -1,5 +1,7 @@
 import http.client
 import json
+import socket
+import socketserver
 import tempfile
 import time
 import unittest
@@ -70,6 +72,14 @@ class WebLogTests(unittest.TestCase):
             b'id: 7\nevent: log\ndata: {"text":"line one\\nline two"}\n\n',
         )
 
+    def test_encode_sse_event_keeps_valid_unicode_and_escapes_unpaired_surrogates(self):
+        text = "snowman \u2603 " + chr(0xD800)
+        frame = encode_sse_event("log", {"text": text})
+
+        self.assertIn("snowman \u2603", frame.decode("utf-8"))
+        self.assertIn(b"\\ud800", frame)
+        self.assertEqual(json.loads(frame.decode("utf-8").splitlines()[1].removeprefix("data: ")), {"text": text})
+
     def open_stream(self, server, path="/api/v1/logs/stream", headers=None):
         connection = http.client.HTTPConnection(*server.server_address, timeout=1)
         connection.request("GET", path, headers=headers or {})
@@ -115,6 +125,27 @@ class WebLogTests(unittest.TestCase):
                     connection.close()
                 bridge.stop_web_server(server)
 
+    def test_sse_snapshot_handles_unpaired_surrogate_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            hub = LogHub()
+            text = "snapshot \u2603 " + chr(0xD800)
+            hub.publish(1, "INFO", "worker", text)
+            server = start_web_server(TaskStore(Path(tmp) / "tasks.db"), "127.0.0.1", 0, log_hub=hub)
+            connection = response = None
+            try:
+                connection, response = self.open_stream(server)
+                snapshot = self.read_event(response)
+
+                self.assertEqual(response.status, 200)
+                self.assertEqual(snapshot.get("event"), "snapshot")
+                self.assertEqual(snapshot.get("data", {}).get("entries", [{}])[0].get("text"), text)
+            finally:
+                if response is not None:
+                    response.close()
+                if connection is not None:
+                    connection.close()
+                bridge.stop_web_server(server)
+
     def test_sse_heartbeat_and_disconnect_release_subscription(self):
         with tempfile.TemporaryDirectory() as tmp, patch("app.web.SSE_HEARTBEAT_SECONDS", 0.05):
             hub = LogHub()
@@ -133,6 +164,44 @@ class WebLogTests(unittest.TestCase):
                     time.sleep(0.02)
                 self.assertEqual(hub.subscriber_count, 0)
             finally:
+                bridge.stop_web_server(server)
+
+    def test_sse_write_timeout_releases_nonreading_subscription(self):
+        class TrackingHub(LogHub):
+            def __init__(self):
+                super().__init__()
+                self.opened = Event()
+
+            def open_stream(self, spec, queue_size=256):
+                stream = super().open_stream(spec, queue_size)
+                self.opened.set()
+                return stream
+
+        observed_timeouts = []
+        write_started = Event()
+
+        def timed_out_write(writer, _data):
+            observed_timeouts.append(writer._sock.gettimeout())
+            write_started.set()
+            raise socket.timeout("simulated slow client")
+
+        with tempfile.TemporaryDirectory() as tmp, patch("app.web.SSE_WRITE_TIMEOUT_SECONDS", 0.05), patch.object(
+            socketserver._SocketWriter, "write", new=timed_out_write
+        ):
+            hub = TrackingHub()
+            server = start_web_server(TaskStore(Path(tmp) / "tasks.db"), "127.0.0.1", 0, log_hub=hub)
+            client = socket.create_connection(server.server_address, timeout=1)
+            try:
+                client.sendall(b"GET /api/v1/logs/stream HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                self.assertTrue(hub.opened.wait(1))
+                self.assertTrue(write_started.wait(1))
+                deadline = time.monotonic() + 1
+                while hub.subscriber_count and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertEqual(observed_timeouts, [0.05])
+                self.assertEqual(hub.subscriber_count, 0)
+            finally:
+                client.close()
                 bridge.stop_web_server(server)
 
     def test_sse_gap_is_sent_and_stream_is_closed(self):
@@ -158,11 +227,14 @@ class WebLogTests(unittest.TestCase):
             connection = response = None
             try:
                 connection, response = self.open_stream(server)
+                self.assertEqual(response.version, 10)
+                self.assertIsNone(response.getheader("Content-Length"))
                 self.read_event(response)
                 gap = self.read_event(response)
                 self.assertEqual(gap["event"], "gap")
                 self.assertEqual(gap["data"], {"reason": "slow_client"})
                 self.assertTrue(closed.wait(1))
+                self.assertEqual(response.fp.readline(), b"")
             finally:
                 if response is not None:
                     response.close()
