@@ -573,6 +573,82 @@ class CmsPlaybackProbeTests(unittest.TestCase):
         self.assertEqual(result["receive_code"], "1212")
         self.assertEqual(result["create_time"], "50.0")
 
+    def test_find_own_share_by_title_rejects_missing_time_when_minimum_is_required(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                assert url == "https://webapi.115.com/share/slist"
+                return {
+                    "state": True,
+                    "data": {
+                        "list": [
+                            {
+                                "share_code": "missing-time",
+                                "share_title": "Exact title",
+                                "receive_code": "1212",
+                            },
+                            {
+                                "share_code": "too-old",
+                                "share_title": "Exact title",
+                                "receive_code": "1212",
+                                "create_time": 99,
+                            },
+                        ]
+                    },
+                }
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3, share_list_cache_ttl_seconds=0)
+
+        result = client.find_own_share_by_title("Exact title", min_create_time=100)
+
+        self.assertIsNone(result)
+
+    def test_find_own_share_by_title_accepts_create_time_from_request_second(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                return {
+                    "state": True,
+                    "data": {
+                        "list": [
+                            {
+                                "share_code": "same-second",
+                                "share_title": "Exact title",
+                                "receive_code": "1212",
+                                "create_time": 1000,
+                            }
+                        ]
+                    },
+                }
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3, share_list_cache_ttl_seconds=0)
+
+        result = client.find_own_share_by_title("Exact title", min_create_time=1000.999)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["share_code"], "same-second")
+
+    def test_find_own_share_by_title_rejects_create_time_before_request_second(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                return {
+                    "state": True,
+                    "data": {
+                        "list": [
+                            {
+                                "share_code": "previous-second",
+                                "share_title": "Exact title",
+                                "receive_code": "1212",
+                                "create_time": 999,
+                            }
+                        ]
+                    },
+                }
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3, share_list_cache_ttl_seconds=0)
+
+        result = client.find_own_share_by_title("Exact title", min_create_time=1000.999)
+
+        self.assertIsNone(result)
+
 
     def test_receive_share_to_cid_gets_snap_file_ids_then_receives_to_target_cid(self):
         class FakeHttp:

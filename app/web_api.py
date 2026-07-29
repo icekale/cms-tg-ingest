@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
+from .background_jobs import redact_background_text
 from .models import TaskSnapshot
 from .quality_rules import QUALITY_RULE_VERSION, QualityRuleEngine, quality_attempt_count
 from .task_diagnostics import explain_task_slowness, format_stage_observability
@@ -185,15 +186,37 @@ def serialize_health(store: TaskStore, *, enabled: bool = True, now: float | Non
     }
 
 
-def serialize_hdhive(service: Any | None, scheduler: Any | None = None) -> dict[str, Any]:
+def serialize_background_job(background_jobs: Any | None, *, prefix: str = "") -> dict[str, Any] | None:
+    if background_jobs is None:
+        return None
+    snapshots = getattr(background_jobs, "list_snapshots", lambda: ())()
+    matches = [snapshot for snapshot in snapshots if str(getattr(snapshot, "key", "")).startswith(prefix)]
+    if not matches:
+        return None
+    snapshot = max(matches, key=lambda item: float(getattr(item, "queued_at", 0)))
+    return {
+        "description": str(getattr(snapshot, "description", "")),
+        "state": str(getattr(snapshot, "status", "")),
+        "started_at": getattr(snapshot, "started_at", None),
+        "finished_at": getattr(snapshot, "finished_at", None),
+        "error": redact_background_text(getattr(snapshot, "error", "")),
+    }
+
+
+def serialize_hdhive(
+    service: Any | None,
+    scheduler: Any | None = None,
+    background_jobs: Any | None = None,
+) -> dict[str, Any]:
     if service is None:
-        return {"enabled": False, "subscriptions": [], "account": None, "schedule": {}}
+        return {"enabled": False, "subscriptions": [], "account": None, "schedule": {}, "background_job": None}
     subscriptions = []
     for subscription in service.list():
         item_rows = []
         for item in service.store.list_items(subscription.id):
             if is_dataclass(item):
                 item_row = asdict(item)
+                item_row.pop("unlocked_url", None)
                 item_row["last_error"] = _safe_error(item_row.get("last_error"))
                 item_rows.append(item_row)
         row = asdict(subscription) if is_dataclass(subscription) else {"id": subscription.id}
@@ -230,7 +253,13 @@ def serialize_hdhive(service: Any | None, scheduler: Any | None = None) -> dict[
             schedule = dict(scheduler.status_snapshot())
         except Exception as exc:
             schedule = {"error": _safe_error(str(exc)[:160])}
-    return {"enabled": True, "subscriptions": subscriptions, "account": account, "schedule": schedule}
+    return {
+        "enabled": True,
+        "subscriptions": subscriptions,
+        "account": account,
+        "schedule": schedule,
+        "background_job": serialize_background_job(background_jobs, prefix="hdhive:"),
+    }
 
 
 def serialize_hdhive_subscription(service: Any | None, subscription_id: int) -> dict[str, Any] | None:
@@ -354,7 +383,13 @@ def quality_items(
     return items
 
 
-def api_quality(store: TaskStore, *, limit: int = 100, quality_automation: Any | None = None) -> dict[str, Any]:
+def api_quality(
+    store: TaskStore,
+    *,
+    limit: int = 100,
+    quality_automation: Any | None = None,
+    background_jobs: Any | None = None,
+) -> dict[str, Any]:
     items = quality_items(store, limit=limit, quality_automation=quality_automation)
     rule_counts: dict[str, int] = {}
     task_keys: set[tuple[int, str]] = set()
@@ -382,4 +417,5 @@ def api_quality(store: TaskStore, *, limit: int = 100, quality_automation: Any |
     if quality_automation is not None:
         snapshot = quality_automation.status_snapshot()
         payload["automation"] = snapshot if isinstance(snapshot, dict) else {}
+    payload["background_job"] = serialize_background_job(background_jobs, prefix="quality:run")
     return payload

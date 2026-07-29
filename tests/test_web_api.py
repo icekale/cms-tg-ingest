@@ -1,4 +1,5 @@
 import json
+import threading
 import tempfile
 import time
 import unittest
@@ -12,12 +13,60 @@ from app.hdhive_subscription_store import HdhiveSubscriptionStore
 from app.series_rules import parse_episode_filter
 from app.task_store import TaskStore
 from app.config import Config
+from app.background_jobs import BackgroundJobCoordinator, BackgroundJobSnapshot
 from app.quality_automation import QualityAutomation
 from app.web import WebApp
-from app.web_api import _safe_error, _safe_url, serialize_health, serialize_task
+from app.web_api import _safe_error, _safe_url, api_quality, serialize_hdhive, serialize_health, serialize_task
 
 
 class WebApiTests(unittest.TestCase):
+    def test_body_limit_rejects_oversized_direct_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = WebApp(TaskStore(Path(tmp) / "tasks.db"), web_token="")
+
+            accepted_status, _headers, _body = app.handle_request("POST", "/history/clear", {}, b"x" * 65536)
+            rejected_status, _headers, _body = app.handle_request("POST", "/history/clear", {}, b"x" * 65537)
+
+        self.assertEqual(accepted_status, 303)
+        self.assertEqual(rejected_status, 413)
+
+    def test_background_job_status_api_exposes_only_latest_safe_fields(self):
+        snapshots = (
+            BackgroundJobSnapshot("quality:run", "old quality", "succeeded", 1, 2, 3, ""),
+            BackgroundJobSnapshot("quality:run", "latest quality", "failed", 4, 5, 6, "Authorization: Bearer api-secret"),
+            BackgroundJobSnapshot("hdhive:run", "old HDHive", "succeeded", 7, 8, 9, ""),
+            BackgroundJobSnapshot("hdhive:item:7", "latest HDHive", "failed", 10, 11, 12, "X-API-Key: hdhive-secret"),
+        )
+
+        class SnapshotSource:
+            def list_snapshots(self):
+                return snapshots
+
+        with tempfile.TemporaryDirectory() as tmp:
+            quality = api_quality(TaskStore(Path(tmp) / "tasks.db"), background_jobs=SnapshotSource())
+        hdhive = serialize_hdhive(SimpleNamespace(list=lambda: []), background_jobs=SnapshotSource())
+
+        for payload, description in ((quality["background_job"], "latest quality"), (hdhive["background_job"], "latest HDHive")):
+            self.assertEqual(payload["description"], description)
+            self.assertEqual(set(payload), {"description", "state", "started_at", "finished_at", "error"})
+            self.assertNotIn("secret", json.dumps(payload))
+        self.assertNotIn("background_jobs", hdhive)
+
+    def test_background_job_status_prefers_newest_submission_over_old_completion(self):
+        snapshots = (
+            BackgroundJobSnapshot("hdhive:run", "old completed", "succeeded", 10, 11, 1000, ""),
+            BackgroundJobSnapshot("hdhive:item:7", "newly queued", "queued", 20, None, None, ""),
+        )
+
+        class SnapshotSource:
+            def list_snapshots(self):
+                return snapshots
+
+        payload = serialize_hdhive(SimpleNamespace(list=lambda: []), background_jobs=SnapshotSource())
+
+        self.assertEqual(payload["background_job"]["description"], "newly queued")
+        self.assertEqual(payload["background_job"]["state"], "queued")
+
     def _quality_service(self, tmp, store):
         root = Path(tmp) / "library"
         config = Config(
@@ -68,6 +117,32 @@ class WebApiTests(unittest.TestCase):
             self.assertIn("automation", payload)
             self.assertNotIn(str(destination), body.decode())
             self.assertIn("movie.strm", item["detail"])
+
+    def test_quality_run_api_deduplicates_duplicate_clicks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            coordinator = BackgroundJobCoordinator()
+            started = threading.Event()
+            release = threading.Event()
+
+            class BlockingQuality:
+                def run_now(self):
+                    started.set()
+                    release.wait(1)
+
+            app = WebApp(store, quality_automation=BlockingQuality(), background_jobs=coordinator)
+            try:
+                first_status, _headers, first_body = app.handle_request("POST", "/api/v1/quality/run", {}, b"")
+                self.assertTrue(started.wait(1))
+                duplicates = [app.handle_request("POST", "/api/v1/quality/run", {}, b"") for _ in range(19)]
+
+                self.assertEqual(first_status, 202)
+                self.assertEqual(json.loads(first_body)["job"]["outcome"], "accepted")
+                self.assertTrue(all(status == 409 for status, _headers, _body in duplicates))
+                self.assertTrue(all(json.loads(body)["job"]["outcome"] == "already_running" for _status, _headers, body in duplicates))
+            finally:
+                release.set()
+                coordinator.shutdown(wait=True)
 
     def test_quality_action_api_validates_rule_and_returns_conflict_without_external_clients(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -274,6 +349,14 @@ class WebApiTests(unittest.TestCase):
             subscription_store.record_check(subscription.id, "password=subscription-secret token=subscription-token")
             error_item = subscription_store.upsert_item(subscription.id, "S01E02", "resource-2", "valid", 1080, 8)
             subscription_store.mark_item_failed(error_item.id, "password=item-secret token=item-token")
+            unlocked_item = subscription_store.upsert_item(subscription.id, "S01E03", "resource-3", "valid", 1080, 8)
+            subscription_store.mark_item_unlocked(
+                unlocked_item.id,
+                "https://115cdn.com/s/api-secret?password=api-password",
+                8,
+                "actual",
+                1700000000,
+            )
 
             class Service:
                 store = subscription_store
@@ -303,6 +386,8 @@ class WebApiTests(unittest.TestCase):
         self.assertNotIn("source_url", row)
         self.assertNotIn("subscription-secret", json.dumps(row, ensure_ascii=False))
         self.assertNotIn("item-secret", json.dumps(row, ensure_ascii=False))
+        self.assertNotIn("api-secret", json.dumps(row, ensure_ascii=False))
+        self.assertTrue(all("unlocked_url" not in item for item in row["items"]))
         self.assertIn("password=***", row["last_error"])
 
     def test_hdhive_filter_api_rejects_invalid_filter_without_changing_value(self):
@@ -642,7 +727,8 @@ class WebApiTests(unittest.TestCase):
             quality = Mock()
             quality.status_snapshot.return_value = {"enabled": True, "time": "02:50"}
             quality.update_settings.return_value = {"enabled": True, "time": "03:10"}
-            app = WebApp(store, quality_automation=quality)
+            coordinator = BackgroundJobCoordinator()
+            app = WebApp(store, quality_automation=quality, background_jobs=coordinator)
 
             clear_status, _headers, clear_body = app.handle_request("POST", "/api/v1/history/clear", {}, b"")
             settings_status, _headers, settings_body = app.handle_request(
@@ -651,8 +737,8 @@ class WebApiTests(unittest.TestCase):
                 {"Content-Type": "application/json"},
                 b'{"enabled":true,"time":"03:10","timezone":"Asia/Shanghai","max_tasks":10,"check_limit":2}',
             )
-            with patch("app.web.Thread") as thread_cls:
-                run_status, _headers, run_body = app.handle_request("POST", "/api/v1/quality/run", {}, b"")
+            run_status, _headers, run_body = app.handle_request("POST", "/api/v1/quality/run", {}, b"")
+            coordinator.shutdown(wait=True)
 
         self.assertEqual(clear_status, 200)
         self.assertEqual(json.loads(clear_body)["cleared"], 1)
@@ -666,8 +752,7 @@ class WebApiTests(unittest.TestCase):
         )
         self.assertEqual(run_status, 202)
         self.assertTrue(json.loads(run_body)["started"])
-        thread_cls.assert_called_once()
-        thread_cls.return_value.start.assert_called_once()
+        quality.run_now.assert_called_once()
 
     def test_hdhive_action_api_delegates_to_existing_services(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -676,7 +761,8 @@ class WebApiTests(unittest.TestCase):
             scheduler = Mock()
             scheduler.settings.return_value = {"enabled": True, "time": "01:30", "timezone": "Asia/Shanghai"}
             scheduler.update_settings.return_value = {"enabled": False, "time": "02:00", "timezone": "Asia/Shanghai"}
-            app = WebApp(store, hdhive_service=service, hdhive_scheduler=scheduler)
+            coordinator = BackgroundJobCoordinator()
+            app = WebApp(store, hdhive_service=service, hdhive_scheduler=scheduler, background_jobs=coordinator)
 
             pause_status, _headers, _body = app.handle_request("POST", "/api/v1/hdhive/subscriptions/7/pause", {}, b"")
             confirm_status, _headers, _body = app.handle_request("POST", "/api/v1/hdhive/items/8/confirm", {}, b"")
@@ -686,8 +772,8 @@ class WebApiTests(unittest.TestCase):
                 {"Content-Type": "application/json"},
                 b'{"enabled":false,"time":"02:00","timezone":"Asia/Shanghai"}',
             )
-            with patch("app.web.Thread") as thread_cls:
-                run_status, _headers, run_body = app.handle_request("POST", "/api/v1/hdhive/run", {}, b"")
+            run_status, _headers, run_body = app.handle_request("POST", "/api/v1/hdhive/run", {}, b"")
+            coordinator.shutdown(wait=True)
 
         self.assertEqual(pause_status, 200)
         service.pause.assert_called_once_with(7)
@@ -698,7 +784,7 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(json.loads(settings_body)["settings"]["time"], "02:00")
         self.assertEqual(run_status, 202)
         self.assertTrue(json.loads(run_body)["started"])
-        thread_cls.return_value.start.assert_called_once()
+        scheduler.run_now.assert_called_once()
 
     def test_serialize_task_does_not_expose_secret_metadata(self):
         task = type(

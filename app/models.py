@@ -75,6 +75,8 @@ class TaskSnapshot:
     next_run_at: float = 0
     claimed_by: str = ""
     claimed_at: float = 0
+    claim_token: str = ""
+    claim_heartbeat_at: float = 0
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = 0
     updated_at: float = 0
@@ -110,8 +112,52 @@ class TaskSnapshot:
             next_run_at=float(row.get("next_run_at") or 0),
             claimed_by=str(row.get("claimed_by") or ""),
             claimed_at=float(row.get("claimed_at") or 0),
+            claim_token=str(row.get("claim_token") or ""),
+            claim_heartbeat_at=float(row.get("claim_heartbeat_at") or 0),
             metadata=metadata,
             created_at=float(row.get("created_at") or 0),
+            updated_at=float(row.get("updated_at") or 0),
+        )
+
+
+@dataclass(frozen=True)
+class TaskOperation:
+    id: int
+    task_id: int
+    operation_key: str
+    operation_type: str
+    status: str
+    request: dict[str, Any]
+    result: dict[str, Any]
+    attempt_count: int
+    last_error: str
+    created_at: float
+    started_at: float
+    finished_at: float
+    updated_at: float
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> "TaskOperation":
+        def decode_object(value: Any) -> dict[str, Any]:
+            try:
+                decoded = json.loads(str(value or "{}").strip() or "{}")
+            except Exception:
+                return {}
+            return decoded if isinstance(decoded, dict) else {}
+
+        return cls(
+            id=int(row["id"]),
+            task_id=int(row["task_id"]),
+            operation_key=str(row.get("operation_key") or ""),
+            operation_type=str(row.get("operation_type") or ""),
+            status=str(row.get("status") or "prepared"),
+            request=decode_object(row.get("request_json")),
+            result=decode_object(row.get("result_json")),
+            attempt_count=int(row.get("attempt_count") or 0),
+            last_error=str(row.get("last_error") or ""),
+            created_at=float(row.get("created_at") or 0),
+            started_at=float(row.get("started_at") or 0),
+            finished_at=float(row.get("finished_at") or 0),
             updated_at=float(row.get("updated_at") or 0),
         )
 

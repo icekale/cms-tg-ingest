@@ -444,11 +444,12 @@ class P115WebClient:
         data: dict | None = None,
         params: dict | None = None,
         headers: dict[str, str] | None = None,
+        use_cache: bool = True,
     ) -> dict:
         with self._request_lock:
             method = str(method or "GET").upper()
             cache_key = None
-            if method == "GET" and self.cache_ttl_seconds > 0:
+            if method == "GET" and use_cache and self.cache_ttl_seconds > 0:
                 cache_key = json.dumps(
                     {
                         "url": str(url),
@@ -465,7 +466,7 @@ class P115WebClient:
                     if float(self.clock()) < expires_at:
                         return deepcopy(response)
                     self._get_cache.pop(cache_key, None)
-            else:
+            elif method != "GET" or use_cache:
                 # Any mutating request can invalidate a previously cached listing or share snapshot.
                 self._get_cache.clear()
                 self._share_list_cache = None
@@ -505,6 +506,7 @@ class P115WebClient:
         cid: str = "0",
         limit: int = 100,
         offset: int = 0,
+        use_cache: bool = True,
     ) -> dict[str, Any]:
         page_size = max(1, min(int(limit), 100))
         page_offset = max(0, int(offset))
@@ -519,6 +521,7 @@ class P115WebClient:
                 "offset": page_offset,
                 "limit": page_size,
             },
+            use_cache=use_cache,
         )
         try:
             self._ensure_state(resp, "115 share snap failed")
@@ -540,6 +543,7 @@ class P115WebClient:
         cid: str = "0",
         limit: int = 100,
         offset: int = 0,
+        use_cache: bool = True,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         page_size = max(1, min(int(limit), 100))
         page_offset = max(0, int(offset))
@@ -558,6 +562,7 @@ class P115WebClient:
                 cid=cid,
                 limit=request_limit,
                 offset=page_offset,
+                use_cache=use_cache,
             )
             if first_snap is None:
                 first_snap = snap
@@ -632,6 +637,7 @@ class P115WebClient:
         expected_title = str(share_title or "").strip()
         if not expected_title:
             return None
+        minimum_create_second = int(max(0.0, as_float(min_create_time, 0.0)))
         resp = self._request(
             "https://webapi.115.com/share/slist",
             params={
@@ -650,7 +656,7 @@ class P115WebClient:
             if title != expected_title:
                 continue
             create_time = as_float(item.get("create_time") or item.get("share_time"), 0.0)
-            if min_create_time and create_time and create_time < float(min_create_time):
+            if minimum_create_second and create_time < minimum_create_second:
                 continue
             share_code = str(item.get("share_code") or item.get("sharecode") or "").strip()
             if not share_code:
@@ -680,13 +686,32 @@ class P115WebClient:
             return self._receive_share_to_cid(share_code, receive_code, target_cid)
 
     def _receive_share_to_cid(self, share_code: str, receive_code: str, target_cid: str) -> dict[str, Any]:
-        items, snap = self.share_root_items(share_code, receive_code, cid="0", limit=100)
+        intent = self._prepare_share_receive(share_code, receive_code, target_cid, snapshot_all_targets=False)
+        return self.execute_prepared_share_receive(intent)
+
+    def prepare_share_receive(self, share_code: str, receive_code: str, target_cid: str) -> dict[str, Any]:
+        return self._prepare_share_receive(share_code, receive_code, target_cid, snapshot_all_targets=True)
+
+    def _prepare_share_receive(
+        self,
+        share_code: str,
+        receive_code: str,
+        target_cid: str,
+        *,
+        snapshot_all_targets: bool,
+    ) -> dict[str, Any]:
+        items, snap = self.share_root_items(
+            share_code,
+            receive_code,
+            cid="0",
+            limit=100,
+            use_cache=False,
+        )
         data = snap.get("data") if isinstance(snap.get("data"), dict) else {}
         file_ids = [p115_share_item_id(item) for item in items]
         if not file_ids:
             raise RuntimeError("115 share snap did not return file ids")
         info = data.get("shareinfo") if isinstance(data.get("shareinfo"), dict) else {}
-        receive_data = {}
         title = str(
             info.get("share_title")
             or (p115_file_name(items[0]) if items else "")
@@ -697,55 +722,112 @@ class P115WebClient:
         )
         existing_file_ids: list[str] = []
         snapshot_complete = False
-        if has_tmdb_hint:
+        if snapshot_all_targets or has_tmdb_hint:
             # A share snapshot ID is not a local file ID. Capture the target
             # root before receiving so a later same-name lookup cannot select
             # an older file already waiting in the pending directory.
-            existing_items = self.list_files(str(target_cid), limit=500)
+            existing_items = self.list_files(str(target_cid), limit=500, use_cache=False)
             existing_file_ids = [
                 file_id
                 for file_id in (p115_file_id(item) for item in existing_items)
                 if file_id
             ]
             snapshot_complete = len(existing_items) < 500
+        return {
+            "share_code": str(share_code),
+            "receive_code": str(receive_code),
+            "target_cid": str(target_cid),
+            "source_file_ids": file_ids,
+            "source_file_names": [p115_file_name(item) for item in items],
+            "title": title,
+            "target_pre_call_file_ids": existing_file_ids,
+            "target_snapshot_complete": snapshot_complete,
+        }
+
+    @staticmethod
+    def _prepared_share_source_items(intent: dict[str, Any]) -> list[dict[str, str]]:
+        file_ids = [str(value).strip() for value in intent.get("source_file_ids") or []]
+        file_names = [str(value).strip() for value in intent.get("source_file_names") or []]
+        return [
+            {"fid": file_id, "n": file_names[index] if index < len(file_names) else ""}
+            for index, file_id in enumerate(file_ids)
+            if file_id
+        ]
+
+    def _prepared_share_receive_result(
+        self,
+        intent: dict[str, Any],
+        response: dict[str, Any],
+        received_items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        source_items = self._prepared_share_source_items(intent)
+        receive_data = response.get("data") if isinstance(response.get("data"), dict) else {}
+        title = str(
+            receive_data.get("receive_title")
+            or intent.get("title")
+            or (p115_file_name(source_items[0]) if source_items else "")
+            or ""
+        ).strip()
+        file_ids = [p115_share_item_id(item) for item in source_items]
+        return {
+            "title": title,
+            "file_ids": file_ids,
+            "received_items": received_items,
+            "received_items_complete": len(received_items) == len(source_items),
+            "received_expected_item_count": len(source_items),
+            "received_existing_file_ids": [
+                str(value).strip()
+                for value in intent.get("target_pre_call_file_ids") or []
+                if str(value).strip()
+            ],
+            "received_snapshot_complete": bool(intent.get("target_snapshot_complete")),
+            "response": response,
+        }
+
+    def execute_prepared_share_receive(self, intent: dict[str, Any]) -> dict[str, Any]:
+        source_items = self._prepared_share_source_items(intent)
+        file_ids = [p115_share_item_id(item) for item in source_items]
+        if not file_ids:
+            raise RuntimeError("115 prepared share receive did not contain file ids")
+        target_cid = str(intent.get("target_cid") or "").strip()
         resp = self._request(
             "https://webapi.115.com/share/receive",
             method="POST",
             data={
-                "share_code": share_code,
-                "receive_code": receive_code,
+                "share_code": str(intent.get("share_code") or ""),
+                "receive_code": str(intent.get("receive_code") or ""),
                 "file_id": ",".join(file_ids),
-                "cid": str(target_cid),
+                "cid": target_cid,
             },
         )
         self._ensure_state(resp, "115 receive share failed")
-        receive_data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
-        title = str(
-            receive_data.get("receive_title")
-            or info.get("share_title")
-            or (p115_file_name(items[0]) if items else "")
-            or ""
-        ).strip()
         received_items = self._resolve_received_root_items(
-            items,
+            source_items,
             resp,
             target_cid,
-            title,
-            excluded_file_ids=set(existing_file_ids),
-            require_new=snapshot_complete,
+            str(intent.get("title") or ""),
+            excluded_file_ids=set(intent.get("target_pre_call_file_ids") or []),
+            require_new=bool(intent.get("target_snapshot_complete")),
         )
-        return {
-            "title": title,
-            # These are the IDs accepted by /share/receive and are retained
-            # only as provenance; they are not trusted as local output IDs.
-            "file_ids": file_ids,
-            "received_items": received_items,
-            "received_items_complete": len(received_items) == len(items),
-            "received_expected_item_count": len(items),
-            "received_existing_file_ids": existing_file_ids,
-            "received_snapshot_complete": snapshot_complete,
-            "response": resp,
-        }
+        return self._prepared_share_receive_result(intent, resp, received_items)
+
+    def reconcile_prepared_share_receive(self, intent: dict[str, Any]) -> dict[str, Any] | None:
+        if not intent.get("target_snapshot_complete"):
+            return None
+        source_items = self._prepared_share_source_items(intent)
+        target_cid = str(intent.get("target_cid") or "").strip()
+        current_items = self.list_files(target_cid, limit=500)
+        received_items = self._resolve_received_root_items(
+            source_items,
+            {"data": current_items},
+            target_cid,
+            str(intent.get("title") or ""),
+            excluded_file_ids=set(intent.get("target_pre_call_file_ids") or []),
+            require_new=True,
+        )
+        if not received_items:
+            return None
+        return self._prepared_share_receive_result(intent, {}, received_items)
 
     @staticmethod
     def _nested_response_dicts(value: Any, depth: int = 0):
@@ -811,7 +893,7 @@ class P115WebClient:
             # is no pre-receive baseline with which to prove a local ID is
             # new. Do not guess from a same-name pending file.
             return []
-        if not candidates and has_tmdb_hint:
+        if not candidates and (has_tmdb_hint or require_new):
             try:
                 for item in self.list_files(str(target_cid), limit=500):
                     normalized = self._normalized_received_item(item, target_cid)
@@ -831,7 +913,7 @@ class P115WebClient:
         for source_name in source_names:
             source_norm = normalize_text(source_name)
             matches = [item for item in remaining if normalize_text(item["file_name"]) == source_norm]
-            if not matches and len(source_items) == 1 and len(remaining) == 1:
+            if not matches and not require_new and len(source_items) == 1 and len(remaining) == 1:
                 matches = remaining[:]
             if not matches:
                 continue
@@ -1020,13 +1102,34 @@ class P115WebClient:
             raise RuntimeError("115 cloud download output has multiple children; use discovery APIs")
         return outputs[0]
 
-    def list_files(self, parent_id: str, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+    def list_files(
+        self,
+        parent_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        *,
+        use_cache: bool = True,
+    ) -> list[dict[str, Any]]:
         resp = self._request(
             "https://webapi.115.com/files",
             params={"cid": str(parent_id), "limit": limit, "offset": max(0, int(offset)), "show_dir": 1, "fc_mix": 1},
+            use_cache=use_cache,
         )
         self._ensure_state(resp, "115 list files failed")
         return iter_items(resp.get("data") or resp)
+
+    def file_exists_in_parent(self, file_id: str, parent_id: str) -> bool:
+        expected_id = str(file_id or "").strip()
+        offset = 0
+        limit = 500
+        while offset < 5000:
+            page = self.list_files(parent_id, limit=limit, offset=offset, use_cache=False)
+            if any(p115_item_id(item) == expected_id for item in page):
+                return True
+            if len(page) < limit:
+                return False
+            offset += len(page)
+        raise RuntimeError("115 parent directory exceeds 5000 entries")
 
     def scan_organized_folders(
         self,
@@ -1246,7 +1349,7 @@ class P115WebClient:
             )
         return result(None, None, True, request_count)
 
-    def create_long_share(self, file_id: str, preferred_receive_code: str = "") -> dict[str, str]:
+    def create_share(self, file_id: str) -> dict[str, str]:
         resp = self._request(
             "https://webapi.115.com/share/send",
             method="POST",
@@ -1262,7 +1365,14 @@ class P115WebClient:
             share_code = match.group(1) if match else ""
         if not share_code:
             raise P115SharePendingError("115 create share did not return share_code")
-        actual_receive_code = str(preferred_receive_code or receive_code or "1212").strip() or "1212"
+        return {
+            "share_code": share_code,
+            "receive_code": receive_code,
+            "share_url": share_url,
+        }
+
+    def ensure_share_settings(self, share_code: str, receive_code: str) -> dict[str, str]:
+        actual_receive_code = str(receive_code or "1212").strip() or "1212"
         update = self._request(
             "https://webapi.115.com/share/updateshare",
             method="POST",
@@ -1285,8 +1395,15 @@ class P115WebClient:
         return {
             "share_code": share_code,
             "receive_code": returned_receive_code or actual_receive_code,
-            "share_url": share_url,
         }
+
+    def create_long_share(self, file_id: str, preferred_receive_code: str = "") -> dict[str, str]:
+        created = self.create_share(file_id)
+        settings = self.ensure_share_settings(
+            created["share_code"],
+            preferred_receive_code or created.get("receive_code") or "1212",
+        )
+        return {**created, **settings}
 
     def rename_file(self, file_id: str, file_name: str) -> dict:
         resp = self._request(

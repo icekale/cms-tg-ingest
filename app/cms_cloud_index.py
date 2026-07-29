@@ -8,6 +8,8 @@ from pathlib import Path
 
 from app.media.classify import extract_tmdb_id_from_name
 
+from .sqlite_utils import sqlite_connection
+
 
 _DIRECT_PICKCODE_RE = re.compile(r"/d/([A-Za-z0-9]+)(?:\.[^/?\s]+)?(?:[?\s/]|$)")
 _SEASON_EPISODE_RE = re.compile(r"s\d{1,3}e\d{1,3}", re.IGNORECASE)
@@ -22,7 +24,9 @@ class CmsCloudDataIndex:
         if not file_id or not self.db_path.is_file():
             return False
         try:
-            with sqlite3.connect(f"{self.db_path.resolve().as_uri()}?mode=ro", uri=True) as conn:
+            with sqlite_connection(
+                f"{self.db_path.resolve().as_uri()}?mode=ro", uri=True, read_only=True
+            ) as conn:
                 return conn.execute("SELECT 1 FROM cloud_data WHERE fid = ? LIMIT 1", (file_id,)).fetchone() is not None
         except (OSError, sqlite3.Error):
             return False
@@ -53,8 +57,12 @@ class CmsCloudDataIndex:
         if not name or not self.db_path.is_file():
             return None
         try:
-            with sqlite3.connect(f"{self.db_path.resolve().as_uri()}?mode=ro", uri=True) as conn:
-                conn.row_factory = sqlite3.Row
+            with sqlite_connection(
+                f"{self.db_path.resolve().as_uri()}?mode=ro",
+                uri=True,
+                read_only=True,
+                row_factory=sqlite3.Row,
+            ) as conn:
                 rows = conn.execute(
                     "SELECT fid, pid, name, is_dir FROM cloud_data WHERE name = ? ORDER BY fid",
                     (name,),
@@ -112,8 +120,12 @@ class CmsCloudDataIndex:
 
     def _folder_for_pickcode(self, pickcode: str, tmdb_id: str) -> dict[str, str] | None:
         try:
-            with sqlite3.connect(f"{self.db_path.resolve().as_uri()}?mode=ro", uri=True) as conn:
-                conn.row_factory = sqlite3.Row
+            with sqlite_connection(
+                f"{self.db_path.resolve().as_uri()}?mode=ro",
+                uri=True,
+                read_only=True,
+                row_factory=sqlite3.Row,
+            ) as conn:
                 row = conn.execute(
                     "SELECT fid, pid, name, is_dir FROM cloud_data WHERE pick_code = ? LIMIT 1",
                     (pickcode,),
@@ -125,7 +137,10 @@ class CmsCloudDataIndex:
 
     @staticmethod
     def _folder_for_row(conn: sqlite3.Connection, row: sqlite3.Row, tmdb_id: str = "") -> dict[str, str] | None:
-        direct_file_id = "" if int(row["is_dir"] or 0) else str(row["fid"] or "").strip()
+        is_direct_file = not int(row["is_dir"] or 0)
+        direct_file_id = str(row["fid"] or "").strip() if is_direct_file else ""
+        direct_file_name = str(row["name"] or "").strip() if is_direct_file else ""
+        direct_parent_id = str(row["pid"] or "").strip() if is_direct_file else ""
         seen: set[str] = set()
         while row:
             fid = str(row["fid"] or "").strip()
@@ -140,6 +155,8 @@ class CmsCloudDataIndex:
                     "file_name": name,
                     "parent_id": str(row["pid"] or "").strip(),
                     "direct_file_id": direct_file_id,
+                    "direct_file_name": direct_file_name,
+                    "direct_parent_id": direct_parent_id,
                 }
             parent_id = str(row["pid"] or "").strip()
             if not parent_id:

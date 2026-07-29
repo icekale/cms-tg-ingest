@@ -1,15 +1,15 @@
+import threading
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
-
 import bridge
 from app.clients.hdhive import HdhiveAccount
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
+from app.background_jobs import BackgroundJobCoordinator
 from app.series_rules import parse_episode_filter
 from app.task_store import TaskStore
-from app.web import WebApp
+from app.web import WebApp, start_web_server
 
 
 class FakeHdhiveScheduler:
@@ -75,7 +75,51 @@ class FakeHdhiveService:
 
 
 class HdhiveWebTests(unittest.TestCase):
-    def make_app(self):
+    def test_stop_web_server_shuts_down_only_internally_owned_coordinator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            owned_server = start_web_server(store, "127.0.0.1", 0)
+            owned_coordinator = getattr(owned_server, "_cms_background_jobs", None)
+            try:
+                self.assertIsNotNone(owned_coordinator)
+                bridge.stop_web_server(owned_server)
+                self.assertEqual(owned_coordinator.submit("quality:run", lambda: None).outcome, "closed")
+            finally:
+                bridge.stop_web_server(owned_server)
+
+            injected_coordinator = BackgroundJobCoordinator()
+            injected_server = start_web_server(store, "127.0.0.1", 0, background_jobs=injected_coordinator)
+            try:
+                bridge.stop_web_server(injected_server)
+                self.assertEqual(injected_coordinator.submit("quality:run", lambda: None).outcome, "accepted")
+            finally:
+                injected_coordinator.shutdown(wait=True)
+                bridge.stop_web_server(injected_server)
+
+    def test_maybe_start_web_server_keeps_legacy_positional_starter_slot(self):
+        calls = []
+        config = SimpleNamespace(
+            web_enabled=True,
+            web_token="secret",
+            task_engine_enabled=True,
+            task_max_retries=3,
+            web_host="127.0.0.1",
+            web_port=0,
+            frontend_dist_path="/tmp/frontend",
+            self_share_receive_cid="",
+            self_share_own_share_password="",
+            cms_state_db_path="/tmp/cms.db",
+        )
+
+        def legacy_starter(*args, **kwargs):
+            calls.append((args, kwargs))
+            return "legacy-server"
+
+        result = bridge.maybe_start_web_server(config, object(), None, None, None, None, None, legacy_starter)
+
+        self.assertEqual(result, "legacy-server")
+        self.assertEqual(len(calls), 1)
+    def make_app(self, *, background_jobs=None):
         directory = tempfile.TemporaryDirectory()
         store = HdhiveSubscriptionStore(Path(directory.name) / "tasks.db")
         subscription = store.create_subscription(
@@ -103,6 +147,7 @@ class HdhiveWebTests(unittest.TestCase):
             web_token="",
             hdhive_service=service,
             hdhive_scheduler=scheduler,
+            background_jobs=background_jobs,
         ), service, scheduler, subscription, item
 
     def test_bridge_passes_hdhive_service_and_scheduler_to_web_server(self):
@@ -169,31 +214,80 @@ class HdhiveWebTests(unittest.TestCase):
             directory.cleanup()
 
     def test_hdhive_check_runs_in_background_and_confirm_delegates(self):
-        directory, app, service, _scheduler, subscription, item = self.make_app()
-
-        class ImmediateThread:
-            def __init__(self, target, **_kwargs):
-                self.target = target
-
-            def start(self):
-                self.target()
+        coordinator = BackgroundJobCoordinator()
+        directory, app, service, _scheduler, subscription, item = self.make_app(background_jobs=coordinator)
 
         try:
-            with patch("app.web.Thread", ImmediateThread):
-                status, headers, _payload = app.handle_request(
-                    "POST", f"/hdhive/subscriptions/{subscription.id}/check", {}, b""
-                )
+            status, headers, _payload = app.handle_request(
+                "POST", f"/hdhive/subscriptions/{subscription.id}/check", {}, b""
+            )
             self.assertEqual(status, 303)
             self.assertEqual(headers["Location"], "/hdhive")
-            self.assertEqual(service.check_calls, [subscription.id])
 
             status, headers, _payload = app.handle_request(
                 "POST", f"/hdhive/item/{item.id}/confirm", {}, b""
             )
             self.assertEqual(status, 303)
             self.assertEqual(headers["Location"], "/hdhive")
+            coordinator.shutdown(wait=True)
+            self.assertEqual(service.check_calls, [subscription.id])
             self.assertEqual(service.confirm_calls, [item.id])
         finally:
+            coordinator.shutdown(wait=True)
+            directory.cleanup()
+
+    def test_api_manual_jobs_deduplicate_duplicate_clicks(self):
+        coordinator = BackgroundJobCoordinator()
+        directory, app, service, scheduler, subscription, item = self.make_app(background_jobs=coordinator)
+        subscription_id = 7
+        started = threading.Event()
+        release = threading.Event()
+
+        def check(subscription_id):
+            service.check_calls.append(subscription_id)
+            started.set()
+            release.wait(1)
+
+        service.check = check
+        try:
+            first_status, _headers, first_body = app.handle_request(
+                "POST", f"/api/v1/hdhive/subscriptions/{subscription_id}/check", {}, b""
+            )
+            self.assertTrue(started.wait(1))
+            duplicate_responses = [
+                app.handle_request("POST", f"/api/v1/hdhive/subscriptions/{subscription_id}/check", {}, b"")
+                for _ in range(19)
+            ]
+            self.assertEqual(first_status, 202)
+            self.assertEqual(__import__("json").loads(first_body)["job"]["outcome"], "accepted")
+            self.assertTrue(all(status == 409 for status, _headers, _body in duplicate_responses))
+            self.assertTrue(all(__import__("json").loads(body)["job"]["outcome"] == "already_running" for _status, _headers, body in duplicate_responses))
+            self.assertEqual(service.check_calls, [7])
+
+            scheduler.run_now = lambda: (started.clear(), started.set(), release.wait(1))
+            release.clear()
+            app.handle_request("POST", "/api/v1/hdhive/run", {}, b"")
+            self.assertTrue(started.wait(1))
+            runs = [app.handle_request("POST", "/api/v1/hdhive/run", {}, b"") for _ in range(19)]
+            self.assertTrue(all(status == 409 for status, _headers, _body in runs))
+
+            release.set()
+            coordinator.shutdown(wait=True)
+            coordinator = BackgroundJobCoordinator()
+            app.background_jobs = coordinator
+            started.clear()
+            release.clear()
+            service.confirm_item = lambda item_id: (service.confirm_calls.append(item_id), started.set(), release.wait(1))
+            app.handle_request("POST", f"/api/v1/hdhive/items/{item.id}/confirm", {}, b"")
+            self.assertTrue(started.wait(1))
+            confirmations = [
+                app.handle_request("POST", f"/api/v1/hdhive/items/{item.id}/confirm", {}, b"") for _ in range(19)
+            ]
+            self.assertTrue(all(status == 409 for status, _headers, _body in confirmations))
+            self.assertEqual(service.confirm_calls, [item.id])
+        finally:
+            release.set()
+            coordinator.shutdown(wait=True)
             directory.cleanup()
 
     def test_hdhive_settings_route_updates_scheduler(self):

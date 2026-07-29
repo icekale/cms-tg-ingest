@@ -951,6 +951,7 @@ class QualityAutomation:
                 "自动巡检没有可用的修复适配器",
                 owner_run_id=run_id,
                 claimed_at=reserved.claimed_at,
+                claim_token=reserved.claim_token,
                 reserved_updated_at=reserved.updated_at,
                 error_type="quality_repair_adapter_missing",
                 error_summary="repair adapter missing",
@@ -968,6 +969,7 @@ class QualityAutomation:
                     "自动巡检修复适配器拒绝执行",
                     owner_run_id=run_id,
                     claimed_at=reserved.claimed_at,
+                    claim_token=reserved.claim_token,
                     reserved_updated_at=reserved.updated_at,
                     error_type="quality_repair_rejected",
                     error_summary="repair rejected",
@@ -983,6 +985,7 @@ class QualityAutomation:
                 f"自动巡检修复已入队：{plan.action}",
                 owner_run_id=run_id,
                 claimed_at=reserved.claimed_at,
+                claim_token=reserved.claim_token,
                 reserved_updated_at=reserved.updated_at,
                 metadata_patch={"quality_repair_queued": True, "quality_last_actor": "quality-auto"},
                 next_run_at=time.time(),
@@ -998,6 +1001,7 @@ class QualityAutomation:
                     f"自动巡检修复失败：{exc}",
                     owner_run_id=run_id,
                     claimed_at=reserved.claimed_at,
+                    claim_token=reserved.claim_token,
                     reserved_updated_at=reserved.updated_at,
                     error_type="quality_repair_failed",
                     error_summary=str(exc),
@@ -1020,6 +1024,7 @@ class QualityAutomation:
         *,
         owner_run_id: str,
         claimed_at: float,
+        claim_token: str,
         reserved_updated_at: float,
         **kwargs: object,
     ) -> TaskSnapshot | None:
@@ -1032,6 +1037,7 @@ class QualityAutomation:
             expected_status=TaskStatus.RUNNING,
             expected_claimed_by=f"quality:{owner_run_id}",
             expected_claimed_at=claimed_at,
+            expected_claim_token=claim_token,
             expected_updated_at=reserved_updated_at,
             **kwargs,
         )
@@ -1116,6 +1122,7 @@ class QualityAutomation:
                         reserved.status,
                         "自动巡检清理被拒绝",
                         expected_claimed_at=reserved.claimed_at,
+                        expected_claim_token=reserved.claim_token,
                         expected_updated_at=reserved.updated_at,
                         error_type="quality_cleanup_rejected",
                         error_summary="cleanup rejected",
@@ -1130,6 +1137,7 @@ class QualityAutomation:
                     TaskStatus.NEEDS_ACTION,
                     "自动巡检清理失败",
                     expected_claimed_at=reserved.claimed_at,
+                    expected_claim_token=reserved.claim_token,
                     expected_updated_at=reserved.updated_at,
                     error_type="quality_cleanup_failed",
                     error_summary="cleanup failed",
@@ -1144,6 +1152,7 @@ class QualityAutomation:
                 "自动巡检清理完成",
                 metadata_patch={"quality_cleanup_completed": True},
                 expected_claimed_at=reserved.claimed_at,
+                expected_claim_token=reserved.claim_token,
                 expected_updated_at=reserved.updated_at,
             ):
                 raise RuntimeError("cleanup owner changed before completion was persisted")
@@ -1153,6 +1162,7 @@ class QualityAutomation:
                 reserved.id,
                 str(run_id),
                 expected_claimed_at=reserved.claimed_at,
+                expected_claim_token=reserved.claim_token,
                 expected_updated_at=reserved.updated_at,
             ):
                 return QualityCleanupResult("blocked_cleanup", "cleanup_completion_persist_failed")

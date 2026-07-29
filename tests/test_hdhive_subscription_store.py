@@ -1,8 +1,10 @@
 import json
+import logging
 import sqlite3
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
@@ -12,7 +14,7 @@ class HdhiveSubscriptionStoreTests(unittest.TestCase):
     def test_pre_feature_database_migrates_without_losing_existing_records(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "legacy.db"
-            with sqlite3.connect(path) as connection:
+            with closing(sqlite3.connect(path)) as connection, connection:
                 connection.executescript(
                     """
                     CREATE TABLE hdhive_subscriptions (
@@ -68,7 +70,13 @@ class HdhiveSubscriptionStoreTests(unittest.TestCase):
             subscription = store.get_subscription(1)
             item = store.get_item(1)
 
+            with closing(sqlite3.connect(path)) as connection:
+                item_columns = {row[1] for row in connection.execute("PRAGMA table_info(hdhive_subscription_items)")}
+
             self.assertEqual(subscription.title, "旧订阅")
+            self.assertTrue(
+                {"unlocked_url", "unlock_state", "unlock_requested_at", "enqueue_started_at"}.issubset(item_columns)
+            )
             self.assertEqual(subscription.episode_filter, "")
             self.assertEqual(subscription.last_summary_json, "{}")
             self.assertEqual(item.title, "旧资源")
@@ -77,6 +85,10 @@ class HdhiveSubscriptionStoreTests(unittest.TestCase):
             self.assertEqual(item.unlocked_at, 100)
             self.assertEqual(item.normalized_episode_key, "")
             self.assertEqual(item.skip_reason, "")
+            self.assertEqual(item.unlocked_url, "")
+            self.assertEqual(item.unlock_state, "")
+            self.assertIsNone(item.unlock_requested_at)
+            self.assertIsNone(item.enqueue_started_at)
 
             claimed = store.claim_item_unlocking(item.id, now=200)
             self.assertEqual(claimed.status, "unlocking")
@@ -168,25 +180,33 @@ class HdhiveSubscriptionStoreTests(unittest.TestCase):
             self.assertEqual(reopened.get_item(second.id).status, "pending_confirmation")
             self.assertEqual(len(reopened.list_items(subscription.id)), 2)
 
-    def test_unlock_cost_and_time_survive_reopen(self):
+    def test_unlocked_result_survives_reopen_without_exposing_url_in_repr_or_logs(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "hdhive.db"
             store = HdhiveSubscriptionStore(path)
             subscription = store.create_subscription("1", "hdhive_tv", "slug", "剧集", "123")
             item = store.upsert_item(subscription.id, "s01e01", "resource", "valid", 2160, 8, "资源")
-            store.mark_item_enqueued(
+            secret_url = "https://115cdn.com/s/private?password=secret"
+            store.mark_item_unlocked(
                 item.id,
-                42,
-                unlock_points_spent=7,
-                unlock_points_source="actual",
-                unlocked_at=1700000000,
+                secret_url,
+                7,
+                "actual",
+                1700000000,
             )
             reopened = HdhiveSubscriptionStore(path)
             saved = reopened.get_item(item.id)
 
+        self.assertEqual(saved.status, "unlocked")
+        self.assertEqual(saved.unlocked_url, secret_url)
+        self.assertEqual(saved.unlock_state, "unlocked")
         self.assertEqual(saved.unlock_points_spent, 7)
         self.assertEqual(saved.unlock_points_source, "actual")
         self.assertEqual(saved.unlocked_at, 1700000000)
+        self.assertNotIn(secret_url, repr(saved))
+        with self.assertLogs("hdhive-test", level=logging.INFO) as captured:
+            logging.getLogger("hdhive-test").info("saved item: %r", saved)
+        self.assertNotIn(secret_url, "\n".join(captured.output))
 
     def test_subscription_status_actions_and_deleted_filter(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -228,22 +248,37 @@ class HdhiveSubscriptionStoreTests(unittest.TestCase):
             self.assertEqual(sum(result is not None for result in results), 1)
             self.assertEqual(store.get_item(item.id).status, "unlocking")
 
-    def test_stale_unlock_claim_can_be_recovered(self):
+    def test_stale_unlock_claim_requires_explicit_confirmation(self):
         with tempfile.TemporaryDirectory() as directory:
             store = HdhiveSubscriptionStore(Path(directory) / "tasks.db")
             subscription = store.create_subscription("464100862", "tmdb_tv", "255358", "剧集", "255358")
             item = store.upsert_item(subscription.id, "s01e01", "resource-1", "valid", 2160, 8)
-            store.mark_item_unlocking(item.id)
-            with store._lock, store._connection() as connection:
-                connection.execute(
-                    "UPDATE hdhive_subscription_items SET updated_at = ? WHERE id = ?",
-                    (1.0, item.id),
-                )
+            store.claim_item_unlocking(item.id, now=100.0)
 
             claimed = store.claim_item_unlocking(item.id, now=7200.0, stale_after_seconds=3600)
 
-            self.assertIsNotNone(claimed)
-            self.assertEqual(claimed.status, "unlocking")
+            self.assertIsNone(claimed)
+            pending = store.get_item(item.id)
+            self.assertEqual(pending.status, "pending_confirmation")
+            self.assertEqual(pending.skip_reason, "unlock_outcome_unknown")
+            self.assertEqual(pending.last_error, "解锁结果未知，禁止自动重复扣分")
+
+    def test_mark_unlock_unknown_persists_all_unknown_state_atomically(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tasks.db"
+            store = HdhiveSubscriptionStore(path)
+            subscription = store.create_subscription("1", "tmdb_tv", "1416", "剧集", "1416")
+            item = store.upsert_item(subscription.id, "S01E01", "resource", "valid", 1080, 8)
+            store.mark_item_unlocking(item.id)
+
+            saved = store.mark_item_unlock_unknown(item.id)
+            reopened = HdhiveSubscriptionStore(path).get_item(item.id)
+
+            for current in (saved, reopened):
+                self.assertEqual(current.status, "pending_confirmation")
+                self.assertEqual(current.unlock_state, "unknown")
+                self.assertEqual(current.skip_reason, "unlock_outcome_unknown")
+                self.assertEqual(current.last_error, "解锁结果未知，禁止自动重复扣分")
 
 
 if __name__ == "__main__":

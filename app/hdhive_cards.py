@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Callable
+
+from .sqlite_utils import sqlite_connection
 
 
 class TmdbDetailCache:
@@ -14,7 +15,7 @@ class TmdbDetailCache:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.ttl_seconds = max(60, int(ttl_seconds))
-        with sqlite3.connect(self.db_path) as connection:
+        with sqlite_connection(self.db_path) as connection:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS tmdb_details (cache_key TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at REAL NOT NULL)"
             )
@@ -22,7 +23,7 @@ class TmdbDetailCache:
     def get(self, media_type: str, tmdb_id: str, fetcher: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         key = f"{media_type}:{tmdb_id}"
         now = time.time()
-        with sqlite3.connect(self.db_path) as connection:
+        with sqlite_connection(self.db_path, read_only=True) as connection:
             row = connection.execute("SELECT payload, updated_at FROM tmdb_details WHERE cache_key = ?", (key,)).fetchone()
         if row is not None and now - float(row[1]) < self.ttl_seconds:
             try:
@@ -37,7 +38,7 @@ class TmdbDetailCache:
             value = {}
         if not isinstance(value, dict):
             value = {}
-        with sqlite3.connect(self.db_path) as connection:
+        with sqlite_connection(self.db_path) as connection:
             connection.execute(
                 "INSERT INTO tmdb_details(cache_key, payload, updated_at) VALUES (?, ?, ?) ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
                 (key, json.dumps(value, ensure_ascii=False), now),
@@ -83,4 +84,3 @@ def build_hdhive_unlock_card(
         )
     )
     return caption, _tmdb_poster_url(details)
-

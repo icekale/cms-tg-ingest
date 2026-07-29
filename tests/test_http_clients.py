@@ -1,10 +1,12 @@
 import http.client
+import json
 import unittest
 from io import BytesIO
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
 from app.clients.http import FormHttp, HttpJson, _redact_text, _redact_url
+from app.clients.p115 import P115WebClient
 
 
 class FakeResponse:
@@ -32,6 +34,325 @@ class TrackingHTTPError(HTTPError):
 
 
 class HttpClientTests(unittest.TestCase):
+    def test_create_share_only_sends_share_request(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, method, dict(data or {})))
+                if url.endswith("/share/send"):
+                    return {
+                        "state": True,
+                        "data": {
+                            "share_code": "created-code",
+                            "receive_code": "generated-code",
+                            "share_url": "https://115cdn.com/s/created-code",
+                        },
+                    }
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = P115WebClient("UID=1", http=http, timeout=3)
+
+        result = client.create_share("folder-id")
+
+        self.assertEqual(
+            result,
+            {
+                "share_code": "created-code",
+                "receive_code": "generated-code",
+                "share_url": "https://115cdn.com/s/created-code",
+            },
+        )
+        self.assertEqual(
+            http.calls,
+            [
+                (
+                    "https://webapi.115.com/share/send",
+                    "POST",
+                    {"file_ids": "folder-id", "ignore_warn": 1},
+                )
+            ],
+        )
+
+    def test_ensure_share_settings_sets_receive_code_and_unlimited_duration(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, method, dict(data or {})))
+                if url.endswith("/share/updateshare"):
+                    return {
+                        "state": True,
+                        "data": {"created-code": {"receive_code": "saved-code"}},
+                    }
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = P115WebClient("UID=1", http=http, timeout=3)
+
+        result = client.ensure_share_settings("created-code", "requested-code")
+
+        self.assertEqual(result["share_code"], "created-code")
+        self.assertEqual(result["receive_code"], "saved-code")
+        self.assertEqual(
+            http.calls,
+            [
+                (
+                    "https://webapi.115.com/share/updateshare",
+                    "POST",
+                    {
+                        "share_code": "created-code",
+                        "receive_code": "requested-code",
+                        "share_duration": -1,
+                        "auto_fill_recvcode": 1,
+                    },
+                )
+            ],
+        )
+
+    def test_file_exists_in_parent_uses_fresh_parent_listing(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+                self.items = [{"cid": "stale-id", "pid": "parent-id", "n": "Old"}]
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, dict(params or {})))
+                if url.endswith("/files"):
+                    return {"state": True, "data": list(self.items)}
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = P115WebClient("UID=1", http=http, timeout=3, cache_ttl_seconds=60, clock=lambda: 100)
+        client.list_files("parent-id")
+        http.items = [{"fid": "target-id", "cid": "parent-id", "n": "Target.mkv"}]
+
+        exists = client.file_exists_in_parent("target-id", "parent-id")
+
+        self.assertTrue(exists)
+        self.assertEqual(len(http.calls), 2)
+
+    def test_prepare_share_receive_reads_and_serializes_exact_snapshot(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, method, dict(data or {}), dict(params or {})))
+                if url.endswith("/share/snap"):
+                    return {
+                        "state": True,
+                        "data": {
+                            "shareinfo": {"share_title": "Multi-root share"},
+                            "list": [
+                                {"fid": "source-a", "n": "Root A"},
+                                {"fid": "source-b", "n": "Extras"},
+                            ],
+                        },
+                    }
+                if url.endswith("/files"):
+                    return {
+                        "state": True,
+                        "data": [
+                            {
+                                "cid": "old-local-a",
+                                "pid": "pending-cid",
+                                "n": "Root A",
+                            }
+                        ],
+                    }
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = P115WebClient("UID=1", http=http, timeout=3)
+
+        intent = client.prepare_share_receive("abc", "1234", "pending-cid")
+
+        self.assertEqual(intent["share_code"], "abc")
+        self.assertEqual(intent["receive_code"], "1234")
+        self.assertEqual(intent["target_cid"], "pending-cid")
+        self.assertEqual(intent["source_file_ids"], ["source-a", "source-b"])
+        self.assertEqual(
+            intent["source_file_names"],
+            ["Root A", "Extras"],
+        )
+        self.assertEqual(intent["title"], "Multi-root share")
+        self.assertEqual(intent["target_pre_call_file_ids"], ["old-local-a"])
+        self.assertTrue(intent["target_snapshot_complete"])
+        json.dumps(intent)
+        self.assertTrue(all(method == "GET" for _url, method, _data, _params in http.calls))
+        self.assertFalse(any(url.endswith("/share/receive") for url, *_rest in http.calls))
+
+    def test_prepare_share_receive_bypasses_preseeded_source_and_target_caches(self):
+        class FakeHttp:
+            def __init__(self):
+                self.source_id = "stale-source"
+                self.target_id = "stale-target"
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append(url)
+                if url.endswith("/share/snap"):
+                    return {
+                        "state": True,
+                        "data": {
+                            "shareinfo": {"share_title": "Root A"},
+                            "list": [{"fid": self.source_id, "n": "Root A"}],
+                        },
+                    }
+                if url.endswith("/files"):
+                    return {
+                        "state": True,
+                        "data": [
+                            {"cid": self.target_id, "pid": "pending-cid", "n": "Existing Root"}
+                        ],
+                    }
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = P115WebClient("UID=1", http=http, timeout=3, cache_ttl_seconds=60, clock=lambda: 100)
+        client.share_root_items("abc", "1234", cid="0", limit=100)
+        client.list_files("pending-cid", limit=500)
+        http.source_id = "fresh-source"
+        http.target_id = "fresh-target"
+
+        intent = client.prepare_share_receive("abc", "1234", "pending-cid")
+
+        self.assertEqual(intent["source_file_ids"], ["fresh-source"])
+        self.assertEqual(intent["target_pre_call_file_ids"], ["fresh-target"])
+        self.assertEqual(sum(url.endswith("/share/snap") for url in http.calls), 2)
+        self.assertEqual(sum(url.endswith("/files") for url in http.calls), 2)
+
+    def test_execute_prepared_share_receive_posts_saved_source_ids_once(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, method, dict(data or {}), dict(params or {})))
+                if url.endswith("/share/receive"):
+                    return {"state": True, "data": {"receive_title": "Saved title"}}
+                if url.endswith("/files"):
+                    return {
+                        "state": True,
+                        "data": [
+                            {"cid": "old-a", "pid": "saved-target", "n": "Root A"},
+                            {"cid": "new-a", "pid": "saved-target", "n": "Root A"},
+                            {"cid": "new-b", "pid": "saved-target", "n": "Root B"},
+                        ],
+                    }
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = P115WebClient("UID=1", http=http, timeout=3)
+        intent = {
+            "share_code": "saved-share",
+            "receive_code": "saved-code",
+            "target_cid": "saved-target",
+            "source_file_ids": ["saved-source-a", "saved-source-b"],
+            "source_file_names": ["Root A", "Root B"],
+            "title": "Saved title",
+            "target_pre_call_file_ids": ["old-a"],
+            "target_snapshot_complete": True,
+        }
+
+        result = client.execute_prepared_share_receive(intent)
+
+        receive_calls = [call for call in http.calls if call[0].endswith("/share/receive")]
+        self.assertEqual(len(receive_calls), 1)
+        self.assertEqual(receive_calls[0][1], "POST")
+        self.assertEqual(
+            receive_calls[0][2],
+            {
+                "share_code": "saved-share",
+                "receive_code": "saved-code",
+                "file_id": "saved-source-a,saved-source-b",
+                "cid": "saved-target",
+            },
+        )
+        self.assertEqual(
+            [item["file_id"] for item in result["received_items"]],
+            ["new-a", "new-b"],
+        )
+        self.assertTrue(result["received_items_complete"])
+
+    def test_reconcile_prepared_share_receive_excludes_pre_call_same_name_items(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, method, dict(data or {}), dict(params or {})))
+                if url.endswith("/files"):
+                    return {
+                        "state": True,
+                        "data": [
+                            {"cid": "old-a", "pid": "pending-cid", "n": "Root A"},
+                            {"cid": "new-a", "pid": "pending-cid", "n": "Root A"},
+                            {"cid": "new-b", "pid": "pending-cid", "n": "Root B"},
+                        ],
+                    }
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = P115WebClient("UID=1", http=http, timeout=3)
+        intent = {
+            "share_code": "abc",
+            "receive_code": "1234",
+            "target_cid": "pending-cid",
+            "source_file_ids": ["source-a", "source-b"],
+            "source_file_names": ["Root A", "Root B"],
+            "title": "Multi-root share",
+            "target_pre_call_file_ids": ["old-a"],
+            "target_snapshot_complete": True,
+        }
+
+        result = client.reconcile_prepared_share_receive(intent)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            [item["file_id"] for item in result["received_items"]],
+            ["new-a", "new-b"],
+        )
+        self.assertTrue(result["received_items_complete"])
+        self.assertTrue(all(method == "GET" for _url, method, _data, _params in http.calls))
+        self.assertFalse(any(url.endswith("/share/receive") for url, *_rest in http.calls))
+
+    def test_reconcile_prepared_share_receive_rejects_unrelated_single_delta(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                if url.endswith("/files"):
+                    return {
+                        "state": True,
+                        "data": [
+                            {
+                                "cid": "unrelated-new-id",
+                                "pid": "pending-cid",
+                                "n": "Unrelated Upload",
+                            }
+                        ],
+                    }
+                raise AssertionError(url)
+
+        client = P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+        intent = {
+            "share_code": "abc",
+            "receive_code": "1234",
+            "target_cid": "pending-cid",
+            "source_file_ids": ["source-a"],
+            "source_file_names": ["Root A"],
+            "title": "Root A",
+            "target_pre_call_file_ids": [],
+            "target_snapshot_complete": True,
+        }
+
+        result = client.reconcile_prepared_share_receive(intent)
+
+        self.assertIsNone(result)
+
     def test_json_get_retries_remote_disconnect(self):
         with (
             patch(

@@ -13,6 +13,7 @@ import threading
 import time
 import urllib.error
 import urllib.parse
+import weakref
 import inspect
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,7 @@ from app.clients.p115 import (
     select_source_residue_115_files,
 )
 from app.backup import BackupScheduler, start_backup_loop
+from app.background_jobs import BackgroundJobCoordinator
 
 from app.config import (
     Config,
@@ -173,8 +175,8 @@ from app.telegram_ui import (
     task_action_keyboard,
     truncate_text,
 )
-from app.task_runner import StageResult, TaskRunner
-from app.task_store import TaskStore
+from app.task_runner import StageResult, TaskRunner, new_worker_id
+from app.task_store import TaskStore, reprocess_delete_keys_for
 from app.web import start_web_server
 from app.web_api import quality_items
 from app.workflows.direct import DirectTaskWorkflow, ModeRoutingWorkflow, SourceShareTaskWorkflow
@@ -192,6 +194,7 @@ from app.workflows.self_share import (
     has_authoritative_category,
     is_115_receive_restricted_error,
     is_move_plan_retryable,
+    journaled_delete_file,
     match_emby_item,
     resolve_category_with_fallbacks,
     resolve_self_share_recognition_before_prepare,
@@ -199,16 +202,29 @@ from app.workflows.self_share import (
     send_move_result,
     should_attempt_strm_move,
     should_defer_for_probing,
+    source_delete_parent_id,
 )
 
 LINK_RE = re.compile(r"https?://(?:www\.)?(?:115cdn|115|anxia)\.com/s/[^\s<>'\"]+", re.I)
+_EXPLICIT_SERIES_UPDATE_RE = re.compile(
+    r"^追更(?:\s*#(?P<task_id>\d+))?(?:\s*[：:])?\s*(?P<payload>.*)$",
+    re.DOTALL,
+)
+_TARGETED_SERIES_UPDATE_RE = re.compile(
+    r"^追更\s+#(?P<task_id>\d+)\s+(?P<link>https?://(?:www\.)?(?:115cdn|115|anxia)\.com/s/[^\s<>'\"]+)\s*$",
+    re.I,
+)
 TRAILING_PUNCT = ".,;)。），]】》>"
 LOG = logging.getLogger("cms-tg-ingest")
+_SERIES_UPDATE_LOCKS_GUARD = threading.Lock()
+_SERIES_UPDATE_LOCKS: weakref.WeakValueDictionary[tuple[str, str, str], threading.Lock] = (
+    weakref.WeakValueDictionary()
+)
 LAST_TELEGRAM_TRANSIENT_ERROR_AT: str | None = None
 _HDHIVE_PENDING_FILTERS: dict[str, int] = {}
 _HDHIVE_FILTER_PROMPT = "请发送集数过滤，例如 S01E01-S01E10,S02；发送“清除”恢复全部正常集。"
 ED2K_HELP_EXAMPLE = "ed2k://|file|Example.mkv|10|" + "0123456789ABCDEF" * 2 + "|/"
-HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 分享、磁力或 ED2K 链接\n- 磁力/ED2K 会进入 115 云下载，再复用 CMS 整理和分享 STRM 流程\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- /搜索：通过 TMDB 匹配 HDHive 影片/剧集，筛选网盘并解锁资源（/hdhive_search 仍兼容）\n- /订阅 <HDHive剧集链接>：创建 HDHive 剧集订阅\n- 发送 HDHive 剧集页面也可直接订阅，例如 https://hdhive.com/tv/xxxxxxxx\n- /status 查看最近任务\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd\n""" + ED2K_HELP_EXAMPLE
+HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 分享、磁力或 ED2K 链接\n- 磁力/ED2K 会进入 115 云下载，再复用 CMS 整理和分享 STRM 流程\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- 新链接追更：追更 #任务号 <新115链接>\n- /搜索：通过 TMDB 匹配 HDHive 影片/剧集，筛选网盘并解锁资源（/hdhive_search 仍兼容）\n- /订阅 <HDHive剧集链接>：创建 HDHive 剧集订阅\n- 发送 HDHive 剧集页面也可直接订阅，例如 https://hdhive.com/tv/xxxxxxxx\n- /status 查看最近任务\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd\n""" + ED2K_HELP_EXAMPLE
 MENU_BUTTONS = {
     "📊 统计": "/metrics",
     "📋 最近任务": "/status",
@@ -256,7 +272,24 @@ class _QualityRepairAdapter:
         row = self.submission_store.find_by_id(int(submission_id))
         if not row:
             return False
-        updated, _message = cleanup_own_share_source(self.submission_store, row, self.cleanup_client)
+        if str(row.get("cleanup_status") or "").lower() == "deleted":
+            return True
+        file_id = str(row.get("own_share_file_id") or "").strip()
+        parent_id = source_delete_parent_id(task, row, file_id)
+        if not self.cleanup_client or not file_id or not parent_id:
+            return False
+        recovery = journaled_delete_file(
+            self.task_store,
+            task,
+            self.cleanup_client,
+            file_id,
+            parent_id,
+            "delete_source",
+            now=time.time(),
+        )
+        if recovery is not None:
+            return False
+        updated = self.submission_store.update_cleanup(int(row["id"]), "deleted", file_id=file_id) or row
         return str(updated.get("cleanup_status") or "").lower() == "deleted"
 
 
@@ -315,6 +348,18 @@ class ShareKey:
     receive_code: str
 
 
+class SeriesUpdateSourceConflict(RuntimeError):
+    pass
+
+
+def parse_explicit_series_update_command(text: str) -> tuple[bool, int | None, str]:
+    match = _EXPLICIT_SERIES_UPDATE_RE.match(str(text or "").strip())
+    if not match:
+        return False, None, str(text or "")
+    task_id = int(match.group("task_id")) if match.group("task_id") else None
+    return True, task_id, str(match.group("payload") or "").strip()
+
+
 def extract_share_links(text: str) -> list[str]:
     seen: set[str] = set()
     links: list[str] = []
@@ -352,7 +397,10 @@ def create_task_store(config: Config) -> TaskStore:
 def create_backup_scheduler(config: Config, task_store: TaskStore) -> BackupScheduler:
     return BackupScheduler(
         task_store,
-        [config.db_path, config.task_db_path],
+        {
+            "submissions": Path(config.db_path),
+            "tasks": Path(config.task_db_path),
+        },
         config.backup_dir,
         run_time=config.backup_time,
         timezone_name=config.backup_timezone,
@@ -410,6 +458,8 @@ def maybe_start_web_server(
     hdhive_scheduler: HdhiveSubscriptionScheduler | None = None,
     frontend_dist_path: str | None = None,
     starter=start_web_server,
+    *,
+    background_jobs: BackgroundJobCoordinator | None = None,
 ):
     if not config.web_enabled:
         return None
@@ -427,6 +477,8 @@ def maybe_start_web_server(
         kwargs["hdhive_service"] = hdhive_service
     if hdhive_scheduler is not None:
         kwargs["hdhive_scheduler"] = hdhive_scheduler
+    if background_jobs is not None:
+        kwargs["background_jobs"] = background_jobs
     try:
         starter_parameters = inspect.signature(starter).parameters
         supports_self_share_config = "self_share_config" in starter_parameters or any(
@@ -458,6 +510,15 @@ def maybe_start_web_server(
         supports_max_retries = True
     if not supports_max_retries:
         kwargs.pop("max_retries", None)
+    try:
+        starter_parameters = inspect.signature(starter).parameters
+        supports_background_jobs = "background_jobs" in starter_parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in starter_parameters.values()
+        )
+    except (TypeError, ValueError):
+        supports_background_jobs = True
+    if not supports_background_jobs:
+        kwargs.pop("background_jobs", None)
     server = starter(task_store, config.web_host, config.web_port, **kwargs)
     LOG.info("v0.2 web admin started host=%s port=%s", config.web_host, config.web_port)
     return server
@@ -471,6 +532,7 @@ def call_maybe_start_web_server(
     hdhive_service: HdhiveSubscriptionService | None = None,
     hdhive_scheduler: HdhiveSubscriptionScheduler | None = None,
     frontend_dist_path: str | None = None,
+    background_jobs: BackgroundJobCoordinator | None = None,
 ):
     try:
         parameters = inspect.signature(maybe_start_web_server).parameters
@@ -494,16 +556,20 @@ def call_maybe_start_web_server(
     supports_max_retries = "max_retries" in parameters or any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     )
-    if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler or supports_frontend_dist_path or supports_max_retries:
-        return maybe_start_web_server(
-            config,
-            task_store,
-            submission_store=submission_store if supports_submission_store else None,
-            quality_automation=quality_automation if supports_quality_automation else None,
-            hdhive_service=hdhive_service if supports_hdhive_service else None,
-            hdhive_scheduler=hdhive_scheduler if supports_hdhive_scheduler else None,
-            frontend_dist_path=frontend_dist_path if supports_frontend_dist_path else None,
-        )
+    supports_background_jobs = "background_jobs" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler or supports_frontend_dist_path or supports_max_retries or supports_background_jobs:
+        kwargs = {
+            "submission_store": submission_store if supports_submission_store else None,
+            "quality_automation": quality_automation if supports_quality_automation else None,
+            "hdhive_service": hdhive_service if supports_hdhive_service else None,
+            "hdhive_scheduler": hdhive_scheduler if supports_hdhive_scheduler else None,
+            "frontend_dist_path": frontend_dist_path if supports_frontend_dist_path else None,
+        }
+        if supports_background_jobs:
+            kwargs["background_jobs"] = background_jobs
+        return maybe_start_web_server(config, task_store, **kwargs)
     return maybe_start_web_server(config, task_store)
 
 
@@ -519,6 +585,11 @@ def stop_web_server(server: Any | None, join_timeout: float = 5) -> None:
     thread = getattr(server, "_cms_thread", None)
     if isinstance(thread, threading.Thread) and thread is not threading.current_thread():
         thread.join(max(0.0, float(join_timeout)))
+    if getattr(server, "_cms_owns_background_jobs", False):
+        background_jobs = getattr(server, "_cms_background_jobs", None)
+        shutdown = getattr(background_jobs, "shutdown", None)
+        if callable(shutdown):
+            shutdown(wait=True)
 
 
 def best_effort_task_sync(action: str, func, *args, **kwargs):
@@ -939,6 +1010,137 @@ class SubmissionStore:
             )
             row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
         return self._row_to_dict(row)
+
+    def prepare_series_update_child(
+        self,
+        target_row_id: int,
+        child_key: ShareKey,
+        child_url: str,
+        *,
+        canonical_title: str | None = None,
+        canonical_tmdb_id: str | None = None,
+        canonical_category: str | None = None,
+        canonical_recognition: dict[str, Any] | None = None,
+        expected_child_exists: bool | None = None,
+        expected_child_id: int | None = None,
+        expected_child_updated_at: float | None = None,
+    ) -> dict[str, Any] | None:
+        now = time.time()
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing_child = conn.execute(
+                "SELECT id, updated_at, own_share_code FROM submissions WHERE share_code = ? AND receive_code = ?",
+                (child_key.share_code, child_key.receive_code),
+            ).fetchone()
+            if expected_child_exists is False and existing_child is not None:
+                raise SeriesUpdateSourceConflict("子任务提交记录在冻结后出现")
+            if expected_child_exists is True:
+                if (
+                    existing_child is None
+                    or int(existing_child["id"]) != int(expected_child_id)
+                    or float(existing_child["updated_at"] or 0) != float(expected_child_updated_at)
+                ):
+                    raise SeriesUpdateSourceConflict("子任务提交记录在冻结后发生变化")
+                if str(existing_child["own_share_code"] or "").strip():
+                    raise SeriesUpdateSourceConflict("子任务分享已在冻结后创建")
+            target = conn.execute(
+                "SELECT * FROM submissions WHERE id = ?",
+                (int(target_row_id),),
+            ).fetchone()
+            if target is None:
+                return None
+            if (
+                str(target["share_code"] or "") == child_key.share_code
+                and str(target["receive_code"] or "") == child_key.receive_code
+            ):
+                return None
+            try:
+                target_recognition = json.loads(str(target["recognition_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                target_recognition = {}
+            if not isinstance(target_recognition, dict):
+                target_recognition = {}
+            child_title = str(target["title"] or "") if canonical_title is None else str(canonical_title)
+            category = (
+                str(
+                    target["category_choice"]
+                    or target["category_final"]
+                    or target_recognition.get("category")
+                    or ""
+                ).strip()
+                if canonical_category is None
+                else str(canonical_category).strip()
+            )
+            child_recognition = dict(canonical_recognition) if canonical_recognition is not None else target_recognition
+            if canonical_title is not None:
+                child_recognition["title"] = child_title
+            if canonical_tmdb_id is not None:
+                child_recognition["tmdb_id"] = str(canonical_tmdb_id).strip()
+            if canonical_category is not None:
+                child_recognition["category"] = category
+            recognition_json = json.dumps(child_recognition, ensure_ascii=False, sort_keys=True)
+            conn.execute(
+                """
+                INSERT INTO submissions (
+                    share_code, receive_code, url, title, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'received', ?, ?)
+                ON CONFLICT(share_code, receive_code) DO UPDATE SET
+                    url = excluded.url,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    child_key.share_code,
+                    child_key.receive_code,
+                    str(child_url),
+                    child_title,
+                    now,
+                    now,
+                ),
+            )
+            child = conn.execute(
+                "SELECT id FROM submissions WHERE share_code = ? AND receive_code = ?",
+                (child_key.share_code, child_key.receive_code),
+            ).fetchone()
+            if child is None or int(child["id"]) == int(target_row_id):
+                return None
+            conn.execute(
+                """
+                UPDATE submissions
+                SET cms_task_id = NULL,
+                    title = ?, status = 'received', last_error = NULL,
+                    category_choice = ?, category_status = 'selected',
+                    recognition_json = ?, workflow_mode = 'self_share_sync',
+                    workflow_phase = 'update_requested',
+                    own_share_file_id = NULL, own_share_file_name = NULL,
+                    own_share_code = NULL, own_share_receive_code = NULL,
+                    own_share_url = NULL, share_sync_status = NULL,
+                    canonical_manifest_json = NULL, share_alias_name = NULL,
+                    share_alias_level = NULL, share_validation_status = NULL,
+                    share_validation_error = NULL, share_probe_at = NULL,
+                    share_invalid_at = NULL, share_invalid_reason = NULL,
+                    source_path = NULL,
+                    dest_path = NULL, move_status = NULL, move_error = NULL,
+                    move_started_at = NULL, move_finished_at = NULL,
+                    category_final = NULL, emby_status = NULL,
+                    emby_item_id = NULL, emby_title = NULL, emby_path = NULL,
+                    emby_parent = NULL, cleanup_status = NULL,
+                    cleanup_file_id = NULL, cleanup_error = NULL,
+                    cleanup_finished_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    child_title,
+                    category,
+                    recognition_json,
+                    now,
+                    int(child["id"]),
+                ),
+            )
+            prepared = conn.execute(
+                "SELECT * FROM submissions WHERE id = ?",
+                (int(child["id"]),),
+            ).fetchone()
+        return self._row_to_dict(prepared)
 
     def replace_self_share_source_file_id(self, row_id: int, file_id: str) -> dict[str, Any] | None:
         with self._lock, self._connection() as conn:
@@ -1925,6 +2127,7 @@ def handle_hdhive_subscription_callback(
     telegram: TelegramClient,
     service: HdhiveSubscriptionService | None,
     scheduler: HdhiveSubscriptionScheduler | None,
+    background_jobs: BackgroundJobCoordinator | None = None,
 ) -> bool:
     parsed = parse_hdhive_subscription_callback(data)
     if parsed is None:
@@ -1950,6 +2153,41 @@ def handle_hdhive_subscription_callback(
         elif action == "delete":
             service.delete(target_id)
             message = "订阅已删除，已入库内容不会受影响。"
+        elif action in {"check", "confirm"} and background_jobs is not None:
+            result_holder: dict[str, Any] = {}
+
+            def run_manual_job() -> None:
+                result_holder["result"] = service.check(target_id) if action == "check" else service.confirm_item(target_id)
+
+            def send_completion(snapshot: Any) -> None:
+                if snapshot.status == "failed":
+                    telegram.send_message(chat_id, f"HDHive 订阅操作失败：{snapshot.error}")
+                    return
+                result = result_holder["result"]
+                if action == "check":
+                    message = (
+                        f"检查完成：发现 {result.discovered} 个资源，入队 {result.enqueued} 个，"
+                        f"待确认 {result.pending_confirmation} 个，失败 {result.failed} 个。"
+                    )
+                else:
+                    message = (
+                        f"已处理确认资源：入队 {result.enqueued} 个，"
+                        f"待确认 {result.pending_confirmation} 个，失败 {result.failed} 个。"
+                    )
+                text, keyboard = format_hdhive_subscription_view(service, scheduler, chat_id)
+                telegram.send_message(chat_id, f"{message}\n\n{text}", reply_markup=keyboard)
+
+            key = f"hdhive:subscription:{target_id}" if action == "check" else f"hdhive:item:{target_id}"
+            description = f"检查 HDHive 订阅 #{target_id}" if action == "check" else f"确认 HDHive 资源 #{target_id}"
+            submission = background_jobs.submit(key, run_manual_job, description=description, on_complete=send_completion)
+            feedback = {
+                "accepted": "已开始检查" if action == "check" else "已开始确认",
+                "already_running": "正在处理中",
+                "capacity_rejected": "后台任务繁忙",
+                "closed": "服务正在关闭",
+            }[submission.outcome]
+            safe_answer_callback_query(telegram, callback_id, feedback, show_alert=submission.outcome in {"capacity_rejected", "closed"})
+            return True
         elif action == "check":
             result = service.check(target_id)
             message = (
@@ -2205,6 +2443,7 @@ def handle_callback_query(
     hdhive_subscription_service: HdhiveSubscriptionService | None = None,
     hdhive_subscription_scheduler: HdhiveSubscriptionScheduler | None = None,
     max_retries: int = 3,
+    background_jobs: BackgroundJobCoordinator | None = None,
 ) -> None:
     sender_id = ((callback_query.get("from") or {}).get("id"))
     message = callback_query.get("message") or {}
@@ -2240,6 +2479,7 @@ def handle_callback_query(
         telegram,
         hdhive_subscription_service,
         hdhive_subscription_scheduler,
+        background_jobs,
     ):
         return
     if handle_hdhive_callback(
@@ -2828,6 +3068,313 @@ def handle_quality_action_callback(
     return True
 
 
+def _series_update_target_identity(
+    target_task: Any | None,
+    store: SubmissionStore | None,
+) -> tuple[dict[str, Any], dict[str, Any], str, str, str] | None:
+    if target_task is None or store is None:
+        return None
+    if target_task.status != TaskStatus.SUCCEEDED or target_task.current_stage != TaskStage.CLEANED:
+        return None
+    if str(target_task.claimed_by or "").strip():
+        return None
+    submission_id = target_task.submission_id or target_task.metadata.get("submission_id")
+    if submission_id in (None, ""):
+        return None
+    try:
+        target_row = store.find_by_id(int(submission_id))
+    except (TypeError, ValueError):
+        return None
+    if not target_row or str(target_row.get("workflow_mode") or "") != "self_share_sync":
+        return None
+    try:
+        recognition = json.loads(str(target_row.get("recognition_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        recognition = {}
+    if not isinstance(recognition, dict):
+        recognition = {}
+    tmdb_id = str(
+        target_task.tmdb_id
+        or target_task.metadata.get("tmdb_id")
+        or recognition.get("tmdb_id")
+        or ""
+    ).strip()
+    category = str(
+        target_task.category
+        or target_task.metadata.get("category")
+        or target_row.get("category_final")
+        or target_row.get("category_choice")
+        or recognition.get("category")
+        or ""
+    ).strip()
+    if category not in {"国产电视", "外国电视", "番剧"} or not tmdb_id:
+        return None
+    if str(recognition.get("type") or "").strip() != "tv":
+        return None
+    title = str(target_task.title or target_row.get("title") or recognition.get("title") or "").strip()
+    canonical_recognition = dict(recognition)
+    canonical_recognition.update(
+        {
+            "title": title,
+            "tmdb_id": tmdb_id,
+            "category": category,
+            "type": "tv",
+        }
+    )
+    return target_row, canonical_recognition, title, tmdb_id, category
+
+
+def _park_series_update_checkpoint(
+    task: Any | None,
+    task_store: TaskStore,
+    *,
+    source: str,
+) -> Any | None:
+    if (
+        task is None
+        or task.current_stage != TaskStage.RECEIVED
+        or task.status not in {TaskStatus.PENDING, TaskStatus.RUNNING}
+        or task.next_run_at >= 0
+    ):
+        return None
+    if str(task.claimed_by or "").strip() or str(task.claim_token or "").strip():
+        return None
+    return task_store.compare_and_set_transition(
+        task.id,
+        task.current_stage,
+        {task.status},
+        require_unclaimed=True,
+        target_stage=TaskStage.NEEDS_ACTION,
+        target_status=TaskStatus.NEEDS_ACTION,
+        target_event_message=f"{source}追更准备中断，请重新发起",
+        next_run_at=-1,
+        clear_claim=True,
+        expected_updated_at=task.updated_at,
+    )
+
+
+@contextmanager
+def _series_update_share_lock(task_store: TaskStore, key: ShareKey):
+    lock_key = (
+        str(task_store.db_path.expanduser().resolve(strict=False)),
+        key.share_code,
+        key.receive_code,
+    )
+    with _SERIES_UPDATE_LOCKS_GUARD:
+        lock = _SERIES_UPDATE_LOCKS.get(lock_key)
+        if lock is None:
+            lock = threading.Lock()
+            _SERIES_UPDATE_LOCKS[lock_key] = lock
+    with lock:
+        yield
+
+
+def start_series_update_from_link(
+    target_task: Any | None,
+    key: ShareKey,
+    link: str,
+    chat_id: int | str,
+    store: SubmissionStore | None,
+    task_store: TaskStore | None,
+    *,
+    source: str,
+) -> tuple[Any | None, str]:
+    if task_store is None:
+        return None, "not_eligible"
+    with _series_update_share_lock(task_store, key):
+        return _start_series_update_from_link_locked(
+            target_task,
+            key,
+            link,
+            chat_id,
+            store,
+            task_store,
+            source=source,
+        )
+
+
+def _start_series_update_from_link_locked(
+    target_task: Any | None,
+    key: ShareKey,
+    link: str,
+    chat_id: int | str,
+    store: SubmissionStore | None,
+    task_store: TaskStore,
+    *,
+    source: str,
+) -> tuple[Any | None, str]:
+    target_identity = _series_update_target_identity(target_task, store)
+    if target_identity is None:
+        return None, "not_eligible"
+    target_row, recognition, title, tmdb_id, category = target_identity
+
+    child = task_store.get_or_create_share_task(
+        key.share_code,
+        key.receive_code,
+        link,
+        chat_id=str(chat_id or ""),
+    )
+    parent_value = child.metadata.get("series_update_parent_task_id")
+    if parent_value not in (None, ""):
+        try:
+            same_parent = int(parent_value) == int(target_task.id)
+        except (TypeError, ValueError):
+            same_parent = False
+        if not same_parent:
+            return None, "source_conflict"
+    else:
+        same_parent = False
+    if str(child.claimed_by or "").strip() or str(child.claim_token or "").strip():
+        return None, "source_busy"
+    if same_parent and child.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+        if child.next_run_at >= 0:
+            return child, "already_started"
+        parked = _park_series_update_checkpoint(child, task_store, source=source)
+        return parked or task_store.find_task(child.id), "failed"
+    child_row = store.find_by_key(key) if store is not None else None
+    if str(child.metadata.get("own_share_code") or "").strip() or str(
+        (child_row or {}).get("own_share_code") or ""
+    ).strip():
+        return None, "source_conflict"
+
+    try:
+        previous_requested = int(child.metadata.get("update_requested_run") or 0)
+        previous_received = int(child.metadata.get("update_received_run") or 0)
+    except (TypeError, ValueError):
+        previous_requested = previous_received = 0
+    update_run = max(previous_requested, previous_received) + 1
+    started_at = time.time()
+    frozen = task_store.compare_and_set_transition(
+        child.id,
+        child.current_stage,
+        {child.status},
+        require_unclaimed=True,
+        target_stage=TaskStage.RECEIVED,
+        target_status=TaskStatus.PENDING,
+        target_event_message=f"{source}绑定历史剧集，准备子任务提交记录",
+        metadata_patch={
+            "series_update_parent_task_id": int(target_task.id),
+            "series_update_parent_submission_id": int(target_row["id"]),
+            "update_requested_run": update_run,
+            "update_received_run": update_run - 1,
+            "update_started_at": started_at,
+            "previous_own_share_code": str(target_row.get("own_share_code") or ""),
+            "force_reprocess": True,
+            "reprocess_started_at": started_at,
+            "recognition": recognition,
+            "title": title,
+            "tmdb_id": tmdb_id,
+            "category": category,
+        },
+        metadata_delete_keys=reprocess_delete_keys_for(child) + ("series_update_checkpoint",),
+        next_run_at=-1,
+        clear_errors=True,
+        clear_claim=True,
+        expected_updated_at=child.updated_at,
+    )
+    if frozen is None:
+        current = task_store.find_task(child.id)
+        if current and (str(current.claimed_by or "").strip() or str(current.claim_token or "").strip()):
+            return None, "source_busy"
+        current_parent = current.metadata.get("series_update_parent_task_id") if current else None
+        try:
+            current_same_parent = current_parent not in (None, "") and int(current_parent) == int(target_task.id)
+        except (TypeError, ValueError):
+            current_same_parent = False
+        if current_parent not in (None, "") and not current_same_parent:
+            return None, "source_conflict"
+        if current and current_same_parent and current.status in {
+            TaskStatus.PENDING,
+            TaskStatus.RUNNING,
+        }:
+            if current.next_run_at >= 0:
+                return current, "already_started"
+            parked = _park_series_update_checkpoint(current, task_store, source=source)
+            return parked or task_store.find_task(current.id), "failed"
+        return current, "failed"
+
+    preparation_error = ""
+    preparation_conflict = ""
+    prepared = None
+    try:
+        prepared = store.prepare_series_update_child(
+            int(target_row["id"]),
+            key,
+            link,
+            canonical_title=title,
+            canonical_tmdb_id=tmdb_id,
+            canonical_category=category,
+            canonical_recognition=recognition,
+            expected_child_exists=child_row is not None,
+            expected_child_id=int(child_row["id"]) if child_row is not None else None,
+            expected_child_updated_at=float(child_row["updated_at"]) if child_row is not None else None,
+        )
+    except SeriesUpdateSourceConflict as exc:
+        preparation_conflict = str(exc)
+    except BaseException as exc:
+        preparation_error = str(exc)
+        LOG.exception("Failed to prepare explicit series update child")
+    if preparation_conflict:
+        conflicted = task_store.record_event(
+            frozen.id,
+            TaskStage.NEEDS_ACTION,
+            TaskStatus.NEEDS_ACTION,
+            f"{source}绑定历史剧集冲突：{preparation_conflict}",
+            error_type="series_update_source_conflict",
+            error_summary=preparation_conflict,
+            next_run_at=-1,
+            clear_claim=True,
+            expected_stage=TaskStage.RECEIVED,
+            expected_status=TaskStatus.PENDING,
+            expected_updated_at=frozen.updated_at,
+        )
+        return conflicted or task_store.find_task(frozen.id), "source_conflict"
+    if prepared is None:
+        summary = preparation_error or "子任务提交记录准备失败"
+        failed = task_store.record_event(
+            frozen.id,
+            TaskStage.NEEDS_ACTION,
+            TaskStatus.NEEDS_ACTION,
+            f"{source}绑定历史剧集失败：{summary}",
+            error_type="series_update_prepare_failed",
+            error_summary=summary,
+            next_run_at=-1,
+            clear_claim=True,
+            expected_stage=TaskStage.RECEIVED,
+            expected_status=TaskStatus.PENDING,
+            expected_updated_at=frozen.updated_at,
+        )
+        return failed or task_store.find_task(frozen.id), "failed"
+
+    activated = task_store.record_event(
+        frozen.id,
+        TaskStage.RECEIVED,
+        TaskStatus.PENDING,
+        f"{source}绑定历史剧集，子任务已入队",
+        title=title or None,
+        tmdb_id=tmdb_id,
+        category=category,
+        submission_id=int(prepared["id"]),
+        metadata_patch={"submission_id": int(prepared["id"])},
+        metadata_delete_keys=(
+            "_defer_stage",
+            "_defer_message",
+            "_defer_count",
+            "share_create_status",
+            "share_create_requested_at",
+        ),
+        next_run_at=0,
+        clear_claim=True,
+        expected_stage=TaskStage.RECEIVED,
+        expected_status=TaskStatus.PENDING,
+        expected_updated_at=frozen.updated_at,
+    )
+    if activated is None:
+        parked = _park_series_update_checkpoint(frozen, task_store, source=source)
+        return parked or task_store.find_task(frozen.id), "failed"
+    return activated, "started"
+
+
 def start_series_update_task(
     task: Any | None,
     store: SubmissionStore | None,
@@ -2837,16 +3384,58 @@ def start_series_update_task(
 ) -> tuple[Any | None, str]:
     if task is None or store is None or task_store is None:
         return None, "not_eligible"
-    if task.status != TaskStatus.SUCCEEDED or task.current_stage != TaskStage.CLEANED:
+    if str(task.claimed_by or "").strip() or str(task.claim_token or "").strip():
+        return None, "not_eligible"
+    metadata = task.metadata
+    checkpoint_submission_id = None
+    if (
+        task.current_stage == TaskStage.RECEIVED
+        and task.status == TaskStatus.PENDING
+        and task.next_run_at == -1
+        and metadata.get("force_reprocess") is True
+        and "previous_own_share_code" in metadata
+    ):
+        try:
+            candidate_submission_id = int(metadata.get("submission_id"))
+            requested_run = int(metadata.get("update_requested_run"))
+            received_run = int(metadata.get("update_received_run"))
+            update_started_at = float(metadata.get("update_started_at"))
+            reprocess_started_at = float(metadata.get("reprocess_started_at"))
+        except (TypeError, ValueError):
+            pass
+        else:
+            checkpoint_kind = str(metadata.get("series_update_checkpoint") or "").strip()
+            has_explicit_parent = any(
+                metadata.get(key) not in (None, "")
+                for key in ("series_update_parent_task_id", "series_update_parent_submission_id")
+            )
+            if (
+                candidate_submission_id > 0
+                and (task.submission_id is None or task.submission_id == candidate_submission_id)
+                and requested_run > 0
+                and received_run >= 0
+                and requested_run == received_run + 1
+                and update_started_at > 0
+                and reprocess_started_at == update_started_at
+                and (
+                    checkpoint_kind == "same_link"
+                    or (not checkpoint_kind and not has_explicit_parent)
+                )
+            ):
+                checkpoint_submission_id = candidate_submission_id
+    completed = task.status == TaskStatus.SUCCEEDED and task.current_stage == TaskStage.CLEANED
+    if not completed and checkpoint_submission_id is None:
         return None, "not_eligible"
     category = str(task.category or task.metadata.get("category") or task.metadata.get("category_final") or "").strip()
     if category not in {"国产电视", "外国电视", "番剧"}:
         return None, "not_eligible"
-    submission_id = task.submission_id or task.metadata.get("submission_id")
+    submission_id = checkpoint_submission_id or task.submission_id or task.metadata.get("submission_id")
     if submission_id in (None, ""):
         return None, "not_eligible"
     row = store.find_by_id(int(submission_id))
     if not row:
+        if checkpoint_submission_id is not None:
+            return None, "not_eligible"
         failed = task_store.record_event(
             task.id,
             TaskStage.FAILED,
@@ -2854,87 +3443,92 @@ def start_series_update_task(
             "追更准备失败：原任务记录不存在",
             error_type="submission_missing",
             error_summary="原任务记录不存在",
-            clear_claim=True,
+            expected_stage=TaskStage.CLEANED,
+            expected_status=TaskStatus.SUCCEEDED,
+            expected_updated_at=task.updated_at,
         )
         return failed, "failed"
     if str(row.get("workflow_mode") or "") != "self_share_sync":
         return None, "not_eligible"
+    if checkpoint_submission_id is not None:
+        if (
+            str(row.get("share_code") or "") != str(task.share_code or "")
+            or str(row.get("receive_code") or "") != str(task.receive_code or "")
+        ):
+            return None, "not_eligible"
+        frozen = task
+    else:
+        try:
+            previous_requested = int(task.metadata.get("update_requested_run") or 0)
+            previous_received = int(task.metadata.get("update_received_run") or 0)
+        except (TypeError, ValueError):
+            previous_requested = previous_received = 0
+        update_run = max(previous_requested, previous_received) + 1
+        started_at = time.time()
+        frozen = task_store.compare_and_set_transition(
+            task.id,
+            TaskStage.CLEANED,
+            {TaskStatus.SUCCEEDED},
+            require_unclaimed=True,
+            target_stage=TaskStage.RECEIVED,
+            target_status=TaskStatus.PENDING,
+            target_event_message=f"{source}开始追更，准备重置提交记录",
+            metadata_patch={
+                "submission_id": int(row["id"]),
+                "series_update_checkpoint": "same_link",
+                "update_requested_run": update_run,
+                "update_received_run": update_run - 1,
+                "update_started_at": started_at,
+                "previous_own_share_code": str(row.get("own_share_code") or "").strip(),
+                "force_reprocess": True,
+                "reprocess_started_at": started_at,
+            },
+            metadata_delete_keys=reprocess_delete_keys_for(task),
+            next_run_at=-1,
+            clear_errors=True,
+            clear_claim=True,
+            expected_updated_at=task.updated_at,
+        )
+        if frozen is None:
+            return None, "not_eligible"
     try:
-        previous_requested = int(task.metadata.get("update_requested_run") or 0)
-        previous_received = int(task.metadata.get("update_received_run") or 0)
-    except (TypeError, ValueError):
-        previous_requested = previous_received = 0
-    update_run = max(previous_requested, previous_received) + 1
-    update_started_at = time.time()
-    previous_share_code = str(row.get("own_share_code") or "").strip()
-    task_store.record_event(
-        task.id,
-        TaskStage.RECEIVED,
-        TaskStatus.PENDING,
-        f"{source}开始追更，准备接收当前分享内容",
-        title=str(row.get("title") or task.title or "") or None,
-        tmdb_id=str(task.tmdb_id or "") or None,
-        category=category,
-        submission_id=int(row["id"]),
-        metadata_patch={
-            "submission_id": int(row["id"]),
-            "update_requested_run": update_run,
-            "update_received_run": update_run - 1,
-            "update_started_at": update_started_at,
-            "previous_own_share_code": previous_share_code,
-        },
-        metadata_delete_keys=(
-            "own_share_file_id",
-            "own_share_file_name",
-            "own_share_code",
-            "own_share_receive_code",
-            "own_share_url",
-            "share_sync_status",
-            "canonical_manifest_json",
-            "share_alias_name",
-            "share_alias_level",
-            "share_validation_status",
-            "share_validation_error",
-            "source_path",
-            "dest_path",
-            "category_final",
-            "move_status",
-            "move_error",
-            "emby_status",
-            "emby_item_id",
-            "emby_title",
-            "emby_path",
-            "emby_parent",
-            "cleanup_status",
-            "cleanup_file_id",
-            "cleanup_error",
-            "emby_refresh_requested",
-            "emby_refresh_library",
-            "emby_refresh_error",
-            "organized_folder",
-            "recognition",
-            "received_file_ids",
-            "direct_strm_removed",
-            "_defer_stage",
-            "_defer_message",
-            "_defer_count",
-        ),
-        next_run_at=-1,
-        clear_claim=True,
-    )
-    updated_row = store.reset_self_share_for_update(int(row["id"]))
+        updated_row = store.reset_self_share_for_update(int(row["id"]))
+    except Exception:
+        LOG.exception("Failed to reset series update submission")
+        updated_row = None
     if not updated_row:
         failed = task_store.record_event(
-            task.id,
+            frozen.id,
             TaskStage.FAILED,
             TaskStatus.FAILED,
             "追更准备失败：原任务记录不存在",
             error_type="submission_missing",
             error_summary="原任务记录不存在",
-            clear_claim=True,
+            next_run_at=-1,
+            expected_stage=TaskStage.RECEIVED,
+            expected_status=TaskStatus.PENDING,
+            expected_updated_at=frozen.updated_at,
         )
-        return failed, "failed"
-    updated = task_store.enqueue_task(task.id, TaskStage.RECEIVED, message="追更已入队", next_run_at=0)
+        return failed or task_store.find_task(frozen.id), "failed"
+    updated = task_store.record_event(
+        frozen.id,
+        TaskStage.RECEIVED,
+        TaskStatus.PENDING,
+        "追更已入队",
+        title=str(row.get("title") or task.title or "") or None,
+        tmdb_id=str(task.tmdb_id or "") or None,
+        category=category,
+        submission_id=int(updated_row["id"]),
+        metadata_delete_keys=("series_update_checkpoint",),
+        next_run_at=0,
+        clear_claim=True,
+        expected_stage=TaskStage.RECEIVED,
+        expected_status=TaskStatus.PENDING,
+        expected_updated_at=frozen.updated_at,
+    )
+    if updated is None:
+        parked = _park_series_update_checkpoint(frozen, task_store, source=source)
+        return parked or task_store.find_task(frozen.id), "failed"
     return updated, "started"
 
 
@@ -3304,6 +3898,7 @@ def handle_update(
     hdhive_subscription_service: HdhiveSubscriptionService | None = None,
     hdhive_subscription_scheduler: HdhiveSubscriptionScheduler | None = None,
     max_retries: int = 3,
+    background_jobs: BackgroundJobCoordinator | None = None,
 ) -> None:
     if update.get("callback_query"):
         handle_callback_query(
@@ -3319,6 +3914,7 @@ def handle_update(
             hdhive_subscription_service=hdhive_subscription_service,
             hdhive_subscription_scheduler=hdhive_subscription_scheduler,
             max_retries=max_retries,
+            background_jobs=background_jobs,
         )
         return
 
@@ -3494,10 +4090,55 @@ def handle_update(
                 telegram.send_message(chat_id, f"HDHive 搜索失败：{getattr(exc, 'message', str(exc))}")
             return
 
-    explicit_series_update = text.startswith("追更")
+    explicit_series_update, explicit_target_task_id, series_update_payload = parse_explicit_series_update_command(text)
+    if explicit_target_task_id is not None:
+        targeted_match = _TARGETED_SERIES_UPDATE_RE.fullmatch(str(text or "").strip())
+        if (
+            targeted_match is None
+            or int(targeted_match.group("task_id")) != explicit_target_task_id
+            or targeted_match.group("link") != targeted_match.group("link").rstrip(TRAILING_PUNCT)
+        ):
+            telegram.send_message(chat_id, "指定历史任务追更仅支持一个 115 分享链接")
+            return
     if explicit_series_update:
-        text = text.removeprefix("追更").lstrip(" ：:")
+        text = series_update_payload
     sources = parse_media_sources(text)
+    if explicit_series_update and not (self_share_workflow and task_engine_enabled and task_store is not None):
+        telegram.send_message(chat_id, "追更需要启用 TaskStore 自分享工作流")
+        return
+    if explicit_target_task_id is not None:
+        if len(sources) != 1 or sources[0].source_type != "share":
+            telegram.send_message(chat_id, "指定历史任务追更仅支持一个 115 分享链接")
+            return
+        target_task = task_store.find_task(explicit_target_task_id)
+        if target_task is None:
+            telegram.send_message(chat_id, f"历史任务不存在：#{explicit_target_task_id}")
+            return
+        link = sources[0].raw_url
+        key = normalize_share_link(link)
+        updated_task, update_result = start_series_update_from_link(
+            target_task,
+            key,
+            link,
+            chat_id,
+            store,
+            task_store,
+            source="文本追更",
+        )
+        if update_result == "started":
+            telegram.send_message(chat_id, f"已开始追更：{format_task_snapshot(updated_task)}")
+        elif update_result == "already_started":
+            telegram.send_message(chat_id, f"追更已在队列中：{format_task_snapshot(updated_task)}")
+        elif update_result == "not_eligible":
+            telegram.send_message(chat_id, f"历史任务 #{explicit_target_task_id} 不符合追更条件")
+        elif update_result == "source_busy":
+            telegram.send_message(chat_id, "新链接任务正在执行，请稍后重试")
+        elif update_result == "source_conflict":
+            telegram.send_message(chat_id, "新链接已关联其他任务或已有分享，不能绑定")
+        else:
+            detail = f"：{format_task_snapshot(updated_task)}" if updated_task is not None else ""
+            telegram.send_message(chat_id, f"追更失败{detail}")
+        return
     if not sources:
         return
 
@@ -3505,6 +4146,9 @@ def handle_update(
     for index, source in enumerate(sources, 1):
         link = source.raw_url
         try:
+            if explicit_series_update and source.source_type != "share":
+                result_lines.append(f"{index}. 新分享链接追更需指定历史任务号，例如：追更 #328 <115链接>")
+                continue
             if source.source_type in {"magnet", "ed2k"}:
                 if not (self_share_workflow and task_engine_enabled and task_store is not None):
                     result_lines.append(f"{index}. 云下载链接需要启用 TaskStore 自分享工作流")
@@ -3524,7 +4168,7 @@ def handle_update(
             if task_engine_enabled and task_store is None:
                 raise RuntimeError("TaskStore is required when TASK_ENGINE_ENABLED=true")
             if task_engine_enabled and task_store is not None:
-                if self_share_workflow and explicit_series_update:
+                if explicit_series_update:
                     existing_task = task_store.find_task_by_share_key(key.share_code, key.receive_code)
                     updated_task, update_result = start_series_update_task(
                         existing_task,
@@ -3538,6 +4182,10 @@ def handle_update(
                     if update_result == "failed":
                         result_lines.append(f"{index}. 追更失败：{format_task_snapshot(updated_task)}")
                         continue
+                    result_lines.append(
+                        f"{index}. 新分享链接追更需指定历史任务号，例如：追更 #328 <115链接>"
+                    )
+                    continue
                 task = task_store.upsert_task(key.share_code, key.receive_code, link, chat_id=str(chat_id or ""))
                 submission = None
                 submission_id = task.submission_id or task.metadata.get("submission_id")
@@ -3700,6 +4348,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
     )
     store = SubmissionStore(config.db_path)
     task_store = create_task_store(config)
+    background_jobs = BackgroundJobCoordinator(state_store=task_store)
     hdhive_workflow = create_hdhive_workflow(config, cms)
     self_share_config = SelfShareConfig.from_config(config, cms)
     p115 = (
@@ -3779,6 +4428,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         task_runner = TaskRunner(
             task_store,
             task_workflow,
+            worker_id=new_worker_id(),
             interval_seconds=config.task_worker_interval_seconds,
             risk_cooldown_seconds=config.p115_risk_cooldown_seconds,
             p115_client=p115 if shared_workflow is not None else None,
@@ -3969,6 +4619,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         hdhive_service=hdhive_subscription_service,
         hdhive_scheduler=hdhive_subscription_scheduler,
         frontend_dist_path=getattr(config, "frontend_dist_path", "/app/frontend/dist"),
+        background_jobs=background_jobs,
     )
 
     try:
@@ -4000,6 +4651,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
                         hdhive_subscription_service=hdhive_subscription_service,
                         hdhive_subscription_scheduler=hdhive_subscription_scheduler,
                         max_retries=config.task_max_retries,
+                        background_jobs=background_jobs,
                     )
             except Exception as exc:
                 if stop_event.is_set():
@@ -4027,6 +4679,7 @@ def run_forever(config: Config, stop_event: threading.Event | None = None) -> No
         if hdhive_subscription_scheduler is not None:
             hdhive_subscription_scheduler.stop(join_timeout=5)
         stop_web_server(web_server)
+        background_jobs.shutdown(wait=True)
 
 
 def main() -> int:

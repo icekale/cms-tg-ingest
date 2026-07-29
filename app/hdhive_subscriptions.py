@@ -18,6 +18,7 @@ from app.series_rules import EpisodeKey, completion_state, is_special_episode, p
 
 LOG = logging.getLogger("cms-tg-ingest")
 _UNLOCK_STALE_AFTER_SECONDS = 3600
+_DEFINITIVE_NO_CHARGE_ERRORS = {"INSUFFICIENT_POINTS", "INVALID_RESOURCE"}
 
 
 class HdhiveUrlError(ValueError):
@@ -351,13 +352,52 @@ class HdhiveSubscriptionService:
                     items.append(item)
             return items
 
+        def protects_unlock_outcome(item: HdhiveSubscriptionItem) -> bool:
+            return item.status in {"unlocking", "unlocked"} or (
+                item.status == "pending_confirmation" and item.skip_reason == "unlock_outcome_unknown"
+            )
+
+        persisted_items = self.store.list_items(subscription.id)
+        for item in persisted_items:
+            if item.status == "unlocking":
+                self.store.reconcile_stale_unlocking(
+                    item.id,
+                    stale_after_seconds=_UNLOCK_STALE_AFTER_SECONDS,
+                )
+
+        persisted_items = self.store.list_items(subscription.id)
+        enqueued_by_episode = {
+            self._stored_episode_keys(item): item
+            for item in persisted_items
+            if item.status == "enqueued" and self._stored_episode_keys(item)
+        }
+        for item in persisted_items:
+            if item.status == "unlocked" and item.unlocked_url:
+                saved_episode = self._stored_episode_keys(item)
+                terminal_sibling = enqueued_by_episode.get(saved_episode)
+                if terminal_sibling is not None:
+                    self.store.mark_item_enqueued(item.id, terminal_sibling.task_id)
+                    continue
+                try:
+                    enqueued_item = self._enqueue_saved_item(subscription, item)
+                    enqueued += 1
+                    if saved_episode:
+                        enqueued_by_episode[saved_episode] = enqueued_item
+                except Exception as exc:
+                    self.store.mark_item_intake_failed(item.id, str(exc))
+                    failed += 1
+
+        persisted_by_episode: dict[str, list[HdhiveSubscriptionItem]] = {}
+        for item in self.store.list_items(subscription.id):
+            persisted_by_episode.setdefault(item.normalized_episode_key or item.episode_key, []).append(item)
+
         for key, candidates in grouped.items():
             parsed_keys = parsed_by_resource.get(id(candidates[0]), ())
             items = group_items(key)
             if not parsed_keys:
                 unparsed_groups.add(key)
                 for item in items:
-                    if item.status != "enqueued":
+                    if item.status != "enqueued" and not protects_unlock_outcome(item):
                         self.store.mark_item_skipped(item.id, "unparsed", "无法识别季集编号")
                 continue
             if not any(episode_filter.matches(parsed) for parsed in parsed_keys):
@@ -366,7 +406,7 @@ class HdhiveSubscriptionService:
                 if all(is_special_episode(parsed) for parsed in parsed_keys) and not subscription.episode_filter.strip():
                     reason = "特殊集默认跳过"
                 for item in items:
-                    if item.status != "enqueued":
+                    if item.status != "enqueued" and not protects_unlock_outcome(item):
                         self.store.mark_item_skipped(item.id, "filtered", reason)
                 continue
             for item in items:
@@ -396,7 +436,7 @@ class HdhiveSubscriptionService:
             if all(parsed.normalized in emby_keys for parsed in parsed_keys):
                 emby_groups.add(key)
                 for item in items:
-                    if item.status not in {"enqueued", "emby_exists"}:
+                    if item.status not in {"enqueued", "emby_exists"} and not protects_unlock_outcome(item):
                         self.store.mark_item_skipped(item.id, "emby_exists", "Emby 中已存在该集")
             else:
                 for item in items:
@@ -406,13 +446,25 @@ class HdhiveSubscriptionService:
         for key, candidates in grouped.items():
             parsed_keys = parsed_by_resource.get(id(candidates[0]), ())
             stored_items = {item.resource_slug: item for item in group_items(key)}
+            persisted_items = persisted_by_episode.get(key, [])
+            unknown_items = [
+                item
+                for item in persisted_items
+                if item.status == "pending_confirmation" and item.skip_reason == "unlock_outcome_unknown"
+            ]
+            if unknown_items and confirmed_item_id not in {item.id for item in unknown_items}:
+                pending += 1
+                continue
+            if any(item.status in {"unlocking", "unlocked"} for item in persisted_items):
+                skipped += 1
+                continue
             if not parsed_keys or not any(episode_filter.matches(parsed) for parsed in parsed_keys):
                 skipped += 1
                 continue
             if all(parsed.normalized in emby_keys for parsed in parsed_keys):
                 skipped += 1
                 continue
-            if any(item.status == "enqueued" for item in stored_items.values()):
+            if any(item.status == "enqueued" for item in persisted_items):
                 skipped += 1
                 continue
             selected = select_best_resource(candidates)
@@ -433,56 +485,78 @@ class HdhiveSubscriptionService:
                 pending += 1
                 continue
 
-            requires_confirmation = not selected.is_unlocked and (
-                selected.unlock_points is None or selected.unlock_points > self.auto_unlock_max_points
-            )
-            if requires_confirmation and confirmed_item_id != selected_item.id:
-                self.store.mark_item_pending(selected_item.id, "积分超过自动解锁阈值或费用未知")
-                pending += 1
-                continue
-
-            claimed_item = self.store.claim_item_unlocking(
-                selected_item.id,
-                stale_after_seconds=_UNLOCK_STALE_AFTER_SECONDS,
-            )
-            if claimed_item is None:
-                skipped += 1
-                continue
-            try:
-                result = self._unlock_one(selected)
-                if not result.success or not result.full_url:
-                    self.store.mark_item_failed(selected_item.id, result.message or result.error_code or "HDHive 解锁失败")
-                    failed += 1
-                    continue
-                if not _is_115_share_url(result.full_url):
-                    self.store.mark_item_failed(selected_item.id, "解锁结果不是 115 分享链接")
-                    failed += 1
-                    continue
-                intake_result = self.enqueue_links([result.full_url], subscription.chat_id)
-                if result.points_spent is not None:
-                    unlock_points_spent = result.points_spent
-                    unlock_points_source = "actual"
-                elif result.already_owned:
-                    unlock_points_spent = 0
-                    unlock_points_source = "actual"
-                else:
-                    unlock_points_spent = selected.unlock_points
-                    unlock_points_source = "estimated" if unlock_points_spent is not None else "unknown"
-                saved_item = self.store.mark_item_enqueued(
-                    selected_item.id,
-                    _task_id_from_intake_result(intake_result),
-                    unlock_points_spent=unlock_points_spent,
-                    unlock_points_source=unlock_points_source,
-                    unlocked_at=time.time(),
+            saved_item = selected_item if selected_item.status == "unlocked" and selected_item.unlocked_url else None
+            if saved_item is None:
+                requires_confirmation = not selected.is_unlocked and (
+                    selected.unlock_points is None or selected.unlock_points > self.auto_unlock_max_points
                 )
-                if self.on_item_enqueued is not None:
-                    try:
-                        self.on_item_enqueued(subscription, saved_item)
-                    except Exception:
-                        LOG.exception("HDHive unlock notification failed item_id=%s", saved_item.id)
+                if (
+                    requires_confirmation
+                    and confirmed_item_id != selected_item.id
+                    and selected_item.status != "unlocking"
+                ):
+                    self.store.mark_item_pending(selected_item.id, "积分超过自动解锁阈值或费用未知")
+                    pending += 1
+                    continue
+
+                claimed_item = self.store.claim_item_unlocking(
+                    selected_item.id,
+                    stale_after_seconds=_UNLOCK_STALE_AFTER_SECONDS,
+                )
+                if claimed_item is None:
+                    current_item = self.store.get_item(selected_item.id)
+                    if current_item is not None and current_item.status == "pending_confirmation":
+                        pending += 1
+                    else:
+                        skipped += 1
+                    continue
+                try:
+                    result = self._unlock_one(selected)
+                    if not result.success or not result.full_url:
+                        if (
+                            not result.success
+                            and result.points_spent is None
+                            and result.error_code in _DEFINITIVE_NO_CHARGE_ERRORS
+                        ):
+                            self.store.mark_item_failed(
+                                selected_item.id,
+                                result.message or result.error_code,
+                            )
+                            failed += 1
+                        else:
+                            self.store.mark_item_unlock_unknown(selected_item.id)
+                            pending += 1
+                        continue
+                    if not _is_115_share_url(result.full_url):
+                        self.store.mark_item_unlock_unknown(selected_item.id)
+                        pending += 1
+                        continue
+                    if result.points_spent is not None:
+                        unlock_points_spent = result.points_spent
+                        unlock_points_source = "actual"
+                    elif result.already_owned:
+                        unlock_points_spent = 0
+                        unlock_points_source = "actual"
+                    else:
+                        unlock_points_spent = selected.unlock_points
+                        unlock_points_source = "estimated" if unlock_points_spent is not None else "unknown"
+                    saved_item = self.store.mark_item_unlocked(
+                        selected_item.id,
+                        result.full_url,
+                        unlock_points_spent,
+                        unlock_points_source,
+                        time.time(),
+                    )
+                except Exception as exc:
+                    self.store.mark_item_unlock_unknown(selected_item.id)
+                    pending += 1
+                    continue
+
+            try:
+                self._enqueue_saved_item(subscription, saved_item)
                 enqueued += 1
             except Exception as exc:
-                self.store.mark_item_failed(selected_item.id, str(exc))
+                self.store.mark_item_intake_failed(saved_item.id, str(exc))
                 failed += 1
 
         tmdb_details: dict[str, Any] = {}
@@ -515,7 +589,7 @@ class HdhiveSubscriptionService:
                 # A filter only proves an episode was intentionally skipped while
                 # the corresponding HDHive resource was present in this check.
                 terminal.update(item_keys)
-            if item.status in {"pending_confirmation", "failed", "unlocking", "unparsed"}:
+            if item.status in {"pending_confirmation", "failed", "unlocking", "unlocked", "unparsed"}:
                 blocked.update(item_keys)
         blocked.update(expected - terminal)
         completion = completion_state(tmdb_status, expected, terminal, blocked)
@@ -550,6 +624,24 @@ class HdhiveSubscriptionService:
             summary=summary,
             subscription_status=subscription_status,
         )
+
+    def _enqueue_saved_item(
+        self,
+        subscription: HdhiveSubscription,
+        item: HdhiveSubscriptionItem,
+    ) -> HdhiveSubscriptionItem:
+        saved_item = self.store.mark_item_enqueue_started(item.id)
+        intake_result = self.enqueue_links([saved_item.unlocked_url], subscription.chat_id)
+        saved_item = self.store.mark_item_enqueued(
+            saved_item.id,
+            _task_id_from_intake_result(intake_result),
+        )
+        if self.on_item_enqueued is not None:
+            try:
+                self.on_item_enqueued(subscription, saved_item)
+            except Exception:
+                LOG.exception("HDHive unlock notification failed item_id=%s", saved_item.id)
+        return saved_item
 
     @staticmethod
     def _dependency_enabled(dependency: Any | None) -> bool:

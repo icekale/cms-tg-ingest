@@ -1,4 +1,5 @@
 import unittest
+from contextlib import closing
 from io import BytesIO
 from urllib.error import HTTPError
 from unittest.mock import patch
@@ -129,18 +130,20 @@ class EmbyClientTests(unittest.TestCase):
         self.assertIn("/Shows/series%2Fid/Episodes?", http.calls[0][0])
 
     def test_episode_query_http_errors_propagate(self):
-        error = HTTPError(
-            "http://emby.test/Shows/series-1/Episodes",
-            503,
-            "service unavailable",
-            {},
-            BytesIO(b"service unavailable"),
-        )
-        http = QueueHttp([error])
-        client = EmbyClient("http://emby.test", "secret-key", user_id="user-1", http=http)
+        with closing(
+            HTTPError(
+                "http://emby.test/Shows/series-1/Episodes",
+                503,
+                "service unavailable",
+                {},
+                BytesIO(b"service unavailable"),
+            )
+        ) as error:
+            http = QueueHttp([error])
+            client = EmbyClient("http://emby.test", "secret-key", user_id="user-1", http=http)
 
-        with self.assertRaises(HTTPError):
-            client.episode_keys_for_series("series-1")
+            with self.assertRaises(HTTPError):
+                client.episode_keys_for_series("series-1")
 
     def test_boolean_episode_indexes_are_rejected_before_conversion(self):
         self.assertIsNone(_positive_episode_index(True))

@@ -1,8 +1,10 @@
 import json
 import tempfile
 import os
+import sqlite3
 import time
 import unittest
+from contextlib import closing
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -10,8 +12,8 @@ from unittest.mock import Mock, patch
 import bridge
 from app.clients import cms as cms_client
 from app.models import TaskStage, TaskStatus
-from app.task_runner import StageOutcome
-from app.task_store import TaskStore
+from app.task_runner import StageOutcome, TaskRunner
+from app.task_store import TaskStore, operation_scope
 
 
 class FakeCms:
@@ -42,6 +44,9 @@ class FakeCms:
 class FakeP115:
     def __init__(self):
         self.received = []
+        self.receive_preparations = []
+        self.receive_reconciliations = []
+        self.received_target_visible = False
         self.folder = None
         self.created_shares = []
         self.find_organized_calls = []
@@ -49,16 +54,66 @@ class FakeP115:
         self.share_statuses = []
         self.share_list_states = {}
         self.files_by_parent = {}
+        self.list_file_calls = []
 
     def receive_share_to_cid(self, share_code, receive_code, receive_cid):
-        self.received.append((share_code, receive_code, receive_cid))
-        return {"title": "received title", "file_ids": ["file-a", "file-b"]}
+        intent = self.prepare_share_receive(share_code, receive_code, receive_cid)
+        return self.execute_prepared_share_receive(intent)
+
+    def prepare_share_receive(self, share_code, receive_code, receive_cid):
+        self.receive_preparations.append((share_code, receive_code, receive_cid))
+        return {
+            "share_code": share_code,
+            "receive_code": receive_code,
+            "target_cid": receive_cid,
+            "source_file_ids": ["file-a", "file-b"],
+            "source_file_names": ["Root A", "Root B"],
+            "title": "received title",
+            "target_pre_call_file_ids": ["old-file"],
+            "target_snapshot_complete": True,
+        }
+
+    def _receive_result(self, intent):
+        return {
+            "title": intent["title"],
+            "file_ids": list(intent["source_file_ids"]),
+            "received_items": [
+                {
+                    "file_id": "received-a",
+                    "file_name": "Root A",
+                    "parent_id": intent["target_cid"],
+                    "is_folder": True,
+                    "received_item_verified": True,
+                },
+                {
+                    "file_id": "received-b",
+                    "file_name": "Root B",
+                    "parent_id": intent["target_cid"],
+                    "is_folder": True,
+                    "received_item_verified": True,
+                },
+            ],
+            "received_items_complete": True,
+            "received_expected_item_count": 2,
+            "received_existing_file_ids": ["old-file"],
+            "received_snapshot_complete": True,
+            "response": {"state": True},
+        }
+
+    def execute_prepared_share_receive(self, intent):
+        self.received.append((intent["share_code"], intent["receive_code"], intent["target_cid"]))
+        self.received_target_visible = True
+        return self._receive_result(intent)
+
+    def reconcile_prepared_share_receive(self, intent):
+        self.receive_reconciliations.append(dict(intent))
+        return self._receive_result(intent) if self.received_target_visible else None
 
     def find_organized_folder(self, recognition, title, excluded_parent_ids=None, min_update_time=0, **kwargs):
         self.find_organized_calls.append((dict(recognition), title, excluded_parent_ids, min_update_time, kwargs))
         return self.folder
 
-    def create_long_share(self, file_id, preferred_receive_code=""):
+    def create_share(self, file_id):
         self.created_shares.append(file_id)
         suffix = len(self.created_shares)
         return {
@@ -66,6 +121,17 @@ class FakeP115:
             "receive_code": "ownpwd",
             "share_url": f"https://115.com/s/owncode{'' if suffix == 1 else suffix}?password=ownpwd",
         }
+
+    def ensure_share_settings(self, share_code, receive_code):
+        return {"share_code": share_code, "receive_code": "ownpwd"}
+
+    def create_long_share(self, file_id, preferred_receive_code=""):
+        created = self.create_share(file_id)
+        settings = self.ensure_share_settings(
+            created["share_code"],
+            preferred_receive_code or created.get("receive_code") or "1212",
+        )
+        return {**created, **settings}
 
     def rename_file(self, file_id, file_name):
         self.renamed.append((str(file_id), str(file_name)))
@@ -82,6 +148,7 @@ class FakeP115:
         return {"owncode": {"share_state": "1", "have_vio_file": False, "create_time": 0}}
 
     def list_files(self, parent_id, limit=100):
+        self.list_file_calls.append((str(parent_id), limit))
         return list(self.files_by_parent.get(str(parent_id), []))
 
 
@@ -300,6 +367,8 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             "category": category,
             "tmdb_id": tmdb_id,
             "type": "movie",
+            "organized_parent_id": "movie-parent",
+            "parent_id": "movie-parent",
         }
         row = self.submissions.update_recognition(int(row["id"]), recognition, "self_share_resolved") or row
         row = self.submissions.update_category(int(row["id"]), category, "selected") or row
@@ -308,6 +377,193 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
     def _write_strm(self, folder, name="movie.strm", content="https://115.com/s/owncode_ownpwd_/movie.mkv"):
         folder.mkdir(parents=True, exist_ok=True)
         (folder / name).write_text(content, encoding="utf-8")
+
+    @staticmethod
+    def _receive_operation_key(task, receive_cid="pending-cid"):
+        return f"{operation_scope(task)}:receive_share:{task.share_code}:{receive_cid}"
+
+    @staticmethod
+    def _create_share_operation_key(task, file_id):
+        return f"{operation_scope(task)}:create_share:{file_id}"
+
+    @staticmethod
+    def _cms_share_sync_operation_key(task, share_code="owncode"):
+        return f"{operation_scope(task)}:cms_share_sync:{share_code}"
+
+    @staticmethod
+    def _delete_operation_key(task, operation_type, file_id):
+        return f"{operation_scope(task)}:{operation_type}:{file_id}"
+
+    def _cleanup_ready_row(self, root):
+        row = self._self_share_row()
+        dest = Path(root) / "library" / row["own_share_file_name"]
+        self._write_strm(dest)
+        row = self.submissions.update_move(
+            int(row["id"]),
+            "moved",
+            source_path="/share/source",
+            dest_path=str(dest),
+            category_final="华语电影",
+        ) or row
+        return self.submissions.update_emby(int(row["id"]), "confirmed") or row
+
+    def test_receive_started_before_post_never_posts_and_times_out_to_needs_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            intent = self.p115.prepare_share_receive("abc", "1234", "pending-cid")
+            operation_key = self._receive_operation_key(task)
+            self.tasks.prepare_operation(task.id, operation_key, "receive_share", intent)
+            started = self.tasks.start_operation(task.id, operation_key)
+            self.tasks.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+            clock = [started.started_at + 1]
+            workflow._now = lambda: clock[0]
+            runner = TaskRunner(self.tasks, workflow, worker_id="receive-recovery", now=lambda: clock[0])
+
+            runner.run_once()
+
+            waiting = self.tasks.find_task(task.id)
+            self.assertEqual(waiting.status, TaskStatus.RUNNING)
+            self.assertEqual(self.p115.received, [])
+            self.assertEqual(len(self.p115.receive_reconciliations), 1)
+
+            clock[0] = started.started_at + 3600
+            runner.run_once()
+
+            timed_out = self.tasks.find_task(task.id)
+            self.assertEqual(timed_out.status, TaskStatus.NEEDS_ACTION)
+            self.assertEqual(self.p115.received, [])
+
+    def test_receive_crash_reconciles_without_second_receive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            self.tasks.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+            clock = [time.time()]
+            workflow._now = lambda: clock[0]
+            runner = TaskRunner(self.tasks, workflow, worker_id="receive-crash", now=lambda: clock[0])
+            complete_operation = self.tasks.complete_operation
+            save_attempts = 0
+
+            def fail_first_result_save(*args, **kwargs):
+                nonlocal save_attempts
+                save_attempts += 1
+                if save_attempts == 1:
+                    raise RuntimeError("simulated crash while saving receive result")
+                return complete_operation(*args, **kwargs)
+
+            with patch.object(self.tasks, "complete_operation", side_effect=fail_first_result_save):
+                runner.run_once()
+                interrupted = self.tasks.find_task(task.id)
+                self.assertEqual(interrupted.status, TaskStatus.FAILED)
+                self.tasks.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+                runner.run_once()
+
+            recovered = self.tasks.find_task(task.id)
+            operation = self.tasks.find_operation(task.id, self._receive_operation_key(task))
+            self.assertEqual(recovered.current_stage, TaskStage.ORGANIZING)
+            self.assertEqual(operation.status, "succeeded")
+            self.assertEqual(len(self.p115.received), 1)
+            self.assertEqual(len(self.p115.receive_reconciliations), 1)
+
+    def test_incomplete_receive_result_stays_started_and_never_posts_again(self):
+        class IncompleteReceiveP115(FakeP115):
+            def _incomplete_result(self, intent):
+                result = self._receive_result(intent)
+                result["received_items"] = result["received_items"][:1]
+                result["received_items_complete"] = False
+                return result
+
+            def execute_prepared_share_receive(self, intent):
+                self.received.append((intent["share_code"], intent["receive_code"], intent["target_cid"]))
+                self.received_target_visible = True
+                return self._incomplete_result(intent)
+
+            def reconcile_prepared_share_receive(self, intent):
+                self.receive_reconciliations.append(dict(intent))
+                return self._incomplete_result(intent)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            self.p115 = IncompleteReceiveP115()
+            workflow.p115 = self.p115
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            self.tasks.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+            clock = [time.time()]
+            workflow._now = lambda: clock[0]
+            runner = TaskRunner(self.tasks, workflow, worker_id="receive-incomplete", now=lambda: clock[0])
+
+            runner.run_once()
+
+            operation_key = self._receive_operation_key(task)
+            operation = self.tasks.find_operation(task.id, operation_key)
+            waiting = self.tasks.find_task(task.id)
+            self.assertEqual(operation.status, "started")
+            self.assertEqual(waiting.current_stage, TaskStage.RECEIVED)
+            self.assertEqual(waiting.status, TaskStatus.RUNNING)
+            self.assertEqual(len(self.p115.received), 1)
+            self.assertIsNone(self.submissions.find_by_key(bridge.ShareKey("abc", "1234")))
+
+            clock[0] = operation.started_at + 3600
+            runner.run_once()
+
+            timed_out = self.tasks.find_task(task.id)
+            self.assertEqual(timed_out.status, TaskStatus.NEEDS_ACTION)
+            self.assertEqual(self.tasks.find_operation(task.id, operation_key).status, "started")
+            self.assertEqual(len(self.p115.received), 1)
+            self.assertEqual(len(self.p115.receive_reconciliations), 1)
+            self.assertIsNone(self.submissions.find_by_key(bridge.ShareKey("abc", "1234")))
+
+    def test_receive_saved_result_survives_discarded_taskrunner_stage_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            self.tasks.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+            clock = [time.time()]
+            workflow._now = lambda: clock[0]
+            runner = TaskRunner(self.tasks, workflow, worker_id="receive-discard", now=lambda: clock[0])
+            complete_stage = self.tasks.complete_claimed_stage
+            stage_save_attempts = 0
+
+            def discard_first_stage_result(*args, **kwargs):
+                nonlocal stage_save_attempts
+                stage_save_attempts += 1
+                if stage_save_attempts == 1:
+                    return None
+                return complete_stage(*args, **kwargs)
+
+            with patch.object(self.tasks, "complete_claimed_stage", side_effect=discard_first_stage_result):
+                runner.run_once()
+                operation = self.tasks.find_operation(task.id, self._receive_operation_key(task))
+                self.assertEqual(operation.status, "succeeded")
+                self.tasks.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+                runner.run_once()
+
+            recovered = self.tasks.find_task(task.id)
+            self.assertEqual(recovered.current_stage, TaskStage.ORGANIZING)
+            self.assertEqual(len(self.p115.received), 1)
+            self.assertEqual(self.p115.receive_reconciliations, [])
+
+    def test_receive_restart_from_started_reconciles_visible_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            intent = self.p115.prepare_share_receive("abc", "1234", "pending-cid")
+            operation_key = self._receive_operation_key(task)
+            self.tasks.prepare_operation(task.id, operation_key, "receive_share", intent)
+            self.tasks.start_operation(task.id, operation_key)
+            self.p115.execute_prepared_share_receive(intent)
+            self.tasks.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+            runner = TaskRunner(self.tasks, workflow, worker_id="receive-restart", now=time.time)
+
+            runner.run_once()
+
+            recovered = self.tasks.find_task(task.id)
+            operation = self.tasks.find_operation(task.id, operation_key)
+            self.assertEqual(recovered.current_stage, TaskStage.ORGANIZING)
+            self.assertEqual(operation.status, "succeeded")
+            self.assertEqual(len(self.p115.received), 1)
+            self.assertEqual(len(self.p115.receive_reconciliations), 1)
 
     def test_received_stage_receives_share_and_creates_submission_row(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -367,13 +623,20 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertIn("claim 已失效", result.message)
             self.assertEqual(result.metadata["receive_target_cid"], "pending-cid")
             self.assertEqual(result.metadata["receive_cid_persist_status"], "stale_claim")
-            self.assertEqual(self.p115.received, [("abc", "1234", "pending-cid")])
+            self.assertEqual(self.p115.received, [])
             self.assertIsNone(self.submissions.find_by_key(bridge.ShareKey("abc", "1234")))
-            persist.assert_called_once()
+            persist.assert_called_once_with(
+                task.id,
+                expected_claimed_by=task.claimed_by,
+                expected_claimed_at=task.claimed_at,
+                expected_claim_token=task.claim_token,
+                expected_updated_at=task.updated_at,
+                patch={"receive_target_cid": "pending-cid"},
+            )
 
     def test_received_stage_stops_when_115_receive_is_restricted(self):
         class RestrictedP115(FakeP115):
-            def receive_share_to_cid(self, share_code, receive_code, receive_cid):
+            def execute_prepared_share_receive(self, intent):
                 raise RuntimeError("你已被限制接收，如有疑问请联系客服")
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -543,6 +806,309 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.DEFER)
             self.assertEqual(self.cms.auto_organize_calls, 1)
             self.assertIn("等待 CMS 整理", result.message)
+
+    def test_organizing_stage_rejects_folder_owned_by_different_tmdb_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="示例剧集 2025") or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": "示例剧集", "type": "tv", "tmdb_id": "273114", "category": "国产电视"},
+                "tmdb_resolved",
+            ) or row
+            owner = self.tasks.upsert_task("owner", "", "https://115cdn.com/s/owner")
+            self.tasks.record_event(
+                owner.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "owner",
+                metadata_patch={
+                    "own_share_file_id": "shared-folder",
+                    "tmdb_id": "9533",
+                    "recognition": {"tmdb_id": "9533"},
+                },
+            )
+            self.p115.folder = {
+                "file_id": "shared-folder",
+                "file_name": "S-示例剧集-2025-[tmdb=273114]",
+                "parent_id": "tv-parent",
+                "category": "国产电视",
+            }
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("其他 TMDB 任务", result.message)
+            self.assertFalse(stored["own_share_file_id"])
+
+    def test_organizing_stage_allows_folder_owned_by_same_tmdb_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="示例剧集 2025") or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": "示例剧集", "type": "tv", "tmdb_id": "273114", "category": "国产电视"},
+                "tmdb_resolved",
+            ) or row
+            owner = self.tasks.upsert_task("owner", "", "https://115cdn.com/s/owner")
+            self.tasks.record_event(
+                owner.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "owner",
+                metadata_patch={
+                    "own_share_file_id": "shared-folder",
+                    "tmdb_id": "273114",
+                    "recognition": {"tmdb_id": "273114"},
+                },
+            )
+            self.p115.folder = {
+                "file_id": "shared-folder",
+                "file_name": "S-示例剧集-2025-[tmdb=273114]",
+                "parent_id": "tv-parent",
+                "category": "国产电视",
+            }
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(stored["own_share_file_id"], "shared-folder")
+
+    def test_organizing_stage_rejects_folder_when_later_owner_has_different_tmdb(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="示例剧集 2025") or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": "示例剧集", "type": "tv", "tmdb_id": "273114", "category": "国产电视"},
+                "tmdb_resolved",
+            ) or row
+            mismatched_owner = self.tasks.upsert_task("mismatched", "", "https://115cdn.com/s/mismatched")
+            self.tasks.record_event(
+                mismatched_owner.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "mismatched owner",
+                metadata_patch={
+                    "own_share_file_id": "shared-folder",
+                    "tmdb_id": "9533",
+                    "recognition": {"tmdb_id": "9533"},
+                },
+            )
+            matching_owner = self.tasks.upsert_task("matching", "", "https://115cdn.com/s/matching")
+            self.tasks.record_event(
+                matching_owner.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "matching owner",
+                metadata_patch={
+                    "own_share_file_id": "shared-folder",
+                    "tmdb_id": "273114",
+                    "recognition": {"tmdb_id": "273114"},
+                },
+            )
+            owners = self.tasks.list_tasks_by_own_share_file_id("shared-folder")
+            self.assertEqual([owner.id for owner in owners], [matching_owner.id, mismatched_owner.id])
+            self.p115.folder = {
+                "file_id": "shared-folder",
+                "file_name": "S-示例剧集-2025-[tmdb=273114]",
+                "parent_id": "tv-parent",
+                "category": "国产电视",
+            }
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("其他 TMDB 任务", result.message)
+            self.assertFalse(stored["own_share_file_id"])
+
+    def test_organizing_stage_rejects_folder_with_ambiguous_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="示例剧集 2025") or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": "示例剧集", "type": "tv", "tmdb_id": "273114", "category": "国产电视"},
+                "tmdb_resolved",
+            ) or row
+            owner = self.tasks.upsert_task("owner", "", "https://115cdn.com/s/owner")
+            self.tasks.record_event(
+                owner.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "owner",
+                metadata_patch={"own_share_file_id": "shared-folder"},
+            )
+            self.p115.folder = {
+                "file_id": "shared-folder",
+                "file_name": "S-示例剧集-2025-[tmdb=273114]",
+                "parent_id": "tv-parent",
+                "category": "国产电视",
+            }
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("其他 TMDB 任务", result.message)
+            self.assertFalse(stored["own_share_file_id"])
+
+    def test_recognizing_stage_stops_legacy_cross_tmdb_folder_before_share(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="示例剧集 2025") or row
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="organized_found",
+                own_share_file_id="shared-folder",
+                own_share_file_name="S-示例剧集-2025-[tmdb=273114]",
+            ) or row
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": "示例剧集", "type": "tv", "tmdb_id": "273114", "category": "国产电视"},
+                "tmdb_resolved",
+            ) or row
+            owner = self.tasks.upsert_task("owner", "", "https://115cdn.com/s/owner")
+            self.tasks.record_event(
+                owner.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "owner",
+                metadata_patch={
+                    "own_share_file_id": "shared-folder",
+                    "tmdb_id": "9533",
+                    "recognition": {"tmdb_id": "9533"},
+                },
+            )
+            task = self._claim_task("abc", "1234", TaskStage.RECOGNIZING, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("其他 TMDB 任务", result.message)
+            self.assertEqual(self.p115.list_file_calls, [])
+            self.assertEqual(self.p115.created_shares, [])
+
+    def test_own_share_stage_rechecks_late_folder_owner_before_operations(self):
+        class RecoveryTrackingP115(FakeP115):
+            def __init__(self):
+                super().__init__()
+                self.recovery_queries = []
+
+            def find_own_share_by_title(self, title, min_create_time=0):
+                self.recovery_queries.append((title, min_create_time))
+                return None
+
+        for pending_recovery in (False, True):
+            with self.subTest(pending_recovery=pending_recovery), tempfile.TemporaryDirectory() as tmp:
+                workflow = self._workflow(tmp)
+                workflow.p115 = RecoveryTrackingP115()
+                row = self._row()
+                row = self.submissions.update_self_share(
+                    int(row["id"]),
+                    workflow_mode="self_share_sync",
+                    workflow_phase="share_alias_prepared",
+                    own_share_file_id="shared-folder",
+                    own_share_file_name="S-示例剧集-2025-[tmdb=273114]",
+                ) or row
+                row = self.submissions.update_recognition(
+                    int(row["id"]),
+                    {"ok": True, "title": "示例剧集", "type": "tv", "tmdb_id": "273114", "category": "国产电视"},
+                    "self_share_resolved",
+                ) or row
+                owner = self.tasks.upsert_task("owner", "", "https://115cdn.com/s/owner")
+                self.tasks.record_event(
+                    owner.id,
+                    TaskStage.ORGANIZING,
+                    TaskStatus.PENDING,
+                    "late owner",
+                    metadata_patch={
+                        "own_share_file_id": "shared-folder",
+                        "tmdb_id": "9533",
+                        "recognition": {"tmdb_id": "9533"},
+                    },
+                )
+                metadata = {"submission_id": row["id"]}
+                if pending_recovery:
+                    metadata["share_create_status"] = "pending"
+                    metadata["share_create_requested_at"] = 1000.0
+                task = self._claim_task(
+                    "abc",
+                    "1234",
+                    TaskStage.OWN_SHARE_CREATED,
+                    metadata,
+                    row["id"],
+                )
+
+                result = workflow.run_stage(task)
+                stored = self.submissions.find_by_id(int(row["id"]))
+
+                self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+                self.assertIn("其他 TMDB 任务", result.message)
+                self.assertEqual(stored["own_share_file_id"], "shared-folder")
+                self.assertIsNone(
+                    self.tasks.find_operation(task.id, self._create_share_operation_key(task, "shared-folder"))
+                )
+                self.assertEqual(workflow.p115.created_shares, [])
+                self.assertEqual(workflow.p115.recovery_queries, [])
+
+    def test_own_share_stage_allows_late_same_tmdb_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="share_alias_prepared",
+                own_share_file_id="shared-folder",
+                own_share_file_name="S-示例剧集-2025-[tmdb=273114]",
+            ) or row
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {"ok": True, "title": "示例剧集", "type": "tv", "tmdb_id": "273114", "category": "国产电视"},
+                "self_share_resolved",
+            ) or row
+            owner = self.tasks.upsert_task("owner", "", "https://115cdn.com/s/owner")
+            self.tasks.record_event(
+                owner.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "late owner",
+                metadata_patch={
+                    "own_share_file_id": "shared-folder",
+                    "tmdb_id": "273114",
+                    "recognition": {"tmdb_id": "273114"},
+                },
+            )
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(workflow.p115.created_shares, ["shared-folder"])
 
     def test_organizing_stage_normalizes_explicit_tmdb_name_before_cms(self):
         class ExplicitTmdbResolver:
@@ -1407,6 +1973,388 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.cms.share_sync_calls, [("owncode", "ownpwd", "0", "/media/share")])
             self.assertEqual(self.cms.plain_share_down_calls, [])
 
+    def test_create_share_crash_recovers_by_saved_title_without_second_send(self):
+        class RecoveringCreateP115(FakeP115):
+            def __init__(self):
+                super().__init__()
+                self.settings = []
+                self.recovery_queries = []
+                self.remote_share = None
+
+            def create_share(self, file_id):
+                self.created_shares.append(file_id)
+                self.remote_share = {
+                    "share_code": "recovered-code",
+                    "receive_code": "generated-code",
+                    "share_url": "https://115cdn.com/s/recovered-code",
+                    "create_time": "1000.0",
+                }
+                return dict(self.remote_share)
+
+            def find_own_share_by_title(self, title, min_create_time=0):
+                self.recovery_queries.append((title, min_create_time))
+                return dict(self.remote_share) if self.remote_share else None
+
+            def ensure_share_settings(self, share_code, receive_code):
+                self.settings.append((share_code, receive_code))
+                return {"share_code": share_code, "receive_code": receive_code}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            self.p115 = RecoveringCreateP115()
+            workflow.p115 = self.p115
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="S-双喜-2025-[tmdb=123456]",
+            ) or row
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            self.tasks.record_event(
+                task.id,
+                TaskStage.OWN_SHARE_CREATED,
+                TaskStatus.RUNNING,
+                "metadata",
+                submission_id=row["id"],
+                metadata_patch={"submission_id": row["id"]},
+            )
+            self.tasks.enqueue_task(task.id, TaskStage.OWN_SHARE_CREATED, next_run_at=0)
+            clock = [1000.0]
+            workflow._now = lambda: clock[0]
+            runner = TaskRunner(self.tasks, workflow, worker_id="share-create-crash", now=lambda: clock[0])
+            complete_operation = self.tasks.complete_operation
+            save_attempts = 0
+
+            def fail_first_result_save(*args, **kwargs):
+                nonlocal save_attempts
+                save_attempts += 1
+                if save_attempts == 1:
+                    raise RuntimeError("simulated crash while saving create result")
+                return complete_operation(*args, **kwargs)
+
+            with patch.object(self.tasks, "complete_operation", side_effect=fail_first_result_save):
+                runner.run_once()
+                self.tasks.enqueue_task(task.id, TaskStage.OWN_SHARE_CREATED, next_run_at=0)
+                runner.run_once()
+
+            recovered = self.tasks.find_task(task.id)
+            operation = self.tasks.find_operation(task.id, self._create_share_operation_key(task, "folder-id"))
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(recovered.current_stage, TaskStage.SHARE_VALIDATED)
+            self.assertEqual(operation.status, "succeeded")
+            self.assertEqual(operation.request["share_title"], "S-双喜-2025-[tmdb=123456]")
+            self.assertEqual(operation.request["requested_at"], 1000.0)
+            self.assertEqual(self.p115.created_shares, ["folder-id"])
+            self.assertEqual(
+                self.p115.recovery_queries,
+                [("S-双喜-2025-[tmdb=123456]", 1000.0)],
+            )
+            self.assertEqual(self.p115.settings, [("recovered-code", "1212")])
+            self.assertEqual(stored["own_share_code"], "recovered-code")
+
+    def test_direct_create_share_crash_recovers_by_actual_filename_without_second_send(self):
+        class RecoveringDirectP115(FakeP115):
+            def __init__(self):
+                super().__init__()
+                self.remote_share = None
+                self.recovery_queries = []
+
+            def create_share(self, file_id):
+                self.created_shares.append(file_id)
+                if file_id == "series-id":
+                    raise RuntimeError("目录不存在或已转移")
+                self.remote_share = {
+                    "share_code": "direct-code",
+                    "receive_code": "generated-code",
+                    "share_url": "https://115cdn.com/s/direct-code",
+                    "create_time": "1000.0",
+                }
+                return dict(self.remote_share)
+
+            def find_own_share_by_title(self, title, min_create_time=0):
+                self.recovery_queries.append((title, min_create_time))
+                if title != "Actual Episode S03E03.mkv":
+                    return None
+                return dict(self.remote_share) if self.remote_share else None
+
+            def ensure_share_settings(self, share_code, receive_code):
+                return {"share_code": share_code, "receive_code": "1212"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            workflow.p115 = RecoveringDirectP115()
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="organized_found",
+                own_share_file_id="series-id",
+                own_share_file_name="Q-权力的游戏前传：龙族-2022-[tmdb=94997]",
+            ) or row
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            self.tasks.record_event(
+                task.id,
+                TaskStage.OWN_SHARE_CREATED,
+                TaskStatus.RUNNING,
+                "metadata",
+                submission_id=row["id"],
+                metadata_patch={
+                    "submission_id": row["id"],
+                    "organized_folder": {
+                        "file_id": "series-id",
+                        "direct_file_id": "episode-id",
+                        "direct_file_name": "Actual Episode S03E03.mkv",
+                        "direct_parent_id": "season-id",
+                        "direct_relative_path": "Season 03/Episode S03E03.strm",
+                    },
+                },
+            )
+            self.tasks.enqueue_task(task.id, TaskStage.OWN_SHARE_CREATED, next_run_at=0)
+            workflow._now = lambda: 1000.999
+            runner = TaskRunner(self.tasks, workflow, worker_id="direct-create-crash", now=lambda: 1000.999)
+            complete_operation = self.tasks.complete_operation
+            save_attempts = 0
+
+            def fail_first_result_save(*args, **kwargs):
+                nonlocal save_attempts
+                save_attempts += 1
+                if save_attempts == 1:
+                    raise RuntimeError("simulated crash while saving direct create result")
+                return complete_operation(*args, **kwargs)
+
+            with patch.object(self.tasks, "complete_operation", side_effect=fail_first_result_save):
+                runner.run_once()
+                self.tasks.enqueue_task(task.id, TaskStage.OWN_SHARE_CREATED, next_run_at=0)
+                runner.run_once()
+
+            recovered = self.tasks.find_task(task.id)
+            operation = self.tasks.find_operation(task.id, self._create_share_operation_key(task, "episode-id"))
+            self.assertEqual(recovered.current_stage, TaskStage.SHARE_VALIDATED)
+            self.assertEqual(workflow.p115.created_shares, ["series-id", "episode-id"])
+            self.assertEqual(workflow.p115.recovery_queries, [("Actual Episode S03E03.mkv", 1000.0)])
+            self.assertEqual(operation.request["share_title"], "Actual Episode S03E03.mkv")
+            self.assertEqual(operation.request["requested_at"], 1000.0)
+            self.assertEqual(operation.request["direct_file_share_parent_id"], "season-id")
+            self.assertTrue(recovered.metadata["direct_file_share"])
+
+    def test_saved_share_row_reconstructs_created_at_after_stage_result_loss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = FakeCleanupClient()
+            workflow = self._workflow(tmp, cleanup_client=cleanup)
+            workflow._now = lambda: 1000.999
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="S-双喜-2025-[tmdb=123456]",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+            own_share_metadata = workflow._own_share_metadata
+            metadata_calls = 0
+
+            def lose_first_stage_result(*args, **kwargs):
+                nonlocal metadata_calls
+                metadata_calls += 1
+                if metadata_calls == 1:
+                    raise RuntimeError("simulated crash after submission update")
+                return own_share_metadata(*args, **kwargs)
+
+            with patch.object(workflow, "_own_share_metadata", side_effect=lose_first_stage_result):
+                with self.assertRaisesRegex(RuntimeError, "after submission update"):
+                    workflow.run_stage(task)
+                recovered = workflow.run_stage(task)
+
+            operation = self.tasks.find_operation(task.id, self._create_share_operation_key(task, "folder-id"))
+            self.assertEqual(operation.request["requested_at"], 1000.0)
+            self.assertEqual(recovered.metadata["share_created_at"], 1000.0)
+
+            dest = Path(tmp) / "library" / row["own_share_file_name"]
+            self._write_strm(dest)
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path="/share/source",
+                dest_path=str(dest),
+                category_final="华语电影",
+            ) or row
+            row = self.submissions.update_emby(int(row["id"]), "confirmed") or row
+            cleanup_task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.CLEANED,
+                {"submission_id": row["id"], **recovered.metadata},
+                row["id"],
+            )
+            workflow._now = lambda: 1001.0
+
+            review = workflow.run_stage(cleanup_task)
+
+            self.assertEqual(review.outcome, StageOutcome.DEFER)
+            self.assertNotIn("缺少自有分享创建时间", review.message)
+
+    def test_direct_file_fallback_uses_distinct_create_operation_key(self):
+        class FolderGoneP115(FakeP115):
+            def __init__(self):
+                super().__init__()
+                self.settings = []
+
+            def create_share(self, file_id):
+                self.created_shares.append(file_id)
+                if file_id == "series-id":
+                    raise RuntimeError("目录不存在或已转移")
+                return {
+                    "share_code": "file-share",
+                    "receive_code": "generated-code",
+                    "share_url": "https://115cdn.com/s/file-share",
+                }
+
+            def ensure_share_settings(self, share_code, receive_code):
+                self.settings.append((share_code, receive_code))
+                return {"share_code": share_code, "receive_code": receive_code}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            workflow.p115 = FolderGoneP115()
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="organized_found",
+                own_share_file_id="series-id",
+                own_share_file_name="Q-权力的游戏前传：龙族-2022-[tmdb=94997]",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {
+                    "submission_id": row["id"],
+                    "organized_folder": {
+                        "file_id": "series-id",
+                        "direct_file_id": "episode-id",
+                        "direct_relative_path": "Season 03/龙族.S03E03.strm",
+                    },
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            folder_operation = self.tasks.find_operation(
+                task.id,
+                self._create_share_operation_key(task, "series-id"),
+            )
+            file_operation = self.tasks.find_operation(
+                task.id,
+                self._create_share_operation_key(task, "episode-id"),
+            )
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(folder_operation.status, "failed")
+            self.assertEqual(file_operation.status, "succeeded")
+            self.assertTrue(file_operation.operation_key.endswith(":episode-id"))
+            self.assertEqual(workflow.p115.created_shares, ["series-id", "episode-id"])
+            self.assertEqual(workflow.p115.settings, [("file-share", "1212")])
+
+    def test_create_share_lost_start_race_never_sends(self):
+        class ReconcilingP115(FakeP115):
+            def find_own_share_by_title(self, title, min_create_time=0):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            workflow.p115 = ReconcilingP115()
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="S-双喜-2025-[tmdb=123456]",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+            operation_key = self._create_share_operation_key(task, "folder-id")
+            self.tasks.prepare_operation(
+                task.id,
+                operation_key,
+                "create_share",
+                {
+                    "file_id": "folder-id",
+                    "share_title": "S-双喜-2025-[tmdb=123456]",
+                    "receive_code": "1212",
+                    "requested_at": 1000.0,
+                },
+            )
+            start_operation = self.tasks.start_operation
+
+            def lose_start_race(*args, **kwargs):
+                start_operation(*args, **kwargs)
+                return None
+
+            with patch.object(self.tasks, "start_operation", side_effect=lose_start_race):
+                result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(workflow.p115.created_shares, [])
+
+    def test_create_share_succeeded_operation_reuses_saved_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="S-双喜-2025-[tmdb=123456]",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+            operation_key = self._create_share_operation_key(task, "folder-id")
+            self.tasks.prepare_operation(
+                task.id,
+                operation_key,
+                "create_share",
+                {
+                    "file_id": "folder-id",
+                    "share_title": "S-双喜-2025-[tmdb=123456]",
+                    "receive_code": "1212",
+                    "requested_at": 1000.0,
+                },
+            )
+            self.tasks.start_operation(task.id, operation_key)
+            self.tasks.complete_operation(
+                task.id,
+                operation_key,
+                {
+                    "share_code": "saved-code",
+                    "receive_code": "generated-code",
+                    "share_url": "https://115cdn.com/s/saved-code",
+                },
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(workflow.p115.created_shares, [])
+            self.assertEqual(self.submissions.find_by_id(int(row["id"]))["own_share_code"], "saved-code")
+
     def test_own_share_stage_defers_when_115_is_still_creating_share(self):
         from app.clients.p115 import P115SharePendingError
 
@@ -1426,7 +2374,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 {"submission_id": row["id"]},
                 row["id"],
             )
-            workflow.p115.create_long_share = Mock(side_effect=P115SharePendingError("processing"))
+            workflow.p115.create_share = Mock(side_effect=P115SharePendingError("processing"))
 
             result = workflow.run_stage(task)
 
@@ -1445,6 +2393,9 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                     "share_url": "https://115cdn.com/s/recovered",
                     "create_time": "123.0",
                 }
+
+            def ensure_share_settings(self, share_code, receive_code):
+                return {"share_code": share_code, "receive_code": receive_code}
 
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
@@ -1514,6 +2465,190 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.DEFER)
             self.assertIn("等待上一条 CMS 分享同步完成", result.message)
             self.assertEqual(result.metadata["share_sync_wait_task_id"], waiting.id)
+            self.assertEqual(self.cms.share_sync_calls, [])
+
+    def test_cms_share_sync_crash_advances_to_expected_strm_without_second_post(self):
+        class CrashAfterPostCms(FakeCms):
+            def add_share115_sync_task(self, own_code, own_pwd, cid, local_path):
+                super().add_share115_sync_task(own_code, own_pwd, cid, local_path)
+                if len(self.share_sync_calls) == 1:
+                    raise RuntimeError("simulated crash after CMS accepted sync")
+                return {"code": 200}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            self.cms = CrashAfterPostCms()
+            workflow.cms = self.cms
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="S-双喜-2025-[tmdb=123456]",
+                own_share_code="owncode",
+                own_share_receive_code="ownpwd",
+            ) or row
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            self.tasks.record_event(
+                task.id,
+                TaskStage.SHARE_SYNC_SUBMITTED,
+                TaskStatus.RUNNING,
+                "metadata",
+                submission_id=row["id"],
+                metadata_patch={"submission_id": row["id"]},
+            )
+            self.tasks.enqueue_task(task.id, TaskStage.SHARE_SYNC_SUBMITTED, next_run_at=0)
+            clock = [1000.0]
+            runner = TaskRunner(self.tasks, workflow, worker_id="cms-sync-crash", now=lambda: clock[0])
+
+            runner.run_once()
+            interrupted = self.tasks.find_task(task.id)
+            operation = self.tasks.find_operation(task.id, self._cms_share_sync_operation_key(task))
+            self.assertEqual(interrupted.status, TaskStatus.FAILED)
+            self.assertEqual(operation.status, "started")
+            self.assertEqual(len(self.cms.share_sync_calls), 1)
+
+            self.tasks.enqueue_task(task.id, TaskStage.SHARE_SYNC_SUBMITTED, next_run_at=0)
+            runner.run_once()
+
+            waiting = self.tasks.find_task(task.id)
+            operation = self.tasks.find_operation(task.id, self._cms_share_sync_operation_key(task))
+            self.assertEqual(waiting.current_stage, TaskStage.STRM_READY)
+            self.assertEqual(waiting.metadata["cms_share_sync_outcome"], "unknown")
+            self.assertEqual(operation.status, "uncertain")
+            self.assertEqual(len(self.cms.share_sync_calls), 1)
+
+            self._write_strm(self.config.strm_root / row["own_share_file_name"])
+            runner.run_once()
+
+            advanced = self.tasks.find_task(task.id)
+            self.assertEqual(advanced.current_stage, TaskStage.CMS_DELETE_SETTLED)
+            self.assertEqual(len(self.cms.share_sync_calls), 1)
+
+    def test_cms_share_sync_unknown_outcome_times_out_without_second_post(self):
+        class CrashAfterPostCms(FakeCms):
+            def add_share115_sync_task(self, own_code, own_pwd, cid, local_path):
+                super().add_share115_sync_task(own_code, own_pwd, cid, local_path)
+                raise RuntimeError("simulated crash after CMS accepted sync")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            self.cms = CrashAfterPostCms()
+            workflow.cms = self.cms
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="S-双喜-2025-[tmdb=123456]",
+                own_share_code="owncode",
+                own_share_receive_code="ownpwd",
+            ) or row
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            self.tasks.record_event(
+                task.id,
+                TaskStage.SHARE_SYNC_SUBMITTED,
+                TaskStatus.RUNNING,
+                "metadata",
+                submission_id=row["id"],
+                metadata_patch={"submission_id": row["id"]},
+            )
+            self.tasks.enqueue_task(task.id, TaskStage.SHARE_SYNC_SUBMITTED, next_run_at=0)
+            clock = [1000.0]
+            runner = TaskRunner(self.tasks, workflow, worker_id="cms-sync-timeout", now=lambda: clock[0])
+
+            runner.run_once()
+            self.tasks.enqueue_task(task.id, TaskStage.SHARE_SYNC_SUBMITTED, next_run_at=0)
+            runner.run_once()
+
+            for _attempt in range(20):
+                clock[0] += 300
+                runner.run_once()
+
+            timed_out = self.tasks.find_task(task.id)
+            self.assertEqual(timed_out.status, TaskStatus.NEEDS_ACTION)
+            self.assertEqual(timed_out.current_stage, TaskStage.NEEDS_ACTION)
+            self.assertEqual(timed_out.metadata["cms_share_sync_outcome"], "unknown")
+            self.assertEqual(len(self.cms.share_sync_calls), 1)
+
+    def test_cms_share_sync_lost_start_race_never_posts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_code="owncode",
+                own_share_receive_code="ownpwd",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.SHARE_SYNC_SUBMITTED,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+            operation_key = self._cms_share_sync_operation_key(task)
+            self.tasks.prepare_operation(
+                task.id,
+                operation_key,
+                "cms_share_sync",
+                {
+                    "share_code": "owncode",
+                    "receive_code": "ownpwd",
+                    "cid": "0",
+                    "local_path": "/media/share",
+                },
+            )
+            start_operation = self.tasks.start_operation
+
+            def lose_start_race(*args, **kwargs):
+                start_operation(*args, **kwargs)
+                return None
+
+            with patch.object(self.tasks, "start_operation", side_effect=lose_start_race):
+                result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["cms_share_sync_outcome"], "unknown")
+            self.assertEqual(self.cms.share_sync_calls, [])
+
+    def test_cms_share_sync_succeeded_operation_never_posts_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_code="owncode",
+                own_share_receive_code="ownpwd",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.SHARE_SYNC_SUBMITTED,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+            operation_key = self._cms_share_sync_operation_key(task)
+            self.tasks.prepare_operation(
+                task.id,
+                operation_key,
+                "cms_share_sync",
+                {
+                    "share_code": "owncode",
+                    "receive_code": "ownpwd",
+                    "cid": "0",
+                    "local_path": "/media/share",
+                },
+            )
+            self.tasks.start_operation(task.id, operation_key)
+            self.tasks.complete_operation(task.id, operation_key, {"code": 200})
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["cms_share_sync_outcome"], "submitted")
             self.assertEqual(self.cms.share_sync_calls, [])
 
     def test_own_share_stage_rejects_unvalidated_received_file_id(self):
@@ -1815,6 +2950,393 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(after_first.outcome, StageOutcome.DEFER)
             self.assertEqual(after_final.outcome, StageOutcome.COMPLETE)
             self.assertEqual(cleanup.deleted, ["folder-id"])
+
+    def test_delete_source_crash_reconciles_absence_without_second_delete(self):
+        class AbsenceAwareCleanup(FakeCleanupClient):
+            def __init__(self):
+                super().__init__()
+                self.files = {"source-parent": {"folder-id"}}
+                self.existence_checks = []
+
+            def delete_file(self, file_id):
+                super().delete_file(file_id)
+                self.files["source-parent"].discard(file_id)
+                return {"state": True}
+
+            def file_exists_in_parent(self, file_id, parent_id):
+                self.existence_checks.append((file_id, parent_id))
+                return file_id in self.files.get(parent_id, set())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = AbsenceAwareCleanup()
+            workflow = self._workflow(tmp, cleanup_client=cleanup)
+            self.tasks.set_self_share_review_mode_override("off")
+            row = self._cleanup_ready_row(tmp)
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            self.tasks.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.RUNNING,
+                "metadata",
+                submission_id=row["id"],
+                metadata_patch={
+                    "submission_id": row["id"],
+                    "share_created_at": 100.0,
+                    "organized_folder": {"file_id": "folder-id", "parent_id": "source-parent"},
+                },
+            )
+            self.tasks.enqueue_task(task.id, TaskStage.CLEANED, next_run_at=0)
+            clock = [time.time()]
+            workflow._now = lambda: clock[0]
+            runner = TaskRunner(self.tasks, workflow, worker_id="delete-source-crash", now=lambda: clock[0])
+            complete_operation = self.tasks.complete_operation
+            save_attempts = 0
+
+            def fail_first_result_save(*args, **kwargs):
+                nonlocal save_attempts
+                save_attempts += 1
+                if save_attempts == 1:
+                    raise RuntimeError("simulated crash while saving delete result")
+                return complete_operation(*args, **kwargs)
+
+            with patch.object(self.tasks, "complete_operation", side_effect=fail_first_result_save):
+                runner.run_once()
+                self.tasks.enqueue_task(task.id, TaskStage.CLEANED, next_run_at=0)
+                runner.run_once()
+
+            operation = self.tasks.find_operation(
+                task.id,
+                self._delete_operation_key(task, "delete_source", "folder-id"),
+            )
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(operation.status, "succeeded")
+            self.assertEqual(operation.request["parent_id"], "source-parent")
+            self.assertEqual(cleanup.deleted, ["folder-id"])
+            self.assertEqual(cleanup.existence_checks, [("folder-id", "source-parent")])
+            self.assertEqual(stored["cleanup_status"], "deleted")
+
+    def test_quality_cleanup_crash_reconciles_absence_without_second_delete(self):
+        class AbsenceAwareCleanup(FakeCleanupClient):
+            def __init__(self):
+                super().__init__()
+                self.present = {"folder-id"}
+                self.existence_checks = []
+
+            def delete_file(self, file_id):
+                super().delete_file(file_id)
+                self.present.discard(file_id)
+                return {"state": True}
+
+            def file_exists_in_parent(self, file_id, parent_id):
+                self.existence_checks.append((file_id, parent_id))
+                return file_id in self.present
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = AbsenceAwareCleanup()
+            self._workflow(tmp, cleanup_client=cleanup)
+            row = self._cleanup_ready_row(tmp)
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            task = self.tasks.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "cleanup ready",
+                submission_id=row["id"],
+                metadata_patch={
+                    "submission_id": row["id"],
+                    "share_review_status": "passed",
+                    "organized_folder": {"file_id": "folder-id", "parent_id": "source-parent"},
+                },
+            )
+            adapter = bridge._QualityRepairAdapter(self.submissions, self.tasks, cleanup)
+            complete_operation = self.tasks.complete_operation
+            save_attempts = 0
+
+            def fail_first_result_save(*args, **kwargs):
+                nonlocal save_attempts
+                save_attempts += 1
+                if save_attempts == 1:
+                    raise RuntimeError("simulated crash while saving quality delete")
+                return complete_operation(*args, **kwargs)
+
+            with patch.object(self.tasks, "complete_operation", side_effect=fail_first_result_save):
+                with self.assertRaisesRegex(RuntimeError, "saving quality delete"):
+                    adapter.cleanup(task, "quality-delete-crash")
+                self.assertTrue(adapter.cleanup(task, "quality-delete-recovery"))
+
+            operation = self.tasks.find_operation(
+                task.id,
+                self._delete_operation_key(task, "delete_source", "folder-id"),
+            )
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(operation.status, "succeeded")
+            self.assertEqual(cleanup.deleted, ["folder-id"])
+            self.assertEqual(cleanup.existence_checks, [("folder-id", "source-parent")])
+            self.assertEqual(stored["cleanup_status"], "deleted")
+
+    def test_quality_cleanup_reuses_already_deleted_submission_without_parent_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._workflow(tmp)
+            row = self._self_share_row()
+            row = self.submissions.update_cleanup(int(row["id"]), "deleted", file_id="folder-id") or row
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            task = self.tasks.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "already cleaned",
+                submission_id=row["id"],
+                metadata_patch={"submission_id": row["id"], "share_review_status": "passed"},
+            )
+            adapter = bridge._QualityRepairAdapter(self.submissions, self.tasks)
+
+            self.assertTrue(adapter.cleanup(task, "quality-already-cleaned"))
+
+    def test_delete_source_recovery_defers_when_parent_listing_fails(self):
+        class UnavailableListingCleanup(FakeCleanupClient):
+            def file_exists_in_parent(self, file_id, parent_id):
+                raise RuntimeError("115 list unavailable")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = UnavailableListingCleanup()
+            workflow = self._workflow(tmp, cleanup_client=cleanup)
+            self.tasks.set_self_share_review_mode_override("off")
+            row = self._cleanup_ready_row(tmp)
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.CLEANED,
+                {
+                    "submission_id": row["id"],
+                    "share_created_at": 100.0,
+                    "organized_folder": {"file_id": "folder-id", "parent_id": "source-parent"},
+                },
+                row["id"],
+            )
+            operation_key = self._delete_operation_key(task, "delete_source", "folder-id")
+            self.tasks.prepare_operation(
+                task.id,
+                operation_key,
+                "delete_source",
+                {"file_id": "folder-id", "parent_id": "source-parent"},
+            )
+            self.tasks.start_operation(task.id, operation_key)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(cleanup.deleted, [])
+
+    def test_delete_source_recovery_needs_action_when_file_remains_after_deadline(self):
+        class PresentCleanup(FakeCleanupClient):
+            def file_exists_in_parent(self, file_id, parent_id):
+                return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = PresentCleanup()
+            workflow = self._workflow(tmp, cleanup_client=cleanup)
+            self.tasks.set_self_share_review_mode_override("off")
+            row = self._cleanup_ready_row(tmp)
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.CLEANED,
+                {
+                    "submission_id": row["id"],
+                    "share_created_at": 100.0,
+                    "organized_folder": {"file_id": "folder-id", "parent_id": "source-parent"},
+                },
+                row["id"],
+            )
+            operation_key = self._delete_operation_key(task, "delete_source", "folder-id")
+            self.tasks.prepare_operation(
+                task.id,
+                operation_key,
+                "delete_source",
+                {"file_id": "folder-id", "parent_id": "source-parent"},
+            )
+            started = self.tasks.start_operation(task.id, operation_key)
+            workflow._now = lambda: started.started_at + 301
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(cleanup.deleted, [])
+
+    def test_delete_source_known_not_found_counts_as_success(self):
+        class MissingSourceCleanup(FakeCleanupClient):
+            def delete_file(self, file_id):
+                self.deleted.append(file_id)
+                raise RuntimeError("文件不存在")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = MissingSourceCleanup()
+            workflow = self._workflow(tmp, cleanup_client=cleanup)
+            self.tasks.set_self_share_review_mode_override("off")
+            row = self._cleanup_ready_row(tmp)
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.CLEANED,
+                {
+                    "submission_id": row["id"],
+                    "share_created_at": 100.0,
+                    "organized_folder": {"file_id": "folder-id", "parent_id": "source-parent"},
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            operation = self.tasks.find_operation(
+                task.id,
+                self._delete_operation_key(task, "delete_source", "folder-id"),
+            )
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(operation.status, "succeeded")
+            self.assertEqual(cleanup.deleted, ["folder-id"])
+            self.assertEqual(stored["cleanup_status"], "deleted")
+
+    def test_delete_source_lost_start_race_never_deletes(self):
+        class PresentCleanup(FakeCleanupClient):
+            def file_exists_in_parent(self, file_id, parent_id):
+                return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = PresentCleanup()
+            workflow = self._workflow(tmp, cleanup_client=cleanup)
+            self.tasks.set_self_share_review_mode_override("off")
+            row = self._cleanup_ready_row(tmp)
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.CLEANED,
+                {
+                    "submission_id": row["id"],
+                    "share_created_at": 100.0,
+                    "organized_folder": {"file_id": "folder-id", "parent_id": "source-parent"},
+                },
+                row["id"],
+            )
+            operation_key = self._delete_operation_key(task, "delete_source", "folder-id")
+            self.tasks.prepare_operation(
+                task.id,
+                operation_key,
+                "delete_source",
+                {"file_id": "folder-id", "parent_id": "source-parent"},
+            )
+            start_operation = self.tasks.start_operation
+
+            def lose_start_race(*args, **kwargs):
+                start_operation(*args, **kwargs)
+                return None
+
+            with patch.object(self.tasks, "start_operation", side_effect=lose_start_race):
+                result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(cleanup.deleted, [])
+
+    def test_delete_source_succeeded_operation_never_deletes_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = FakeCleanupClient()
+            workflow = self._workflow(tmp, cleanup_client=cleanup)
+            self.tasks.set_self_share_review_mode_override("off")
+            row = self._cleanup_ready_row(tmp)
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.CLEANED,
+                {
+                    "submission_id": row["id"],
+                    "share_created_at": 100.0,
+                    "organized_folder": {"file_id": "folder-id", "parent_id": "source-parent"},
+                },
+                row["id"],
+            )
+            operation_key = self._delete_operation_key(task, "delete_source", "folder-id")
+            self.tasks.prepare_operation(
+                task.id,
+                operation_key,
+                "delete_source",
+                {"file_id": "folder-id", "parent_id": "source-parent"},
+            )
+            self.tasks.start_operation(task.id, operation_key)
+            self.tasks.complete_operation(task.id, operation_key, {"state": True})
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(cleanup.deleted, [])
+            self.assertEqual(self.submissions.find_by_id(int(row["id"]))["cleanup_status"], "deleted")
+
+    def test_delete_residue_crash_reconciles_absence_without_second_delete(self):
+        class ResidueCleanup(FakeCleanupClient):
+            def __init__(self):
+                super().__init__()
+                self.present = {"residue-id"}
+
+            def find_source_residue_files(self, *args, **kwargs):
+                if "residue-id" not in self.present:
+                    return []
+                return [{"file_id": "residue-id", "parent_id": "residue-parent"}]
+
+            def delete_file(self, file_id):
+                super().delete_file(file_id)
+                self.present.discard(file_id)
+                return {"state": True}
+
+            def file_exists_in_parent(self, file_id, parent_id):
+                return file_id in self.present
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = ResidueCleanup()
+            config = bridge.SelfShareConfig(
+                enabled=True,
+                strm_root=Path(tmp) / "share-strm",
+                cms_cid="0",
+                cms_local_path="/media/share",
+                source_cleanup_parent_ids={"residue-parent"},
+            )
+            workflow = self._workflow(tmp, cleanup_client=cleanup, self_share_config=config)
+            self.tasks.set_self_share_review_mode_override("off")
+            row = self._cleanup_ready_row(tmp)
+            row = self.submissions.update_cleanup(int(row["id"]), "deleted", file_id="folder-id") or row
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            self.tasks.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.RUNNING,
+                "metadata",
+                submission_id=row["id"],
+                metadata_patch={"submission_id": row["id"], "share_created_at": 100.0},
+            )
+            self.tasks.enqueue_task(task.id, TaskStage.CLEANED, next_run_at=0)
+            clock = [time.time()]
+            workflow._now = lambda: clock[0]
+            runner = TaskRunner(self.tasks, workflow, worker_id="delete-residue-crash", now=lambda: clock[0])
+            complete_operation = self.tasks.complete_operation
+            save_attempts = 0
+
+            def fail_first_result_save(*args, **kwargs):
+                nonlocal save_attempts
+                save_attempts += 1
+                if save_attempts == 1:
+                    raise RuntimeError("simulated crash while saving residue delete")
+                return complete_operation(*args, **kwargs)
+
+            with patch.object(self.tasks, "complete_operation", side_effect=fail_first_result_save):
+                runner.run_once()
+                self.tasks.enqueue_task(task.id, TaskStage.CLEANED, next_run_at=0)
+                runner.run_once()
+
+            operation = self.tasks.find_operation(
+                task.id,
+                self._delete_operation_key(task, "delete_residue", "residue-id"),
+            )
+            self.assertEqual(operation.status, "succeeded")
+            self.assertEqual(cleanup.deleted, ["residue-id"])
 
     def test_cleaned_stage_skips_review_when_web_setting_is_off(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2331,7 +3853,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
 
     def test_own_share_stage_falls_back_to_direct_file_when_folder_is_gone(self):
         class FolderGoneP115(FakeP115):
-            def create_long_share(self, file_id, preferred_receive_code=""):
+            def create_share(self, file_id):
                 self.created_shares.append(file_id)
                 if file_id == "series-id":
                     raise RuntimeError("目录不存在或已转移")
@@ -2340,6 +3862,9 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                     "receive_code": "1212",
                     "share_url": "https://115cdn.com/s/file-share?password=1212",
                 }
+
+            def ensure_share_settings(self, share_code, receive_code):
+                return {"share_code": share_code, "receive_code": receive_code}
 
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
@@ -2375,6 +3900,222 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(updated["own_share_file_id"], "episode-id")
             self.assertEqual(updated["own_share_code"], "file-share")
             self.assertTrue(result.metadata["direct_file_share"])
+
+    def test_direct_file_fallback_rechecks_conflicting_owner_before_replacement(self):
+        class FolderGoneP115(FakeP115):
+            def create_share(self, file_id):
+                self.created_shares.append(file_id)
+                if file_id == "series-id":
+                    raise RuntimeError("目录不存在或已转移")
+                return {
+                    "share_code": "file-share",
+                    "receive_code": "1212",
+                    "share_url": "https://115cdn.com/s/file-share?password=1212",
+                }
+
+        for owner_tmdb_id in ("9533", ""):
+            with self.subTest(owner_tmdb_id=owner_tmdb_id), tempfile.TemporaryDirectory() as tmp:
+                workflow = self._workflow(tmp)
+                workflow.p115 = FolderGoneP115()
+                row = self._row()
+                row = self.submissions.update_self_share(
+                    int(row["id"]),
+                    workflow_mode="self_share_sync",
+                    workflow_phase="share_alias_prepared",
+                    own_share_file_id="series-id",
+                    own_share_file_name="Q-权力的游戏前传：龙族-2022-[tmdb=94997]",
+                ) or row
+                row = self.submissions.update_recognition(
+                    int(row["id"]),
+                    {"ok": True, "title": "龙族", "type": "tv", "tmdb_id": "94997", "category": "外国电视"},
+                    "self_share_resolved",
+                ) or row
+                owner = self.tasks.upsert_task("owner", "", "https://115cdn.com/s/owner")
+                owner_metadata = {"own_share_file_id": "episode-id"}
+                if owner_tmdb_id:
+                    owner_metadata.update(
+                        {"tmdb_id": owner_tmdb_id, "recognition": {"tmdb_id": owner_tmdb_id}}
+                    )
+                self.tasks.record_event(
+                    owner.id,
+                    TaskStage.ORGANIZING,
+                    TaskStatus.PENDING,
+                    "fallback owner",
+                    metadata_patch=owner_metadata,
+                )
+                task = self._claim_task(
+                    "abc",
+                    "1234",
+                    TaskStage.OWN_SHARE_CREATED,
+                    {
+                        "submission_id": row["id"],
+                        "organized_folder": {
+                            "file_id": "series-id",
+                            "direct_file_id": "episode-id",
+                            "direct_relative_path": "Season 03/龙族.S03E03.strm",
+                        },
+                    },
+                    row["id"],
+                )
+
+                with patch.object(
+                    self.submissions,
+                    "replace_self_share_source_file_id",
+                    wraps=self.submissions.replace_self_share_source_file_id,
+                ) as replace_source:
+                    result = workflow.run_stage(task)
+                stored = self.submissions.find_by_id(int(row["id"]))
+
+                self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+                self.assertIn("其他 TMDB 任务", result.message)
+                replace_source.assert_not_called()
+                self.assertEqual(stored["own_share_file_id"], "series-id")
+                self.assertFalse(stored["own_share_code"])
+                self.assertIsNone(
+                    self.tasks.find_operation(task.id, self._create_share_operation_key(task, "episode-id"))
+                )
+                self.assertEqual(workflow.p115.created_shares, ["series-id"])
+
+    def test_production_index_direct_fallback_survives_result_loss_and_cleans_direct_parent(self):
+        class FolderGoneP115(FakeP115):
+            def create_share(self, file_id):
+                self.created_shares.append(file_id)
+                if file_id == "series-id":
+                    raise RuntimeError("目录不存在或已转移")
+                return {
+                    "share_code": "file-share",
+                    "receive_code": "1212",
+                    "share_url": "https://115cdn.com/s/file-share?password=1212",
+                }
+
+            def ensure_share_settings(self, share_code, receive_code):
+                return {"share_code": share_code, "receive_code": receive_code}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cms-online.db"
+            with closing(sqlite3.connect(db_path)) as conn, conn:
+                conn.execute(
+                    """
+                    CREATE TABLE cloud_data (
+                        fid TEXT PRIMARY KEY,
+                        pid TEXT,
+                        name TEXT,
+                        pick_code TEXT,
+                        is_dir INTEGER NOT NULL,
+                        f_modify_time INTEGER
+                    )
+                    """
+                )
+                conn.executemany(
+                    "INSERT INTO cloud_data (fid, pid, name, pick_code, is_dir, f_modify_time) VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        ("episode-id", "season-id", "Actual Episode S03E03.mkv", "episodepick", 0, 0),
+                        ("season-id", "series-id", "Season 03", "", 1, 0),
+                        ("series-id", "tv-root", "Q-Dragon-2022-[tmdb=94997]", "", 1, 0),
+                        ("tv-root", "0", "TV", "", 1, 0),
+                    ],
+                )
+            indexed_source = Path(tmp) / "cms-library" / "Q-Dragon-2022-[tmdb=94997]"
+            self._write_strm(
+                indexed_source / "Season 03",
+                "Episode S03E03.strm",
+                "http://cms/d/episodepick.mkv?/episode.mkv",
+            )
+            cms_index = bridge.CmsCloudDataIndex(db_path)
+            folder = cms_index.folder_for_direct_strm(indexed_source, "94997")
+            cleanup = FakeCleanupClient()
+            workflow = self._workflow(tmp, cleanup_client=cleanup, cms_cloud_index=cms_index)
+            workflow.p115 = FolderGoneP115()
+            workflow._now = lambda: 1000.0
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="organized_found",
+                own_share_file_id="series-id",
+                own_share_file_name=folder["file_name"],
+            ) or row
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {"title": "Dragon", "type": "tv", "tmdb_id": "94997", "category": "外国电视"},
+                "cms_direct_strm_resolved",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {"submission_id": row["id"], "organized_folder": folder},
+                row["id"],
+            )
+            own_share_metadata = workflow._own_share_metadata
+            metadata_calls = 0
+
+            def lose_first_stage_result(*args, **kwargs):
+                nonlocal metadata_calls
+                metadata_calls += 1
+                if metadata_calls == 1:
+                    raise RuntimeError("simulated direct stage result loss")
+                return own_share_metadata(*args, **kwargs)
+
+            with patch.object(workflow, "_own_share_metadata", side_effect=lose_first_stage_result):
+                with self.assertRaisesRegex(RuntimeError, "direct stage result loss"):
+                    workflow.run_stage(task)
+                recovered = workflow.run_stage(task)
+
+            self.assertTrue(recovered.metadata["direct_file_share"])
+            self.assertEqual(recovered.metadata["direct_file_share_file_id"], "episode-id")
+            self.assertEqual(recovered.metadata["direct_file_share_parent_id"], "season-id")
+            incoming = workflow.self_share_config.strm_root / "incoming.strm"
+            self._write_strm(
+                incoming.parent,
+                incoming.name,
+                "https://115cdn.com/s/file-share_1212_/episode.mkv",
+            )
+            stored = self.submissions.find_by_id(int(row["id"]))
+            prepared = workflow._prepare_direct_file_share_strm(
+                SimpleNamespace(metadata=recovered.metadata),
+                stored,
+            )
+            expected = prepared / folder["direct_relative_path"]
+            self.assertTrue(expected.is_file())
+
+            dest = Path(tmp) / "library" / stored["own_share_file_name"]
+            direct_relative = Path(folder["direct_relative_path"])
+            self._write_strm(
+                dest / direct_relative.parent,
+                direct_relative.name,
+                "https://115cdn.com/s/file-share_1212_/episode.mkv",
+            )
+            stored = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(prepared),
+                dest_path=str(dest),
+                category_final="外国电视",
+            ) or stored
+            stored = self.submissions.update_emby(int(row["id"]), "confirmed") or stored
+            self.tasks.set_self_share_review_mode_override("off")
+            self.tasks.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.RUNNING,
+                "cleanup",
+                submission_id=stored["id"],
+                metadata_patch={"submission_id": stored["id"], **recovered.metadata},
+                metadata_delete_keys=("organized_folder",),
+            )
+            self.tasks.enqueue_task(task.id, TaskStage.CLEANED, next_run_at=1.0)
+            cleanup_task = self.tasks.claim_next_runnable("direct-cleanup", now=1.0)
+
+            cleanup_result = workflow.run_stage(cleanup_task)
+
+            delete_operation = self.tasks.find_operation(
+                task.id,
+                self._delete_operation_key(task, "delete_source", "episode-id"),
+            )
+            self.assertEqual(cleanup_result.outcome, StageOutcome.COMPLETE, cleanup_result.message)
+            self.assertEqual(cleanup.deleted, ["episode-id"])
+            self.assertEqual(delete_operation.request["parent_id"], "season-id")
 
     def test_strm_ready_stage_places_direct_file_share_in_canonical_episode_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3367,7 +5108,7 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
         self.assertIsNotNone(task)
         self.assertEqual(task.metadata["strm_mode"], "direct")
 
-    def test_direct_task_engine_run_forever_constructs_without_p115(self):
+    def test_direct_task_engine_run_forever_constructs_runtime_dependencies_once(self):
         captured = {}
 
         class FakeCmsClient:
@@ -3386,19 +5127,27 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
                 pass
 
             def get_updates(self, **_kwargs):
-                stop_event.set()
-                return []
+                return [{"update_id": 1}]
 
         class FakeTaskRunner:
             def __init__(self, _store, workflow, **kwargs):
                 captured["workflow"] = workflow
                 captured["p115_client"] = kwargs.get("p115_client")
+                captured["worker_id"] = kwargs.get("worker_id")
 
             def start(self):
                 captured["started"] = True
 
             def stop(self, **_kwargs):
                 captured["stopped"] = True
+
+        def capture_web_server(*_args, **kwargs):
+            captured["web_background_jobs"] = kwargs["background_jobs"]
+            return None
+
+        def capture_update(*_args, **kwargs):
+            captured["update_background_jobs"] = kwargs["background_jobs"]
+            stop_event.set()
 
         with tempfile.TemporaryDirectory() as tmp:
             stop_event = __import__("threading").Event()
@@ -3422,7 +5171,9 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
                 bridge, "TaskRunner", FakeTaskRunner
             ), patch.object(bridge, "normalize_emby_parents", lambda *_args, **_kwargs: 0), patch.object(
                 bridge, "write_metrics_snapshot", lambda *_args, **_kwargs: None
-            ), patch.object(bridge, "call_maybe_start_web_server", lambda *_args, **_kwargs: None), patch.object(
+            ), patch.object(bridge, "call_maybe_start_web_server", capture_web_server), patch.object(
+                bridge, "handle_update", capture_update
+            ), patch.object(
                 bridge, "start_status_repair_loop", lambda *_args, **_kwargs: None
             ):
                 bridge.run_forever(config, stop_event=stop_event)
@@ -3430,6 +5181,15 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
         self.assertTrue(captured["started"])
         self.assertTrue(captured["stopped"])
         self.assertIsNone(captured["p115_client"])
+        self.assertIs(captured["web_background_jobs"], captured["update_background_jobs"])
+        self.assertEqual(
+            captured["update_background_jobs"].submit("after-shutdown", lambda: None).outcome,
+            "closed",
+        )
+        worker_parts = captured["worker_id"].split(":")
+        self.assertGreaterEqual(len(worker_parts), 3)
+        self.assertEqual(worker_parts[-2], str(os.getpid()))
+        self.assertEqual(len(worker_parts[-1]), 12)
 
 
 if __name__ == "__main__":

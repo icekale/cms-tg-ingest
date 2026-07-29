@@ -10,16 +10,18 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
+from collections.abc import Iterable, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .task_store import TaskStore
+from .sqlite_utils import sqlite_connection, sqlite_quick_check
 
 
 LOG = logging.getLogger("cms-tg-ingest")
 BACKUP_STATE_KEY = "backup_last_result"
 BACKUP_RUN_DATE_KEY = "backup_last_run_date"
 _BACKUP_NAME_RE = re.compile(r"^(?P<stem>.+)-(?P<timestamp>\d{8}T\d{6}Z)\.db$")
+_BACKUP_LOGICAL_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 @dataclass(frozen=True)
@@ -68,8 +70,42 @@ def _retire_old_backups(destination: Path, stems: set[str], cutoff: float) -> No
                     continue
 
 
+def _normalize_sources(
+    sources: Mapping[str, str | Path] | Iterable[str | Path],
+    destination: Path,
+    timestamp: str,
+) -> list[tuple[str, Path]]:
+    if isinstance(sources, Mapping):
+        candidates = [(name, Path(source).expanduser()) for name, source in sources.items()]
+    else:
+        candidates = []
+        for source in sources:
+            path = Path(source).expanduser()
+            candidates.append((path.stem, path))
+
+    normalized: list[tuple[str, Path]] = []
+    names: dict[str, Path] = {}
+    targets: dict[Path, str] = {}
+    for raw_name, source in candidates:
+        name = str(raw_name)
+        if not _BACKUP_LOGICAL_NAME_RE.fullmatch(name):
+            raise ValueError(f"invalid backup name {name!r}; use only letters, digits, '.', '_' or '-'")
+        previous = names.get(name)
+        if previous is not None:
+            raise ValueError(f"duplicate backup name {name!r}: {previous} and {source}")
+        target = destination / f"{name}-{timestamp}.db"
+        target_key = target.resolve()
+        previous_name = targets.get(target_key)
+        if previous_name is not None:
+            raise ValueError(f"duplicate backup target {target}: names {previous_name!r} and {name!r}")
+        names[name] = source
+        targets[target_key] = name
+        normalized.append((name, source))
+    return normalized
+
+
 def backup_sqlite_databases(
-    sources: Iterable[str | Path],
+    sources: Mapping[str, str | Path] | Iterable[str | Path],
     destination: str | Path,
     *,
     now: float | None = None,
@@ -81,8 +117,19 @@ def backup_sqlite_databases(
     files: list[str] = []
     skipped: list[str] = []
     errors: list[str] = []
-    source_paths = [Path(source).expanduser() for source in sources]
     timestamp = _timestamp(started)
+
+    try:
+        normalized_sources = _normalize_sources(sources, destination_path, timestamp)
+    except (TypeError, ValueError) as exc:
+        return BackupResult(
+            "failed",
+            started_at,
+            _iso_timestamp(time.time()),
+            [],
+            [],
+            [f"backup sources: {exc}"],
+        )
 
     try:
         destination_path.mkdir(parents=True, exist_ok=True)
@@ -99,18 +146,18 @@ def backup_sqlite_databases(
         )
 
     generated_stems: set[str] = set()
-    for source in source_paths:
+    for logical_name, source in normalized_sources:
         source_text = str(source)
         if not source.is_file():
             skipped.append(source_text)
             continue
-        stem = source.stem
-        generated_stems.add(stem)
-        target = destination_path / f"{stem}-{timestamp}.db"
-        temporary = destination_path / f".{stem}-{timestamp}.db.tmp"
+        generated_stems.add(logical_name)
+        target = destination_path / f"{logical_name}-{timestamp}.db"
+        temporary = destination_path / f".{logical_name}-{timestamp}.db.tmp"
         try:
-            with sqlite3.connect(source) as source_connection, sqlite3.connect(temporary) as target_connection:
+            with sqlite_connection(source) as source_connection, sqlite_connection(temporary) as target_connection:
                 source_connection.backup(target_connection)
+            sqlite_quick_check(temporary)
             os.chmod(temporary, 0o600)
             os.replace(temporary, target)
             os.chmod(target, 0o600)
@@ -140,7 +187,7 @@ class BackupScheduler:
     def __init__(
         self,
         store: TaskStore,
-        sources: Iterable[str | Path],
+        sources: Mapping[str, str | Path] | Iterable[str | Path],
         destination: str | Path,
         *,
         run_time: str = "03:30",
@@ -149,7 +196,16 @@ class BackupScheduler:
         enabled: bool = True,
     ) -> None:
         self.store = store
-        self.sources = tuple(Path(source).expanduser() for source in sources)
+        self.named_sources = (
+            {str(name): Path(source).expanduser() for name, source in sources.items()}
+            if isinstance(sources, Mapping)
+            else None
+        )
+        self.sources = tuple(
+            self.named_sources.values()
+            if self.named_sources is not None
+            else (Path(source).expanduser() for source in sources)
+        )
         self.destination = Path(destination).expanduser()
         self.run_time = self._parse_time(run_time)
         try:
@@ -185,7 +241,7 @@ class BackupScheduler:
 
     def run_once(self, now: float | None = None) -> BackupResult:
         result = backup_sqlite_databases(
-            self.sources,
+            self.named_sources if self.named_sources is not None else self.sources,
             self.destination,
             now=now,
             retention_days=self.retention_days,

@@ -33,7 +33,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.2.43`。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.2.44`。
 4. 拉取固定版本并启动：
 
 ```sh
@@ -324,7 +324,7 @@ QUALITY_AUTO_115_CHECK_LIMIT=3
 
 ## 数据库备份
 
-程序默认每天在 `03:30`（`Asia/Shanghai`）使用 SQLite 在线备份 API 快照 `/data/submissions.db` 和 `/data/tasks.db`，保存到 `/data/backups`，默认保留 14 天。`/health` 和 Web `/api/v1/health` 只显示最近一次备份的状态、文件数和错误摘要，不显示备份绝对路径或任何凭据。
+程序默认每天在 `03:30`（`Asia/Shanghai`）使用 SQLite 在线备份 API 快照 `/data/submissions.db` 和 `/data/tasks.db`，保存到 `/data/backups`，默认保留 14 天。备份文件分别命名为 `submissions-<UTC>.db` 和 `tasks-<UTC>.db`；临时快照通过 `PRAGMA quick_check` 后才会原子发布。`/health` 和 Web `/api/v1/health` 只显示最近一次备份的状态、文件数和错误摘要，不显示备份绝对路径或任何凭据。
 
 ```env
 BACKUP_ENABLED=true
@@ -405,12 +405,19 @@ docker compose exec cms-tg-ingest python /app/doctor.py --quiet
 3. 不要连续点击重试；等待冷却结束后再重试当前阶段。
 4. 只有确认状态安全时，才使用“从头重跑”或质量修复。
 
+### 恢复、并发与人工任务
+
+- 操作记录为 `started` 或 `uncertain` 时，远端结果未知。程序可能执行只读核对，但会刻意禁止自动重放对应的接收、建分享、CMS 同步、删除或 HDHive 解锁。
+- 显式重处理前，先查看 Web 任务详情中的事件时间线，并在数据库副本上查询 `task_operations` 和 `task_events`。例如使用 `sqlite3 'file:/path/to/tasks-copy.db?mode=ro'`，按任务 ID 查询 `operation_type`、`status`、`attempt_count`、`stage`、`message` 和时间字段；确认远端实际状态后再决定是否从头重跑。显式重处理会创建新的操作代次，可能再次产生远端成本。
+- Web 和 Telegram 触发的质量巡检、HDHive 全量检查、订阅检查和条目确认共用一个单 worker 后台队列；相同任务键会去重，同时在途任务最多 8 个。
+- 只部署一个应用容器。任务 lease 能避免新 worker 抢走仍有新鲜心跳的 claim，并允许 lease 过期后恢复，但这不是通过启动第二个容器提高并发的许可。
+
 回滚到上一版本：
 
 ```sh
 docker compose down
-docker pull icekale/cms-tg-ingest:0.2.11
-# 将 compose 的 image 改为 0.2.11
+docker pull icekale/cms-tg-ingest:0.2.43
+# 将 compose 的 image 改为 0.2.43
 docker compose up -d
 ```
 
@@ -437,8 +444,8 @@ python3 -m unittest discover -s tests -q
 发布版本通过 GitHub Actions 构建并推送 GHCR 和 Docker Hub：
 
 ```sh
-git tag v0.2.43
-git push origin v0.2.43
+git tag v0.2.44
+git push origin v0.2.44
 ```
 
 如果 fork 后要发布自己的 Docker Hub 镜像，在 GitHub Secrets 中配置：
@@ -449,7 +456,7 @@ git push origin v0.2.43
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.2.43
+docker pull icekale/cms-tg-ingest:0.2.44
 docker pull icekale/cms-tg-ingest:latest
 ```
 

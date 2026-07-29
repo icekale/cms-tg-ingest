@@ -1,12 +1,15 @@
+import io
 import re
+import socket
 import sqlite3
+import struct
 import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, redirect_stderr
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 from unittest.mock import patch
 
 import bridge
@@ -27,6 +30,7 @@ from app.web import (
     render_quality_page,
     render_task_detail,
     render_task_list,
+    start_web_server,
 )
 
 
@@ -44,6 +48,157 @@ class _ManualActionRuleEngine:
 
 
 class WebAdminTests(unittest.TestCase):
+    def test_content_length_handler_boundary_returns_deterministic_responses(self):
+        def post(server, content_length, body=b""):
+            headers = [b"POST /history/clear HTTP/1.0", b"Host: localhost"]
+            if content_length is not None:
+                headers.append(f"Content-Length: {content_length}".encode("ascii"))
+            request = b"\r\n".join([*headers, b"", body])
+            with socket.create_connection(server.server_address, timeout=1) as client:
+                client.settimeout(1)
+                client.sendall(request)
+                client.shutdown(socket.SHUT_WR)
+                response = client.recv(4096)
+            return int(response.split(b" ", 2)[1]) if response else 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            server = start_web_server(store, "127.0.0.1", 0)
+            try:
+                for content_length, body, expected_status in (
+                    (None, b"", 303),
+                    ("0", b"", 303),
+                    ("-1", b"", 400),
+                    ("invalid", b"", 400),
+                    ("65536", b"x" * 65536, 303),
+                    ("65537", b"x" * 65537, 413),
+                ):
+                    with self.subTest(content_length=content_length):
+                        self.assertEqual(post(server, content_length, body), expected_status)
+            finally:
+                bridge.stop_web_server(server)
+
+    def test_content_length_handler_rejects_incomplete_bodies_without_blocking_server(self):
+        def post(server, content_length, body=b"", *, close_write=True):
+            request = b"\r\n".join(
+                [
+                    b"POST /history/clear HTTP/1.0",
+                    b"Host: localhost",
+                    f"Content-Length: {content_length}".encode("ascii"),
+                    b"",
+                    body,
+                ]
+            )
+            with socket.create_connection(server.server_address, timeout=1) as client:
+                client.settimeout(0.3)
+                client.sendall(request)
+                if close_write:
+                    client.shutdown(socket.SHUT_WR)
+                started = time.monotonic()
+                try:
+                    response = client.recv(4096)
+                except socket.timeout:
+                    client.shutdown(socket.SHUT_WR)
+                    client.settimeout(1)
+                    response = client.recv(4096)
+                return response, time.monotonic() - started
+
+        with tempfile.TemporaryDirectory() as tmp, patch("app.web.REQUEST_BODY_READ_TIMEOUT_SECONDS", 0.05):
+            store = TaskStore(Path(tmp) / "tasks.db")
+            server = start_web_server(store, "127.0.0.1", 0)
+            try:
+                for body, close_write in ((b"abc", True), (b"", False)):
+                    with self.subTest(body=body, close_write=close_write):
+                        response, elapsed = post(server, 5, body, close_write=close_write)
+                        self.assertTrue(response.startswith(b"HTTP/1.0 400"))
+                        self.assertIn(b"Content-Length:", response)
+                        self.assertLess(elapsed, 0.25)
+                        response, _elapsed = post(server, 0)
+                        self.assertTrue(response.startswith(b"HTTP/1.0 303"))
+            finally:
+                bridge.stop_web_server(server)
+
+    def test_content_length_handler_ignores_reset_during_body_read(self):
+        def post_empty_body(server):
+            request = b"\r\n".join(
+                [b"POST /history/clear HTTP/1.0", b"Host: localhost", b"Content-Length: 0", b"", b""]
+            )
+            with socket.create_connection(server.server_address, timeout=1) as client:
+                client.settimeout(1)
+                client.sendall(request)
+                client.shutdown(socket.SHUT_WR)
+                return client.recv(4096)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            server = start_web_server(store, "127.0.0.1", 0)
+            stderr = io.StringIO()
+            reset_request_finished = Event()
+            unrelated_request_finished = Event()
+            reset_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            reset_client.settimeout(1)
+            reset_client.bind(("127.0.0.1", 0))
+            reset_client_address = reset_client.getsockname()
+            reset_request = None
+            unrelated_request = None
+            original_get_request = server.get_request
+            original_shutdown_request = server.shutdown_request
+
+            def get_request():
+                nonlocal reset_request, unrelated_request
+                request, client_address = original_get_request()
+                if client_address == reset_client_address:
+                    reset_request = request
+                elif unrelated_request is None:
+                    unrelated_request = request
+                return request, client_address
+
+            def shutdown_request(request):
+                try:
+                    return original_shutdown_request(request)
+                finally:
+                    if request is reset_request:
+                        reset_request_finished.set()
+                    elif request is unrelated_request:
+                        unrelated_request_finished.set()
+
+            try:
+                with (
+                    redirect_stderr(stderr),
+                    patch.object(server, "handle_error", wraps=server.handle_error) as handle_error,
+                    patch.object(server, "get_request", side_effect=get_request),
+                    patch.object(server, "shutdown_request", side_effect=shutdown_request),
+                ):
+                    response = post_empty_body(server)
+                    self.assertTrue(unrelated_request_finished.wait(1))
+                    self.assertFalse(reset_request_finished.is_set())
+                    self.assertTrue(response.startswith(b"HTTP/1.0 303"))
+
+                    reset_client.connect(server.server_address)
+                    reset_client.sendall(
+                        b"\r\n".join(
+                            [
+                                b"POST /history/clear HTTP/1.0",
+                                b"Host: localhost",
+                                b"Content-Length: 5",
+                                b"",
+                                b"abc",
+                            ]
+                        )
+                    )
+                    reset_client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    reset_client.close()
+
+                    self.assertTrue(reset_request_finished.wait(1))
+                    self.assertFalse(handle_error.called)
+                    self.assertEqual(stderr.getvalue(), "")
+                    response = post_empty_body(server)
+
+                self.assertTrue(response.startswith(b"HTTP/1.0 303"))
+            finally:
+                reset_client.close()
+                bridge.stop_web_server(server)
+
     def test_quality_page_reprocess_action_is_registered_and_orphan_is_not_linked(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -58,11 +58,16 @@ from app.media.strm import (
 from app.models import TaskStage, TaskStatus
 from app.self_share_settings import resolve_own_share_receive_code, resolve_self_share_review_policy
 from app.task_bridge import reset_self_share_submission_for_reprocess
+from app.task_store import operation_scope
 from app.strm_mode import effective_task_strm_mode
 from app.task_runner import StageOutcome, StageResult
 
 LOG = logging.getLogger("cms-tg-ingest")
 OPENAI_CATEGORY_LABELS = ["华语电影", "欧美电影", "亚洲电影", "动漫电影", "国产电视", "外国电视", "番剧", "纪录片"]
+_RECEIVE_RECOVERY_RETRY_SECONDS = 30
+_RECEIVE_RECOVERY_WINDOW_SECONDS = 300
+_DELETE_RECOVERY_RETRY_SECONDS = 30
+_DELETE_RECOVERY_WINDOW_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -78,12 +83,136 @@ def as_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def source_delete_parent_id(task: Any, row: dict[str, Any], file_id: str) -> str:
+    folder = task.metadata.get("organized_folder")
+    if isinstance(folder, dict):
+        if str(folder.get("file_id") or "").strip() == file_id:
+            parent_id = str(folder.get("parent_id") or "").strip()
+            if parent_id:
+                return parent_id
+        if str(folder.get("direct_file_id") or "").strip() == file_id:
+            return str(folder.get("direct_parent_id") or "").strip()
+    if str(task.metadata.get("direct_file_share_file_id") or "").strip() == file_id:
+        parent_id = str(task.metadata.get("direct_file_share_parent_id") or "").strip()
+        if parent_id:
+            return parent_id
+    try:
+        recognition = json.loads(row.get("recognition_json") or "{}")
+    except (TypeError, ValueError):
+        recognition = {}
+    recognition = recognition if isinstance(recognition, dict) else {}
+    return str(recognition.get("organized_parent_id") or recognition.get("parent_id") or "").strip()
+
+
+def _is_missing_delete_target_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return any(
+        token in message
+        for token in (
+            "file not found",
+            "文件不存在",
+            "文件已不存在",
+            "不存在或已删除",
+            "目标不存在",
+        )
+    )
+
+
+def journaled_delete_file(
+    task_store: Any,
+    task: Any,
+    cleanup_client: Any,
+    file_id: str,
+    parent_id: str,
+    operation_type: str,
+    *,
+    now: float,
+) -> StageResult | None:
+    operation_key = f"{operation_scope(task)}:{operation_type}:{file_id}"
+    operation = task_store.find_operation(int(task.id), operation_key)
+    if operation is None:
+        operation = task_store.prepare_operation(
+            int(task.id),
+            operation_key,
+            operation_type,
+            {"file_id": file_id, "parent_id": parent_id},
+        )
+    if operation.status == "prepared":
+        started = task_store.start_operation(int(task.id), operation_key)
+        operation = started or task_store.find_operation(int(task.id), operation_key)
+        if started is not None:
+            try:
+                response = cleanup_client.delete_file(str(operation.request.get("file_id") or file_id))
+            except Exception as exc:
+                if not _is_missing_delete_target_error(exc):
+                    raise
+                response = {"state": True, "already_absent": True}
+            completed = task_store.complete_operation(
+                int(task.id),
+                operation_key,
+                response if isinstance(response, dict) else {"state": True},
+            )
+            operation = completed or task_store.find_operation(int(task.id), operation_key)
+    if operation is None:
+        raise RuntimeError("115 delete operation disappeared")
+    metadata = {
+        "delete_operation_key": operation_key,
+        "delete_operation_type": operation_type,
+        "delete_file_id": file_id,
+        "delete_parent_id": parent_id,
+    }
+    if operation.status == "succeeded":
+        return None
+    if operation.status not in {"started", "uncertain"}:
+        return StageResult.needs_action("115 删除操作状态无法安全恢复，请人工检查", metadata)
+    try:
+        exists = cleanup_client.file_exists_in_parent(
+            str(operation.request.get("file_id") or file_id),
+            str(operation.request.get("parent_id") or parent_id),
+        )
+    except Exception as exc:
+        return StageResult.defer(
+            f"115 删除结果暂时无法确认：{exc}",
+            _DELETE_RECOVERY_RETRY_SECONDS,
+            metadata,
+        )
+    if not exists:
+        if operation.status == "started":
+            task_store.complete_operation(
+                int(task.id),
+                operation_key,
+                {"state": True, "reconciled_absent": True},
+            )
+        return None
+    recovery_age = max(0.0, float(now) - float(operation.started_at or operation.created_at))
+    if recovery_age >= _DELETE_RECOVERY_WINDOW_SECONDS:
+        return StageResult.needs_action("115 删除结果仍不明确，文件仍存在且禁止自动重复删除", metadata)
+    return StageResult.defer(
+        "等待确认 115 删除结果，禁止自动重复删除",
+        _DELETE_RECOVERY_RETRY_SECONDS,
+        metadata,
+    )
+
+
 
 def is_115_receive_restricted_error(exc: Exception) -> bool:
     if isinstance(exc, P115RiskControlError):
         return True
     text = str(exc or "")
     return is_p115_risk_control_message(text)
+
+
+def is_complete_share_receive_result(received: dict[str, Any] | None) -> bool:
+    if not isinstance(received, dict) or not received.get("received_items_complete"):
+        return False
+    items = received.get("received_items")
+    if not isinstance(items, list):
+        return False
+    try:
+        expected_count = int(received.get("received_expected_item_count") or 0)
+    except (TypeError, ValueError):
+        return False
+    return expected_count > 0 and len(items) == expected_count
 
 
 def has_authoritative_category(row: dict[str, Any], recognition: dict[str, Any]) -> bool:
@@ -121,6 +250,20 @@ def has_tmdb_folder_mismatch(folder: dict[str, Any], recognition: dict[str, Any]
     if not actual:
         actual = extract_tmdb_id_from_name(share_name)
     return bool(expected and actual and expected != actual)
+
+
+def task_tmdb_identity(task: Any) -> str:
+    metadata = getattr(task, "metadata", {}) or {}
+    recognition = metadata.get("recognition")
+    if not isinstance(recognition, dict):
+        recognition = {}
+    return str(
+        getattr(task, "tmdb_id", "")
+        or metadata.get("tmdb_id")
+        or recognition.get("tmdb_id")
+        or extract_tmdb_id_from_name(str(metadata.get("own_share_file_name") or ""))
+        or ""
+    ).strip()
 
 
 def has_explicit_task_tmdb_hint(recognition: dict[str, Any], row: dict[str, Any], share_name: str = "") -> bool:
@@ -719,7 +862,41 @@ class BridgeSelfShareTaskWorkflow:
                     )
                 existing = self.store.find_by_id(int(existing["id"])) or existing
                 reprocess_reset = True
-        if self._should_reuse_received_self_share_state(existing, task.metadata):
+        patch_claimed_metadata = getattr(self.task_store, "patch_claimed_metadata", None)
+        if str(getattr(task, "claimed_by", "") or "").strip():
+            if not callable(patch_claimed_metadata):
+                return StageResult(
+                    StageOutcome.NEEDS_ACTION,
+                    "当前任务不支持原子持久化接收目录 CID，已在接收前停止",
+                    {
+                        "receive_target_cid": receive_cid,
+                        "receive_cid_persist_status": "unsupported",
+                    },
+                    error_type="receive_cid_persistence_unsupported",
+                )
+            persisted = patch_claimed_metadata(
+                int(task.id),
+                expected_claimed_by=str(task.claimed_by),
+                expected_claimed_at=float(task.claimed_at),
+                expected_claim_token=str(task.claim_token),
+                expected_updated_at=float(task.updated_at),
+                patch={"receive_target_cid": receive_cid},
+            )
+            if persisted is None:
+                return StageResult(
+                    StageOutcome.NEEDS_ACTION,
+                    "接收目录 CID 未能持久化，任务 claim 已失效；已在接收前停止",
+                    {
+                        "receive_target_cid": receive_cid,
+                        "receive_cid_persist_status": "stale_claim",
+                    },
+                    error_type="receive_cid_persistence_stale_claim",
+                )
+            task = persisted
+
+        operation_key = f"{operation_scope(task)}:receive_share:{task.share_code}:{receive_cid}"
+        operation = self.task_store.find_operation(int(task.id), operation_key)
+        if operation is None and self._should_reuse_received_self_share_state(existing, task.metadata):
             metadata = self._received_metadata(existing, task.metadata)
             if reprocess_reset:
                 metadata["self_share_reprocess_reset"] = True
@@ -727,44 +904,90 @@ class BridgeSelfShareTaskWorkflow:
                 metadata["reprocess_started_at"] = reprocess_started_at
             return StageResult.complete("已接收 115 分享到待整理", metadata)
 
-        try:
-            received = self.p115.receive_share_to_cid(task.share_code, task.receive_code, receive_cid)
-        except RuntimeError as exc:
-            if is_115_receive_restricted_error(exc):
-                return StageResult.needs_action(
-                    "115 接收被限制，已停止自动重试；请稍后恢复后手动重试或先手动转存。",
-                    {"share_code": task.share_code},
-                )
-            raise
-        patch_claimed_metadata = getattr(self.task_store, "patch_claimed_metadata", None)
-        if callable(patch_claimed_metadata) and str(getattr(task, "claimed_by", "") or "").strip():
-            persisted = patch_claimed_metadata(
+        if operation is None:
+            intent = self.p115.prepare_share_receive(task.share_code, task.receive_code, receive_cid)
+            operation = self.task_store.prepare_operation(
                 int(task.id),
-                expected_claimed_by=str(task.claimed_by),
-                expected_claimed_at=float(task.claimed_at),
-                expected_updated_at=float(task.updated_at),
-                patch={"receive_target_cid": receive_cid},
+                operation_key,
+                "receive_share",
+                intent,
             )
-            if persisted is None:
-                return StageResult(
-                    StageOutcome.NEEDS_ACTION,
-                    "115 接收成功，但接收目录 CID 未能持久化，任务 claim 已失效；已停止后续处理，请重试",
-                    {
-                        "receive_target_cid": receive_cid,
-                        "receive_cid_persist_status": "stale_claim",
-                    },
-                    error_type="receive_cid_persistence_stale_claim",
+
+        execute_authorized = False
+        if operation.status == "prepared":
+            started = self.task_store.start_operation(int(task.id), operation_key)
+            if started is not None:
+                operation = started
+                execute_authorized = True
+            else:
+                operation = self.task_store.find_operation(int(task.id), operation_key)
+
+        execution_incomplete = False
+        if execute_authorized:
+            try:
+                received = self.p115.execute_prepared_share_receive(operation.request)
+            except RuntimeError as exc:
+                if is_115_receive_restricted_error(exc):
+                    self.task_store.mark_operation_failed(int(task.id), operation_key, str(exc))
+                    return StageResult.needs_action(
+                        "115 接收被限制，已停止自动重试；请稍后恢复后手动重试或先手动转存。",
+                        {"share_code": task.share_code, "receive_target_cid": receive_cid},
+                    )
+                self.task_store.mark_operation_uncertain(int(task.id), operation_key, str(exc))
+                raise
+            except Exception as exc:
+                self.task_store.mark_operation_uncertain(int(task.id), operation_key, str(exc))
+                raise
+            if is_complete_share_receive_result(received):
+                completed = self.task_store.complete_operation(int(task.id), operation_key, received)
+                if completed is None:
+                    completed = self.task_store.find_operation(int(task.id), operation_key)
+                operation = completed
+            else:
+                execution_incomplete = True
+
+        if operation is None:
+            return StageResult.needs_action(
+                "115 接收操作记录丢失，请人工检查后重试",
+                {"receive_target_cid": receive_cid, "receive_operation_key": operation_key},
+            )
+        if operation.status == "succeeded":
+            received = operation.result
+        elif operation.status in {"started", "uncertain"}:
+            if not execution_incomplete:
+                received = self.p115.reconcile_prepared_share_receive(operation.request)
+            if is_complete_share_receive_result(received):
+                if operation.status == "started":
+                    completed = self.task_store.complete_operation(int(task.id), operation_key, received)
+                    if completed is not None:
+                        received = completed.result
+            else:
+                recovery_age = max(0.0, self._now() - float(operation.started_at or operation.created_at))
+                recovery_metadata = {
+                    "receive_target_cid": receive_cid,
+                    "receive_operation_key": operation_key,
+                    "receive_recovery_started_at": float(operation.started_at or operation.created_at),
+                }
+                if recovery_age >= _RECEIVE_RECOVERY_WINDOW_SECONDS:
+                    return StageResult.needs_action(
+                        "无法确认 115 分享接收结果，已停止自动处理以避免重复接收",
+                        recovery_metadata,
+                    )
+                return StageResult.defer(
+                    "等待确认 115 分享接收结果",
+                    _RECEIVE_RECOVERY_RETRY_SECONDS,
+                    recovery_metadata,
                 )
-        elif str(getattr(task, "claimed_by", "") or "").strip():
-            return StageResult(
-                StageOutcome.NEEDS_ACTION,
-                "115 接收成功，但当前任务不支持原子持久化接收目录 CID，已停止后续处理",
+        else:
+            return StageResult.needs_action(
+                "115 分享接收操作未成功，已停止自动重试",
                 {
                     "receive_target_cid": receive_cid,
-                    "receive_cid_persist_status": "unsupported",
+                    "receive_operation_key": operation_key,
+                    "receive_operation_status": operation.status,
                 },
-                error_type="receive_cid_persistence_unsupported",
             )
+
         title = str(received.get("title") or task.title or task.share_code).strip()
         row = self.store.upsert_submission(
             _ShareKey(task.share_code, task.receive_code),
@@ -1240,6 +1463,11 @@ class BridgeSelfShareTaskWorkflow:
         if existing_library_category and not str(folder.get("category") or "").strip():
             folder = dict(folder)
             folder["category"] = existing_library_category
+        if self._conflicting_folder_owner(task, folder, recognition, row, title):
+            return StageResult.needs_action(
+                "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享",
+                {"submission_id": int(row["id"]), "own_share_file_id": ""},
+            )
         row = self.store.update_self_share(
             int(row["id"]),
             workflow_phase="organized_found",
@@ -1279,6 +1507,17 @@ class BridgeSelfShareTaskWorkflow:
                 "file_name": row.get("own_share_file_name"),
                 "parent_id": parent_id,
             }
+        if self._conflicting_folder_owner(
+            task,
+            folder,
+            recognition,
+            row,
+            str(folder.get("file_name") or task.title or task.share_code),
+        ):
+            return StageResult.needs_action(
+                "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享",
+                {"submission_id": int(row["id"]), "own_share_file_id": ""},
+            )
         if has_tmdb_folder_mismatch(
             folder,
             recognition,
@@ -1421,6 +1660,18 @@ class BridgeSelfShareTaskWorkflow:
             },
         )
 
+    def _conflicting_folder_owner(self, task, folder, recognition, row, share_name):
+        file_id = str(folder.get("file_id") or "").strip()
+        if not file_id:
+            return None
+        expected = expected_task_tmdb_id(recognition, row) or task_tmdb_identity(task)
+        owners = self.task_store.list_tasks_by_own_share_file_id(file_id, exclude_task_id=task.id)
+        for owner in owners:
+            owner_identity = task_tmdb_identity(owner)
+            if not expected or not owner_identity or owner_identity != expected:
+                return owner
+        return None
+
     def _folder_child_video_name(self, file_id: str) -> str:
         if not file_id or not hasattr(self.p115, "list_files"):
             return ""
@@ -1489,12 +1740,26 @@ class BridgeSelfShareTaskWorkflow:
                 "等待可验证的 CMS 整理后源目录，当前 115 ID 仍是接收/分享快照，拒绝创建自有分享",
                 self._own_share_metadata(row) | {"own_share_file_id": ""},
             )
+        if self._conflicting_folder_owner(
+            task,
+            {"file_id": file_id},
+            recognition,
+            row,
+            str(row.get("own_share_file_name") or task.title or task.share_code),
+        ):
+            return StageResult.needs_action(
+                "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享",
+                self._own_share_metadata(row) | {"own_share_file_id": ""},
+            )
         created = False
         direct_file_share = False
         direct_relative_path = ""
         recovered_share_created_at = 0.0
         share_creation_pending = str(task.metadata.get("share_create_status") or "").strip().lower() == "pending"
-        if share_creation_pending and not row.get("own_share_code"):
+        create_operation_key = f"{operation_scope(task)}:create_share:{file_id}"
+        create_operation = self.task_store.find_operation(int(task.id), create_operation_key)
+        legacy_share_creation_pending = share_creation_pending and create_operation is None
+        if legacy_share_creation_pending and not row.get("own_share_code"):
             recover = getattr(self.p115, "find_own_share_by_title", None)
             if callable(recover):
                 recovered = recover(
@@ -1502,6 +1767,9 @@ class BridgeSelfShareTaskWorkflow:
                     min_create_time=self._positive_timestamp(task.metadata.get("share_create_requested_at")),
                 )
                 if recovered:
+                    receive_code = resolve_own_share_receive_code(self.task_store, self.self_share_config).value
+                    settings = self.p115.ensure_share_settings(str(recovered.get("share_code") or ""), receive_code)
+                    recovered = {**recovered, **settings}
                     recovered_share_created_at = self._positive_timestamp(recovered.get("create_time"))
                     row = self.store.update_self_share(
                         int(row["id"]),
@@ -1523,7 +1791,12 @@ class BridgeSelfShareTaskWorkflow:
         if not row.get("own_share_code"):
             receive_code = resolve_own_share_receive_code(self.task_store, self.self_share_config).value
             try:
-                share = self.p115.create_long_share(file_id, preferred_receive_code=receive_code)
+                share = self._journaled_create_share(
+                    task,
+                    file_id,
+                    str(row.get("own_share_file_name") or task.title or "").strip(),
+                    receive_code,
+                )
             except P115SharePendingError:
                 return StageResult.defer(
                     "等待 115 完成分享创建",
@@ -1535,13 +1808,42 @@ class BridgeSelfShareTaskWorkflow:
                     },
                 )
             except RuntimeError as exc:
-                direct_file_id, direct_relative_path = self._direct_file_share_details(task)
+                direct_file_id, direct_relative_path, direct_file_name, direct_parent_id = self._direct_file_share_details(task)
                 if not direct_file_id or not self._is_gone_share_source_error(exc):
                     raise
+                if self._conflicting_folder_owner(
+                    task,
+                    {"file_id": direct_file_id},
+                    recognition,
+                    row,
+                    direct_file_name or Path(direct_relative_path).name,
+                ):
+                    return StageResult.needs_action(
+                        "CMS 直链文件已被其他 TMDB 任务占用，已阻止创建自有分享",
+                        self._own_share_metadata(row),
+                    )
                 if not hasattr(self.store, "replace_self_share_source_file_id"):
                     raise
                 row = self.store.replace_self_share_source_file_id(int(row["id"]), direct_file_id) or row
-                share = self.p115.create_long_share(direct_file_id, preferred_receive_code=receive_code)
+                direct_title = str(
+                    direct_file_name
+                    or task.metadata.get("cloud_output_name")
+                    or Path(direct_relative_path).name
+                ).strip()
+                direct_metadata = {
+                    "direct_file_share": True,
+                    "direct_file_share_file_id": direct_file_id,
+                    "direct_file_share_file_name": direct_file_name,
+                    "direct_file_share_parent_id": direct_parent_id,
+                    "direct_file_share_relative_path": direct_relative_path,
+                }
+                share = self._journaled_create_share(
+                    task,
+                    direct_file_id,
+                    direct_title,
+                    receive_code,
+                    recovery_metadata=direct_metadata,
+                )
                 direct_file_share = True
             row = self.store.update_self_share(
                 int(row["id"]),
@@ -1553,22 +1855,111 @@ class BridgeSelfShareTaskWorkflow:
             created = True
         message = "已创建自有 115 分享" if created else "已存在自有 115 分享"
         metadata = self._own_share_metadata(row)
+        durable_file_id = str(row.get("own_share_file_id") or file_id).strip()
+        durable_operation = self.task_store.find_operation(
+            int(task.id),
+            f"{operation_scope(task)}:create_share:{durable_file_id}",
+        )
+        metadata.update(self._create_share_operation_metadata(durable_operation))
         share_created_at = self._positive_timestamp(task.metadata.get("share_created_at")) or recovered_share_created_at
-        if created:
-            share_created_at = self._now()
+        share_created_at = self._positive_timestamp(metadata.get("share_created_at")) or share_created_at
+        if created and not share_created_at:
+            share_created_at = float(int(max(0.0, self._now())))
         if share_creation_pending and not share_created_at:
             share_created_at = self._now()
         if share_created_at:
             metadata["share_created_at"] = share_created_at
         if direct_file_share:
-            metadata.update(
-                {
-                    "direct_file_share": True,
-                    "direct_file_share_file_id": direct_file_id,
-                    "direct_file_share_relative_path": direct_relative_path,
-                }
-            )
+            metadata.update(direct_metadata)
         return StageResult.complete(message, metadata)
+
+    def _journaled_create_share(
+        self,
+        task,
+        file_id: str,
+        share_title: str,
+        receive_code: str,
+        *,
+        recovery_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        operation_key = f"{operation_scope(task)}:create_share:{file_id}"
+        operation = self.task_store.find_operation(int(task.id), operation_key)
+        if operation is None:
+            request = {
+                "file_id": file_id,
+                "share_title": share_title,
+                "receive_code": receive_code,
+                "requested_at": float(int(max(0.0, self._now()))),
+            }
+            request.update(recovery_metadata or {})
+            operation = self.task_store.prepare_operation(
+                int(task.id),
+                operation_key,
+                "create_share",
+                request,
+            )
+        if operation.status == "prepared":
+            started = self.task_store.start_operation(int(task.id), operation_key)
+            operation = started or self.task_store.find_operation(int(task.id), operation_key)
+            if started is not None:
+                try:
+                    created = self.p115.create_share(str(operation.request.get("file_id") or file_id))
+                except P115SharePendingError:
+                    raise
+                except Exception as exc:
+                    if self._is_gone_share_source_error(exc):
+                        self.task_store.mark_operation_failed(int(task.id), operation_key, str(exc))
+                    else:
+                        self.task_store.mark_operation_uncertain(int(task.id), operation_key, str(exc))
+                    raise
+                completed = self.task_store.complete_operation(int(task.id), operation_key, created)
+                operation = completed or self.task_store.find_operation(int(task.id), operation_key)
+        if operation is None:
+            raise RuntimeError("115 share creation operation disappeared")
+        if operation.status == "succeeded":
+            created = operation.result
+        elif operation.status in {"started", "uncertain"}:
+            recovered = self.p115.find_own_share_by_title(
+                str(operation.request.get("share_title") or ""),
+                min_create_time=self._positive_timestamp(operation.request.get("requested_at")),
+            )
+            if not recovered:
+                raise P115SharePendingError("115 create share outcome is not visible yet")
+            created = recovered
+            if operation.status == "started":
+                completed = self.task_store.complete_operation(int(task.id), operation_key, recovered)
+                operation = completed or operation
+        elif operation.status == "failed":
+            raise RuntimeError(operation.last_error or "115 create share failed")
+        else:
+            raise RuntimeError(f"unsupported create share operation status: {operation.status}")
+        settings = self.p115.ensure_share_settings(
+            str(created.get("share_code") or ""),
+            str(operation.request.get("receive_code") or receive_code),
+        )
+        return {**created, **settings}
+
+    def _create_share_operation_metadata(self, operation: Any | None) -> dict[str, Any]:
+        if operation is None or operation.status not in {"started", "uncertain", "succeeded"}:
+            return {}
+        metadata: dict[str, Any] = {}
+        created_at = self._positive_timestamp(operation.result.get("create_time"))
+        if not created_at:
+            created_at = self._positive_timestamp(operation.request.get("requested_at"))
+        if created_at:
+            metadata["share_created_at"] = created_at
+        if operation.request.get("direct_file_share"):
+            for key in (
+                "direct_file_share",
+                "direct_file_share_file_id",
+                "direct_file_share_file_name",
+                "direct_file_share_parent_id",
+                "direct_file_share_relative_path",
+            ):
+                value = operation.request.get(key)
+                if value not in (None, ""):
+                    metadata[key] = value
+        return metadata
 
     def _stage_share_validated(self, task):
         row = self._submission_row(task)
@@ -1635,34 +2026,79 @@ class BridgeSelfShareTaskWorkflow:
         own_pwd = str(task.metadata.get("own_share_receive_code") or row.get("own_share_receive_code") or "").strip()
         if not own_code:
             return StageResult.failed("缺少自有分享码", error_type="own_share_missing")
-        if row.get("share_sync_status") != "submitted":
-            waiting_task = self._pending_cms_share_sync_task(task)
-            if waiting_task:
-                return StageResult.defer(
-                    "等待上一条 CMS 分享同步完成",
-                    5,
+        operation_key = f"{operation_scope(task)}:cms_share_sync:{own_code}"
+        operation = self.task_store.find_operation(int(task.id), operation_key)
+        if row.get("share_sync_status") != "submitted" or operation is not None:
+            if operation is None:
+                waiting_task = self._pending_cms_share_sync_task(task)
+                if waiting_task:
+                    return StageResult.defer(
+                        "等待上一条 CMS 分享同步完成",
+                        5,
+                        {
+                            "submission_id": int(row["id"]),
+                            "share_sync_wait_task_id": waiting_task.id,
+                        },
+                    )
+                operation = self.task_store.prepare_operation(
+                    int(task.id),
+                    operation_key,
+                    "cms_share_sync",
                     {
-                        "submission_id": int(row["id"]),
-                        "share_sync_wait_task_id": waiting_task.id,
+                        "share_code": own_code,
+                        "receive_code": own_pwd,
+                        "cid": self.self_share_config.cms_cid,
+                        "local_path": self.self_share_config.cms_local_path,
                     },
                 )
-            self.cms.add_share115_sync_task(
-                own_code,
-                own_pwd,
-                cid=self.self_share_config.cms_cid,
-                local_path=self.self_share_config.cms_local_path,
-            )
+            if operation.status == "prepared":
+                started = self.task_store.start_operation(int(task.id), operation_key)
+                operation = started or self.task_store.find_operation(int(task.id), operation_key)
+                if started is not None:
+                    response = self.cms.add_share115_sync_task(
+                        str(operation.request.get("share_code") or own_code),
+                        str(operation.request.get("receive_code") or own_pwd),
+                        cid=str(operation.request.get("cid") or self.self_share_config.cms_cid),
+                        local_path=str(operation.request.get("local_path") or self.self_share_config.cms_local_path),
+                    )
+                    completed = self.task_store.complete_operation(
+                        int(task.id),
+                        operation_key,
+                        response if isinstance(response, dict) else {},
+                    )
+                    operation = completed or self.task_store.find_operation(int(task.id), operation_key)
+            if operation is None:
+                raise RuntimeError("CMS share sync operation disappeared")
+            if operation.status == "started":
+                uncertain = self.task_store.mark_operation_uncertain(
+                    int(task.id),
+                    operation_key,
+                    "CMS share sync result was not persisted",
+                )
+                operation = uncertain or self.task_store.find_operation(int(task.id), operation_key)
+            if operation.status not in {"succeeded", "uncertain"}:
+                return StageResult.needs_action(
+                    "CMS 分享同步结果无法安全重试，请人工检查",
+                    {
+                        "submission_id": int(row["id"]),
+                        "cms_share_sync_outcome": "unknown",
+                    },
+                )
+            sync_outcome = "submitted" if operation.status == "succeeded" else "unknown"
             row = self.store.update_self_share(
                 int(row["id"]),
                 workflow_phase="share_sync_submitted",
                 share_sync_status="submitted",
             ) or row
+        else:
+            sync_outcome = str(task.metadata.get("cms_share_sync_outcome") or "submitted")
         return StageResult.complete(
-            "已提交 CMS 分享同步",
+            "已提交 CMS 分享同步" if sync_outcome == "submitted" else "CMS 分享同步结果未知，转入 STRM 结果核对",
             {
                 "submission_id": int(row["id"]),
                 "share_sync_status": row.get("share_sync_status") or "submitted",
                 "share_sync_wait_task_id": "",
+                "cms_share_sync_outcome": sync_outcome,
             },
         )
 
@@ -1876,42 +2312,130 @@ class BridgeSelfShareTaskWorkflow:
             dest_path = str(metadata.get("dest_path") or "").strip()
             if dest_path and not self._strm_destination_ready(dest_path, row, task.metadata):
                 return self._restore_missing_moved_destination(task, row, metadata, terminal=True)
-        if str(row.get("cleanup_status") or "").lower() == "deleted":
-            return StageResult.complete("115 转存源已删除，自有分享保留", self._cleanup_metadata(row))
-        review_status, review_metadata, review_message, review_delay = self._advance_share_review(task, row)
-        if review_status == "invalid":
-            updated = self.store.update_self_share(
-                int(row["id"]),
-                share_validation_status="invalid",
-                share_validation_error=str(review_metadata.get("share_review_error") or review_message),
-            ) or row
-            metadata = self._cleanup_metadata(updated)
-            metadata.update(review_metadata)
-            return StageResult.needs_action(
-                "自有分享在异步审核中已变为不可用，源文件已保留，停止自动改名和重建",
-                metadata,
-            )
-        if review_status != "passed":
-            metadata = self._cleanup_metadata(row)
-            metadata.update(review_metadata)
-            return StageResult.defer(review_message, review_delay, metadata)
-        updated, line = cleanup_own_share_source(self.store, row, self.cleanup_client)
-        cleanup_status = str(updated.get("cleanup_status") or "").lower()
-        if cleanup_status == "deleted":
-            metadata = self._cleanup_metadata(updated)
-            metadata.update(review_metadata)
-            return StageResult.complete(line or "115 转存源已删除，自有分享保留", metadata)
-        if cleanup_status == "error":
-            metadata = self._cleanup_metadata(updated)
-            metadata.update(review_metadata)
-            return StageResult.failed(
-                str(updated.get("cleanup_error") or line or "115 转存源删除失败"),
-                error_type="cleanup_failed",
-                metadata=metadata,
-            )
-        metadata = self._cleanup_metadata(updated)
+        review_metadata: dict[str, Any] = {}
+        if str(row.get("cleanup_status") or "").lower() != "deleted":
+            review_status, review_metadata, review_message, review_delay = self._advance_share_review(task, row)
+            if review_status == "invalid":
+                updated = self.store.update_self_share(
+                    int(row["id"]),
+                    share_validation_status="invalid",
+                    share_validation_error=str(review_metadata.get("share_review_error") or review_message),
+                ) or row
+                metadata = self._cleanup_metadata(updated)
+                metadata.update(review_metadata)
+                return StageResult.needs_action(
+                    "自有分享在异步审核中已变为不可用，源文件已保留，停止自动改名和重建",
+                    metadata,
+                )
+            if review_status != "passed":
+                metadata = self._cleanup_metadata(row)
+                metadata.update(review_metadata)
+                return StageResult.defer(review_message, review_delay, metadata)
+            file_id = str(row.get("own_share_file_id") or "").strip()
+            parent_id = self._delete_source_parent_id(task, row, file_id)
+            if not parent_id:
+                metadata = self._cleanup_metadata(row)
+                metadata.update(review_metadata)
+                return StageResult.needs_action("缺少 115 转存源父目录，无法安全核对删除结果", metadata)
+            recovery = self._journaled_delete(task, file_id, parent_id, "delete_source")
+            if recovery is not None:
+                return recovery
+            row = self.store.update_cleanup(int(row["id"]), "deleted", file_id=file_id) or row
+        residue_result, residue_count = self._cleanup_residue_operations(task, row)
+        if residue_result is not None:
+            return residue_result
+        metadata = self._cleanup_metadata(row)
         metadata.update(review_metadata)
-        return StageResult.needs_action(line or "等待 115 转存源清理", metadata)
+        if residue_count:
+            metadata["residue_deleted_count"] = residue_count
+        return StageResult.complete("115 转存源已删除，自有分享保留", metadata)
+
+    def _delete_source_parent_id(self, task, row: dict[str, Any], file_id: str) -> str:
+        return source_delete_parent_id(task, row, file_id)
+
+    @staticmethod
+    def _is_missing_delete_target_error(exc: Exception) -> bool:
+        return _is_missing_delete_target_error(exc)
+
+    def _journaled_delete(
+        self,
+        task,
+        file_id: str,
+        parent_id: str,
+        operation_type: str,
+    ) -> StageResult | None:
+        return journaled_delete_file(
+            self.task_store,
+            task,
+            self.cleanup_client,
+            file_id,
+            parent_id,
+            operation_type,
+            now=self._now(),
+        )
+
+    def _cleanup_residue_operations(self, task, row: dict[str, Any]) -> tuple[StageResult | None, int]:
+        parent_ids = self.self_share_config.source_cleanup_parent_ids or set()
+        if not parent_ids or not hasattr(self.cleanup_client, "find_source_residue_files"):
+            return None, 0
+        manifest_key = f"{operation_scope(task)}:delete_residue:manifest"
+        manifest = self.task_store.find_operation(int(task.id), manifest_key)
+        if manifest is None:
+            recognition = self._recognition_from_row(row)
+            share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
+            try:
+                discovered = self.cleanup_client.find_source_residue_files(
+                    recognition,
+                    share_name,
+                    parent_ids,
+                    excluded_file_ids={str(row.get("own_share_file_id") or "").strip()},
+                    min_update_time=float(row.get("created_at") or 0),
+                )
+            except Exception as exc:
+                return StageResult.defer(f"115 接收残留暂时无法扫描：{exc}", _DELETE_RECOVERY_RETRY_SECONDS), 0
+            files = sorted(
+                (
+                    {
+                        "file_id": str(item.get("file_id") or "").strip(),
+                        "parent_id": str(item.get("parent_id") or "").strip(),
+                    }
+                    for item in discovered
+                    if str(item.get("file_id") or "").strip() and str(item.get("parent_id") or "").strip()
+                ),
+                key=lambda item: (item["parent_id"], item["file_id"]),
+            )
+            if not files:
+                return None, 0
+            manifest = self.task_store.prepare_operation(
+                int(task.id),
+                manifest_key,
+                "delete_residue",
+                {"files": files},
+            )
+        files = manifest.request.get("files")
+        files = files if isinstance(files, list) else []
+        deleted = 0
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            file_id = str(item.get("file_id") or "").strip()
+            parent_id = str(item.get("parent_id") or "").strip()
+            if not file_id or not parent_id:
+                continue
+            recovery = self._journaled_delete(task, file_id, parent_id, "delete_residue")
+            if recovery is not None:
+                return recovery, deleted
+            deleted += 1
+        if manifest.status == "prepared":
+            started = self.task_store.start_operation(int(task.id), manifest_key)
+            manifest = started or self.task_store.find_operation(int(task.id), manifest_key)
+        if manifest is not None and manifest.status == "started":
+            self.task_store.complete_operation(
+                int(task.id),
+                manifest_key,
+                {"deleted_count": deleted},
+            )
+        return None, deleted
 
     @staticmethod
     def _positive_timestamp(value: Any) -> float:
@@ -2112,18 +2636,20 @@ class BridgeSelfShareTaskWorkflow:
         )
 
     @staticmethod
-    def _direct_file_share_details(task) -> tuple[str, str]:
+    def _direct_file_share_details(task) -> tuple[str, str, str, str]:
         folder = task.metadata.get("organized_folder")
         folder = folder if isinstance(folder, dict) else {}
         file_id = str(folder.get("direct_file_id") or task.metadata.get("direct_file_share_file_id") or "").strip()
         relative_path = str(folder.get("direct_relative_path") or task.metadata.get("direct_file_share_relative_path") or "").strip()
+        file_name = str(folder.get("direct_file_name") or task.metadata.get("direct_file_share_file_name") or "").strip()
+        parent_id = str(folder.get("direct_parent_id") or task.metadata.get("direct_file_share_parent_id") or "").strip()
         relative = Path(relative_path)
         if not file_id or not relative_path or relative.is_absolute() or ".." in relative.parts:
-            return "", ""
-        return file_id, relative_path
+            return "", "", "", ""
+        return file_id, relative_path, file_name, parent_id
 
     def _prepare_direct_file_share_strm(self, task, row: dict[str, Any]) -> Path | None:
-        _file_id, relative_path = self._direct_file_share_details(task)
+        _file_id, relative_path, _file_name, _parent_id = self._direct_file_share_details(task)
         folder_name = str(row.get("own_share_file_name") or "").strip()
         own_share_code = str(row.get("own_share_code") or "").strip()
         receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
