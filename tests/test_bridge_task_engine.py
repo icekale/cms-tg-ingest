@@ -4378,6 +4378,60 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
         self.assertEqual(stored_recognition["category"], "国产电视")
         self.assertEqual(stored_recognition["category_status"], "self_share_resolved")
 
+    def test_organizing_treats_nonfinite_current_run_timestamps_as_no_cutoff(self):
+        for timestamp in (float("inf"), float("nan")):
+            with self.subTest(timestamp=timestamp), tempfile.TemporaryDirectory() as tmp:
+                western_root = Path(tmp) / "library" / "western"
+                workflow = self._workflow(
+                    tmp,
+                    move_config=bridge.MoveConfig(source_roots=[], library_roots={"欧美电影": western_root}),
+                )
+                row = self._row()
+                row = self.submissions.update_status(int(row["id"]), "received", title="悬案 (2026)") or row
+                row = self.submissions.update_self_share(
+                    int(row["id"]),
+                    workflow_mode="self_share_sync",
+                    workflow_phase="auto_organize_submitted",
+                ) or row
+                recognition = {
+                    "ok": True,
+                    "title": "悬案",
+                    "share_name": "悬案 (2026)",
+                    "tmdb_id": "273114",
+                    "type": "tv",
+                    "category": "国产电视",
+                    "category_status": "self_share_resolved",
+                }
+                row = self.submissions.update_recognition(
+                    int(row["id"]), recognition, "self_share_resolved"
+                ) or row
+                row = self.submissions.update_category(int(row["id"]), "国产电视", "selected") or row
+                direct_dir = western_root / "unmatched-direct-folder"
+                self._write_strm(direct_dir, content="http://cms/d/direct-link/movie.mkv")
+                direct_time = float(row["created_at"]) + 10
+                os.utime(direct_dir / "movie.strm", (direct_time, direct_time))
+                os.utime(direct_dir, (direct_time, direct_time))
+                task = self._claim_task(
+                    "abc",
+                    "1234",
+                    TaskStage.ORGANIZING,
+                    {
+                        "submission_id": row["id"],
+                        "recognition": recognition,
+                        "update_started_at": timestamp,
+                        "reprocess_started_at": timestamp,
+                    },
+                    row["id"],
+                )
+
+                result = workflow.run_stage(task)
+                stored = self.submissions.find_by_id(int(row["id"]))
+                stored_recognition = bridge.parse_recognition_json(stored)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(stored["category_choice"], "欧美电影")
+            self.assertEqual(stored_recognition["category"], "欧美电影")
+
     def test_organizing_without_current_run_cutoff_preserves_existing_persistence(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)

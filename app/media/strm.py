@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shutil
 import time
@@ -465,6 +466,8 @@ def find_recent_direct_library_strm_source_dir(
     try:
         explicit_since = float(min_update_time or 0)
     except (TypeError, ValueError):
+        explicit_since = 0
+    if not math.isfinite(explicit_since):
         explicit_since = 0
     if explicit_since > 0:
         since = max(since, explicit_since)

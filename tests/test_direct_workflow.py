@@ -374,7 +374,7 @@ class DirectWorkflowTests(unittest.TestCase):
         self.assertEqual(result.error_type, "cms_organize_failed")
         self.assertEqual(result.message, "CMS rejected")
 
-    def test_recent_direct_library_lookup_allows_old_exact_tmdb_folder(self):
+    def test_recent_direct_library_lookup_allows_old_exact_tmdb_folder_across_explicit_cutoff(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             library = root / "library"
@@ -383,6 +383,7 @@ class DirectWorkflowTests(unittest.TestCase):
             strm = media_root / "movie.strm"
             strm.write_text("https://115.com/d/file-id/movie.mkv", encoding="utf-8")
             os.utime(strm, (1, 1))
+            os.utime(media_root, (1, 1))
             config = MoveConfig(source_roots=[], library_roots={"欧美电影": library}, stable_seconds=0)
             row = {"created_at": 1000, "title": "Example"}
 
@@ -391,9 +392,33 @@ class DirectWorkflowTests(unittest.TestCase):
                 row,
                 {"tmdb_id": "123", "title": "Example"},
                 share_name="Example",
+                min_update_time=1000,
             )
 
         self.assertEqual(found, (media_root.resolve(), "欧美电影"))
+
+    def test_recent_direct_library_lookup_ignores_nonfinite_explicit_cutoffs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            library = root / "library"
+            media_root = library / "Example"
+            media_root.mkdir(parents=True)
+            strm = media_root / "movie.strm"
+            strm.write_text("https://115.com/d/file-id/movie.mkv", encoding="utf-8")
+            config = MoveConfig(source_roots=[], library_roots={"欧美电影": library}, stable_seconds=0)
+            row = {"created_at": 0, "title": "Example"}
+
+            for cutoff in (float("inf"), float("nan")):
+                with self.subTest(cutoff=cutoff):
+                    found = find_recent_direct_library_strm_source_dir(
+                        config,
+                        row,
+                        {"title": "Example"},
+                        share_name="Example",
+                        min_update_time=cutoff,
+                    )
+
+                    self.assertEqual(found, (media_root.resolve(), "欧美电影"))
 
     def test_recognizing_uses_saved_cms_category_and_needs_action_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:

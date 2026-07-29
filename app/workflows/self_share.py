@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import shutil
 import time
 from dataclasses import dataclass
@@ -81,6 +82,11 @@ def as_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def as_finite_timestamp(value: Any) -> float:
+    timestamp = as_float(value, 0.0)
+    return timestamp if math.isfinite(timestamp) else 0.0
 
 
 def source_delete_parent_id(task: Any, row: dict[str, Any], file_id: str) -> str:
@@ -1308,13 +1314,10 @@ class BridgeSelfShareTaskWorkflow:
         min_update_time = float(row.get("created_at") or 0)
         stage_metadata = dict(task.metadata)
         stage_metadata.update(hint_metadata)
-        try:
-            update_started_at = float(stage_metadata.get("update_started_at") or 0)
-        except (TypeError, ValueError):
-            update_started_at = 0
+        update_started_at = as_finite_timestamp(stage_metadata.get("update_started_at"))
         if update_started_at:
             min_update_time = max(min_update_time, update_started_at - 5)
-        reprocess_started_at = as_float(stage_metadata.get("reprocess_started_at"), 0)
+        reprocess_started_at = as_finite_timestamp(stage_metadata.get("reprocess_started_at"))
         if reprocess_started_at:
             min_update_time = max(min_update_time, reprocess_started_at - 5)
         direct_min_update_time = max(
