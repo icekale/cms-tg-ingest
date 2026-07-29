@@ -334,7 +334,38 @@ python3 -W error::ResourceWarning -m unittest -v \
 
 Expected: all tests PASS with no resource warnings.
 
-- [ ] **Step 5: Commit the historical recovery fix**
+- [ ] **Step 5: Add a failing legacy-snapshot safety regression**
+
+Add `test_hint_recovery_rejects_legacy_snapshot_containing_target_cid` to `P115SingleFileReceiveTests`. Use a real ordinary-file listing, set `received_existing_file_ids` to `["pending-cid"]`, call `_recover_received_items_for_hint()`, and assert that the result is `[]`.
+
+- [ ] **Step 6: Run the legacy-snapshot test and verify RED**
+
+```bash
+python3 -m unittest -v tests.test_p115_single_file_receive.P115SingleFileReceiveTests.test_hint_recovery_rejects_legacy_snapshot_containing_target_cid
+```
+
+Expected: FAIL because the ordinary file is currently selected even though the legacy baseline is ambiguous.
+
+- [ ] **Step 7: Fail closed on an invalid legacy baseline**
+
+Immediately after building `existing_ids` in `_recover_received_items_for_hint()`, add:
+
+```python
+if receive_cid in existing_ids:
+    # Older snapshots stored a regular file's parent cid as its item
+    # id. That baseline cannot safely distinguish old and new files.
+    return []
+```
+
+- [ ] **Step 8: Run both historical tests and verify GREEN**
+
+```bash
+python3 -m unittest -v tests.test_p115_single_file_receive
+```
+
+Expected: both tests PASS.
+
+- [ ] **Step 9: Commit the historical recovery fix**
 
 ```bash
 git add app/workflows/self_share.py tests/test_p115_single_file_receive.py

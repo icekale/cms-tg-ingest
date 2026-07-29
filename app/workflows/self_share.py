@@ -1088,6 +1088,10 @@ class BridgeSelfShareTaskWorkflow:
             for value in (task.metadata.get("received_existing_file_ids") or [])
             if str(value).strip()
         }
+        if receive_cid in existing_ids:
+            # Older snapshots stored a regular file's parent cid as its item
+            # id. That baseline cannot safely distinguish old and new files.
+            return []
         try:
             items = self.p115.list_files(receive_cid, limit=500)
         except Exception:
