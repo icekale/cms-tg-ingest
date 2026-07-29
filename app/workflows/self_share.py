@@ -1451,7 +1451,11 @@ class BridgeSelfShareTaskWorkflow:
                 if folder and has_tmdb_folder_mismatch(folder, recognition, row, title):
                     folder = None
                 category = str(recognition.get("category") or "").strip()
-                preserve_authoritative_category = not folder and has_authoritative_category(row, recognition)
+                preserve_authoritative_category = (
+                    direct_min_update_time > 0
+                    and not folder
+                    and has_authoritative_category(row, recognition)
+                )
                 if category and hasattr(self.store, "update_category") and not preserve_authoritative_category:
                     row = self.store.update_category(int(row["id"]), category, "selected") or row
                 if hasattr(self.store, "update_recognition") and not preserve_authoritative_category:
