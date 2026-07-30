@@ -237,6 +237,7 @@ class WebApiTests(unittest.TestCase):
                     "dest_path": str(destination),
                     "own_share_code": "own",
                     "own_share_receive_code": "1212",
+                    "organized_folder": {"file_name": "Q-质量 API 任务-2026-[tmdb=123]"},
                 },
             )
             app = WebApp(store, quality_automation=quality)
@@ -249,6 +250,7 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(item["code"], "direct_strm")
             self.assertEqual(item["task_id"], task.id)
             self.assertEqual(item["title"], "质量 API 任务")
+            self.assertEqual(item["display_title"], "Q-质量 API 任务-2026-[tmdb=123]")
             self.assertEqual(item["rule_id"], "strm_mode_mismatch")
             self.assertIn("execute", item["available_actions"])
             self.assertIn("snooze", item["available_actions"])
@@ -971,6 +973,62 @@ class WebApiTests(unittest.TestCase):
         payload = serialize_task(task)
         self.assertNotIn("secret", json.dumps(payload, ensure_ascii=False))
         self.assertEqual(payload["metadata"]["source_path"], "/safe")
+
+    def test_serialize_task_exposes_organized_folder_as_display_title(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task(
+                "folder-display",
+                "",
+                "https://115cdn.com/s/folder-display?password=secret",
+            )
+            store.record_event(
+                task.id,
+                TaskStage.MOVED,
+                TaskStatus.SUCCEEDED,
+                "moved",
+                title="https://115cdn.com/s/folder-display?password=secret",
+                metadata_patch={
+                    "organized_folder": {
+                        "file_name": "H-黑金-2011-[tmdb=77221]",
+                    },
+                },
+            )
+
+            payload = serialize_task(store.find_task(task.id))
+
+        self.assertEqual(payload["title"], "https://115cdn.com/s/folder-display?password=***")
+        self.assertEqual(payload["display_title"], "H-黑金-2011-[tmdb=77221]")
+
+    def test_serialize_task_display_title_falls_back_without_folder_metadata(self):
+        task = type(
+            "Task",
+            (),
+            {
+                "id": 2,
+                "title": "原始电影标题",
+                "share_code": "fallback-share",
+                "source_type": "share",
+                "current_stage": TaskStage.RECEIVED,
+                "status": TaskStatus.PENDING,
+                "strm_mode": "shared",
+                "category": "",
+                "tmdb_id": "",
+                "url": "https://115cdn.com/s/fallback-share",
+                "error_type": "",
+                "error_summary": "",
+                "retry_count": 0,
+                "next_run_at": 0,
+                "claimed_by": "",
+                "metadata": {},
+                "created_at": 0,
+                "updated_at": 0,
+            },
+        )()
+
+        payload = serialize_task(task)
+
+        self.assertEqual(payload["display_title"], "原始电影标题")
 
     def test_api_recursively_redacts_task_event_and_hdhive_credentials(self):
         task = type(

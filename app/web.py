@@ -47,6 +47,7 @@ from .web_api import (
     serialize_health,
     serialize_hdhive,
     serialize_hdhive_subscription,
+    task_display_title,
     _safe_url,
 )
 
@@ -407,28 +408,6 @@ def _task_lock_label(task: Any) -> str:
         return "-"
     owner = str(task.metadata.get("_lock_owner_task_id") or "").strip()
     return f"等待资源锁: #{owner} {reason}" if owner else f"等待资源锁: {reason}"
-
-
-def task_display_title(task: Any) -> str:
-    metadata = getattr(task, "metadata", {}) or {}
-    organized = metadata.get("organized_folder")
-    if isinstance(organized, dict):
-        folder_name = str(organized.get("file_name") or "").strip()
-        if folder_name:
-            return folder_name
-    for key in ("own_share_file_name", "dest_path", "source_path", "emby_path"):
-        value = str(metadata.get(key) or "").strip()
-        if not value:
-            continue
-        if key.endswith("_path"):
-            name = Path(value).name
-            if name:
-                return name
-        return value
-    title = str(getattr(task, "title", "") or "").strip()
-    if title and not title.startswith(("http://", "https://")):
-        return title
-    return str(getattr(task, "share_code", "") or title or "-")
 
 
 def parse_task_id_from_path(path: str) -> int | None:

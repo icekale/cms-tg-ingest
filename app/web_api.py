@@ -116,6 +116,28 @@ def _enum_value(value: Any) -> Any:
     return getattr(value, "value", value)
 
 
+def task_display_title(task: Any) -> str:
+    metadata = getattr(task, "metadata", {}) or {}
+    organized = metadata.get("organized_folder")
+    if isinstance(organized, dict):
+        folder_name = str(organized.get("file_name") or "").strip()
+        if folder_name:
+            return folder_name
+    for key in ("own_share_file_name", "dest_path", "source_path", "emby_path"):
+        value = str(metadata.get(key) or "").strip()
+        if not value:
+            continue
+        if key.endswith("_path"):
+            name = Path(value).name
+            if name:
+                return name
+        return value
+    title = str(getattr(task, "title", "") or "").strip()
+    if title and not title.startswith(("http://", "https://")):
+        return title
+    return str(getattr(task, "share_code", "") or title or "-")
+
+
 def _safe_container_value(value: Any) -> Any:
     if isinstance(value, dict):
         return _safe_metadata(value)
@@ -183,6 +205,7 @@ def serialize_task(
     return _safe_api_value({
         "id": task.id,
         "title": task.title or task.share_code,
+        "display_title": task_display_title(task),
         "source_type": task.source_type,
         "stage": _enum_value(task.current_stage),
         "status": _enum_value(task.status),
@@ -479,6 +502,7 @@ def quality_items(
             {
                 "task_id": issue.task_id,
                 "title": issue.title or (task.title if task is not None else ""),
+                "display_title": task_display_title(task) if task is not None else issue.title,
                 "code": issue.code,
                 "message": issue.message,
                 "detail": redact_quality_detail(issue.detail),
