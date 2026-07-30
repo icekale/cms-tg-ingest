@@ -5,8 +5,10 @@ from io import BytesIO
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
+from app.clients.cms import CmsClient
 from app.clients.http import FormHttp, HttpJson, _redact_text, _redact_url
-from app.clients.p115 import P115WebClient
+from app.clients.p115 import P115RiskControlError, P115WebClient
+from app.config import Config
 
 
 class FakeResponse:
@@ -461,6 +463,27 @@ class HttpClientTests(unittest.TestCase):
         self.assertEqual(urlopen.call_count, 2)
         sleep.assert_called_once()
 
+    def test_cms_auto_organize_does_not_retry_after_lost_response(self):
+        config = Config(
+            tg_bot_token="tg",
+            tg_allowed_chat_id="chat",
+            cms_base_url="http://cms",
+            cms_username="user",
+            cms_password="pass",
+            http_timeout=1,
+        )
+        responses = [
+            FakeResponse('{"code": 200, "data": {"token": "cms-token"}}'),
+            http.client.RemoteDisconnected("lost response"),
+            FakeResponse('{"code": 200, "data": {}}'),
+        ]
+
+        with patch("app.clients.http.urllib.request.urlopen", side_effect=responses) as urlopen:
+            with self.assertRaisesRegex(RuntimeError, "lost response"):
+                CmsClient(config).run_auto_organize()
+
+        self.assertEqual(urlopen.call_count, 2)
+
     def test_form_get_retries_one_transient_network_error(self):
         with (
             patch("app.clients.http.urllib.request.urlopen", side_effect=[URLError("temporary"), FakeResponse('{"ok": true}')]) as urlopen,
@@ -471,6 +494,47 @@ class HttpClientTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
         self.assertEqual(urlopen.call_count, 2)
         sleep.assert_called_once()
+
+    def test_p115_http_429_is_not_retried_inside_transport(self):
+        def rate_limited(*_args, **_kwargs):
+            raise TrackingHTTPError(
+                "https://webapi.115.com/files/search",
+                429,
+                "Too Many Requests",
+                {"Retry-After": "120"},
+                BytesIO(b'{"message":"too many requests"}'),
+            )
+
+        with patch("app.clients.http.urllib.request.urlopen", side_effect=rate_limited) as urlopen:
+            client = P115WebClient("UID=1", timeout=1, cache_ttl_seconds=0)
+
+            with self.assertRaises(P115RiskControlError) as raised:
+                client.search_files("movie")
+
+        self.assertEqual(urlopen.call_count, 1)
+        self.assertEqual(client.request_count, 1)
+        self.assertEqual(getattr(raised.exception, "retry_after_seconds", 0), 120)
+
+    def test_p115_http_429_parses_http_date_retry_after(self):
+        def rate_limited(*_args, **_kwargs):
+            raise TrackingHTTPError(
+                "https://webapi.115.com/files/search",
+                429,
+                "Too Many Requests",
+                {"Retry-After": "Thu, 01 Jan 1970 00:18:40 GMT"},
+                BytesIO(b'{"message":"too many requests"}'),
+            )
+
+        with (
+            patch("app.clients.http.urllib.request.urlopen", side_effect=rate_limited),
+            patch("app.clients.http.time.time", return_value=1000),
+        ):
+            client = P115WebClient("UID=1", timeout=1, cache_ttl_seconds=0)
+
+            with self.assertRaises(P115RiskControlError) as raised:
+                client.search_files("movie")
+
+        self.assertEqual(getattr(raised.exception, "retry_after_seconds", 0), 120)
 
     def test_post_does_not_retry_transient_network_error(self):
         with patch("app.clients.http.urllib.request.urlopen", side_effect=URLError("temporary")) as urlopen:

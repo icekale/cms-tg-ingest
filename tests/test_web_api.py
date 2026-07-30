@@ -16,7 +16,16 @@ from app.config import Config
 from app.background_jobs import BackgroundJobCoordinator, BackgroundJobSnapshot
 from app.quality_automation import QualityAutomation
 from app.web import WebApp
-from app.web_api import _safe_error, _safe_url, api_quality, serialize_hdhive, serialize_health, serialize_task
+from app.web_api import (
+    _safe_error,
+    _safe_url,
+    api_quality,
+    api_response,
+    serialize_event,
+    serialize_hdhive,
+    serialize_health,
+    serialize_task,
+)
 
 
 class WebApiTests(unittest.TestCase):
@@ -448,6 +457,24 @@ class WebApiTests(unittest.TestCase):
                 self.assertNotIn("variant-secret", _safe_url(f"https://hdhive.test/tv/x?{key}=variant-secret"))
                 self.assertNotIn("variant-secret", _safe_error(f"{key}=variant-secret"))
         self.assertNotIn("user-secret", _safe_url("https://user:user-secret@hdhive.test/tv/x"))
+
+    def test_api_recursively_redacts_sensitive_url_query_suffixes(self):
+        _status, _headers, body = api_response(
+            {
+                "nested": {
+                    "callback_url": (
+                        "https://example.test/callback?"
+                        "web_token=web-secret&emby_api_key=emby-secret&"
+                        "own_share_receive_code=share-secret"
+                    )
+                }
+            }
+        )
+
+        encoded = body.decode("utf-8")
+        self.assertNotIn("web-secret", encoded)
+        self.assertNotIn("emby-secret", encoded)
+        self.assertNotIn("share-secret", encoded)
 
     def test_health_api_reports_last_database_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -944,6 +971,93 @@ class WebApiTests(unittest.TestCase):
         payload = serialize_task(task)
         self.assertNotIn("secret", json.dumps(payload, ensure_ascii=False))
         self.assertEqual(payload["metadata"]["source_path"], "/safe")
+
+    def test_api_recursively_redacts_task_event_and_hdhive_credentials(self):
+        task = type(
+            "Task",
+            (),
+            {
+                "id": 1,
+                "title": "safe title",
+                "share_code": "safe",
+                "source_type": "share",
+                "current_stage": TaskStage.RECEIVED,
+                "status": TaskStatus.FAILED,
+                "strm_mode": "shared",
+                "category": "",
+                "tmdb_id": "",
+                "url": "https://115cdn.com/s/safe",
+                "error_type": "remote_error",
+                "error_summary": 'Authorization: "Bearer summary-credential"',
+                "retry_count": 0,
+                "next_run_at": 0,
+                "claimed_by": "",
+                "metadata": {
+                    "nested": [
+                        {"own_share_receive_code": "metadata-credential"},
+                        ('Cookie: "session=list-credential; csrf=list-csrf"',),
+                    ]
+                },
+                "created_at": 0,
+                "updated_at": 0,
+            },
+        )()
+        event = serialize_event(
+            {
+                "id": 1,
+                "stage": "received",
+                "status": "failed",
+                "message": 'Cookie: "session=event-credential"',
+                "error_type": "remote_error",
+                "created_at": 0,
+            }
+        )
+
+        class Proxy:
+            def account(self):
+                raise RuntimeError('Authorization: "Bearer hdhive-credential"')
+
+        hdhive = serialize_hdhive(SimpleNamespace(list=lambda: [], proxy=Proxy()))
+        _status, _headers, body = api_response(
+            {
+                "task": serialize_task(task),
+                "event": event,
+                "hdhive": hdhive,
+                "nested": [
+                    {
+                        "message": "Bearer boundary-credential",
+                        "web_token": "web-token-credential",
+                        "emby_api_key": "emby-key-credential",
+                    }
+                ],
+                "own_share_receive_code": {
+                    "configured": True,
+                    "masked": "****",
+                    "source": "env",
+                    "value": "receive-code-credential",
+                },
+            }
+        )
+        encoded = body.decode("utf-8")
+        decoded = json.loads(encoded)
+
+        for secret in (
+            "summary-credential",
+            "metadata-credential",
+            "list-credential",
+            "list-csrf",
+            "event-credential",
+            "hdhive-credential",
+            "boundary-credential",
+            "web-token-credential",
+            "emby-key-credential",
+            "receive-code-credential",
+        ):
+            self.assertNotIn(secret, encoded)
+        self.assertEqual(
+            decoded["own_share_receive_code"],
+            {"configured": True, "masked": "****", "source": "env"},
+        )
 
     def test_serialize_task_rejects_non_normalizable_ed2k_url_without_crashing(self):
         with tempfile.TemporaryDirectory() as tmp:

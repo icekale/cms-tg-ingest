@@ -729,12 +729,12 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(result.summary["expected"], 2)
         self.assertEqual(result.summary["tmdb_status"], "Ended")
 
-    def test_emby_failure_continues_without_skipping_and_reports_reason(self):
+    def test_emby_failure_blocks_automatic_unlock_and_reports_reason(self):
         emby = FakeEmby(error=RuntimeError("Emby unavailable"))
         unlock_items = [
             HdhiveUnlockItem("s1e1", True, "https://115cdn.com/s/s1e1?password=abcd", "", "", False)
         ]
-        directory, _store, subscription, _proxy, service, _intake_calls = self.make_service(
+        directory, _store, subscription, proxy, service, _intake_calls = self.make_service(
             [resource("s1e1", episode_key="s1e1")],
             unlock_items,
             emby=emby,
@@ -744,9 +744,10 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         finally:
             directory.cleanup()
 
-        self.assertEqual(result.enqueued, 1)
+        self.assertEqual(result.enqueued, 0)
         self.assertTrue(result.summary["emby_skip_unavailable"])
         self.assertEqual(result.subscription_status, "active")
+        self.assertEqual(proxy.unlock_calls, [])
 
     def test_unconfigured_emby_reports_skip_unavailable(self):
         unlock_items = [
@@ -781,7 +782,7 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertTrue(result.summary["emby_skip_unavailable"])
         self.assertEqual(emby.calls, [])
 
-    def test_empty_emby_episode_result_reports_skip_unavailable(self):
+    def test_empty_emby_episode_result_is_a_successful_lookup(self):
         emby = FakeEmby()
         unlock_items = [
             HdhiveUnlockItem("s1e1", True, "https://115cdn.com/s/s1e1?password=abcd", "", "", False)
@@ -796,7 +797,8 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         finally:
             directory.cleanup()
 
-        self.assertTrue(result.summary["emby_skip_unavailable"])
+        self.assertFalse(result.summary["emby_skip_unavailable"])
+        self.assertEqual(result.enqueued, 1)
         self.assertEqual(emby.calls, ["255358"])
 
     def test_unknown_tmdb_result_never_marks_subscription_completed(self):

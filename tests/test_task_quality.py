@@ -159,6 +159,62 @@ class TaskQualityTests(unittest.TestCase):
             self.assertEqual(missing[0].code, "missing_dest")
             self.assertEqual(empty[0].code, "missing_strm")
 
+    def test_unreadable_strm_is_reported_without_aborting_other_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "Movie"
+            dest.mkdir()
+            bad = dest / "bad.strm"
+            good = dest / "good.strm"
+            bad.write_text("ignored", encoding="utf-8")
+            good.write_text("http://cms/s/ownshare_1212_fileid.mkv", encoding="utf-8")
+            task = TaskStore(root / "tasks.db").upsert_task("abc", "", "https://115cdn.com/s/abc")
+            original_read_text = Path.read_text
+
+            def read_text(path, *args, **kwargs):
+                if path == bad:
+                    raise OSError("permission denied")
+                return original_read_text(path, *args, **kwargs)
+
+            with patch.object(Path, "read_text", new=read_text):
+                issues = inspect_task_files(task, dest_path=dest, own_share_code="ownshare")
+
+            self.assertEqual([issue.code for issue in issues], ["unreadable_strm"])
+            self.assertIn(str(bad), issues[0].detail)
+
+    def test_scan_reuses_directory_reads_but_keeps_per_task_marker_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "Movie"
+            dest.mkdir()
+            strm = dest / "movie.strm"
+            strm.write_text("http://cms/s/first_1212_fileid.mkv", encoding="utf-8")
+            store = TaskStore(root / "tasks.db")
+            tasks = []
+            for share_code, own_share_code in (("first-task", "first"), ("second-task", "second")):
+                task = store.upsert_task(share_code, "", f"https://115cdn.com/s/{share_code}")
+                tasks.append(
+                    store.record_event(
+                        task.id,
+                        TaskStage.MOVED,
+                        TaskStatus.SUCCEEDED,
+                        "moved",
+                        metadata_patch={"dest_path": str(dest), "own_share_code": own_share_code},
+                    )
+                )
+            original_read_text = Path.read_text
+            reads = []
+
+            def read_text(path, *args, **kwargs):
+                reads.append(path)
+                return original_read_text(path, *args, **kwargs)
+
+            with patch.object(Path, "read_text", new=read_text):
+                issues = scan_task_quality(store, tasks=tasks)
+
+            self.assertEqual(reads, [strm])
+            self.assertEqual([(issue.task_id, issue.code) for issue in issues], [(tasks[1].id, "unexpected_strm")])
+
     def test_scan_rejects_strm_symlink_target_outside_allowed_root_before_reading(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

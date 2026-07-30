@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import threading
 import time
 from copy import deepcopy
 from typing import Any
 
-from app.clients.http import FormHttp, load_cookie_value
+from app.clients.http import FormHttp, HttpRequestError, load_cookie_value
 from app.clients.p115_cipher import lixian_rsa_encrypt
 from app.config import default_library_roots
 from app.media.classify import candidate_tokens, extract_tmdb_id_from_name, extract_year_from_name, normalize_text
@@ -24,6 +25,10 @@ PAN115_ANDROID_USER_AGENT = "Mozilla/5.0 115disk/99.99.99.99 115Browser/99.99.99
 
 class P115RiskControlError(RuntimeError):
     """Raised when 115 asks callers to slow down or stops automated actions."""
+
+    def __init__(self, message: str, *, retry_after_seconds: int = 0):
+        super().__init__(message)
+        self.retry_after_seconds = max(0, int(retry_after_seconds or 0))
 
 
 class P115ShareUnavailableError(RuntimeError):
@@ -358,7 +363,14 @@ def select_source_residue_115_files(
     min_update_time: float = 0,
 ) -> list[dict[str, str]]:
     excluded = {str(value) for value in (excluded_file_ids or set()) if str(value)}
-    tokens = candidate_tokens(recognition, share_name)
+    title_values = [
+        str(recognition.get("title") or "").strip(),
+        str(recognition.get("share_name") or "").strip(),
+        str(share_name or "").strip(),
+    ]
+    full_name_tokens = {normalize_text(value) for value in title_values if value}
+    title_values = [value for value in title_values if value and len(normalize_text(value)) >= 2]
+    expected_tmdb = str(recognition.get("tmdb_id") or "").strip()
     year = extract_year_from_name(share_name) or extract_year_from_name(str(recognition.get("title") or ""))
     matches: list[tuple[int, float, dict[str, str]]] = []
     for item in items:
@@ -367,12 +379,32 @@ def select_source_residue_115_files(
         if not file_id or not name or file_id in excluded:
             continue
         update_time = as_float(item.get("tu") or item.get("t") or item.get("te"), 0.0)
-        if min_update_time and update_time and update_time < min_update_time:
+        if not math.isfinite(update_time) or update_time <= 0:
+            continue
+        if min_update_time and update_time < min_update_time:
             continue
         norm_name = normalize_text(name)
+        item_tmdb = extract_tmdb_id_from_name(name)
+        if item_tmdb and expected_tmdb and item_tmdb != expected_tmdb:
+            continue
+        exact_tmdb = bool(item_tmdb and expected_tmdb and item_tmdb == expected_tmdb)
+        item_year = extract_year_from_name(name)
+        if not exact_tmdb and year and item_year and item_year != year:
+            continue
         score = 0
-        if any(token and token in norm_name for token in tokens):
-            score += 5
+        if exact_tmdb:
+            score = 10
+        elif norm_name in full_name_tokens:
+            score = 8
+        elif any(
+            re.search(
+                rf"(?<![A-Za-z0-9\u4e00-\u9fff]){re.escape(value)}(?![A-Za-z0-9\u4e00-\u9fff])",
+                name,
+                re.IGNORECASE,
+            )
+            for value in title_values
+        ):
+            score = 5
         if year and year in name:
             score += 2
         if score < 5:
@@ -405,7 +437,7 @@ class P115WebClient:
         sleeper: Any | None = None,
     ):
         self.cookie = load_cookie_value(cookie)
-        self.http = http or FormHttp(timeout)
+        self.http = http or FormHttp(timeout, safe_get_attempts=1)
         self.min_interval_seconds = max(0.0, float(min_interval_seconds or 0.0))
         self.cache_ttl_seconds = max(0.0, float(cache_ttl_seconds or 0.0))
         self.share_list_cache_ttl_seconds = max(0.0, float(share_list_cache_ttl_seconds or 0.0))
@@ -475,7 +507,15 @@ class P115WebClient:
             request_headers = self._headers()
             if headers:
                 request_headers.update(headers)
-            response = self.http.request(url, method=method, data=data, params=params, headers=request_headers)
+            try:
+                response = self.http.request(url, method=method, data=data, params=params, headers=request_headers)
+            except HttpRequestError as exc:
+                if exc.status_code == 429:
+                    raise P115RiskControlError(
+                        "115 HTTP 429: 请求过于频繁，请稍后再试",
+                        retry_after_seconds=exc.retry_after_seconds,
+                    ) from exc
+                raise
             if cache_key and isinstance(response, dict) and response.get("state") is not False:
                 self._get_cache[cache_key] = (float(self.clock()) + self.cache_ttl_seconds, deepcopy(response))
             return response
@@ -980,6 +1020,18 @@ class P115WebClient:
             "parent_id": p115_parent_id(item),
             "file_name": p115_file_name(item),
             "raw": item,
+        }
+
+    def find_cloud_download_by_source(self, source_url: str) -> dict[str, Any]:
+        item = self._find_cloud_task(source_url=source_url)
+        if not item:
+            return {}
+        return {
+            **_cloud_identity(item),
+            "status": normalize_cloud_status(item),
+            "file_id": p115_file_id(item),
+            "parent_id": p115_parent_id(item),
+            "file_name": p115_file_name(item),
         }
 
     def _find_cloud_task(

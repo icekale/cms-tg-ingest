@@ -622,18 +622,87 @@ class BridgeSelfShareTaskWorkflow:
             return self._stage_cleaned(task)
         return StageResult.failed("阶段尚未实现", error_type="unsupported_stage")
 
-    def _trigger_cloud_auto_organize(self, row_id: int, metadata: dict[str, Any]) -> StageResult:
-        try:
-            self.cms.run_auto_organize()
-        except Exception as exc:
-            metadata["auto_organize_pending"] = True
-            metadata["auto_organize_last_error"] = str(exc)[:500]
-            LOG.warning("CMS auto-organize trigger failed after cloud download row_id=%s", row_id, exc_info=True)
-            return StageResult.defer(
-                "文件已移动到待整理目录，等待 CMS 自动整理触发成功",
-                self.self_share_config.auto_organize_retry_seconds or 30,
-                metadata,
+    def _trigger_cloud_auto_organize(self, task, row_id: int, metadata: dict[str, Any]) -> StageResult:
+        operation = None
+        operation_key = ""
+        attempt = max(0, int(metadata.get("auto_organize_attempt") or 0))
+        if self.task_store is not None:
+            while True:
+                operation_key = f"{operation_scope(task)}:cloud_auto_organize:{attempt}"
+                operation = self.task_store.find_operation(int(task.id), operation_key)
+                if operation is None or operation.status != "failed":
+                    break
+                attempt += 1
+                metadata["auto_organize_attempt"] = attempt
+            if operation is None:
+                operation = self.task_store.prepare_operation(
+                    int(task.id),
+                    operation_key,
+                    "cloud_auto_organize",
+                    {"submission_id": int(row_id)},
+                )
+        if operation is None:
+            try:
+                self.cms.run_auto_organize()
+            except Exception as exc:
+                metadata["auto_organize_pending"] = True
+                metadata["auto_organize_last_error"] = str(exc)[:500]
+                LOG.warning("CMS auto-organize trigger failed after cloud download row_id=%s", row_id, exc_info=True)
+                return StageResult.defer(
+                    "文件已移动到待整理目录，等待 CMS 自动整理触发成功",
+                    self.self_share_config.auto_organize_retry_seconds or 30,
+                    metadata,
+                )
+        elif operation.status == "prepared":
+            started = self.task_store.start_operation(int(task.id), operation_key)
+            operation = started or self.task_store.find_operation(int(task.id), operation_key)
+            if started is not None:
+                try:
+                    response = self.cms.run_auto_organize()
+                except Exception as exc:
+                    self.task_store.mark_operation_failed(int(task.id), operation_key, str(exc))
+                    metadata["auto_organize_attempt"] = attempt + 1
+                    metadata["auto_organize_pending"] = True
+                    metadata["auto_organize_last_error"] = str(exc)[:500]
+                    LOG.warning(
+                        "CMS auto-organize trigger failed after cloud download row_id=%s",
+                        row_id,
+                        exc_info=True,
+                    )
+                    return StageResult.defer(
+                        "文件已移动到待整理目录，等待 CMS 自动整理触发成功",
+                        self.self_share_config.auto_organize_retry_seconds or 30,
+                        metadata,
+                    )
+                completed = self.task_store.complete_operation(
+                    int(task.id),
+                    operation_key,
+                    response if isinstance(response, dict) else {"accepted": True},
+                )
+                operation = completed or self.task_store.find_operation(int(task.id), operation_key)
+        elif operation.status in {"started", "uncertain"}:
+            if operation.status == "started":
+                uncertain = self.task_store.mark_operation_uncertain(
+                    int(task.id),
+                    operation_key,
+                    "CMS auto-organize result was not persisted",
+                )
+                operation = uncertain or self.task_store.find_operation(int(task.id), operation_key)
+            metadata.update(
+                {
+                    "auto_organize_pending": True,
+                    "auto_organize_operation_key": operation_key,
+                    "auto_organize_last_error": "CMS 自动整理触发结果无法确认",
+                }
             )
+            return StageResult(
+                StageOutcome.NEEDS_ACTION,
+                "CMS 自动整理触发结果无法确认，已禁止自动重复触发；请检查 CMS 后重新处理",
+                metadata,
+                error_type="cloud_auto_organize_uncertain",
+            )
+        if operation is not None and operation.status != "succeeded":
+            raise RuntimeError("CMS auto-organize operation could not be persisted")
         self.store.update_self_share(row_id, workflow_phase="auto_organize_submitted")
         metadata["auto_organize_pending"] = False
         metadata["auto_organize_submitted_at"] = self._now()
@@ -665,14 +734,88 @@ class BridgeSelfShareTaskWorkflow:
             row = self._submission_row(task)
             if not row:
                 return StageResult.failed("找不到云下载提交记录", error_type="submission_missing")
-            return self._trigger_cloud_auto_organize(int(row["id"]), metadata)
+            return self._trigger_cloud_auto_organize(task, int(row["id"]), metadata)
         info_hash = str(metadata.get("cloud_info_hash") or "").strip()
         task_id = str(metadata.get("cloud_task_id") or "").strip()
         if not info_hash and not task_id:
-            submitted = self.p115.cloud_download_add(task.url, receive_cid)
+            submitted = None
+            operation = None
+            operation_key = f"{operation_scope(task)}:cloud_download_submit"
+            if self.task_store is not None:
+                operation = self.task_store.find_operation(int(task.id), operation_key)
+                if operation is None:
+                    operation = self.task_store.prepare_operation(
+                        int(task.id),
+                        operation_key,
+                        "cloud_download_submit",
+                        {"url": task.url, "target_cid": receive_cid},
+                    )
+            if operation is None:
+                submitted = self.p115.cloud_download_add(task.url, receive_cid)
+            elif operation.status == "prepared":
+                started = self.task_store.start_operation(int(task.id), operation_key)
+                operation = started or self.task_store.find_operation(int(task.id), operation_key)
+                if started is not None:
+                    submitted = self.p115.cloud_download_add(
+                        str(operation.request.get("url") or task.url),
+                        str(operation.request.get("target_cid") or receive_cid),
+                    )
+                    completed = self.task_store.complete_operation(
+                        int(task.id),
+                        operation_key,
+                        submitted,
+                    )
+                    operation = completed or self.task_store.find_operation(int(task.id), operation_key)
+            elif operation.status == "succeeded":
+                submitted = operation.result
+            elif operation.status in {"started", "uncertain"}:
+                recover = getattr(self.p115, "find_cloud_download_by_source", None)
+                if callable(recover):
+                    submitted = recover(str(operation.request.get("url") or task.url)) or None
+                if submitted and operation.status == "started":
+                    completed = self.task_store.complete_operation(
+                        int(task.id),
+                        operation_key,
+                        submitted,
+                    )
+                    operation = completed or self.task_store.find_operation(int(task.id), operation_key)
+                if not submitted:
+                    operation_started_at = float(operation.started_at or operation.created_at or self._now())
+                    metadata.update(
+                        {
+                            "cloud_started_at": operation_started_at,
+                            "cloud_target_cid": receive_cid,
+                            "cloud_submit_recovery_pending": True,
+                        }
+                    )
+                    if self._now() - operation_started_at >= timeout_seconds:
+                        return StageResult(
+                            StageOutcome.NEEDS_ACTION,
+                            "115 云下载提交结果无法确认，已禁止自动重复提交",
+                            metadata,
+                            error_type="cloud_download_submit_uncertain",
+                        )
+                    return StageResult.defer(
+                        "等待确认 115 云下载提交结果，禁止自动重复提交",
+                        self.self_share_config.cloud_poll_seconds,
+                        metadata,
+                    )
+            if operation is not None and operation.status == "failed":
+                return StageResult(
+                    StageOutcome.NEEDS_ACTION,
+                    "115 云下载提交状态无法安全恢复，请人工检查",
+                    metadata,
+                    error_type="cloud_download_submit_failed",
+                )
+            if not submitted:
+                raise RuntimeError("115 cloud download operation disappeared")
             info_hash = str(submitted.get("info_hash") or "").strip()
             task_id = str(submitted.get("task_id") or "").strip()
-            started_at = self._now()
+            started_at = float(
+                (operation.started_at if operation is not None else 0)
+                or metadata.get("cloud_started_at")
+                or self._now()
+            )
             metadata.update(
                 {
                     "cloud_info_hash": info_hash,
@@ -682,6 +825,7 @@ class BridgeSelfShareTaskWorkflow:
                     "cloud_status": normalize_cloud_status(submitted),
                 }
             )
+            metadata.pop("cloud_submit_recovery_pending", None)
             return StageResult.defer(
                 "已提交 115 云下载，等待完成",
                 self.self_share_config.cloud_poll_seconds,
@@ -799,7 +943,7 @@ class BridgeSelfShareTaskWorkflow:
                 "auto_organize_pending": True,
             }
         )
-        return self._trigger_cloud_auto_organize(int(row["id"]), metadata)
+        return self._trigger_cloud_auto_organize(task, int(row["id"]), metadata)
 
     def _submission_row(self, task) -> dict[str, Any] | None:
         submission_id = task.metadata.get("submission_id") or task.submission_id

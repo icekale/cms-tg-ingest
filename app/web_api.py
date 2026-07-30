@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 from .background_jobs import redact_background_text
+from .logging_system import redact_text
 from .models import TaskSnapshot
 from .quality_rules import QUALITY_RULE_VERSION, QualityRuleEngine, quality_attempt_count
 from .task_diagnostics import explain_task_slowness, format_stage_observability
@@ -43,10 +44,43 @@ _SENSITIVE_QUERY_KEYS = {
 _SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(password|passwd|pwd|token|access_token|refresh_token|cookie|share[-_]?password|share[-_]?pwd|hdhive[-_]?token|api[-_]?key|authorization|auth_token|bearer_token|session_token|csrf_token|p115_cookie)\s*([:=])\s*([^\s&;,]+)"
 )
+_SENSITIVE_METADATA_KEYS = {
+    "authorization",
+    "cookie",
+    "p115_cookie",
+    "access_token",
+    "refresh_token",
+    "hdhive_token",
+    "token",
+    "receive_code",
+    "own_share_receive_code",
+    "password",
+    "share_password",
+    "share_pwd",
+    "api_key",
+    "apikey",
+    "auth_token",
+    "bearer_token",
+    "session_token",
+    "csrf_token",
+    "own_share_url",
+}
+_SENSITIVE_METADATA_KEY_SUFFIXES = (
+    "_token",
+    "_api_key",
+    "_cookie",
+    "_password",
+    "_passwd",
+    "_pwd",
+    "_secret",
+)
+_OWN_SHARE_RECEIVE_CODE_SOURCES = {"web", "cms", "env", "default"}
 
 
 def _safe_error(value: Any) -> str:
-    return _SENSITIVE_ASSIGNMENT_RE.sub(r"\1\2***", str(value or ""))
+    redacted = redact_background_text(redact_text(value or ""))
+    redacted = redacted.replace("[REDACTED]", "***").replace("[redacted]", "***")
+    return _SENSITIVE_ASSIGNMENT_RE.sub(r"\1\2***", redacted)
 
 
 def _safe_url(value: str) -> str:
@@ -70,7 +104,7 @@ def _safe_url(value: str) -> str:
     safe_netloc = hostname + (f":{port}" if port is not None else "")
     query = []
     for key, item in parse_qsl(parsed.query, keep_blank_values=True):
-        if key.lower() in _SENSITIVE_QUERY_KEYS:
+        if key.lower() in _SENSITIVE_QUERY_KEYS or _is_sensitive_metadata_key(key):
             query.append((key, "***"))
         else:
             query.append((key, item))
@@ -82,37 +116,58 @@ def _enum_value(value: Any) -> Any:
     return getattr(value, "value", value)
 
 
+def _safe_container_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return _safe_metadata(value)
+    if isinstance(value, (list, tuple)):
+        return [_safe_container_value(item) for item in value]
+    if isinstance(value, str):
+        if value.startswith(("http://", "https://")):
+            return _safe_url(value)
+        return _safe_error(value)
+    return value
+
+
+def _is_sensitive_metadata_key(value: Any) -> bool:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    return normalized in _SENSITIVE_METADATA_KEYS or normalized.endswith(_SENSITIVE_METADATA_KEY_SUFFIXES)
+
+
 def _safe_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
-    sensitive_keys = {
-        "cookie",
-        "p115_cookie",
-        "access_token",
-        "refresh_token",
-        "hdhive_token",
-        "token",
-        "receive_code",
-        "password",
-        "share_password",
-        "share_pwd",
-        "api_key",
-        "apikey",
-        "auth_token",
-        "bearer_token",
-        "session_token",
-        "csrf_token",
-        "own_share_url",
-    }
     for key, value in metadata.items():
-        if str(key).lower() in sensitive_keys:
+        if _is_sensitive_metadata_key(key):
             continue
-        if isinstance(value, str) and value.startswith(("http://", "https://")):
-            result[str(key)] = _safe_url(value)
-        elif isinstance(value, dict):
-            result[str(key)] = _safe_metadata(value)
-        else:
-            result[str(key)] = value
+        result[str(key)] = _safe_container_value(value)
     return result
+
+
+def _safe_api_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            normalized_key = str(key).lower()
+            if normalized_key == "own_share_receive_code" and isinstance(item, dict):
+                configured = bool(item.get("configured"))
+                source = str(item.get("source") or "").strip().lower()
+                result[key] = {
+                    "configured": configured,
+                    "masked": "****" if configured else "",
+                    "source": source if source in _OWN_SHARE_RECEIVE_CODE_SOURCES else "",
+                }
+                continue
+            if _is_sensitive_metadata_key(normalized_key):
+                result[key] = "***"
+                continue
+            result[key] = _safe_api_value(item)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_safe_api_value(item) for item in value]
+    if isinstance(value, str):
+        if value.startswith(("http://", "https://")):
+            return _safe_url(value)
+        return _safe_error(value)
+    return value
 
 
 def serialize_task(
@@ -125,7 +180,7 @@ def serialize_task(
     elapsed, p115_calls = format_stage_observability(task)
     termination_requested = task_termination_requested(task)
     available_actions = sorted(available_lifecycle_actions(task)) if lifecycle_actions_enabled else []
-    return {
+    return _safe_api_value({
         "id": task.id,
         "title": task.title or task.share_code,
         "source_type": task.source_type,
@@ -135,7 +190,7 @@ def serialize_task(
         "category": task.category or task.metadata.get("category") or "",
         "tmdb_id": task.tmdb_id or task.metadata.get("tmdb_id") or "",
         "safe_url": _safe_url(task.url),
-        "error": {"type": task.error_type, "summary": task.error_summary},
+        "error": {"type": task.error_type, "summary": _safe_error(task.error_summary)},
         "retry_count": task.retry_count,
         "next_run_at": task.next_run_at,
         "claimed": bool(task.claimed_by),
@@ -147,18 +202,18 @@ def serialize_task(
         "metadata": _safe_metadata(task.metadata),
         "created_at": task.created_at,
         "updated_at": task.updated_at,
-    }
+    })
 
 
 def serialize_event(event: dict[str, Any]) -> dict[str, Any]:
-    return {
+    return _safe_api_value({
         "id": int(event.get("id") or 0),
         "stage": str(event.get("stage") or ""),
         "status": str(event.get("status") or ""),
-        "message": str(event.get("message") or ""),
+        "message": _safe_error(event.get("message")),
         "error_type": str(event.get("error_type") or ""),
         "created_at": float(event.get("created_at") or 0),
-    }
+    })
 
 
 def serialize_health(store: TaskStore, *, enabled: bool = True, now: float | None = None) -> dict[str, Any]:
@@ -282,13 +337,13 @@ def serialize_hdhive(
             schedule = dict(scheduler.status_snapshot())
         except Exception as exc:
             schedule = {"error": _safe_error(str(exc)[:160])}
-    return {
+    return _safe_api_value({
         "enabled": True,
         "subscriptions": subscriptions,
         "account": account,
         "schedule": schedule,
         "background_job": serialize_background_job(background_jobs, prefix="hdhive:"),
-    }
+    })
 
 
 def serialize_hdhive_subscription(service: Any | None, subscription_id: int) -> dict[str, Any] | None:
@@ -302,7 +357,7 @@ def serialize_hdhive_subscription(service: Any | None, subscription_id: int) -> 
 
 
 def api_response(payload: Any, *, status: int = 200) -> tuple[int, dict[str, str], bytes]:
-    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    body = json.dumps(_safe_api_value(payload), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return status, {"Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store"}, body
 
 

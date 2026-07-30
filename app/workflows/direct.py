@@ -589,7 +589,17 @@ class DirectTaskWorkflow:
             "STRM 源目录仍在更新",
         }:
             return StageResult.defer(plan.reason, 15, metadata)
-        moved_row = execute_strm_move(plan, self.store, row)
+        if plan.status == "skipped" and plan.reason == "已在目标媒体库，无需移动" and plan.dest_path:
+            moved_row = self.store.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(plan.source_path or source),
+                dest_path=str(plan.dest_path),
+                category_final=category,
+                error="已恢复移动完成状态",
+            ) or row
+        else:
+            moved_row = execute_strm_move(plan, self.store, row)
         move_status = str(moved_row.get("move_status") or "").lower()
         metadata.update(
             {

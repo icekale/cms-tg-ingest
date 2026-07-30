@@ -553,7 +553,7 @@ def find_recent_direct_library_strm_source_dir(
     if len(token_matches) == 1:
         path, (category, _mtime, _token_match, _tmdb_match) = token_matches[0]
         return safe_resolve(path), category
-    if len(candidates) == 1:
+    if len(candidates) == 1 and math.isfinite(since) and since > 0:
         path, (category, _mtime, _token_match, _tmdb_match) = next(iter(candidates.items()))
         return safe_resolve(path), category
     return None
@@ -647,24 +647,27 @@ def remove_direct_strm_relative_paths(path: Path, relative_paths: set[Path]) -> 
     return removed
 
 
-def remove_direct_strm_files_matching_source(source: Path, destination: Path) -> int:
-    """Remove only stale direct STRMs at paths supplied by a validated source."""
-    source = safe_resolve(source)
-    destination = safe_resolve(destination)
-    if not source.is_dir() or not destination.is_dir():
-        return 0
-    removed = 0
-    for source_path in iter_strm_files(source):
-        relative_path = source_path.relative_to(source)
-        target = safe_resolve(destination / relative_path)
-        if not is_relative_to(target, destination) or not target.is_file() or not _strm_has_direct_link(target):
+def validate_self_share_strm_merge(source: Path, destination: Path, row: dict[str, Any]) -> str:
+    """Validate the destination state after source-relative STRMs are replaced."""
+    if str(row.get("workflow_mode") or "") != "self_share_sync":
+        return ""
+    directory_issue = _validate_self_share_strm_directory_tmdb(destination, row)
+    if directory_issue:
+        return directory_issue
+    own_share_code = str(row.get("own_share_code") or "").strip()
+    if not own_share_code:
+        return "等待自有分享码，暂不移动 STRM"
+    receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+    expected_marker = f"/s/{own_share_code}_{receive_code}_"
+    for existing in iter_strm_files(destination):
+        relative = existing.relative_to(destination)
+        replacement = safe_resolve(source / relative)
+        if is_relative_to(replacement, source) and replacement.is_file():
             continue
-        try:
-            target.unlink()
-        except OSError:
-            continue
-        removed += 1
-    return removed
+        issue = validate_self_share_strm_file(existing, expected_marker)
+        if issue:
+            return issue
+    return ""
 
 
 def _self_share_move_path_issue(source: Path, dest: Path, move_config: MoveConfig) -> str:
@@ -734,19 +737,8 @@ def merge_self_share_strm_folder(
                 source_target = safe_resolve(source / relative)
                 if not is_relative_to(source_target, source) or not source_target.is_file():
                     issue = f"源自有分享 STRM 不存在：{relative}"
-        stale_direct_removed = 0
         if not issue and str(row.get("workflow_mode") or "") == "self_share_sync" and dest.exists():
-            stale_direct_removed = remove_direct_strm_files_matching_source(source, dest)
-            if relative is not None:
-                target = safe_resolve(dest / relative)
-                if not is_relative_to(target, dest):
-                    issue = "单集 STRM 相对路径无效"
-                else:
-                    issue = validate_self_share_strm_destination(dest, row, required_relative_path)
-                    if not target.exists() and issue == f"目标自有分享 STRM 不存在：{relative}":
-                        issue = validate_self_share_strm_source(dest, row) if has_strm_file(dest) else ""
-            else:
-                issue = "" if stale_direct_removed and not has_strm_file(dest) else validate_self_share_strm_destination(dest, row)
+            issue = validate_self_share_strm_merge(source, dest, row)
         if issue:
             return store.update_move(
                 int(row["id"]),
@@ -781,7 +773,12 @@ def merge_self_share_strm_folder(
             target.parent.mkdir(parents=True, exist_ok=True)
             if child.suffix.lower() == ".strm":
                 if target.is_file() and expected_marker and str(row.get("workflow_mode") or "") == "self_share_sync":
-                    continue
+                    if not validate_self_share_strm_file(target, expected_marker):
+                        try:
+                            if target.read_bytes() == child.read_bytes():
+                                continue
+                        except OSError:
+                            pass
                 temp_path = target.with_name(target.name + ".cms-ingest.tmp")
                 shutil.copy2(child, temp_path)
                 os.replace(temp_path, target)

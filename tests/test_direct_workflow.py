@@ -420,6 +420,48 @@ class DirectWorkflowTests(unittest.TestCase):
 
                     self.assertEqual(found, (media_root.resolve(), "欧美电影"))
 
+    def test_recent_direct_library_lookup_rejects_only_unrelated_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            library = root / "library"
+            unrelated = library / "007-无暇赴死-[tmdb=370172]"
+            unrelated.mkdir(parents=True)
+            (unrelated / "movie.strm").write_text(
+                "https://115.com/d/unrelated/movie.mkv",
+                encoding="utf-8",
+            )
+            config = MoveConfig(source_roots=[], library_roots={"欧美电影": library}, stable_seconds=0)
+
+            found = find_recent_direct_library_strm_source_dir(
+                config,
+                {"created_at": 0, "title": "危机13小时"},
+                {"title": "危机13小时"},
+                share_name="13.Hours.2016.2160p.mkv",
+            )
+
+        self.assertIsNone(found)
+
+    def test_recent_direct_library_lookup_accepts_only_candidate_with_task_time_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            library = root / "library"
+            generated = library / "cms-generated-folder"
+            generated.mkdir(parents=True)
+            strm = generated / "movie.strm"
+            strm.write_text("https://115.com/d/generated/movie.mkv", encoding="utf-8")
+            os.utime(strm, (1010, 1010))
+            os.utime(generated, (1010, 1010))
+            config = MoveConfig(source_roots=[], library_roots={"欧美电影": library}, stable_seconds=0)
+
+            found = find_recent_direct_library_strm_source_dir(
+                config,
+                {"created_at": 1000, "title": "危机13小时"},
+                {"title": "危机13小时"},
+                share_name="13.Hours.2016.2160p.mkv",
+            )
+
+        self.assertEqual(found, (generated.resolve(), "欧美电影"))
+
     def test_recognizing_uses_saved_cms_category_and_needs_action_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow, _cms, submissions = self._workflow(tmp)
@@ -485,6 +527,50 @@ class DirectWorkflowTests(unittest.TestCase):
         self.assertEqual(stored["emby_item_id"], "emby-1")
         self.assertEqual(workflow.forbidden_p115.calls, [])
         self.assertEqual(emby.refreshed, [str(dest.resolve())])
+
+    def test_direct_move_recovers_when_destination_exists_after_state_write_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_root = root / "source"
+            library_root = root / "library"
+            original_source = source_root / "Example-[tmdb=123]"
+            destination = library_root / original_source.name
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text(
+                "https://115.com/d/file-id/movie.mkv",
+                encoding="utf-8",
+            )
+            workflow, _cms, submissions = self._workflow(
+                tmp,
+                source_roots=[source_root],
+                library_roots={"欧美电影": library_root},
+            )
+            tasks = TaskStore(root / "tasks.db")
+            row = self._row(
+                submissions,
+                {"title": "Example", "category": "欧美电影", "tmdb_id": "123", "type": "movie"},
+            )
+            submissions.update_move(
+                int(row["id"]),
+                "moving",
+                source_path=str(original_source),
+                dest_path=str(destination),
+                category_final="欧美电影",
+            )
+
+            result = workflow.run_stage(
+                self._task(
+                    tasks,
+                    TaskStage.MOVED,
+                    row["id"],
+                    {"source_path": str(original_source), "dest_path": str(destination)},
+                )
+            )
+            stored = submissions.find_by_id(row["id"])
+
+        self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+        self.assertEqual(result.metadata["dest_path"], str(destination.resolve()))
+        self.assertEqual(stored["move_status"], "moved")
 
     def test_direct_workflow_rejects_shared_mode_before_cms_submission(self):
         with tempfile.TemporaryDirectory() as tmp:

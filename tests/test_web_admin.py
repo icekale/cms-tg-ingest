@@ -48,6 +48,24 @@ class _ManualActionRuleEngine:
 
 
 class WebAdminTests(unittest.TestCase):
+    def test_real_server_dispatches_delete_to_task_api(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("delete-real", "", "https://115cdn.com/s/delete-real")
+            store.request_task_termination(task.id, "test", now=1)
+            server = start_web_server(store, "127.0.0.1", 0)
+            try:
+                with socket.create_connection(server.server_address, timeout=1) as client:
+                    client.sendall(
+                        f"DELETE /api/v1/tasks/{task.id} HTTP/1.0\r\nHost: localhost\r\n\r\n".encode("ascii")
+                    )
+                    response = client.recv(4096)
+
+                self.assertTrue(response.startswith(b"HTTP/1.0 200"))
+                self.assertIsNone(store.find_task(task.id))
+            finally:
+                bridge.stop_web_server(server)
+
     def test_content_length_handler_boundary_returns_deterministic_responses(self):
         def post(server, content_length, body=b""):
             headers = [b"POST /history/clear HTTP/1.0", b"Host: localhost"]

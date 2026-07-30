@@ -1633,6 +1633,55 @@ class OrganizedFolderSelectionTests(unittest.TestCase):
 
         self.assertEqual([item["file_id"] for item in selected], ["recent-file"])
 
+    def test_select_source_residue_files_rejects_candidates_without_remote_timestamp(self):
+        selected = bridge.select_source_residue_115_files(
+            [
+                {
+                    "fid": "unknown-time",
+                    "n": "银行家.2020.1080p.BluRay.mkv",
+                    "cid": "receive",
+                }
+            ],
+            {"title": "银行家", "tmdb_id": "627725"},
+            "The.Banker.2020.1080p.BluRay.mkv",
+        )
+
+        self.assertEqual(selected, [])
+
+    def test_select_source_residue_files_rejects_partial_title_match(self):
+        selected = bridge.select_source_residue_115_files(
+            [
+                {
+                    "fid": "different-movie",
+                    "n": "银行家传奇.2020.1080p.BluRay.mkv",
+                    "cid": "receive",
+                    "tu": "1781962470",
+                }
+            ],
+            {"title": "银行家", "tmdb_id": "627725"},
+            "The.Banker.2020.1080p.BluRay.mkv",
+            min_update_time=1781962277,
+        )
+
+        self.assertEqual(selected, [])
+
+    def test_select_source_residue_files_rejects_conflicting_release_year(self):
+        selected = bridge.select_source_residue_115_files(
+            [
+                {
+                    "fid": "wrong-year",
+                    "n": "Crash.1996.1080p.BluRay.mkv",
+                    "cid": "receive",
+                    "tu": "1781962470",
+                }
+            ],
+            {"title": "Crash"},
+            "Crash.2004.1080p.BluRay.mkv",
+            min_update_time=1781962277,
+        )
+
+        self.assertEqual(selected, [])
+
 
 class SelfShareWorkflowTests(unittest.TestCase):
     def test_self_share_maintenance_loop_honors_stop_event(self):
@@ -2544,6 +2593,8 @@ class SelfShareWorkflowTests(unittest.TestCase):
             source.mkdir(parents=True)
             dest.mkdir(parents=True)
             (source / "movie.strm").write_text("https://115.com/s/share_1212_movie.mkv", encoding="utf-8")
+            existing = dest / "movie.strm"
+            existing.write_text("https://115.com/d/existing/movie.mkv", encoding="utf-8")
 
             class UnconfirmedStore:
                 def update_move(self, row_id, status, **fields):
@@ -2553,13 +2604,23 @@ class SelfShareWorkflowTests(unittest.TestCase):
             with patch("app.media.strm.Path.mkdir") as mkdir, patch("app.media.strm.shutil.copy2") as copy2, patch(
                 "app.media.strm.shutil.rmtree"
             ) as rmtree, patch("os.replace") as replace:
-                updated = bridge.merge_self_share_strm_folder(plan, UnconfirmedStore(), {"id": 1})
+                updated = bridge.merge_self_share_strm_folder(
+                    plan,
+                    UnconfirmedStore(),
+                    {
+                        "id": 1,
+                        "workflow_mode": "self_share_sync",
+                        "own_share_code": "share",
+                        "own_share_receive_code": "1212",
+                    },
+                )
 
             self.assertEqual(updated["move_status"], "error")
             mkdir.assert_not_called()
             copy2.assert_not_called()
             rmtree.assert_not_called()
             replace.assert_not_called()
+            self.assertEqual(existing.read_text(encoding="utf-8"), "https://115.com/d/existing/movie.mkv")
 
     def test_merge_self_share_folder_journals_moving_and_atomically_replaces_each_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2620,6 +2681,8 @@ class SelfShareWorkflowTests(unittest.TestCase):
             dest.mkdir(parents=True)
             strm_path = source / "movie.strm"
             strm_path.write_text("https://115.com/s/share_1212_movie.mkv", encoding="utf-8")
+            existing = dest / "movie.strm"
+            existing.write_text("https://115.com/d/existing/movie.mkv", encoding="utf-8")
 
             class FakeStore:
                 def __init__(self):
@@ -2638,13 +2701,23 @@ class SelfShareWorkflowTests(unittest.TestCase):
             store = FakeStore()
             plan = bridge.MovePlan("conflict", "ready", source, dest, "华语电影")
             with patch("app.media.strm.shutil.copy2", side_effect=partial_copy_then_fail), patch("os.replace") as replace:
-                updated = bridge.merge_self_share_strm_folder(plan, store, {"id": 1})
+                updated = bridge.merge_self_share_strm_folder(
+                    plan,
+                    store,
+                    {
+                        "id": 1,
+                        "workflow_mode": "self_share_sync",
+                        "own_share_code": "share",
+                        "own_share_receive_code": "1212",
+                    },
+                )
 
             self.assertEqual([status for status, _fields in store.statuses], ["moving", "error"])
             self.assertEqual(updated["move_status"], "error")
             self.assertEqual(updated["move_error"], "copy failed")
             self.assertFalse((dest / "movie.strm.cms-ingest.tmp").exists())
             self.assertTrue(strm_path.exists())
+            self.assertEqual(existing.read_text(encoding="utf-8"), "https://115.com/d/existing/movie.mkv")
             replace.assert_not_called()
 
     def test_merge_self_share_folder_rejects_direct_strm_before_copy(self):
@@ -2710,6 +2783,39 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 (dest / "movie.strm").read_text(encoding="utf-8"),
                 "http://cms/s/ownshare_1212_movie.mkv",
             )
+            self.assertFalse(source.exists())
+
+    def test_merge_self_share_folder_replaces_changed_strm_with_same_share_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "share" / "Movie"
+            dest = root / "library" / "Movie"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            expected = "http://cms/s/ownshare_1212_new-file.mkv"
+            (source / "movie.strm").write_text(expected, encoding="utf-8")
+            (dest / "movie.strm").write_text(
+                "http://cms/s/ownshare_1212_old-file.mkv",
+                encoding="utf-8",
+            )
+            store = bridge.SubmissionStore(root / "db.sqlite")
+            row = store.upsert_submission(
+                bridge.ShareKey("abc", "1234"),
+                "https://115cdn.com/s/abc?password=1234",
+                "received",
+            )
+            row = store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_code="ownshare",
+                own_share_receive_code="1212",
+            ) or row
+            plan = bridge.MovePlan("conflict", "ready", source, dest, "欧美电影")
+
+            updated = bridge.merge_self_share_strm_folder(plan, store, row)
+
+            self.assertEqual(updated["move_status"], "moved")
+            self.assertEqual((dest / "movie.strm").read_text(encoding="utf-8"), expected)
             self.assertFalse(source.exists())
 
     def test_merge_self_share_folder_rejects_uppercase_direct_strm_before_copy(self):
@@ -4521,7 +4627,7 @@ class ParentCidCategoryMapTests(unittest.TestCase):
                 self.login_calls = 0
                 self.authorized_headers = []
 
-            def request(self, url, method="POST", payload=None, headers=None):
+            def request(self, url, method="POST", payload=None, headers=None, safe_get_attempts=None):
                 if url.endswith("/api/auth/login"):
                     self.login_calls += 1
                     return {"code": 200, "data": {"token": f"token-{self.login_calls}"}}

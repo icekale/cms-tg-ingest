@@ -21,6 +21,9 @@ class QualityIssue:
     title: str = ""
 
 
+_StrmDirectoryScan = tuple[tuple[tuple[Path, str], ...], tuple[QualityIssue, ...]]
+
+
 def redact_quality_detail(value: object) -> str:
     """Keep quality evidence useful without exposing absolute host paths."""
     text = str(value or "")
@@ -45,26 +48,46 @@ def inspect_task_files(
     own_share_code: str = "",
     own_share_receive_code: str = "1212",
     allowed_roots: Iterable[str | Path] | None = None,
+    _scan_cache: dict[Path, _StrmDirectoryScan] | None = None,
 ) -> list[QualityIssue]:
     del task
     allowed_roots = tuple(allowed_roots) if allowed_roots is not None else None
     expected_mode = normalize_strm_mode(expected_mode)
     dest = Path(dest_path)
-    if not is_path_within_allowed_roots(dest, allowed_roots):
-        return [QualityIssue("unsafe_metadata", "目标路径不在允许根目录", str(dest))]
-    if not dest.exists():
-        return [QualityIssue("missing_dest", "目标目录不存在", str(dest))]
-    try:
-        files = sorted(iter_strm_files(dest, allowed_roots=allowed_roots))
-    except UnsafeMediaPathError:
-        return [QualityIssue("unsafe_metadata", "目标路径不在允许根目录", str(dest))]
-    if not files:
-        return [QualityIssue("missing_strm", "目标目录没有 STRM 文件", str(dest))]
-    issues: list[QualityIssue] = []
+    cache_key = dest.absolute()
+    scan = _scan_cache.get(cache_key) if _scan_cache is not None else None
+    if scan is None:
+        base_issues: list[QualityIssue] = []
+        entries: list[tuple[Path, str]] = []
+        if not is_path_within_allowed_roots(dest, allowed_roots):
+            base_issues.append(QualityIssue("unsafe_metadata", "目标路径不在允许根目录", str(dest)))
+        elif not dest.exists():
+            base_issues.append(QualityIssue("missing_dest", "目标目录不存在", str(dest)))
+        else:
+            try:
+                files = sorted(iter_strm_files(dest, allowed_roots=allowed_roots))
+            except UnsafeMediaPathError:
+                base_issues.append(QualityIssue("unsafe_metadata", "目标路径不在允许根目录", str(dest)))
+            else:
+                if not files:
+                    base_issues.append(QualityIssue("missing_strm", "目标目录没有 STRM 文件", str(dest)))
+                for path in files:
+                    try:
+                        text = path.read_text(encoding="utf-8", errors="replace").strip()
+                    except OSError as exc:
+                        base_issues.append(
+                            QualityIssue("unreadable_strm", "STRM 文件无法读取", f"{path}: {exc}")
+                        )
+                        continue
+                    entries.append((path, text))
+        scan = (tuple(entries), tuple(base_issues))
+        if _scan_cache is not None:
+            _scan_cache[cache_key] = scan
+    entries, base_issues = scan
+    issues = list(base_issues)
     receive_code = str(own_share_receive_code or "1212").strip() or "1212"
     expected_marker = f"/s/{own_share_code}_{receive_code}_" if own_share_code else "/s/"
-    for path in files:
-        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    for path, text in entries:
         if "/d/" in text:
             if expected_mode != "direct":
                 issues.append(QualityIssue("direct_strm", "发现直链 STRM", str(path)))
@@ -84,6 +107,7 @@ def scan_task_quality(
 ) -> list[QualityIssue]:
     allowed_roots = tuple(allowed_roots) if allowed_roots is not None else None
     issues: list[QualityIssue] = []
+    scan_cache: dict[Path, _StrmDirectoryScan] = {}
     task_rows = list(tasks) if tasks is not None else store.list_recent_tasks(limit=limit)
     for task in task_rows:
         title = task.title or str(task.metadata.get("received_title") or "") or task.share_code
@@ -105,6 +129,7 @@ def scan_task_quality(
             own_share_code=own_share_code,
             own_share_receive_code=own_share_receive_code,
             allowed_roots=allowed_roots,
+            _scan_cache=scan_cache,
         ):
             issues.append(replace(issue, task_id=task.id, title=title))
     return issues

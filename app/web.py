@@ -8,7 +8,7 @@ import time
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import BoundedSemaphore, Thread
+from threading import BoundedSemaphore, Event, Thread
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
@@ -61,6 +61,20 @@ LEGACY_LIFECYCLE_REASON = "旧版任务引擎模式不支持终止或删除任�
 TASK_NOT_FOUND_MESSAGE = "任务不存在或已过期"
 _LOG_STREAM_PATH = "/api/v1/logs/stream"
 _LOG_QUERY_KEYS = frozenset({"filter_type", "lines", "keyword", "token"})
+
+
+class _WebThreadingHTTPServer(ThreadingHTTPServer):
+    def __init__(self, server_address, handler_class, log_hub: LogHub | None):
+        self._cms_log_hub = log_hub
+        self._cms_shutdown_event = Event()
+        super().__init__(server_address, handler_class)
+
+    def shutdown(self) -> None:
+        self._cms_shutdown_event.set()
+        close_streams = getattr(self._cms_log_hub, "close_streams", None)
+        if callable(close_streams):
+            close_streams()
+        super().shutdown()
 
 
 def _parse_request_target(path: str):
@@ -2086,6 +2100,9 @@ def start_web_server(
                 return
             self._serve(body)
 
+        def do_DELETE(self):
+            self._serve()
+
         def _read_request_body(self, length: int) -> bytes:
             previous_timeout = self.connection.gettimeout()
             deadline = time.monotonic() + REQUEST_BODY_READ_TIMEOUT_SECONDS
@@ -2143,6 +2160,10 @@ def start_web_server(
                     pass
                 return
 
+            shutdown_event = getattr(self.server, "_cms_shutdown_event", None)
+            if shutdown_event is not None and shutdown_event.is_set():
+                self._request_body_error(503, b"Service Unavailable")
+                return
             if not sse_capacity.acquire(blocking=False):
                 self._request_body_error(429, b"Too Many Requests")
                 return
@@ -2152,6 +2173,8 @@ def start_web_server(
             restore_timeout = False
             try:
                 stream = app.log_hub.open_stream(spec, queue_size=SSE_CLIENT_QUEUE_SIZE)
+                if shutdown_event is not None and shutdown_event.is_set():
+                    return
                 previous_timeout = self.connection.gettimeout()
                 restore_timeout = True
                 self.connection.settimeout(SSE_WRITE_TIMEOUT_SECONDS)
@@ -2169,10 +2192,12 @@ def start_web_server(
                     "keyword": spec.keyword,
                 }))
                 self.wfile.flush()
-                while True:
+                while shutdown_event is None or not shutdown_event.is_set():
                     event = stream.next_event(SSE_HEARTBEAT_SECONDS)
                     if event is None:
                         frame = encode_sse_event("heartbeat", {"time": time.time()})
+                    elif event.kind == "closed":
+                        break
                     elif event.kind == "gap":
                         self.wfile.write(encode_sse_event("gap", {"reason": "slow_client"}))
                         self.wfile.flush()
@@ -2210,7 +2235,7 @@ def start_web_server(
         def log_message(self, format: str, *args: Any) -> None:
             return
 
-    server = ThreadingHTTPServer((host, port), Handler)
+    server = _WebThreadingHTTPServer((host, port), Handler, app.log_hub)
     server.daemon_threads = True
     server.block_on_close = False
     server._cms_background_jobs = app.background_jobs

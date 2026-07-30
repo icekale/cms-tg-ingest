@@ -1,6 +1,7 @@
 import gc
 import sqlite3
 import tempfile
+import threading
 import unittest
 import warnings
 from contextlib import closing
@@ -8,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import bridge
-from app.backup import BackupScheduler, backup_sqlite_databases
+from app.backup import BackupScheduler, backup_sqlite_databases, start_backup_loop
 from app.config import Config
 from app.cms_cloud_index import CmsCloudDataIndex
 from app.hdhive_cards import TmdbDetailCache
@@ -276,6 +277,75 @@ class BackupTests(unittest.TestCase):
             retried = scheduler.run_if_due(now=1_735_689_600.0)
             self.assertIsNotNone(retried)
             self.assertEqual(retried.status, "succeeded")
+
+    def test_scheduler_retries_after_partial_backup_on_the_same_day(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "tasks.db"
+            late_source = root / "submissions.db"
+            self._make_database(source)
+            store = TaskStore(root / "state.db")
+            scheduler = BackupScheduler(
+                store,
+                {"tasks": source, "submissions": late_source},
+                root / "backups",
+                run_time="03:30",
+                timezone_name="Asia/Shanghai",
+            )
+
+            partial = scheduler.run_if_due(now=1_735_689_600.0)
+            self._make_database(late_source)
+            retried = scheduler.run_if_due(now=1_735_689_600.0)
+
+            self.assertEqual(partial.status, "partial")
+            self.assertIsNotNone(retried)
+            self.assertEqual(retried.status, "succeeded")
+
+    def test_backup_loop_survives_failure_state_persistence_error(self):
+        stop_event = threading.Event()
+
+        class FailingStore:
+            def set_runtime_state(self, *args, **kwargs):
+                raise sqlite3.OperationalError("state database unavailable")
+
+        class Scheduler:
+            store = FailingStore()
+            calls = 0
+
+            def run_if_due(self):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("backup failed")
+                stop_event.set()
+                return None
+
+        scheduler = Scheduler()
+        with patch.object(stop_event, "wait", side_effect=lambda _timeout: stop_event.is_set()):
+            thread = start_backup_loop(scheduler, stop_event, interval_seconds=1)
+            thread.join(1)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(scheduler.calls, 2)
+
+    def test_backup_loop_backs_off_after_partial_result(self):
+        stop_event = threading.Event()
+        wait_seconds = []
+
+        class Scheduler:
+            def run_if_due(self):
+                return type("Result", (), {"status": "partial", "error": "missing source", "files": []})()
+
+        def stop_after_wait(timeout):
+            wait_seconds.append(timeout)
+            stop_event.set()
+            return True
+
+        with patch.object(stop_event, "wait", side_effect=stop_after_wait):
+            thread = start_backup_loop(Scheduler(), stop_event, interval_seconds=30)
+            thread.join(1)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(wait_seconds, [3600])
 
     def test_bridge_builds_scheduler_for_both_runtime_databases(self):
         with tempfile.TemporaryDirectory() as tmp:

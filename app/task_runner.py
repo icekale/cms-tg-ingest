@@ -228,6 +228,7 @@ class TaskRunner:
         self._active_claim_lock = threading.Lock()
         self._active_claim: TaskSnapshot | None = None
         self._active_claim_renewal_failed = False
+        self._claim_release_pending = False
         self._p115_risk_cooldown_until = self._load_p115_risk_cooldown()
         self._last_heartbeat_at = 0.0
 
@@ -312,9 +313,30 @@ class TaskRunner:
                 self._active_claim_renewal_failed = False
 
     def run_once(self) -> bool:
+        if self._claim_release_pending:
+            self.store.clear_worker_claims(self.worker_id, now=self.now())
+            self._claim_release_pending = False
         task = self.store.claim_next_runnable(self.worker_id, now=self.now())
         if task is None:
             return False
+        try:
+            return self._run_claimed_task(task)
+        except Exception:
+            self._release_claims_after_runner_failure()
+            raise
+        finally:
+            self._clear_active_claim(task)
+
+    def _release_claims_after_runner_failure(self) -> None:
+        self._claim_release_pending = True
+        try:
+            self.store.clear_worker_claims(self.worker_id, now=self.now())
+        except Exception:
+            LOG.exception("Failed to release task claim after runner failure")
+        else:
+            self._claim_release_pending = False
+
+    def _run_claimed_task(self, task: TaskSnapshot) -> bool:
         if self._settle_requested_termination(task):
             return True
         if self._defer_for_p115_risk_cooldown(task):
@@ -329,7 +351,8 @@ class TaskRunner:
         try:
             result = self.workflow.run_stage(task)
         except P115RiskControlError as exc:
-            self._p115_risk_cooldown_until = self.now() + self.risk_cooldown_seconds
+            retry_after_seconds = max(0.0, float(getattr(exc, "retry_after_seconds", 0) or 0))
+            self._p115_risk_cooldown_until = self.now() + max(self.risk_cooldown_seconds, retry_after_seconds)
             self.store.set_runtime_state(
                 _P115_RISK_COOLDOWN_STATE_KEY,
                 str(self._p115_risk_cooldown_until),
@@ -403,8 +426,6 @@ class TaskRunner:
                 clear_claim=True,
             )
             return True
-        finally:
-            self._clear_active_claim(task)
         if self._settle_requested_termination(task):
             return True
         self._apply_result(task, result, p115_before=p115_before, p115_after=_p115_request_count(self.p115_client))

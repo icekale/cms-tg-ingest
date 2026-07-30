@@ -62,7 +62,21 @@ class CmsClient:
         text = str(exc).lower()
         return "401" in text or "unauthorized" in text
 
-    def _authorized_request(self, path: str, payload: dict | None, method: str) -> dict:
+    def _authorized_request(
+        self,
+        path: str,
+        payload: dict | None,
+        method: str,
+        safe_get_attempts: int | None = None,
+    ) -> dict:
+        if safe_get_attempts is not None:
+            return self.http.request(
+                f"{self.config.cms_base_url}{path}",
+                method=method,
+                payload=payload,
+                headers={"Authorization": f"Bearer {self.token}"},
+                safe_get_attempts=safe_get_attempts,
+            )
         return self.http.request(
             f"{self.config.cms_base_url}{path}",
             method=method,
@@ -70,19 +84,26 @@ class CmsClient:
             headers={"Authorization": f"Bearer {self.token}"},
         )
 
-    def _authorized(self, path: str, payload: dict | None = None, method: str = "POST", params: dict | None = None) -> dict:
+    def _authorized(
+        self,
+        path: str,
+        payload: dict | None = None,
+        method: str = "POST",
+        params: dict | None = None,
+        safe_get_attempts: int | None = None,
+    ) -> dict:
         if not self.token:
             self.login()
         if params:
             path = path + "?" + urllib.parse.urlencode(params)
         try:
-            return self._authorized_request(path, payload, method)
+            return self._authorized_request(path, payload, method, safe_get_attempts)
         except RuntimeError as exc:
             if not self._is_unauthorized_error(exc):
                 raise
             self.token = ""
             self.login()
-            return self._authorized_request(path, payload, method)
+            return self._authorized_request(path, payload, method, safe_get_attempts)
 
     def add_share_down(self, url: str) -> dict:
         resp = self._authorized("/api/cloud/add_share_down", payload={"url": url})
@@ -142,7 +163,7 @@ class CmsClient:
         return resp
 
     def run_auto_organize(self) -> dict:
-        resp = self._authorized("/api/sync/auto_organize", method="GET")
+        resp = self._authorized("/api/sync/auto_organize", method="GET", safe_get_attempts=1)
         if resp.get("code") != 200:
             raise RuntimeError(resp.get("msg") or "CMS auto organize failed")
         return resp

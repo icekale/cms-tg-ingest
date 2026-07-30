@@ -155,7 +155,7 @@ class LogFilter:
 
 @dataclass(frozen=True)
 class LogEvent:
-    kind: Literal["log", "gap"]
+    kind: Literal["log", "gap", "closed"]
     entry: LogEntry | None = None
 
 
@@ -346,6 +346,15 @@ class LogStream:
         if not self._closed:
             self._closed = True
             self._hub._unsubscribe(self)
+            try:
+                self._queue.put_nowait(LogEvent("closed"))
+            except queue.Full:
+                while True:
+                    try:
+                        self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                self._queue.put_nowait(LogEvent("closed"))
 
 
 class LogHub:
@@ -429,6 +438,12 @@ class LogHub:
             stream = LogStream(self, spec, self.snapshot(spec), queue_size)
             self._streams.add(stream)
             return stream
+
+    def close_streams(self) -> None:
+        with self._lock:
+            streams = tuple(self._streams)
+        for stream in streams:
+            stream.close()
 
     def _unsubscribe(self, stream: LogStream) -> None:
         with self._lock:

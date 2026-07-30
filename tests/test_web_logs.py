@@ -336,6 +336,72 @@ class WebLogTests(unittest.TestCase):
                     connection.close()
                 bridge.stop_web_server(server)
 
+    def test_server_shutdown_closes_active_sse_subscription_immediately(self):
+        with tempfile.TemporaryDirectory() as tmp, patch("app.web.SSE_HEARTBEAT_SECONDS", 30):
+            hub = LogHub()
+            server = start_web_server(TaskStore(Path(tmp) / "tasks.db"), "127.0.0.1", 0, log_hub=hub)
+            connection = response = None
+            stopped = False
+            try:
+                connection, response = self.open_stream(server)
+                self.read_event(response)
+                self.assertEqual(hub.subscriber_count, 1)
+
+                bridge.stop_web_server(server, join_timeout=1)
+                stopped = True
+
+                deadline = time.monotonic() + 1
+                while hub.subscriber_count and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(hub.subscriber_count, 0)
+            finally:
+                if response is not None:
+                    response.close()
+                if connection is not None:
+                    connection.close()
+                if not stopped:
+                    bridge.stop_web_server(server)
+
+    def test_server_shutdown_rejects_sse_subscription_registered_after_cleanup_snapshot(self):
+        class DelayedOpenHub(LogHub):
+            def __init__(self):
+                super().__init__()
+                self.entered = Event()
+                self.release = Event()
+                self.opened = Event()
+
+            def open_stream(self, spec, queue_size=256):
+                self.entered.set()
+                self.release.wait(2)
+                stream = super().open_stream(spec, queue_size=queue_size)
+                self.opened.set()
+                return stream
+
+        with tempfile.TemporaryDirectory() as tmp, patch("app.web.SSE_HEARTBEAT_SECONDS", 30):
+            hub = DelayedOpenHub()
+            server = start_web_server(TaskStore(Path(tmp) / "tasks.db"), "127.0.0.1", 0, log_hub=hub)
+            client = socket.create_connection(server.server_address, timeout=1)
+            stopped = False
+            try:
+                client.sendall(b"GET /api/v1/logs/stream HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                self.assertTrue(hub.entered.wait(1))
+
+                bridge.stop_web_server(server, join_timeout=1)
+                stopped = True
+                hub.release.set()
+
+                self.assertTrue(hub.opened.wait(1))
+                deadline = time.monotonic() + 1
+                while hub.subscriber_count and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(hub.subscriber_count, 0)
+            finally:
+                hub.release.set()
+                hub.close_streams()
+                client.close()
+                if not stopped:
+                    bridge.stop_web_server(server)
+
     def test_malformed_get_target_returns_400_and_server_remains_usable(self):
         with tempfile.TemporaryDirectory() as tmp:
             hub = LogHub()

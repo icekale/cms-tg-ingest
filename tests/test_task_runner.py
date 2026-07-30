@@ -108,6 +108,102 @@ class TerminateBeforeResultStore(TaskStore):
 
 
 class TaskRunnerTests(unittest.TestCase):
+    def test_result_persistence_failure_releases_claim_for_immediate_retry(self):
+        class FailFirstCompletionStore(TaskStore):
+            def __init__(self, db_path):
+                super().__init__(db_path)
+                self.failed = False
+
+            def complete_claimed_stage(self, task_id, **kwargs):
+                if not self.failed:
+                    self.failed = True
+                    raise sqlite3.OperationalError("database is temporarily locked")
+                return super().complete_claimed_stage(task_id, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = FailFirstCompletionStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("persist-retry", "", "https://115cdn.com/s/persist-retry")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1)
+            workflow = FakeWorkflow(
+                [
+                    StageResult.complete("first result"),
+                    StageResult.complete("retried result"),
+                ]
+            )
+            runner = TaskRunner(store, workflow, worker_id="worker", now=lambda: 2)
+
+            with self.assertRaises(sqlite3.OperationalError):
+                runner.run_once()
+
+            released = store.find_task(task.id)
+            self.assertEqual(released.claimed_by, "")
+            self.assertTrue(runner.run_once())
+            completed = store.find_task(task.id)
+            self.assertEqual(completed.current_stage, TaskStage.RECOGNIZING)
+            self.assertEqual(completed.claimed_by, "")
+
+    def test_result_persistence_keeps_claim_active_for_heartbeat(self):
+        class InspectCompletionStore(TaskStore):
+            runner = None
+            claim_active_during_completion = False
+
+            def complete_claimed_stage(self, task_id, **kwargs):
+                self.claim_active_during_completion = self.runner._active_claim is not None
+                return super().complete_claimed_stage(task_id, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = InspectCompletionStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("persist-heartbeat", "", "https://115cdn.com/s/persist-heartbeat")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1)
+            runner = TaskRunner(
+                store,
+                FakeWorkflow([StageResult.complete("completed")]),
+                worker_id="worker",
+                now=lambda: 2,
+            )
+            store.runner = runner
+
+            self.assertTrue(runner.run_once())
+
+            self.assertTrue(store.claim_active_during_completion)
+            self.assertIsNone(runner._active_claim)
+
+    def test_failure_event_persistence_error_releases_claim_for_immediate_retry(self):
+        class FailFirstFailureEventStore(TaskStore):
+            def __init__(self, db_path):
+                super().__init__(db_path)
+                self.failed = False
+
+            def record_event(self, task_id, stage, status, message, **kwargs):
+                if kwargs.get("expected_claimed_by") and status == TaskStatus.FAILED and not self.failed:
+                    self.failed = True
+                    raise sqlite3.OperationalError("database is temporarily locked")
+                return super().record_event(task_id, stage, status, message, **kwargs)
+
+        class FailThenCompleteWorkflow:
+            def __init__(self):
+                self.calls = 0
+
+            def run_stage(self, task):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("stage failed")
+                return StageResult.complete("retried result")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = FailFirstFailureEventStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("failure-event-retry", "", "https://115cdn.com/s/failure-event-retry")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1)
+            runner = TaskRunner(store, FailThenCompleteWorkflow(), worker_id="worker", now=lambda: 2)
+
+            with self.assertRaises(sqlite3.OperationalError):
+                runner.run_once()
+
+            released = store.find_task(task.id)
+            self.assertEqual(released.claimed_by, "")
+            self.assertTrue(runner.run_once())
+            self.assertEqual(store.find_task(task.id).current_stage, TaskStage.RECOGNIZING)
+
     def test_termination_after_claim_skips_workflow(self):
         class TerminateAfterClaimStore(TaskStore):
             def claim_next_runnable(self, worker_id, now=None, stale_after_seconds=21600):

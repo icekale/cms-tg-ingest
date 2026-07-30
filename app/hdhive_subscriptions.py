@@ -415,6 +415,7 @@ class HdhiveSubscriptionService:
 
         emby_keys: set[str] = set()
         emby_skip_unavailable = not self._dependency_enabled(self.emby)
+        emby_lookup_failed = False
         if not emby_skip_unavailable:
             try:
                 raw_emby_keys = self.emby.existing_episode_keys_by_tmdb(subscription.tmdb_id)
@@ -422,10 +423,9 @@ class HdhiveSubscriptionService:
                     parsed = parse_episode_key(str(value))
                     if parsed is not None:
                         emby_keys.add(parsed.normalized)
-                if not emby_keys:
-                    emby_skip_unavailable = True
             except Exception:
                 emby_skip_unavailable = True
+                emby_lookup_failed = True
                 LOG.warning("HDHive Emby episode lookup unavailable subscription_id=%s", subscription.id, exc_info=True)
 
         for key, candidates in grouped.items():
@@ -465,6 +465,9 @@ class HdhiveSubscriptionService:
                 skipped += 1
                 continue
             if any(item.status == "enqueued" for item in persisted_items):
+                skipped += 1
+                continue
+            if emby_lookup_failed and confirmed_item_id is None:
                 skipped += 1
                 continue
             selected = select_best_resource(candidates)

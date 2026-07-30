@@ -3,6 +3,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import bridge
 from app.config import MoveConfig, SelfShareConfig
@@ -287,6 +288,148 @@ def make_workflow(p115, store, task_store=None, cms=None):
 
 
 class CloudWorkflowTests(unittest.TestCase):
+    def test_cloud_submit_recovers_remote_task_after_local_result_write_failure(self):
+        class RecoveringCloudP115(FakeCloudP115):
+            def __init__(self):
+                super().__init__([])
+                self.recovery_calls = 0
+
+            def find_cloud_download_by_source(self, url):
+                self.recovery_calls += 1
+                if not self.add_calls:
+                    return {}
+                return {"info_hash": "hash", "task_id": "task-1", "status": "running"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_cloud_task("ed2k:hash:10", ED2K, title="Example.mkv")
+            p115 = RecoveringCloudP115()
+            workflow = make_workflow(p115, FakeSubmissionStore(), task_store=task_store)
+            complete_operation = task_store.complete_operation
+            failed = False
+
+            def fail_first_result_write(*args, **kwargs):
+                nonlocal failed
+                if not failed:
+                    failed = True
+                    raise RuntimeError("simulated cloud result persistence failure")
+                return complete_operation(*args, **kwargs)
+
+            with patch.object(task_store, "complete_operation", side_effect=fail_first_result_write):
+                with self.assertRaisesRegex(RuntimeError, "persistence failure"):
+                    workflow.run_stage(task)
+                recovered = workflow.run_stage(task)
+
+            self.assertEqual(recovered.outcome.value, "defer")
+            self.assertEqual(p115.add_calls, [(ED2K, TARGET_CID)])
+            self.assertEqual(p115.recovery_calls, 1)
+            self.assertEqual(recovered.metadata["cloud_task_id"], "task-1")
+
+    def test_auto_organize_uncertain_result_requires_action_without_retrigger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_cloud_task("ed2k:hash:10", ED2K, title="Example.mkv")
+            submissions = FakeSubmissionStore()
+            row = submissions.upsert_submission(
+                bridge.ShareKey(task.share_code, task.receive_code),
+                task.url,
+                "received",
+                title="Example.mkv",
+            )
+            task = task_store.record_event(
+                task.id,
+                TaskStage.CLOUD_DOWNLOADING,
+                TaskStatus.RUNNING,
+                "等待 CMS 整理",
+                metadata_patch={
+                    "submission_id": row["id"],
+                    "cloud_started_at": time.time(),
+                    "cloud_output_file_id": "folder-1",
+                    "cloud_output_items": [
+                        {
+                            "file_id": "folder-1",
+                            "file_name": "Example.mkv",
+                            "parent_id": TARGET_CID,
+                            "is_folder": True,
+                        }
+                    ],
+                    "auto_organize_pending": True,
+                },
+            )
+            cms = FakeCms()
+            workflow = make_workflow(
+                FakeCloudP115([]),
+                submissions,
+                task_store=task_store,
+                cms=cms,
+            )
+            complete_operation = task_store.complete_operation
+            failed = False
+
+            def fail_first_result_write(*args, **kwargs):
+                nonlocal failed
+                if not failed:
+                    failed = True
+                    raise RuntimeError("simulated organize result persistence failure")
+                return complete_operation(*args, **kwargs)
+
+            with patch.object(task_store, "complete_operation", side_effect=fail_first_result_write):
+                with self.assertRaisesRegex(RuntimeError, "persistence failure"):
+                    workflow.run_stage(task)
+                recovered = workflow.run_stage(task)
+
+            self.assertEqual(recovered.outcome.value, "needs_action")
+            self.assertEqual(recovered.error_type, "cloud_auto_organize_uncertain")
+            self.assertEqual(cms.auto_organize_calls, 1)
+            self.assertTrue(recovered.metadata["auto_organize_pending"])
+
+    def test_auto_organize_retry_recovers_when_attempt_metadata_was_not_persisted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_cloud_task("ed2k:hash:10", ED2K, title="Example.mkv")
+            submissions = FakeSubmissionStore()
+            row = submissions.upsert_submission(
+                bridge.ShareKey(task.share_code, task.receive_code),
+                task.url,
+                "received",
+                title="Example.mkv",
+            )
+            task = task_store.record_event(
+                task.id,
+                TaskStage.CLOUD_DOWNLOADING,
+                TaskStatus.RUNNING,
+                "等待 CMS 整理",
+                metadata_patch={
+                    "submission_id": row["id"],
+                    "cloud_started_at": time.time(),
+                    "cloud_output_file_id": "folder-1",
+                    "cloud_output_items": [
+                        {
+                            "file_id": "folder-1",
+                            "file_name": "Example.mkv",
+                            "parent_id": TARGET_CID,
+                            "is_folder": True,
+                        }
+                    ],
+                    "auto_organize_pending": True,
+                },
+            )
+            cms = FakeCms(fail_auto_organize=True)
+            workflow = make_workflow(
+                FakeCloudP115([]),
+                submissions,
+                task_store=task_store,
+                cms=cms,
+            )
+
+            failed = workflow.run_stage(task)
+            cms.fail_auto_organize = False
+            recovered = workflow.run_stage(task)
+
+            self.assertEqual(failed.outcome.value, "defer")
+            self.assertEqual(recovered.outcome.value, "complete")
+            self.assertEqual(cms.auto_organize_calls, 2)
+
     def test_cloud_output_items_persist_before_multi_item_movement(self):
         with tempfile.TemporaryDirectory() as tmp:
             task_store = TaskStore(Path(tmp) / "tasks.db")

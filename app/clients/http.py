@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import http.client
+import math
 import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 
@@ -73,6 +76,31 @@ _SENSITIVE_ASSIGNMENT_RE = re.compile(
     rf"(?P<bare_value>[^,;&\s}}]+))",
     re.IGNORECASE,
 )
+
+
+class HttpRequestError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int = 0, retry_after_seconds: int = 0):
+        super().__init__(message)
+        self.status_code = int(status_code or 0)
+        self.retry_after_seconds = max(0, int(retry_after_seconds or 0))
+
+
+def _retry_after_seconds(error: urllib.error.HTTPError) -> int:
+    try:
+        value = str(error.headers.get("Retry-After") or "").strip()
+    except (AttributeError, TypeError):
+        return 0
+    if value.isdecimal():
+        return int(value)
+    try:
+        retry_at = parsedate_to_datetime(value)
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(0, math.ceil(retry_at.timestamp() - time.time()))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 _SENSITIVE_PATH_VALUE_RE = re.compile(
     rf"(?P<prefix>/(?:{_SENSITIVE_KEY_PATTERN})(?:/|=))(?P<value>[^/?#]+)",
     re.IGNORECASE,
@@ -183,16 +211,17 @@ def _safe_get_retryable(req: urllib.request.Request, error: BaseException) -> bo
     return isinstance(error, _TRANSIENT_NETWORK_ERRORS)
 
 
-def _read_response(req: urllib.request.Request, timeout: int) -> str:
-    attempts = _MAX_SAFE_GET_ATTEMPTS if str(req.get_method()).upper() in {"GET", "HEAD"} else 1
+def _read_response(req: urllib.request.Request, timeout: int, safe_get_attempts: int = _MAX_SAFE_GET_ATTEMPTS) -> str:
+    attempts = max(1, int(safe_get_attempts)) if str(req.get_method()).upper() in {"GET", "HEAD"} else 1
     for attempt in range(attempts):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
             if attempt + 1 < attempts and _safe_get_retryable(req, exc):
+                delay = max(0.2, float(_retry_after_seconds(exc)))
                 exc.close()
-                time.sleep(0.2)
+                time.sleep(delay)
                 continue
             raise
         except _TRANSIENT_NETWORK_ERRORS as exc:
@@ -204,10 +233,18 @@ def _read_response(req: urllib.request.Request, timeout: int) -> str:
 
 
 class HttpJson:
-    def __init__(self, timeout: int):
+    def __init__(self, timeout: int, safe_get_attempts: int = _MAX_SAFE_GET_ATTEMPTS):
         self.timeout = timeout
+        self.safe_get_attempts = max(1, int(safe_get_attempts))
 
-    def request(self, url: str, method: str = "GET", payload: dict | None = None, headers: dict | None = None) -> dict:
+    def request(
+        self,
+        url: str,
+        method: str = "GET",
+        payload: dict | None = None,
+        headers: dict | None = None,
+        safe_get_attempts: int | None = None,
+    ) -> dict:
         data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req_headers = {"Accept": "application/json"}
         if payload is not None:
@@ -216,13 +253,18 @@ class HttpJson:
             req_headers.update(headers)
         req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
         try:
-            raw = _read_response(req, self.timeout)
+            attempts = self.safe_get_attempts if safe_get_attempts is None else max(1, int(safe_get_attempts))
+            raw = _read_response(req, self.timeout, attempts)
         except urllib.error.HTTPError as exc:
             try:
                 body = _redact_text(exc.read().decode("utf-8", "replace"))[:300]
             finally:
                 exc.close()
-            raise RuntimeError(f"HTTP {exc.code} from {_redact_url(url)}: {body[:300]}") from exc
+            raise HttpRequestError(
+                f"HTTP {exc.code} from {_redact_url(url)}: {body[:300]}",
+                status_code=exc.code,
+                retry_after_seconds=_retry_after_seconds(exc),
+            ) from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Cannot reach {_redact_url(url)}: {_redact_text(str(exc.reason))}") from exc
         except TimeoutError as exc:
@@ -239,8 +281,9 @@ class HttpJson:
 
 
 class FormHttp:
-    def __init__(self, timeout: int):
+    def __init__(self, timeout: int, safe_get_attempts: int = _MAX_SAFE_GET_ATTEMPTS):
         self.timeout = timeout
+        self.safe_get_attempts = max(1, int(safe_get_attempts))
 
     def request(
         self,
@@ -260,13 +303,17 @@ class FormHttp:
             req_headers.update(headers)
         req = urllib.request.Request(url, data=body, headers=req_headers, method=method)
         try:
-            raw = _read_response(req, self.timeout)
+            raw = _read_response(req, self.timeout, self.safe_get_attempts)
         except urllib.error.HTTPError as exc:
             try:
                 body_text = _redact_text(exc.read().decode("utf-8", "replace"))[:300]
             finally:
                 exc.close()
-            raise RuntimeError(f"HTTP {exc.code} from {_redact_url(url)}: {body_text}") from exc
+            raise HttpRequestError(
+                f"HTTP {exc.code} from {_redact_url(url)}: {body_text}",
+                status_code=exc.code,
+                retry_after_seconds=_retry_after_seconds(exc),
+            ) from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Cannot reach {_redact_url(url)}: {_redact_text(str(exc.reason))}") from exc
         except TimeoutError as exc:

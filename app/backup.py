@@ -20,6 +20,7 @@ from .sqlite_utils import sqlite_connection, sqlite_quick_check
 LOG = logging.getLogger("cms-tg-ingest")
 BACKUP_STATE_KEY = "backup_last_result"
 BACKUP_RUN_DATE_KEY = "backup_last_run_date"
+_PARTIAL_BACKUP_RETRY_SECONDS = 3600
 _BACKUP_NAME_RE = re.compile(r"^(?P<stem>.+)-(?P<timestamp>\d{8}T\d{6}Z)\.db$")
 _BACKUP_LOGICAL_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -273,7 +274,7 @@ class BackupScheduler:
         result = self.run_once(now)
         # Keep failed runs retryable; a transient disk or SQLite error should
         # not suppress the next scheduler tick until tomorrow.
-        if result.status != "failed":
+        if result.status in {"succeeded", "skipped"}:
             self.store.set_runtime_state(BACKUP_RUN_DATE_KEY, run_date, updated_at=local_now.timestamp())
         return result
 
@@ -286,6 +287,7 @@ def start_backup_loop(
 ) -> threading.Thread:
     def loop() -> None:
         while not stop_event.is_set():
+            wait_seconds = max(1, int(interval_seconds))
             try:
                 result = scheduler.run_if_due()
                 if result is not None:
@@ -293,23 +295,28 @@ def start_backup_loop(
                     if result.error:
                         status = f"{status}: {result.error}"
                     LOG.info("Database backup completed status=%s files=%s", status, len(result.files))
+                    if result.status == "partial":
+                        wait_seconds = max(wait_seconds, _PARTIAL_BACKUP_RETRY_SECONDS)
             except Exception as exc:
-                scheduler.store.set_runtime_state(
-                    BACKUP_STATE_KEY,
-                    json.dumps(
-                        {
-                            "status": "failed",
-                            "error": f"{type(exc).__name__}: {exc}",
-                            "files": [],
-                            "skipped": [],
-                            "errors": [str(exc)],
-                        },
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    ),
-                )
+                try:
+                    scheduler.store.set_runtime_state(
+                        BACKUP_STATE_KEY,
+                        json.dumps(
+                            {
+                                "status": "failed",
+                                "error": f"{type(exc).__name__}: {exc}",
+                                "files": [],
+                                "skipped": [],
+                                "errors": [str(exc)],
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                    )
+                except Exception:
+                    LOG.exception("Unable to persist failed database backup state")
                 LOG.exception("Database backup loop failed: %s", exc)
-            stop_event.wait(max(1, int(interval_seconds)))
+            stop_event.wait(wait_seconds)
 
     thread = threading.Thread(target=loop, name="database-backup", daemon=True)
     thread.start()
