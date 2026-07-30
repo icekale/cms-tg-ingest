@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { taskLifecycleState, taskStatusLabel } from '../src/taskView.js'
+import { displayTaskTitle, taskLifecycleState, taskStatusLabel } from '../src/taskView.js'
+
+test('prefers backend display title and falls back to legacy title', () => {
+  assert.equal(
+    displayTaskTitle({ id: 328, display_title: 'H-后天-2024-[tmdb=435]', title: 'swso9jn3wul' }),
+    'H-后天-2024-[tmdb=435]',
+  )
+  assert.equal(displayTaskTitle({ id: 329, title: '旧版任务标题' }), '旧版任务标题')
+  assert.equal(displayTaskTitle({ id: 330 }), '任务 #330')
+})
 
 test('maps cancelled status without changing existing raw labels', () => {
   assert.equal(taskStatusLabel('cancelled'), '已终止')
