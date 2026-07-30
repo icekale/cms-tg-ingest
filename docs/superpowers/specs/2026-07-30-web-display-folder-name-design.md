@@ -16,6 +16,7 @@ Apply the same display rule to:
 - the Vue overview queue;
 - the Vue task detail page;
 - the Vue quality queue;
+- the Vue health page's latest-problem link;
 - the API payloads consumed by those pages;
 - the existing legacy UI through the shared helper.
 
@@ -47,7 +48,8 @@ for the task associated with each issue, while preserving its existing
 `title` field.
 
 The Vue views render `display_title || title`, which keeps compatibility with
-older API responses and with tasks that have no organized folder yet.
+older API responses and with tasks that have no organized folder yet. This
+includes the latest-problem task link on the health page.
 
 ## Error Handling
 
@@ -63,9 +65,9 @@ Add API regression coverage for:
 - fallback to the original title when no folder metadata exists;
 - quality rows exposing the same display title.
 
-Add or update frontend tests to assert that all four Vue surfaces prefer
-`display_title`. Run the focused tests first, then the complete Python and
-frontend test suites, compilation, build, and `git diff --check`.
+Add or update frontend tests to assert that all task-bearing Vue surfaces
+prefer `display_title`. Run the focused tests first, then the complete Python
+and frontend test suites, compilation, build, and `git diff --check`.
 
 ## Alternatives Rejected
 
