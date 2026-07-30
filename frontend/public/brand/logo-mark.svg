@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 64 64" role="img" aria-label="媒体仓">
+  <rect x="4" y="4" width="56" height="56" rx="16" fill="#1D4ED8"/>
+  <rect x="16" y="17" width="32" height="30" rx="7" fill="none" stroke="#FFFFFF" stroke-width="4"/>
+  <path d="M16 26h32M25 17v9M39 17v9" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round"/>
+  <path d="M27 32.5 40 38 27 43.5Z" fill="#FFFFFF"/>
+</svg>

@@ -1,4 +1,5 @@
 import json
+import struct
 import unittest
 from pathlib import Path
 
@@ -16,6 +17,29 @@ class FrontendTests(unittest.TestCase):
         for route in ("/overview", "/tasks", "/quality", "/health", "/hdhive", "/logs", "/settings"):
             self.assertIn(route, router)
         self.assertIn("base: '/app/'", (ROOT / "frontend/vite.config.js").read_text(encoding="utf-8"))
+
+    def test_media_vault_brand_assets_exist_with_expected_dimensions(self):
+        brand_dir = ROOT / "frontend/public/brand"
+        logo = brand_dir / "logo-mark.svg"
+        favicon = brand_dir / "favicon-32.png"
+        touch_icon = brand_dir / "apple-touch-icon.png"
+
+        self.assertTrue(logo.is_file())
+        self.assertTrue(favicon.is_file())
+        self.assertTrue(touch_icon.is_file())
+
+        svg = logo.read_text(encoding="utf-8")
+        self.assertIn('viewBox="0 0 64 64"', svg)
+        self.assertIn("#1D4ED8", svg)
+        self.assertIn('aria-label="媒体仓"', svg)
+
+        def png_dimensions(path):
+            payload = path.read_bytes()[:24]
+            self.assertEqual(payload[:8], b"\x89PNG\r\n\x1a\n")
+            return struct.unpack(">II", payload[16:24])
+
+        self.assertEqual(png_dimensions(favicon), (32, 32))
+        self.assertEqual(png_dimensions(touch_icon), (180, 180))
 
     def test_vue_admin_exposes_realtime_logs_route_and_lifecycle_controls(self):
         router = (ROOT / "frontend/src/router.js").read_text(encoding="utf-8")
