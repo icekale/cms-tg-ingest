@@ -842,7 +842,11 @@ def render_quality_page(
     background_jobs: BackgroundJobCoordinator | None = None,
 ) -> str:
     allowed_roots = quality_automation.allowed_roots if quality_automation is not None else ()
-    issues = scan_task_quality(store, allowed_roots=allowed_roots)
+    share_identity_resolver = getattr(quality_automation, "share_identity_resolver", None)
+    scan_kwargs = {"allowed_roots": allowed_roots}
+    if callable(share_identity_resolver):
+        scan_kwargs["share_identity_resolver"] = share_identity_resolver
+    issues = scan_task_quality(store, **scan_kwargs)
     report = format_task_quality_report(issues)
     quality_rows = quality_items(store, quality_automation=quality_automation, issues=issues)
     grouped: dict[int, dict[str, Any]] = {}
@@ -1021,7 +1025,11 @@ def fix_quality_issues(store: TaskStore, quality_automation: QualityAutomation |
     if quality_automation is None:
         return 0
     fixed_task_ids: set[int] = set()
-    issues = scan_task_quality(store, allowed_roots=quality_automation.allowed_roots)
+    share_identity_resolver = getattr(quality_automation, "share_identity_resolver", None)
+    scan_kwargs = {"allowed_roots": quality_automation.allowed_roots}
+    if callable(share_identity_resolver):
+        scan_kwargs["share_identity_resolver"] = share_identity_resolver
+    issues = scan_task_quality(store, **scan_kwargs)
     for item in quality_items(store, quality_automation=quality_automation, issues=issues):
         task_id = int(item["task_id"])
         if task_id in fixed_task_ids:

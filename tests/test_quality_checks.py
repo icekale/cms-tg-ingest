@@ -379,6 +379,44 @@ class EmbyAutoMatchTests(unittest.TestCase):
 
 
 class StatusRepairTests(unittest.TestCase):
+    def test_latest_self_share_identity_prefers_newer_matching_tmdb_submission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            dest = Path(tmp) / "library" / "Series"
+            old = store.upsert_submission(
+                bridge.ShareKey("old-source", "1212"),
+                "https://115cdn.com/s/old-source?password=1212",
+                "received",
+                title="旧提交",
+            )
+            store.update_recognition(int(old["id"]), {"tmdb_id": "1416"}, "self_share_resolved")
+            store.update_self_share(
+                int(old["id"]),
+                workflow_mode="self_share_sync",
+                own_share_code="oldshare",
+                own_share_receive_code="1212",
+            )
+            store.update_move(int(old["id"]), "moved", dest_path=str(dest))
+
+            latest = store.upsert_submission(
+                bridge.ShareKey("latest-source", "1212"),
+                "https://115cdn.com/s/latest-source?password=1212",
+                "received",
+                title="最新提交",
+            )
+            store.update_recognition(int(latest["id"]), {"tmdb_id": "1416"}, "self_share_resolved")
+            store.update_self_share(
+                int(latest["id"]),
+                workflow_mode="self_share_sync",
+                own_share_code="newshare",
+                own_share_receive_code="1212",
+            )
+            store.update_move(int(latest["id"]), "moved", dest_path=str(dest))
+
+            identity = store.latest_self_share_identity(str(dest), "1416")
+
+            self.assertEqual(identity, ("newshare", "1212"))
+
     def test_submission_store_creates_self_share_performance_indexes(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "submissions.db"

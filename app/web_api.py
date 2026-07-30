@@ -405,11 +405,14 @@ def quality_items(
     if not isinstance(allowed_roots, (list, tuple, set, frozenset)):
         allowed_roots = None
     if issues is None:
-        issues = scan_task_quality(
-            store,
-            limit=max(1, min(int(limit), 500)),
-            allowed_roots=allowed_roots,
-        )
+        share_identity_resolver = getattr(quality_automation, "share_identity_resolver", None)
+        scan_kwargs = {
+            "limit": max(1, min(int(limit), 500)),
+            "allowed_roots": allowed_roots,
+        }
+        if callable(share_identity_resolver):
+            scan_kwargs["share_identity_resolver"] = share_identity_resolver
+        issues = scan_task_quality(store, **scan_kwargs)
     grouped: dict[int, list[Any]] = {}
     for issue in issues:
         grouped.setdefault(int(issue.task_id), []).append(issue)

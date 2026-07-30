@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import Config, MoveConfig, is_relative_to, is_under_any_root, safe_resolve
 from .models import TaskSnapshot, TaskStage, TaskStatus
-from .quality import QualityIssue, scan_task_quality
+from .quality import QualityIssue, ShareIdentityResolver, scan_task_quality
 from .quality_rules import (
     QUALITY_RULE_VERSION,
     QualityRuleEngine,
@@ -98,6 +98,7 @@ class QualityAutomation:
         repair_adapter: object | None = None,
         on_enabled_changed: object | None = None,
         rule_engine: QualityRuleEngine | None = None,
+        share_identity_resolver: ShareIdentityResolver | None = None,
     ) -> None:
         self.store = store
         self.config = config
@@ -126,6 +127,7 @@ class QualityAutomation:
         self.allowed_roots = tuple(safe_resolve(Path(root)) for root in roots)
         self.repair_adapter = repair_adapter
         self.on_enabled_changed = on_enabled_changed
+        self.share_identity_resolver = share_identity_resolver if callable(share_identity_resolver) else None
 
     def _load_rule_config(self) -> dict[str, bool | int]:
         values: dict[str, object] = dict(self.DEFAULT_RULE_CONFIG)
@@ -359,6 +361,7 @@ class QualityAutomation:
                 limit=scan_limit,
                 allowed_roots=self.allowed_roots,
                 tasks=tasks,
+                share_identity_resolver=self.share_identity_resolver,
             )
             issues.extend(
                 QualityIssue("invalid_share", "115 已明确确认自有分享失效", task_id=task.id)
@@ -448,7 +451,12 @@ class QualityAutomation:
         """Describe one current rule decision for presentation and manual actions."""
         current_time = time.time() if now is None else float(now)
         issue_list = tuple(issues) if issues is not None else tuple(
-            scan_task_quality(self.store, tasks=[task], allowed_roots=self.allowed_roots)
+            scan_task_quality(
+                self.store,
+                tasks=[task],
+                allowed_roots=self.allowed_roots,
+                share_identity_resolver=self.share_identity_resolver,
+            )
         )
         match = self.rule_engine.evaluate(task, issue_list, config=self.rule_config)
         state = self.store.quality_state(task.id, now=current_time)

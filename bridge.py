@@ -1228,6 +1228,43 @@ class SubmissionStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def latest_self_share_identity(self, dest_path: str, tmdb_id: str = "") -> tuple[str, str] | None:
+        """Return the newest moved, valid self-share identity for one media directory."""
+        dest_path = str(dest_path or "").strip()
+        target_tmdb = str(tmdb_id or "").strip()
+        if not dest_path:
+            return None
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, own_share_code, own_share_receive_code, recognition_json
+                FROM submissions
+                WHERE workflow_mode = 'self_share_sync'
+                  AND lower(COALESCE(move_status, '')) = 'moved'
+                  AND COALESCE(dest_path, '') = ?
+                  AND COALESCE(own_share_code, '') <> ''
+                  AND lower(COALESCE(share_validation_status, '')) NOT IN ('invalid', 'unavailable')
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (dest_path,),
+            ).fetchall()
+        for row in rows:
+            try:
+                recognition = json.loads(str(row["recognition_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                recognition = {}
+            if not isinstance(recognition, dict):
+                recognition = {}
+            candidate_tmdb = str(recognition.get("tmdb_id") or "").strip()
+            if target_tmdb and candidate_tmdb != target_tmdb:
+                continue
+            share_code = str(row["own_share_code"] or "").strip()
+            if not share_code:
+                continue
+            receive_code = str(row["own_share_receive_code"] or "1212").strip() or "1212"
+            return share_code, receive_code
+        return None
+
     def all_confirmed_with_emby_path(self) -> list[dict[str, Any]]:
         with self._lock, self._connection() as conn:
             rows = conn.execute(
@@ -1408,6 +1445,15 @@ class SubmissionStore:
                 params,
             ).fetchall()
         return [dict(row) for row in rows]
+
+
+def quality_share_identity_for_task(store: SubmissionStore, task: Any) -> tuple[str, str] | None:
+    metadata = getattr(task, "metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    dest_path = str(metadata.get("dest_path") or "").strip()
+    tmdb_id = str(metadata.get("tmdb_id") or getattr(task, "tmdb_id", "") or "").strip()
+    return store.latest_self_share_identity(dest_path, tmdb_id)
 
 def should_wait_for_category(row: dict[str, Any]) -> bool:
     return str(row.get("category_status") or "") == "uncertain" and not row.get("category_choice")
@@ -4532,6 +4578,7 @@ def run_forever(
                 cleanup_client=p115 if self_share_config.cleanup_after_emby else None,
             ),
             on_enabled_changed=set_invalid_probe_enabled,
+            share_identity_resolver=lambda task: quality_share_identity_for_task(store, task),
         )
         set_invalid_probe_enabled(bool(quality_automation.config.quality_auto_enabled))
         quality_thread = start_quality_automation_loop(

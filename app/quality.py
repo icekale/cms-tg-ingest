@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import replace
 from pathlib import Path, PureWindowsPath
@@ -22,6 +23,7 @@ class QualityIssue:
 
 
 _StrmDirectoryScan = tuple[tuple[tuple[Path, str], ...], tuple[QualityIssue, ...]]
+ShareIdentityResolver = Callable[[TaskSnapshot], tuple[str, str] | None]
 
 
 def redact_quality_detail(value: object) -> str:
@@ -104,10 +106,12 @@ def scan_task_quality(
     limit: int = 100,
     allowed_roots: Iterable[str | Path] | None = None,
     tasks: Iterable[TaskSnapshot] | None = None,
+    share_identity_resolver: ShareIdentityResolver | None = None,
 ) -> list[QualityIssue]:
     allowed_roots = tuple(allowed_roots) if allowed_roots is not None else None
     issues: list[QualityIssue] = []
     scan_cache: dict[Path, _StrmDirectoryScan] = {}
+    identity_cache: dict[tuple[str, str], tuple[str, str] | None] = {}
     task_rows = list(tasks) if tasks is not None else store.list_recent_tasks(limit=limit)
     for task in task_rows:
         title = task.title or str(task.metadata.get("received_title") or "") or task.share_code
@@ -122,6 +126,19 @@ def scan_task_quality(
             continue
         own_share_code = str(task.metadata.get("own_share_code") or "").strip()
         own_share_receive_code = str(task.metadata.get("own_share_receive_code") or "1212").strip() or "1212"
+        if expected_mode == "shared" and callable(share_identity_resolver):
+            identity_key = (dest_path, str(task.metadata.get("tmdb_id") or task.tmdb_id or "").strip())
+            if identity_key not in identity_cache:
+                try:
+                    identity_cache[identity_key] = share_identity_resolver(task)
+                except Exception:
+                    identity_cache[identity_key] = None
+            latest_identity = identity_cache[identity_key]
+            if latest_identity:
+                latest_code, latest_receive_code = latest_identity
+                if str(latest_code or "").strip():
+                    own_share_code = str(latest_code).strip()
+                    own_share_receive_code = str(latest_receive_code or own_share_receive_code).strip() or own_share_receive_code
         for issue in inspect_task_files(
             task,
             dest_path=dest_path,

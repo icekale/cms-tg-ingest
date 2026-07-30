@@ -215,6 +215,35 @@ class TaskQualityTests(unittest.TestCase):
             self.assertEqual(reads, [strm])
             self.assertEqual([(issue.task_id, issue.code) for issue in issues], [(tasks[1].id, "unexpected_strm")])
 
+    def test_scan_uses_latest_completed_share_identity_for_same_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "Series"
+            dest.mkdir()
+            (dest / "episode.strm").write_text("http://cms/s/newshare_1212_fileid.mkv", encoding="utf-8")
+            store = TaskStore(root / "tasks.db")
+            task = store.upsert_task("old-task", "", "https://115cdn.com/s/old-task")
+            task = store.record_event(
+                task.id,
+                TaskStage.MOVED,
+                TaskStatus.SUCCEEDED,
+                "moved",
+                metadata_patch={
+                    "dest_path": str(dest),
+                    "own_share_code": "oldshare",
+                    "own_share_receive_code": "1212",
+                    "tmdb_id": "1416",
+                },
+            )
+
+            issues = scan_task_quality(
+                store,
+                tasks=[task],
+                share_identity_resolver=lambda current: ("newshare", "1212"),
+            )
+
+            self.assertEqual(issues, [])
+
     def test_scan_rejects_strm_symlink_target_outside_allowed_root_before_reading(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
