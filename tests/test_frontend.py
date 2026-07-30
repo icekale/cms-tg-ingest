@@ -63,6 +63,22 @@ class FrontendTests(unittest.TestCase):
         self.assertIn(".brand-logo", styles)
         self.assertNotIn(".brand-mark", styles)
 
+    def test_vue_admin_footer_uses_product_signature_layout(self):
+        shell = (ROOT / "frontend/src/App.vue").read_text(encoding="utf-8")
+        styles = (ROOT / "frontend/src/styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('class="app-footer"', shell)
+        self.assertIn('class="footer-signature"', shell)
+        self.assertIn('class="footer-product"', shell)
+        self.assertIn("115 · CMS · Emby 工作流", shell)
+        self.assertIn('class="footer-version"', shell)
+        self.assertIn(':src="brandLogoUrl"', shell)
+        self.assertIn(".footer-signature", styles)
+        self.assertIn(".footer-version", styles)
+        self.assertIn("@media (max-width: 520px)", styles)
+        self.assertIn(".footer-caption", styles)
+        self.assertIn("display: none", styles)
+
     def test_vue_admin_exposes_realtime_logs_route_and_lifecycle_controls(self):
         router = (ROOT / "frontend/src/router.js").read_text(encoding="utf-8")
         shell = (ROOT / "frontend/src/App.vue").read_text(encoding="utf-8")

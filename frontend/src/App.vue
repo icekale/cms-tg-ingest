@@ -41,7 +41,18 @@ onMounted(async () => {
           <n-layout-content class="content-wrap">
             <div class="content-inner"><router-view /></div>
           </n-layout-content>
-          <n-layout-footer class="app-footer">{{ program.app_name }}<span v-if="program.version"> {{ program.version }}</span></n-layout-footer>
+          <n-layout-footer class="app-footer">
+            <div class="footer-signature">
+              <div class="footer-identity">
+                <img class="footer-logo" :src="brandLogoUrl" alt="" width="24" height="24" />
+                <span>
+                  <span class="footer-product">入库助手</span>
+                  <span class="footer-caption">115 · CMS · Emby 工作流</span>
+                </span>
+              </div>
+              <span v-if="program.version" class="footer-version">v{{ program.version }}</span>
+            </div>
+          </n-layout-footer>
         </n-layout>
       </n-layout>
       </n-layout>
