@@ -41,6 +41,28 @@ class FrontendTests(unittest.TestCase):
         self.assertEqual(png_dimensions(favicon), (32, 32))
         self.assertEqual(png_dimensions(touch_icon), (180, 180))
 
+    def test_vue_admin_wires_media_vault_logo_and_icons(self):
+        index = (ROOT / "frontend/index.html").read_text(encoding="utf-8")
+        shell = (ROOT / "frontend/src/App.vue").read_text(encoding="utf-8")
+        styles = (ROOT / "frontend/src/styles.css").read_text(encoding="utf-8")
+
+        for expected in (
+            "%BASE_URL%brand/logo-mark.svg",
+            "%BASE_URL%brand/favicon-32.png",
+            "%BASE_URL%brand/apple-touch-icon.png",
+            'name="theme-color" content="#1D4ED8"',
+        ):
+            self.assertIn(expected, index)
+
+        self.assertIn("brandLogoUrl", shell)
+        self.assertIn("import.meta.env.BASE_URL", shell)
+        self.assertIn('class="brand-logo"', shell)
+        self.assertIn(':src="brandLogoUrl"', shell)
+        self.assertIn('alt=""', shell)
+        self.assertNotIn('<span class="brand-mark">CMS</span>', shell)
+        self.assertIn(".brand-logo", styles)
+        self.assertNotIn(".brand-mark", styles)
+
     def test_vue_admin_exposes_realtime_logs_route_and_lifecycle_controls(self):
         router = (ROOT / "frontend/src/router.js").read_text(encoding="utf-8")
         shell = (ROOT / "frontend/src/App.vue").read_text(encoding="utf-8")

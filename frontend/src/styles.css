@@ -5,7 +5,7 @@ body { margin: 0; min-width: 320px; background: #f5f7fb; }
 .main-column { min-height: calc(100vh - 60px); }
 .top-header { height: 60px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; background: #fff; }
 .brand { display: flex; align-items: center; gap: 10px; color: #172033; font-weight: 700; font-size: 17px; }
-.brand-mark { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 28px; border-radius: 7px; color: #fff; background: #2563eb; font-size: 11px; letter-spacing: .04em; }
+.brand-logo { display: block; flex: 0 0 auto; width: 38px; height: 38px; }
 .header-note { color: #748096; font-size: 13px; }
 .content-wrap { padding: 28px; }
 .content-inner { max-width: 1240px; margin: 0 auto; }

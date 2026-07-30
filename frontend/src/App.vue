@@ -8,6 +8,7 @@ const route = useRoute()
 const router = useRouter()
 const collapsed = ref(false)
 const program = ref({ app_name: 'cms-tg-ingest', version: '' })
+const brandLogoUrl = `${import.meta.env.BASE_URL}brand/logo-mark.svg`
 const menuOptions = [
   { label: '运行概览', key: '/overview' },
   { label: '当前任务', key: '/tasks' },
@@ -29,7 +30,7 @@ onMounted(async () => {
     <n-message-provider>
       <n-layout class="admin-shell">
       <n-layout-header bordered class="top-header">
-        <div class="brand"><span class="brand-mark">CMS</span><span>入库助手</span></div>
+        <div class="brand"><img class="brand-logo" :src="brandLogoUrl" alt="" width="38" height="38" /><span>入库助手</span></div>
         <div class="header-note">115 · CMS · Emby 工作流</div>
       </n-layout-header>
       <n-layout has-sider>
