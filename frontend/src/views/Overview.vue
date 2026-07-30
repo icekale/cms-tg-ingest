@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 import { NButton, NCard, NPopconfirm, NSpace, NTag, useMessage } from 'naive-ui'
 import { RouterLink } from 'vue-router'
 import { api } from '../api'
+import { displayTaskTitle } from '../taskView'
 
 const data = ref(null)
 const error = ref('')
@@ -32,7 +33,7 @@ onMounted(load)
     <n-card title="当前队列" class="section-card">
       <n-space vertical>
         <div v-for="task in data.tasks.items.slice(0, 8)" :key="task.id">
-          <router-link class="task-link" :to="`/tasks/${task.id}`">#{{ task.id }} {{ task.title }}</router-link>
+          <router-link class="task-link" :to="`/tasks/${task.id}`">#{{ task.id }} {{ displayTaskTitle(task) }}</router-link>
           <span class="muted"> · {{ task.stage }} · </span><n-tag size="small">{{ task.status }}</n-tag>
         </div>
         <span v-if="!data.tasks.items.length" class="muted">暂无任务</span>

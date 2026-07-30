@@ -3,7 +3,7 @@ import { h, onMounted, ref } from 'vue'
 import { NButton, NCard, NDataTable, NPopconfirm, NSpace, NTag, useMessage } from 'naive-ui'
 import { RouterLink } from 'vue-router'
 import { api } from '../api'
-import { taskLifecycleState, taskStatusLabel } from '../taskView'
+import { displayTaskTitle, taskLifecycleState, taskStatusLabel } from '../taskView'
 
 const message = useMessage()
 const tasks = ref([])
@@ -19,7 +19,7 @@ function setActionBusy(row, action, value) {
   busyActions.value = next
 }
 const columns = [
-  { title: '任务', key: 'title', render: (row) => h(RouterLink, { class: 'task-link', to: `/tasks/${row.id}` }, { default: () => `#${row.id} ${row.title}` }) },
+  { title: '任务', key: 'title', render: (row) => h(RouterLink, { class: 'task-link', to: `/tasks/${row.id}` }, { default: () => `#${row.id} ${displayTaskTitle(row)}` }) },
   { title: '阶段', key: 'stage' },
   { title: '状态', key: 'status', render: (row) => h(NTag, { size: 'small' }, { default: () => taskStatusLabel(row.status) }) },
   { title: 'STRM', key: 'strm_mode', render: (row) => modeLabels[row.strm_mode] || row.strm_mode },

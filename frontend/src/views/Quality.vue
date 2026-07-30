@@ -4,6 +4,7 @@ import { NButton, NCard, NDataTable, NSpace, NTag, useMessage } from 'naive-ui'
 import { RouterLink } from 'vue-router'
 import { api } from '../api'
 import { mergeQualityRows, qualityActionLabel, qualityRiskType, qualityStatusLabel } from '../qualityView'
+import { displayTaskTitle } from '../taskView'
 
 const message = useMessage()
 const payload = ref({ items: [], rule_counts: {}, manual_count: 0, cooldown_count: 0, automation: null })
@@ -105,7 +106,7 @@ async function runQualityAction(row, action) {
 }
 
 function taskCell(row) {
-  const title = row.title || `任务 #${row.task_id}`
+  const title = displayTaskTitle(row)
   if (!row.title) return h('span', `#${row.task_id} ${title}`)
   return h(RouterLink, { class: 'task-link', to: `/tasks/${row.task_id}` }, { default: () => `#${row.task_id} ${title}` })
 }

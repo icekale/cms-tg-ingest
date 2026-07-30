@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 import { NButton, NCard, NDescriptions, NDescriptionsItem, NTag, useMessage } from 'naive-ui'
 import { RouterLink } from 'vue-router'
 import { api } from '../api'
+import { displayTaskTitle } from '../taskView'
 
 const message = useMessage()
 const health = ref(null)
@@ -22,7 +23,7 @@ onMounted(load)
       <n-descriptions-item label="115 冷却">{{ health.p115_cooldown_active ? '冷却中' : '未冷却' }}</n-descriptions-item>
     </n-descriptions>
     <div v-if="health.wait_details?.length" class="health-list"><h3>等待原因</h3><div v-for="detail in health.wait_details" :key="detail">{{ detail }}</div></div>
-    <div v-if="health.latest_problem" class="health-list"><h3>最近问题</h3><RouterLink :to="`/tasks/${health.latest_problem.id}`">#{{ health.latest_problem.id }} {{ health.latest_problem.title }}</RouterLink><div>{{ health.latest_problem.error?.summary || health.latest_problem.why_slow || '' }}</div></div>
+    <div v-if="health.latest_problem" class="health-list"><h3>最近问题</h3><RouterLink :to="`/tasks/${health.latest_problem.id}`">#{{ health.latest_problem.id }} {{ displayTaskTitle(health.latest_problem) }}</RouterLink><div>{{ health.latest_problem.error?.summary || health.latest_problem.why_slow || '' }}</div></div>
   </n-card>
   <n-card v-else>正在加载…</n-card>
 </template>
