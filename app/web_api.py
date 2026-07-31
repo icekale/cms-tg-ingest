@@ -10,7 +10,8 @@ from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 from .background_jobs import redact_background_text
 from .logging_system import redact_text
-from .models import TaskSnapshot
+from .media.strm import iter_strm_files
+from .models import TaskSnapshot, TaskStage, TaskStatus
 from .quality_rules import QUALITY_RULE_VERSION, QualityRuleEngine, quality_attempt_count
 from .task_diagnostics import explain_task_slowness, format_stage_observability
 from .task_health import build_task_health
@@ -138,6 +139,85 @@ def task_display_title(task: Any) -> str:
     return str(getattr(task, "share_code", "") or title or "-")
 
 
+def _completion_drift_recommendation(mode: str) -> str:
+    if mode == "shared":
+        return "系统会尝试用自有分享 STRM 恢复；恢复后刷新 Emby。"
+    return "请检查 STRM 内容和媒体库挂载，并让系统重新执行 Emby 入库确认。"
+
+
+def completion_drift_for_task(task: TaskSnapshot) -> dict[str, str] | None:
+    """Report a live filesystem mismatch without mutating the persisted task."""
+    if task.status != TaskStatus.SUCCEEDED or task.current_stage != TaskStage.CLEANED:
+        return None
+    try:
+        mode = effective_task_strm_mode(task)
+    except ValueError:
+        mode = "shared"
+    recommendation = _completion_drift_recommendation(mode)
+    dest_path = str(task.metadata.get("dest_path") or "").strip()
+    if not dest_path:
+        return {
+            "code": "missing_dest",
+            "message": "已入库但当前媒体目录缺失",
+            "detail": "任务未保存目标媒体目录",
+            "recommendation": recommendation,
+        }
+    try:
+        destination = Path(dest_path)
+        if not destination.is_dir():
+            return {
+                "code": "missing_dest",
+                "message": "已入库但当前媒体目录缺失",
+                "detail": "目标媒体目录不存在",
+                "recommendation": recommendation,
+            }
+        strm_files = iter_strm_files(destination)
+        try:
+            first_file = next(strm_files)
+        except StopIteration:
+            first_file = None
+        if first_file is None:
+            return {
+                "code": "missing_strm",
+                "message": "已入库但当前媒体目录没有 STRM",
+                "detail": "目标媒体目录中未找到 STRM 文件",
+                "recommendation": recommendation,
+            }
+        expected_code = str(task.metadata.get("own_share_code") or "").strip()
+        receive_code = str(task.metadata.get("own_share_receive_code") or "1212").strip() or "1212"
+        expected_marker = f"/s/{expected_code}_{receive_code}_" if expected_code else "/s/"
+        has_unexpected = False
+        for path in (first_file, *strm_files):
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                has_unexpected = True
+                continue
+            if mode == "direct":
+                matches = "/d/" in text
+            elif mode == "source_shared":
+                matches = "/s/" in text
+            else:
+                matches = expected_marker in text
+            has_unexpected = has_unexpected or not matches
+        if not has_unexpected:
+            return None
+        return {
+            "code": "unexpected_strm",
+            "message": "已入库但 STRM 内容与任务模式不匹配",
+            "detail": "目标媒体目录中的 STRM 不是预期来源",
+            "recommendation": recommendation,
+        }
+    except (OSError, RuntimeError):
+        return {
+            "code": "missing_dest",
+            "message": "已入库但当前媒体目录缺失",
+            "detail": "目标媒体目录无法访问",
+            "recommendation": recommendation,
+        }
+    return None
+
+
 def _safe_container_value(value: Any) -> Any:
     if isinstance(value, dict):
         return _safe_metadata(value)
@@ -197,6 +277,7 @@ def serialize_task(
     *,
     now: float | None = None,
     lifecycle_actions_enabled: bool = True,
+    include_completion_drift: bool = False,
 ) -> dict[str, Any]:
     current_time = time.time() if now is None else float(now)
     elapsed, p115_calls = format_stage_observability(task)
@@ -222,6 +303,7 @@ def serialize_task(
         "why_slow": explain_task_slowness(task, now=current_time),
         "stage_elapsed": elapsed,
         "stage_p115_calls": p115_calls,
+        "completion_drift": completion_drift_for_task(task) if include_completion_drift else None,
         "metadata": _safe_metadata(task.metadata),
         "created_at": task.created_at,
         "updated_at": task.updated_at,
@@ -411,7 +493,12 @@ def api_task_detail(
     task = store.find_task(task_id)
     if task is None:
         return None
-    result = serialize_task(task, now=now, lifecycle_actions_enabled=lifecycle_actions_enabled)
+    result = serialize_task(
+        task,
+        now=now,
+        lifecycle_actions_enabled=lifecycle_actions_enabled,
+        include_completion_drift=True,
+    )
     result["events"] = [serialize_event(event) for event in store.list_events(task.id)]
     return result
 

@@ -1328,20 +1328,21 @@ class SubmissionStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def missing_self_share_library_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
+    def missing_self_share_library_candidates(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         with self._lock, self._connection() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM submissions
                 WHERE workflow_mode = 'self_share_sync'
                   AND lower(COALESCE(move_status, '')) = 'moved'
+                  AND lower(COALESCE(share_validation_status, '')) NOT IN ('invalid', 'unavailable')
                   AND COALESCE(dest_path, '') <> ''
                   AND COALESCE(own_share_file_name, '') <> ''
                   AND COALESCE(own_share_code, '') <> ''
                 ORDER BY updated_at DESC, id DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
-                (max(1, int(limit)),),
+                (max(1, int(limit)), max(0, int(offset))),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -2738,7 +2739,14 @@ def start_status_repair_loop(
                 repaired = repair_stale_submissions(store, emby, move_config=move_config, limit=limit)
                 moved = repair_stranded_self_share_moves(store, move_config, limit=limit) if move_config else 0
                 restored = (
-                    restore_missing_self_share_library_folders(store, cms, self_share_config, move_config, limit=limit)
+                    restore_missing_self_share_library_folders(
+                        store,
+                        cms,
+                        self_share_config,
+                        move_config,
+                        emby=emby,
+                        limit=limit,
+                    )
                     if cms and self_share_config and move_config
                     else 0
                 )
@@ -2770,6 +2778,7 @@ def start_self_share_maintenance_loop(
     interval_seconds: int = 15,
     limit: int = 50,
     stop_event: threading.Event | None = None,
+    emby: Any | None = None,
 ) -> threading.Thread | None:
     if interval_seconds <= 0:
         return None
@@ -2784,6 +2793,7 @@ def start_self_share_maintenance_loop(
                     cms,
                     self_share_config,
                     move_config,
+                    emby=emby,
                     limit=limit,
                 )
                 if moved:
@@ -4524,6 +4534,7 @@ def run_forever(
                 interval_seconds=max(1, int(config.status_repair_interval_seconds)),
                 limit=max(1, int(config.status_repair_limit)),
                 stop_event=stop_event,
+                emby=emby,
             )
     if config.backup_enabled:
         backup_scheduler = create_backup_scheduler(config, task_store)

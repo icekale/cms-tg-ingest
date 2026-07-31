@@ -4580,6 +4580,213 @@ class P115FailureHandlingTests(unittest.TestCase):
             self.assertEqual(restored, 0)
             self.assertEqual(cms.sync_payloads, [])
 
+    def test_maintenance_restores_historical_completed_row_and_refreshes_emby(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            movie_root = root / "Movie"
+            source = share_root / "Y-历史任务-2025-[tmdb=1054867]"
+            dest = movie_root / source.name
+            source.mkdir(parents=True)
+            (source / "历史任务.strm").write_text(
+                "http://cms/s/swswold_1212_3455387345258282790.mkv",
+                encoding="utf-8",
+            )
+            store = bridge.SubmissionStore(root / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("oldshare", "pass"),
+                "https://115cdn.com/s/oldshare?password=pass",
+                "submitted",
+                title="历史任务 (2025) {tmdb-1054867}",
+            )
+            store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_name=source.name,
+                own_share_code="swswold",
+                own_share_receive_code="1212",
+                share_sync_status="submitted",
+                share_validation_status="valid",
+            )
+            store.update_category(int(row["id"]), "欧美电影", "selected")
+            store.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(source),
+                dest_path=str(dest),
+                category_final="欧美电影",
+            )
+            old_updated_at = time.time() - 86400
+            with store._lock, store._connection() as conn:
+                conn.execute("UPDATE submissions SET updated_at = ? WHERE id = ?", (old_updated_at, int(row["id"])))
+
+            class FakeEmby:
+                enabled = True
+
+                def __init__(self):
+                    self.refreshed_paths = []
+
+                def refresh_library_for_path(self, path):
+                    self.refreshed_paths.append(str(path))
+                    return "电影库"
+
+            emby = FakeEmby()
+            restored = bridge.restore_missing_self_share_library_folders(
+                store,
+                cms=None,
+                self_share_config=bridge.SelfShareConfig(enabled=True, strm_root=share_root),
+                move_config=bridge.MoveConfig(
+                    source_roots=[share_root],
+                    library_roots={"欧美电影": movie_root},
+                    stable_seconds=0,
+                ),
+                emby=emby,
+                limit=10,
+            )
+
+            self.assertEqual(restored, 1)
+            self.assertFalse(source.exists())
+            self.assertTrue((dest / "历史任务.strm").exists())
+            self.assertEqual(emby.refreshed_paths, [str(bridge.safe_resolve(dest))])
+
+    def test_maintenance_does_not_restore_invalid_self_share(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            movie_root = root / "Movie"
+            source = share_root / "Y-无效分享-2025-[tmdb=1054867]"
+            dest = movie_root / source.name
+            source.mkdir(parents=True)
+            (source / "无效分享.strm").write_text(
+                "http://cms/s/invalid_1212_3455387345258282790.mkv",
+                encoding="utf-8",
+            )
+            store = bridge.SubmissionStore(root / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("invalid-source", "pass"),
+                "https://115cdn.com/s/invalid-source?password=pass",
+                "submitted",
+                title="无效分享 (2025) {tmdb-1054867}",
+            )
+            store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_name=source.name,
+                own_share_code="invalid",
+                own_share_receive_code="1212",
+                share_sync_status="submitted",
+                share_validation_status="invalid",
+            )
+            store.update_category(int(row["id"]), "欧美电影", "selected")
+            store.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(source),
+                dest_path=str(dest),
+                category_final="欧美电影",
+            )
+            store.update_emby(int(row["id"]), "confirmed")
+            store.update_cleanup(int(row["id"]), "deleted", file_id="3455387345258282790")
+
+            restored = bridge.restore_missing_self_share_library_folders(
+                store,
+                cms=None,
+                self_share_config=bridge.SelfShareConfig(enabled=True, strm_root=share_root),
+                move_config=bridge.MoveConfig(
+                    source_roots=[share_root],
+                    library_roots={"欧美电影": movie_root},
+                    stable_seconds=0,
+                ),
+                limit=10,
+            )
+
+            self.assertEqual(restored, 0)
+            self.assertTrue((source / "无效分享.strm").exists())
+            self.assertFalse(dest.exists())
+
+    def test_maintenance_scans_candidates_beyond_action_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            movie_root = root / "Movie"
+            healthy_source = share_root / "H-健康任务-2025-[tmdb=1054867]"
+            healthy_dest = movie_root / healthy_source.name
+            missing_source = share_root / "M-历史任务-2025-[tmdb=1054867]"
+            missing_dest = movie_root / missing_source.name
+            healthy_source.mkdir(parents=True)
+            healthy_dest.mkdir(parents=True)
+            missing_source.mkdir(parents=True)
+            (healthy_source / "健康任务.strm").write_text("http://cms/s/healthy_1212_movie", encoding="utf-8")
+            (healthy_dest / "健康任务.strm").write_text("http://cms/s/healthy_1212_movie", encoding="utf-8")
+            (missing_source / "历史任务.strm").write_text("http://cms/s/history_1212_movie", encoding="utf-8")
+            store = bridge.SubmissionStore(root / "submissions.db")
+
+            healthy = store.upsert_submission(
+                bridge.ShareKey("healthy-source", "pass"),
+                "https://115cdn.com/s/healthy-source?password=pass",
+                "submitted",
+                title="健康任务 (2025) {tmdb-1054867}",
+            )
+            store.update_self_share(
+                int(healthy["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_name=healthy_source.name,
+                own_share_code="healthy",
+                own_share_receive_code="1212",
+                share_sync_status="submitted",
+                share_validation_status="valid",
+            )
+            store.update_category(int(healthy["id"]), "欧美电影", "selected")
+            store.update_move(
+                int(healthy["id"]),
+                "moved",
+                source_path=str(healthy_source),
+                dest_path=str(healthy_dest),
+                category_final="欧美电影",
+            )
+
+            missing = store.upsert_submission(
+                bridge.ShareKey("history-source", "pass"),
+                "https://115cdn.com/s/history-source?password=pass",
+                "submitted",
+                title="历史任务 (2025) {tmdb-1054867}",
+            )
+            store.update_self_share(
+                int(missing["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_name=missing_source.name,
+                own_share_code="history",
+                own_share_receive_code="1212",
+                share_sync_status="submitted",
+                share_validation_status="valid",
+            )
+            store.update_category(int(missing["id"]), "欧美电影", "selected")
+            store.update_move(
+                int(missing["id"]),
+                "moved",
+                source_path=str(missing_source),
+                dest_path=str(missing_dest),
+                category_final="欧美电影",
+            )
+            old_updated_at = time.time() - 86400
+            with store._lock, store._connection() as conn:
+                conn.execute("UPDATE submissions SET updated_at = ? WHERE id = ?", (old_updated_at, int(missing["id"])))
+
+            restored = bridge.restore_missing_self_share_library_folders(
+                store,
+                cms=None,
+                self_share_config=bridge.SelfShareConfig(enabled=True, strm_root=share_root),
+                move_config=bridge.MoveConfig(
+                    source_roots=[share_root],
+                    library_roots={"欧美电影": movie_root},
+                    stable_seconds=0,
+                ),
+                limit=1,
+            )
+
+            self.assertEqual(restored, 1)
+            self.assertTrue((missing_dest / "历史任务.strm").exists())
+
     def test_delete_file_raises_when_115_returns_state_false_without_canceling_share(self):
         class FakeHttp:
             def request(self, url, method="GET", data=None, headers=None, params=None):

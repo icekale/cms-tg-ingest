@@ -1285,18 +1285,43 @@ def restore_missing_self_share_library_folders(
     self_share_config: SelfShareConfig,
     move_config: MoveConfig,
     limit: int = 50,
-    recent_seconds: int = 3600,
+    recent_seconds: int = 0,
+    emby: Any | None = None,
 ) -> int:
     restored = 0
     if not hasattr(store, "missing_self_share_library_candidates"):
         return restored
     cutoff = time.time() - max(1, int(recent_seconds)) if recent_seconds > 0 else 0
-    for row in store.missing_self_share_library_candidates(limit=max(1, int(limit))):
+    candidate_limit = max(1, int(limit))
+    candidates: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        page = store.missing_self_share_library_candidates(limit=candidate_limit, offset=offset)
+        candidates.extend(page)
+        if len(page) < candidate_limit:
+            break
+        offset += len(page)
+    action_count = 0
+    for row in candidates:
         if cutoff and float(row.get("updated_at") or 0) < cutoff:
             continue
-        status, _metadata = restore_missing_self_share_library_folder(store, cms, row, self_share_config, move_config)
+        status, metadata = restore_missing_self_share_library_folder(store, cms, row, self_share_config, move_config)
         if status == "restored":
             restored += 1
+        if status in {"restored", "restore_submitted", "move_failed"}:
+            action_count += 1
+            if emby and getattr(emby, "enabled", False) and hasattr(emby, "refresh_library_for_path"):
+                try:
+                    if status == "restored":
+                        emby.refresh_library_for_path(str(metadata.get("dest_path") or row.get("dest_path") or ""))
+                except Exception:
+                    LOG.warning(
+                        "Failed to refresh Emby after restoring self-share submission id=%s",
+                        row.get("id"),
+                        exc_info=True,
+                    )
+            if action_count >= candidate_limit:
+                break
     return restored
 
 

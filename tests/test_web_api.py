@@ -21,6 +21,7 @@ from app.web_api import (
     _safe_url,
     api_quality,
     api_response,
+    api_tasks,
     serialize_event,
     serialize_hdhive,
     serialize_health,
@@ -29,6 +30,57 @@ from app.web_api import (
 
 
 class WebApiTests(unittest.TestCase):
+    def test_completed_task_exposes_missing_media_directory_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("drift", "", "https://115cdn.com/s/drift", strm_mode="shared")
+            store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "done",
+                metadata_patch={"dest_path": str(Path(tmp) / "missing")},
+            )
+
+            payload = serialize_task(store.find_task(task.id), include_completion_drift=True)
+
+            self.assertEqual(payload["status"], "succeeded")
+            self.assertEqual(payload["completion_drift"]["code"], "missing_dest")
+            self.assertEqual(payload["completion_drift"]["message"], "已入库但当前媒体目录缺失")
+
+    def test_completed_shared_task_exposes_wrong_strm_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            destination = root / "movie"
+            destination.mkdir()
+            (destination / "movie.strm").write_text("http://115.example/d/direct-file", encoding="utf-8")
+            store = TaskStore(root / "tasks.db")
+            task = store.upsert_task("wrong", "", "https://115cdn.com/s/wrong", strm_mode="shared")
+            store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "done",
+                metadata_patch={
+                    "dest_path": str(destination),
+                    "own_share_code": "own-share",
+                    "own_share_receive_code": "1212",
+                },
+            )
+
+            payload = serialize_task(store.find_task(task.id), include_completion_drift=True)
+
+            self.assertEqual(payload["completion_drift"]["code"], "unexpected_strm")
+
+    def test_task_list_does_not_scan_completion_drift_filesystem(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            store.upsert_task("list", "", "https://115cdn.com/s/list")
+            with patch("app.web_api.completion_drift_for_task") as drift:
+                api_tasks(store)
+
+            drift.assert_not_called()
+
     def test_task_api_exposes_backend_lifecycle_actions(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

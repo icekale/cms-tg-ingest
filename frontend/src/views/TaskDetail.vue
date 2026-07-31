@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { NButton, NCard, NDescriptions, NDescriptionsItem, NSelect, NSpace, NTag, useMessage } from 'naive-ui'
+import { NAlert, NButton, NCard, NDescriptions, NDescriptionsItem, NSelect, NSpace, NTag, useMessage } from 'naive-ui'
 import { useRoute } from 'vue-router'
 import { api } from '../api'
 import { displayTaskTitle } from '../taskView'
@@ -48,6 +48,10 @@ onMounted(load)
 <template>
   <div v-if="task" class="page-title"><div><h1>{{ displayTaskTitle(task) }}</h1><p>#{{ task.id }} · {{ task.stage }}</p></div><n-tag>{{ task.status }}</n-tag></div>
   <n-card v-if="task" title="任务详情">
+    <n-alert v-if="task.completion_drift" type="warning" title="入库状态需要复核" style="margin-bottom: 18px">
+      <div>{{ task.completion_drift.message }}</div>
+      <div class="muted">{{ task.completion_drift.recommendation }}</div>
+    </n-alert>
     <n-descriptions bordered :column="2">
       <n-descriptions-item label="STRM 模式"><n-select style="width: 170px" :value="task.strm_mode" :options="modeOptions" @update:value="changeMode" /></n-descriptions-item>
       <n-descriptions-item label="分类">{{ task.category || '-' }}</n-descriptions-item>
