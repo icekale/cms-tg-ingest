@@ -79,6 +79,19 @@ class FrontendTests(unittest.TestCase):
         self.assertIn(".footer-caption", styles)
         self.assertIn("display: none", styles)
 
+    def test_vue_admin_scrolls_long_pages_while_footer_stays_in_view(self):
+        styles = (ROOT / "frontend/src/styles.css").read_text(encoding="utf-8")
+
+        for expected in (
+            ".admin-shell { height: 100vh;",
+            ".main-column { height: calc(100vh - 60px); min-height: 0;",
+            ".main-column > .n-layout-scroll-container",
+            ".content-wrap { flex: 1 1 auto; min-height: 0;",
+            ".content-wrap > .n-layout-scroll-container",
+            ".app-footer { flex: 0 0 auto;",
+        ):
+            self.assertIn(expected, styles)
+
     def test_vue_admin_exposes_realtime_logs_route_and_lifecycle_controls(self):
         router = (ROOT / "frontend/src/router.js").read_text(encoding="utf-8")
         shell = (ROOT / "frontend/src/App.vue").read_text(encoding="utf-8")
