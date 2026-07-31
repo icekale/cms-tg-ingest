@@ -63,6 +63,20 @@ class P115WebClientTests(unittest.TestCase):
 
         self.assertTrue(response["state"])
 
+    def test_inspect_share_preserves_numeric_zero_share_state(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                return {
+                    "state": True,
+                    "data": {"shareinfo": {"share_state": 0, "have_vio_file": 0}},
+                }
+
+        client = bridge.P115WebClient("UID=1", http=FakeHttp(), timeout=3)
+
+        status = client.inspect_share("valid-share", "1212")
+
+        self.assertEqual(status["share_state"], "0")
+
     def test_inspect_share_reports_violation_flag_as_warning_not_invalid(self):
         class FakeHttp:
             def request(self, url, method="GET", data=None, headers=None, params=None):
@@ -521,6 +535,7 @@ class CmsPlaybackProbeTests(unittest.TestCase):
                     "state": True,
                     "data": {
                         "list": [
+                            {"share_code": "share-zero", "share_state": 0, "have_vio_file": 0, "create_time": 9},
                             {"share_code": "share-a", "share_state": 1, "have_vio_file": 0, "create_time": 10},
                             {"share_code": "share-b", "share_state": 6, "have_vio_file": 1, "create_time": 11},
                         ]
@@ -533,6 +548,7 @@ class CmsPlaybackProbeTests(unittest.TestCase):
         first = client.list_own_share_states()
         second = client.list_own_share_states()
 
+        self.assertEqual(first["share-zero"], {"share_state": "0", "have_vio_file": False, "create_time": 9})
         self.assertEqual(first["share-a"], {"share_state": "1", "have_vio_file": False, "create_time": 10})
         self.assertEqual(first["share-b"], {"share_state": "6", "have_vio_file": True, "create_time": 11})
         self.assertEqual(first, second)

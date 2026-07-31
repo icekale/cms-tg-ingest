@@ -84,6 +84,10 @@ def as_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def normalize_share_state(value: Any) -> str:
+    return "" if value is None else str(value).strip().lower()
+
+
 def iter_items(data: Any) -> list[dict]:
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]
@@ -571,7 +575,7 @@ class P115WebClient:
             raise
         data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
         share_info = data.get("shareinfo") if isinstance(data.get("shareinfo"), dict) else {}
-        share_state = str(share_info.get("share_state") or "").strip().lower()
+        share_state = normalize_share_state(share_info.get("share_state"))
         if share_state and share_state not in {"0", "1", "true"}:
             raise P115ShareUnavailableError(f"115 分享状态不可用: {share_state}")
         return resp
@@ -626,7 +630,7 @@ class P115WebClient:
         snap = self.share_snap(share_code, receive_code, cid="0", limit=1)
         data = snap.get("data") if isinstance(snap.get("data"), dict) else {}
         share_info = data.get("shareinfo") if isinstance(data.get("shareinfo"), dict) else {}
-        share_state = str(share_info.get("share_state") or "").strip().lower()
+        share_state = normalize_share_state(share_info.get("share_state"))
         raw_vio = share_info.get("have_vio_file", data.get("have_vio_file", 0))
         have_vio_file = str(raw_vio).strip().lower() in {"1", "true", "yes"}
         return {
@@ -659,8 +663,11 @@ class P115WebClient:
             if not share_code:
                 continue
             raw_vio = item.get("have_vio_file", item.get("is_collect", 0))
+            raw_state = item.get("share_state")
+            if raw_state is None:
+                raw_state = item.get("state")
             states[share_code] = {
-                "share_state": str(item.get("share_state") or item.get("state") or "").strip().lower(),
+                "share_state": normalize_share_state(raw_state),
                 "have_vio_file": str(raw_vio).strip().lower() in {"1", "true", "yes"},
                 "create_time": item.get("create_time") or item.get("share_time") or 0,
             }
