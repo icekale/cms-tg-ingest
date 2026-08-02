@@ -992,6 +992,31 @@ class SubmissionStore:
             row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
         return self._row_to_dict(row)
 
+    def claim_self_share_restore_sync(
+        self,
+        row_id: int,
+        retry_seconds: float = 60,
+        now: float | None = None,
+    ) -> bool:
+        timestamp = time.time() if now is None else float(now)
+        stale_before = timestamp - max(1.0, float(retry_seconds))
+        with self._lock, self._connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE submissions
+                SET workflow_phase = 'restore_share_sync_submitted',
+                    share_sync_status = 'restore_submitted',
+                    updated_at = ?
+                WHERE id = ?
+                  AND (
+                      lower(COALESCE(workflow_phase, '')) <> 'restore_share_sync_submitted'
+                      OR COALESCE(updated_at, 0) <= ?
+                  )
+                """,
+                (timestamp, row_id, stale_before),
+            )
+            return bool(cursor.rowcount)
+
     def reset_self_share_for_update(self, row_id: int) -> dict[str, Any] | None:
         """Keep stable media identity while clearing only one self-share execution's state."""
         with self._lock, self._connection() as conn:

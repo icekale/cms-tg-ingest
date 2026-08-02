@@ -24,10 +24,22 @@ from app.media.classify import (
 LOG = logging.getLogger("cms-tg-ingest")
 
 MISSING_SELF_SHARE_SOURCE_REASONS = {"STRM 源目录不存在", "源目录不包含 STRM 文件", "未找到 STRM 源目录"}
+SELF_SHARE_RESTORE_SYNC_RETRY_SECONDS = 60
 
 
 class UnsafeMediaPathError(ValueError):
     pass
+
+
+def _restore_sync_is_waiting(row: dict[str, Any], now: float | None = None) -> bool:
+    if str(row.get("workflow_phase") or "") != "restore_share_sync_submitted":
+        return False
+    try:
+        submitted_at = float(row.get("updated_at") or 0)
+    except (TypeError, ValueError):
+        submitted_at = 0
+    current_time = time.time() if now is None else float(now)
+    return current_time - submitted_at < SELF_SHARE_RESTORE_SYNC_RETRY_SECONDS
 
 
 def category_for_self_share_row(row: dict[str, Any]) -> str:
@@ -1261,21 +1273,27 @@ def restore_missing_self_share_library_folder(
         receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
         if not share_code:
             return "skipped", metadata
-        if str(row.get("workflow_phase") or "") != "restore_share_sync_submitted":
-            cms.add_share115_sync_task(
-                share_code,
-                receive_code,
-                cid=self_share_config.cms_cid,
-                local_path=self_share_config.cms_local_path,
+        if _restore_sync_is_waiting(row):
+            return "waiting_source", metadata
+        if hasattr(store, "claim_self_share_restore_sync"):
+            if not store.claim_self_share_restore_sync(
+                int(row["id"]),
+                retry_seconds=SELF_SHARE_RESTORE_SYNC_RETRY_SECONDS,
+            ):
+                return "waiting_source", metadata
+        elif hasattr(store, "update_self_share"):
+            store.update_self_share(
+                int(row["id"]),
+                workflow_phase="restore_share_sync_submitted",
+                share_sync_status="restore_submitted",
             )
-            if hasattr(store, "update_self_share"):
-                store.update_self_share(
-                    int(row["id"]),
-                    workflow_phase="restore_share_sync_submitted",
-                    share_sync_status="restore_submitted",
-                )
-            return "restore_submitted", metadata
-        return "waiting_source", metadata
+        cms.add_share115_sync_task(
+            share_code,
+            receive_code,
+            cid=self_share_config.cms_cid,
+            local_path=self_share_config.cms_local_path,
+        )
+        return "restore_submitted", metadata
     return "skipped", metadata
 
 
@@ -1291,7 +1309,8 @@ def restore_missing_self_share_library_folders(
     restored = 0
     if not hasattr(store, "missing_self_share_library_candidates"):
         return restored
-    cutoff = time.time() - max(1, int(recent_seconds)) if recent_seconds > 0 else 0
+    maintenance_now = time.time()
+    cutoff = maintenance_now - max(1, int(recent_seconds)) if recent_seconds > 0 else 0
     candidate_limit = max(1, int(limit))
     candidates: list[dict[str, Any]] = []
     offset = 0
@@ -1301,11 +1320,14 @@ def restore_missing_self_share_library_folders(
         if len(page) < candidate_limit:
             break
         offset += len(page)
+    candidates.sort(key=lambda row: not _restore_sync_is_waiting(row, now=maintenance_now))
     action_count = 0
     for row in candidates:
         if cutoff and float(row.get("updated_at") or 0) < cutoff:
             continue
         status, metadata = restore_missing_self_share_library_folder(store, cms, row, self_share_config, move_config)
+        if status == "waiting_source":
+            break
         if status == "restored":
             restored += 1
         if status in {"restored", "restore_submitted", "move_failed"}:
@@ -1320,6 +1342,8 @@ def restore_missing_self_share_library_folders(
                         row.get("id"),
                         exc_info=True,
                     )
+            if status == "restore_submitted":
+                break
             if action_count >= candidate_limit:
                 break
     return restored

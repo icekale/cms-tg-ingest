@@ -3957,6 +3957,211 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertEqual(cms.sync_payloads, [{"share_code": "swsw43a3wul", "receive_code": "1212", "cid": "0", "local_path": "/media/share"}])
             self.assertEqual(updated["workflow_phase"], "restore_share_sync_submitted")
 
+    def test_maintenance_submits_only_one_restore_sync_per_cycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            movie_root = root / "Movie"
+            store = bridge.SubmissionStore(root / "submissions.db")
+            rows = []
+            for index in range(2):
+                folder_name = f"M-缺失任务{index}-2025-[tmdb={1054800 + index}]"
+                row = store.upsert_submission(
+                    bridge.ShareKey(f"missing-source-{index}", "pass"),
+                    f"https://115cdn.com/s/missing-source-{index}?password=pass",
+                    "submitted",
+                    title=f"缺失任务{index} (2025)",
+                )
+                store.update_self_share(
+                    int(row["id"]),
+                    workflow_mode="self_share_sync",
+                    own_share_file_name=folder_name,
+                    own_share_code=f"missing{index}",
+                    own_share_receive_code="1212",
+                    share_sync_status="submitted",
+                    share_validation_status="valid",
+                )
+                store.update_category(int(row["id"]), "欧美电影", "selected")
+                store.update_move(
+                    int(row["id"]),
+                    "moved",
+                    source_path=str(share_root / folder_name),
+                    dest_path=str(movie_root / folder_name),
+                    category_final="欧美电影",
+                )
+                rows.append(store.find_by_id(int(row["id"])))
+
+            class FakeCms:
+                def __init__(self):
+                    self.sync_payloads = []
+
+                def add_share115_sync_task(self, share_code, receive_code, cid="0", local_path="/media/share"):
+                    self.sync_payloads.append({"share_code": share_code, "receive_code": receive_code})
+                    return {"code": 200}
+
+            cms = FakeCms()
+            restored = bridge.restore_missing_self_share_library_folders(
+                store,
+                cms,
+                bridge.SelfShareConfig(enabled=True, strm_root=share_root, cms_local_path="/media/share", cms_cid="0"),
+                bridge.MoveConfig(source_roots=[share_root], library_roots={"欧美电影": movie_root}, stable_seconds=0),
+                limit=10,
+            )
+
+            self.assertEqual(restored, 0)
+            self.assertEqual(len(cms.sync_payloads), 1)
+            phases = [store.find_by_id(int(row["id"]))["workflow_phase"] for row in rows]
+            self.assertEqual(phases.count("restore_share_sync_submitted"), 1)
+
+    def test_restore_share_sync_resubmits_after_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            movie_root = root / "Movie"
+            folder_name = "M-超时恢复-2025-[tmdb=1054801]"
+            dest = movie_root / folder_name
+            store = bridge.SubmissionStore(root / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("timed-out-source", "pass"),
+                "https://115cdn.com/s/timed-out-source?password=pass",
+                "submitted",
+                title="超时恢复 (2025)",
+            )
+            store.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="restore_share_sync_submitted",
+                own_share_file_name=folder_name,
+                own_share_code="timedout",
+                own_share_receive_code="1212",
+                share_sync_status="restore_submitted",
+                share_validation_status="valid",
+            )
+            store.update_category(int(row["id"]), "欧美电影", "selected")
+            store.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(share_root / folder_name),
+                dest_path=str(dest),
+                category_final="欧美电影",
+            )
+            with store._lock, store._connection() as conn:
+                conn.execute("UPDATE submissions SET updated_at = ? WHERE id = ?", (time.time() - 120, int(row["id"])))
+
+            class FakeCms:
+                def __init__(self):
+                    self.sync_payloads = []
+
+                def add_share115_sync_task(self, share_code, receive_code, cid="0", local_path="/media/share"):
+                    self.sync_payloads.append({"share_code": share_code, "receive_code": receive_code})
+                    return {"code": 200}
+
+            cms = FakeCms()
+            status, _metadata = bridge.restore_missing_self_share_library_folder(
+                store,
+                cms,
+                store.find_by_id(int(row["id"])),
+                bridge.SelfShareConfig(enabled=True, strm_root=share_root, cms_local_path="/media/share", cms_cid="0"),
+                bridge.MoveConfig(source_roots=[share_root], library_roots={"欧美电影": movie_root}, stable_seconds=0),
+            )
+
+            self.assertEqual(status, "restore_submitted")
+            self.assertEqual(cms.sync_payloads, [{"share_code": "timedout", "receive_code": "1212"}])
+
+    def test_maintenance_waits_for_active_restore_before_newer_missing_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            share_root = root / "share"
+            movie_root = root / "Movie"
+            store = bridge.SubmissionStore(root / "submissions.db")
+
+            active_folder = "A-等待恢复-2025-[tmdb=1054802]"
+            active = store.upsert_submission(
+                bridge.ShareKey("active-restore", "pass"),
+                "https://115cdn.com/s/active-restore?password=pass",
+                "submitted",
+                title="等待恢复 (2025)",
+            )
+            store.update_self_share(
+                int(active["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="restore_share_sync_submitted",
+                own_share_file_name=active_folder,
+                own_share_code="active",
+                own_share_receive_code="1212",
+                share_sync_status="restore_submitted",
+                share_validation_status="valid",
+            )
+            store.update_category(int(active["id"]), "欧美电影", "selected")
+            store.update_move(
+                int(active["id"]),
+                "moved",
+                source_path=str(share_root / active_folder),
+                dest_path=str(movie_root / active_folder),
+                category_final="欧美电影",
+            )
+            with store._lock, store._connection() as conn:
+                conn.execute("UPDATE submissions SET updated_at = ? WHERE id = ?", (time.time() - 10, int(active["id"])))
+
+            newer_folder = "N-更新缺失-2025-[tmdb=1054803]"
+            newer = store.upsert_submission(
+                bridge.ShareKey("newer-missing", "pass"),
+                "https://115cdn.com/s/newer-missing?password=pass",
+                "submitted",
+                title="更新缺失 (2025)",
+            )
+            store.update_self_share(
+                int(newer["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_name=newer_folder,
+                own_share_code="newer",
+                own_share_receive_code="1212",
+                share_sync_status="submitted",
+                share_validation_status="valid",
+            )
+            store.update_category(int(newer["id"]), "欧美电影", "selected")
+            store.update_move(
+                int(newer["id"]),
+                "moved",
+                source_path=str(share_root / newer_folder),
+                dest_path=str(movie_root / newer_folder),
+                category_final="欧美电影",
+            )
+
+            class FakeCms:
+                def __init__(self):
+                    self.sync_payloads = []
+
+                def add_share115_sync_task(self, share_code, receive_code, cid="0", local_path="/media/share"):
+                    self.sync_payloads.append({"share_code": share_code, "receive_code": receive_code})
+                    return {"code": 200}
+
+            cms = FakeCms()
+            restored = bridge.restore_missing_self_share_library_folders(
+                store,
+                cms,
+                bridge.SelfShareConfig(enabled=True, strm_root=share_root, cms_local_path="/media/share", cms_cid="0"),
+                bridge.MoveConfig(source_roots=[share_root], library_roots={"欧美电影": movie_root}, stable_seconds=0),
+                limit=10,
+            )
+
+            self.assertEqual(restored, 0)
+            self.assertEqual(cms.sync_payloads, [])
+
+    def test_restore_sync_claim_allows_only_one_fresh_submission_and_retries_after_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            row = store.upsert_submission(
+                bridge.ShareKey("claim-source", "pass"),
+                "https://115cdn.com/s/claim-source?password=pass",
+                "submitted",
+            )
+
+            self.assertTrue(store.claim_self_share_restore_sync(int(row["id"]), now=100.0))
+            self.assertFalse(store.claim_self_share_restore_sync(int(row["id"]), now=100.0))
+            self.assertFalse(store.claim_self_share_restore_sync(int(row["id"]), now=150.0))
+            self.assertTrue(store.claim_self_share_restore_sync(int(row["id"]), now=161.0))
+
     def test_restore_missing_self_share_library_folder_moves_regenerated_share_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
