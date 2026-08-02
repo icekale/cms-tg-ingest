@@ -214,6 +214,7 @@ class TaskRunner:
         risk_cooldown_seconds: float = 900,
         p115_client: object | None = None,
         now: Callable[[], float] | None = None,
+        claim_stale_after_seconds: int = 300,
     ):
         self.store = store
         self.workflow = workflow
@@ -221,6 +222,7 @@ class TaskRunner:
         self.interval_seconds = max(0.1, float(interval_seconds))
         self.risk_cooldown_seconds = max(1.0, float(risk_cooldown_seconds))
         self.p115_client = p115_client
+        self.claim_stale_after_seconds = max(30, int(claim_stale_after_seconds))
         self.now = now or time.time
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -316,7 +318,11 @@ class TaskRunner:
         if self._claim_release_pending:
             self.store.clear_worker_claims(self.worker_id, now=self.now())
             self._claim_release_pending = False
-        task = self.store.claim_next_runnable(self.worker_id, now=self.now())
+        task = self.store.claim_next_runnable(
+            self.worker_id,
+            now=self.now(),
+            stale_after_seconds=self.claim_stale_after_seconds,
+        )
         if task is None:
             return False
         try:

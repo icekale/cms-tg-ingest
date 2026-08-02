@@ -1517,3 +1517,45 @@ class TaskRunnerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClaimRecoveryTests(unittest.TestCase):
+    def test_restarted_runner_reclaims_stale_claim_before_old_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("hang", "", "https://115cdn.com/s/hang")
+            store.enqueue_task(task.id, next_run_at=0)
+            # Worker A claims the task and then crashes without renewing its heartbeat.
+            claimed = store.claim_next_runnable("worker-a", now=100.0)
+            self.assertIsNotNone(claimed)
+
+            workflow = FakeWorkflow([StageResult.complete("done")])
+            runner = TaskRunner(
+                store,
+                workflow,
+                worker_id="worker-b",
+                now=lambda: 500.0,
+                claim_stale_after_seconds=300,
+            )
+            self.assertTrue(runner.run_once())
+            self.assertEqual([call[0] for call in workflow.calls], [task.id])
+
+    def test_active_claim_is_not_reclaimed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("active", "", "https://115cdn.com/s/active")
+            store.enqueue_task(task.id, next_run_at=0)
+            claimed = store.claim_next_runnable("worker-a", now=100.0)
+            self.assertIsNotNone(claimed)
+            store.renew_claim(claimed.id, "worker-a", claimed.claim_token, now=460.0)
+
+            workflow = FakeWorkflow([StageResult.complete("done")])
+            runner = TaskRunner(
+                store,
+                workflow,
+                worker_id="worker-b",
+                now=lambda: 500.0,
+                claim_stale_after_seconds=300,
+            )
+            self.assertFalse(runner.run_once())
+            self.assertEqual(workflow.calls, [])
