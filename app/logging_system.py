@@ -146,9 +146,12 @@ class LogFilter:
     filter_type: str
     lines: int
     keyword: str
+    logger: str = ""
 
     def matches(self, entry: LogEntry) -> bool:
         if _LEVEL_VALUES.get(entry.level, logging.INFO) < _FILTER_LEVELS[self.filter_type]:
+            return False
+        if self.logger and entry.logger.casefold() != self.logger.casefold():
             return False
         return not self.keyword or self.keyword.casefold() in entry.text.casefold()
 
@@ -157,9 +160,15 @@ class LogFilter:
 class LogEvent:
     kind: Literal["log", "gap", "closed"]
     entry: LogEntry | None = None
+    dropped: int = 0
 
 
-def parse_log_filter(filter_type: object = "main", lines: object = 1000, keyword: object = "") -> LogFilter:
+def parse_log_filter(
+    filter_type: object = "main",
+    lines: object = 1000,
+    keyword: object = "",
+    logger: object = "",
+) -> LogFilter:
     normalized_type = str(filter_type or "main")
     if normalized_type not in _FILTER_LEVELS:
         raise ValueError("filter_type must be main, ERROR, or all")
@@ -172,7 +181,10 @@ def parse_log_filter(filter_type: object = "main", lines: object = 1000, keyword
     normalized_keyword = str(keyword or "")
     if len(normalized_keyword) > 100:
         raise ValueError("keyword must be at most 100 characters")
-    return LogFilter(normalized_type, normalized_lines, normalized_keyword)
+    normalized_logger = str(logger or "").strip()
+    if len(normalized_logger) > 100:
+        raise ValueError("logger must be at most 100 characters")
+    return LogFilter(normalized_type, normalized_lines, normalized_keyword, normalized_logger)
 
 
 def _replace_captured_value(match: re.Match[str]) -> str:
@@ -322,6 +334,7 @@ class LogStream:
         self._spec = spec
         self._queue: queue.Queue[LogEvent] = queue.Queue(maxsize=max(1, queue_size))
         self._closed = False
+        self._dropped = 0
 
     def _offer(self, entry: LogEntry) -> None:
         if self._closed or not self._spec.matches(entry):
@@ -329,12 +342,15 @@ class LogStream:
         try:
             self._queue.put_nowait(LogEvent("log", entry))
         except queue.Full:
+            drained = 0
             while True:
                 try:
                     self._queue.get_nowait()
                 except queue.Empty:
                     break
-            self._queue.put_nowait(LogEvent("gap"))
+                drained += 1
+            self._dropped += max(1, drained)
+            self._queue.put_nowait(LogEvent("gap", dropped=self._dropped))
 
     def next_event(self, timeout: float) -> LogEvent | None:
         try:
@@ -358,21 +374,29 @@ class LogStream:
 
 
 class LogHub:
-    def __init__(self, capacity: int = LOG_HISTORY_LIMIT):
+    def __init__(self, capacity: int = LOG_HISTORY_LIMIT, rate_limit: bool = False):
         self._entries: deque[LogEntry] = deque(maxlen=max(1, capacity))
         self._total_bytes = 0
         self._next_id = 1
         self._streams: set[LogStream] = set()
         self._lock = threading.RLock()
+        self._rate_limit = bool(rate_limit)
+        self._rate_buckets: dict[tuple[str, str, str], float] = {}
 
     @property
     def subscriber_count(self) -> int:
         with self._lock:
             return len(self._streams)
 
-    def publish(self, created_at: float, level: str, logger: str, text: str) -> LogEntry:
+    def publish(self, created_at: float, level: str, logger: str, text: str) -> LogEntry | None:
         with self._lock:
             safe_text = _truncate_utf8(redact_text(text))
+            if self._rate_limit:
+                key = (str(level or "INFO").upper(), str(logger or "root"), safe_text)
+                previous = self._rate_buckets.get(key)
+                if previous is not None and float(created_at) - previous < 1.0:
+                    return None
+                self._rate_buckets[key] = float(created_at)
             entry = LogEntry(
                 id=self._next_id,
                 created_at=float(created_at),
@@ -421,12 +445,15 @@ class LogHub:
                 if match is None:
                     self.publish(time.time(), "INFO", "history", stripped)
                     continue
+                raw_timestamp = match.group("timestamp")
+                if "," in raw_timestamp:
+                    raw_timestamp = raw_timestamp.split(",", 1)[0]
                 try:
-                    created_at = datetime.strptime(match.group("timestamp"), LOG_DATE_FORMAT).astimezone().timestamp()
+                    created_at = datetime.strptime(raw_timestamp, LOG_DATE_FORMAT).astimezone().timestamp()
                 except ValueError:
                     self.publish(time.time(), "INFO", "history", stripped)
                     continue
-                self.publish(created_at, match.group("level"), match.group("logger"), stripped)
+                self.publish(created_at, match.group("level"), match.group("logger"), match.group("text"))
 
     def snapshot(self, spec: LogFilter) -> tuple[LogEntry, ...]:
         with self._lock:
@@ -469,7 +496,7 @@ class LogHubHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            self.hub.publish(record.created, record.levelname, record.name, self.format(record))
+            self.hub.publish(record.created, record.levelname, record.name, record.getMessage())
         except Exception:
             return
 
@@ -587,6 +614,7 @@ def configure_logging(
     max_bytes: int = LOG_MAX_BYTES,
     backup_count: int = LOG_BACKUP_COUNT,
     history_limit: int = LOG_HISTORY_LIMIT,
+    rate_limit: bool = False,
 ) -> LoggingRuntime:
     logger = root_logger if root_logger is not None else logging.getLogger()
     with _CONFIGURE_LOCK:
@@ -594,10 +622,10 @@ def configure_logging(
             if getattr(handler, _HANDLER_MARKER, False):
                 runtime = getattr(handler, "_cms_logging_runtime", None)
                 if isinstance(runtime, LoggingRuntime):
-                    logger.setLevel(level)
-                    return runtime
+                    runtime.close()
+                break
 
-        hub = LogHub(history_limit)
+        hub = LogHub(history_limit, rate_limit=rate_limit)
         path = Path(log_path)
         _prune_stale_backups(path, backup_count)
         hub.restore(path, backup_count)

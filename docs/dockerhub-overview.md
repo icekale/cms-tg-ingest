@@ -110,6 +110,8 @@ docker compose logs -f cms-tg-ingest
 - 容器继续使用现有 `./data:/data` 挂载，不需要增加日志 volume；重启后恢复最近最多 5000 行。
 - 配置 `WEB_TOKEN` 时，先通过 `/app/?token=...` 建立 HttpOnly Cookie，再进入 `/app/logs`；EventSource URL 不携带 Token。
 - `/api/v1/logs/stream` 是仅供页面读取实时流的内部只读 SSE 端点。
+- 日志页支持级别、关键字和来源（logger）过滤；慢客户端丢行时页面会提示并自动重连。
+- AI 分析接口：`GET /api/v1/logs/analyze` 返回结构化摘要（错误/告警统计、重复模式、修复提示与最近条目），供外部 AI 分析和调用管理 API 修复。
 
 首次部署检查：
 

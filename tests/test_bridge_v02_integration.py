@@ -296,7 +296,10 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             exit_code = bridge.main()
 
         self.assertEqual(exit_code, 0)
-        configure.assert_called_once_with(os.environ.get("LOG_LEVEL", "INFO"))
+        configure.assert_called_once_with(
+            os.environ.get("LOG_LEVEL", "INFO"),
+            rate_limit=False,
+        )
         self.assertIs(run.call_args.kwargs["log_hub"], runtime.hub)
 
     def test_stop_web_server_closes_server(self):

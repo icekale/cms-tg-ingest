@@ -36,6 +36,24 @@ test('buildLogStreamUrl sends only documented filters and never a web token', ()
   const url = buildLogStreamUrl({ filterType: 'ERROR', lines: 2000, keyword: 'CMS 失败' })
   assert.equal(url, '/api/v1/logs/stream?filter_type=ERROR&lines=2000&keyword=CMS+%E5%A4%B1%E8%B4%A5')
   assert.equal(url.includes('token='), false)
+
+  const withLogger = buildLogStreamUrl({ filterType: 'main', lines: 1000, keyword: '', logger: 'task_runner' })
+  assert.equal(withLogger, '/api/v1/logs/stream?filter_type=main&lines=1000&keyword=&logger=task_runner')
+})
+
+test('gap event delivers dropped count to the view callback', () => {
+  const sources = []
+  const gaps = []
+  const controller = createLogStreamController(
+    { onGap: (payload) => gaps.push(payload) },
+    createFakeSourceFactory(sources),
+  )
+
+  controller.connect({ filterType: 'main', lines: 1000, keyword: '', logger: '' })
+  sources[0].emit('gap', { reason: 'slow_client', dropped: 17 })
+
+  assert.deepEqual(gaps, [{ reason: 'slow_client', dropped: 17 }])
+  controller.close()
 })
 
 test('log state keeps newest first, enforces limit, and parses multiline payloads', () => {

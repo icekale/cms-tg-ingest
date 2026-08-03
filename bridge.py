@@ -4847,7 +4847,11 @@ def run_forever(
 
 
 def main() -> int:
-    logging_runtime = configure_logging(os.environ.get("LOG_LEVEL", "INFO"))
+    logging_runtime = configure_logging(
+        os.environ.get("LOG_LEVEL", "INFO"),
+        rate_limit=str(os.environ.get("LOG_RATE_LIMIT_ENABLED", "")).strip().lower()
+        in {"1", "true", "yes", "on"},
+    )
     stop_event = threading.Event()
 
     def request_stop(signum, _frame):

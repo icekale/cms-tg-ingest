@@ -14,7 +14,10 @@ const filterType = ref('main')
 const lineLimit = ref(1000)
 const keywordDraft = ref('')
 const keyword = ref('')
+const loggerDraft = ref('')
+const logger = ref('')
 const logViewport = ref(null)
+const visibleCount = ref(2000)
 const filterOptions = [
   { label: '重要', value: 'main' },
   { label: '错误', value: 'ERROR' },
@@ -27,8 +30,10 @@ let reconnectTimer
 let disposed = false
 
 function currentFilters() {
-  return { filterType: filterType.value, lines: lineLimit.value, keyword: keyword.value }
+  return { filterType: filterType.value, lines: lineLimit.value, keyword: keyword.value, logger: logger.value }
 }
+
+const visibleEntries = computed(() => entries.value.slice(0, visibleCount.value))
 
 const controller = createLogStreamController({
   onOpen: () => { connectionState.value = 'connected' },
@@ -60,9 +65,10 @@ const controller = createLogStreamController({
       )
     }
   },
-  onGap: () => {
+  onGap: (payload) => {
     if (disposed) return
-    message.warning('日志更新过快，正在重新获取快照')
+    const dropped = Number.isFinite(payload?.dropped) ? payload.dropped : 0
+    message.warning(dropped > 0 ? `日志更新过快，可能丢失 ${dropped} 行，正在重新获取快照` : '日志更新过快，正在重新获取快照')
     controller.close()
     clearTimeout(reconnectTimer)
     reconnectTimer = setTimeout(reconnect, 500)
@@ -78,7 +84,13 @@ function reconnect() {
 function applyKeyword() {
   keyword.value = keywordDraft.value.trim().slice(0, 100)
   keywordDraft.value = keyword.value
+  logger.value = loggerDraft.value.trim().slice(0, 100)
+  loggerDraft.value = logger.value
+  visibleCount.value = 2000
   reconnect()
+}
+function loadMore() {
+  visibleCount.value = Math.min(entries.value.length, visibleCount.value + 1000)
 }
 function clearVisibleLogs() {
   entries.value = []
@@ -107,6 +119,7 @@ onBeforeUnmount(() => {
       <n-select v-model:value="filterType" filterable :input-props="{ 'aria-label': '日志级别' }" :options="filterOptions" style="width: 120px" />
       <n-select v-model:value="lineLimit" filterable :input-props="{ 'aria-label': '日志行数' }" :options="lineOptions" style="width: 120px" />
       <n-input v-model:value="keywordDraft" aria-label="日志关键字" maxlength="100" clearable placeholder="关键字" style="max-width: 280px" @keyup.enter="applyKeyword" />
+      <n-input v-model:value="loggerDraft" aria-label="日志来源" maxlength="100" clearable placeholder="来源(如 task_runner)" style="max-width: 220px" @keyup.enter="applyKeyword" />
       <n-space>
         <n-button secondary @click="applyKeyword">筛选</n-button>
         <n-button secondary @click="reconnect">重连</n-button>
@@ -114,8 +127,11 @@ onBeforeUnmount(() => {
       </n-space>
     </div>
     <div ref="logViewport" class="log-viewport" role="log" tabindex="0" aria-label="实时日志输出">
-      <pre v-for="entry in entries" :key="entry.id" class="log-entry" :class="levelClass(entry.level)">{{ entry.text }}</pre>
-      <div v-if="!entries.length" class="log-empty">当前页面暂无日志</div>
+      <pre v-for="entry in visibleEntries" :key="entry.id" class="log-entry" :class="levelClass(entry.level)">{{ entry.text }}</pre>
+      <div v-if="!visibleEntries.length" class="log-empty">当前页面暂无日志</div>
     </div>
+    <n-space v-if="entries.length > visibleCount" class="log-toolbar">
+      <n-button secondary @click="loadMore">加载更早日志（当前 {{ visibleCount }}/{{ entries.length }}）</n-button>
+    </n-space>
   </n-card>
 </template>

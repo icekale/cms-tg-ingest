@@ -27,6 +27,10 @@ class WebLogTests(unittest.TestCase):
                 "/api/v1/logs/stream?filter_type=ERROR&lines=2000&keyword=CMS",
                 {"Cookie": "cms_web_token=web-secret"},
             )
+            with_logger = app.prepare_log_stream(
+                "/api/v1/logs/stream?filter_type=main&lines=1000&logger=task_runner",
+                {"Cookie": "cms_web_token=web-secret"},
+            )
             invalid_type = app.prepare_log_stream(
                 "/api/v1/logs/stream?filter_type=debug", {"Cookie": "cms_web_token=web-secret"}
             )
@@ -46,6 +50,7 @@ class WebLogTests(unittest.TestCase):
         self.assertEqual(forbidden[0], 403)
         self.assertEqual(accepted[0], 200)
         self.assertEqual(accepted[3], LogFilter("ERROR", 2000, "CMS"))
+        self.assertEqual(with_logger[3], LogFilter("main", 1000, "", "task_runner"))
         self.assertEqual(
             [invalid_type[0], invalid_lines[0], long_keyword[0], duplicate[0], unknown[0]],
             [400, 400, 400, 400, 400],
@@ -326,7 +331,7 @@ class WebLogTests(unittest.TestCase):
                 self.read_event(response)
                 gap = self.read_event(response)
                 self.assertEqual(gap["event"], "gap")
-                self.assertEqual(gap["data"], {"reason": "slow_client"})
+                self.assertEqual(gap["data"], {"reason": "slow_client", "dropped": 0})
                 self.assertTrue(closed.wait(1))
                 self.assertEqual(response.fp.readline(), b"")
             finally:
@@ -335,6 +340,44 @@ class WebLogTests(unittest.TestCase):
                 if connection is not None:
                     connection.close()
                 bridge.stop_web_server(server)
+
+    def test_log_analysis_endpoint_returns_summary_entries_and_hints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            hub = LogHub(capacity=100)
+            hub.publish(1, "INFO", "worker", "received link")
+            hub.publish(2, "ERROR", "task_runner", "Task stage failed: stage_wait_timeout 等待超时")
+            hub.publish(3, "WARNING", "runner", "115 风控，暂停重试")
+            app = self.make_app(tmp, hub=hub)
+
+            status, headers, body = app.handle_log_analysis(
+                "/api/v1/logs/analyze?lines=500&logger=task_runner",
+                {},
+            )
+            payload = json.loads(body)
+
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["summary"]["total"], 1)
+            self.assertEqual(payload["summary"]["error_count"], 1)
+            self.assertEqual(payload["entries"][0]["text"], "Task stage failed: stage_wait_timeout 等待超时")
+            self.assertTrue(any(hint["marker"] == "等待超时" for hint in payload["repair_hints"]))
+
+    def test_log_analysis_endpoint_requires_auth_and_valid_query(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self.make_app(tmp, token="web-secret", hub=LogHub())
+
+            forbidden = app.handle_log_analysis("/api/v1/logs/analyze", {})
+            unknown = app.handle_log_analysis(
+                "/api/v1/logs/analyze?extra=value",
+                {"Cookie": "cms_web_token=web-secret"},
+            )
+            bad_lines = app.handle_log_analysis(
+                "/api/v1/logs/analyze?lines=abc",
+                {"Cookie": "cms_web_token=web-secret"},
+            )
+
+            self.assertEqual(forbidden[0], 403)
+            self.assertEqual(unknown[0], 400)
+            self.assertEqual(bad_lines[0], 400)
 
     def test_server_shutdown_closes_active_sse_subscription_immediately(self):
         with tempfile.TemporaryDirectory() as tmp, patch("app.web.SSE_HEARTBEAT_SECONDS", 30):

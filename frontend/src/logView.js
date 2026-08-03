@@ -1,9 +1,10 @@
-export function buildLogStreamUrl({ filterType = 'main', lines = 1000, keyword = '' } = {}) {
+export function buildLogStreamUrl({ filterType = 'main', lines = 1000, keyword = '', logger = '' } = {}) {
   const params = new URLSearchParams({
     filter_type: filterType,
     lines: String(lines),
     keyword,
   })
+  if (logger) params.set('logger', logger)
   return `/api/v1/logs/stream?${params.toString()}`
 }
 

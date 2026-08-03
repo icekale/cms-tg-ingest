@@ -230,9 +230,9 @@ class LoggingSystemTests(unittest.TestCase):
     def test_parse_log_filter_accepts_only_documented_values(self):
         self.assertEqual(parse_log_filter(), LogFilter("main", 1000, ""))
         self.assertEqual(parse_log_filter("ERROR", "2000", "CMS"), LogFilter("ERROR", 2000, "CMS"))
-        self.assertEqual(parse_log_filter("all", 5000, "中文"), LogFilter("all", 5000, "中文"))
+        self.assertEqual(parse_log_filter("all", 5000, "中文", "runner"), LogFilter("all", 5000, "中文", "runner"))
 
-        for values in (("debug", 1000, ""), ("main", 100, ""), ("main", 1000, "x" * 101)):
+        for values in (("debug", 1000, ""), ("main", 100, ""), ("main", 1000, "x" * 101), ("main", 1000, "", "x" * 101)):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 parse_log_filter(*values)
 
@@ -250,6 +250,15 @@ class LoggingSystemTests(unittest.TestCase):
         self.assertEqual([entry.id for entry in main], [4, 2])
         self.assertEqual([entry.level for entry in errors], ["ERROR"])
         self.assertEqual([entry.id for entry in all_rows], [4, 3, 2, 1])
+
+    def test_snapshot_filters_by_logger(self):
+        hub = LogHub(capacity=10)
+        hub.publish(1, "INFO", "worker", "one")
+        hub.publish(2, "INFO", "runner", "two")
+
+        rows = hub.snapshot(LogFilter("all", 1000, "", logger="runner"))
+
+        self.assertEqual([entry.id for entry in rows], [2])
 
     def test_publish_truncates_single_entry_to_utf8_byte_limit(self):
         hub = LogHub(capacity=200)
@@ -281,9 +290,23 @@ class LoggingSystemTests(unittest.TestCase):
         hub.publish(2, "INFO", "worker", "second")
         hub.publish(3, "INFO", "worker", "third")
 
-        self.assertEqual(stream.next_event(0).kind, "gap")
+        gap = stream.next_event(0)
+        self.assertEqual(gap.kind, "gap")
+        self.assertGreaterEqual(gap.dropped, 1)
         stream.close()
         self.assertEqual(hub.subscriber_count, 0)
+
+    def test_publish_rate_limit_skips_duplicate_within_window(self):
+        hub = LogHub(capacity=10, rate_limit=True)
+        first = hub.publish(1, "INFO", "worker", "same message")
+        second = hub.publish(1.5, "INFO", "worker", "same message")
+        later = hub.publish(3, "INFO", "worker", "same message")
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+        self.assertIsNotNone(later)
+        rows = hub.snapshot(LogFilter("all", 1000, ""))
+        self.assertEqual([row.text for row in rows], ["same message", "same message"])
 
     def test_restore_reads_oldest_rotation_first_limits_rows_and_keeps_bad_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -305,12 +328,47 @@ class LoggingSystemTests(unittest.TestCase):
             self.assertEqual(
                 [row.text for row in rows],
                 [
-                    "2026-01-01 00:00:03 INFO current newest",
-                    "2026-01-01 00:00:02 ERROR current newer",
+                    "newest",
+                    "newer",
                     "damaged history line",
                 ],
             )
             self.assertEqual(rows[-1].logger, "history")
+            self.assertEqual(rows[0].logger, "current")
+            self.assertEqual(rows[1].level, "ERROR")
+
+    def test_restore_parses_millisecond_timestamps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cms-tg-ingest.log"
+            path.write_text(
+                "2026-01-01 00:00:01,123 ERROR worker ms line\n",
+                encoding="utf-8",
+            )
+            hub = LogHub(capacity=10)
+
+            hub.restore(path, backup_count=0)
+
+            row = hub.snapshot(LogFilter("all", 1000, ""))[0]
+            self.assertEqual(row.level, "ERROR")
+            self.assertEqual(row.logger, "worker")
+            self.assertEqual(row.text, "ms line")
+
+    def test_configure_logging_reconfigures_with_new_parameters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first_path = Path(tmp) / "first.log"
+            second_path = Path(tmp) / "second.log"
+            logger = logging.Logger("reconfigure", logging.INFO)
+            logger.propagate = False
+
+            first = configure_logging("INFO", log_path=first_path, root_logger=logger, history_limit=10)
+            second = configure_logging("DEBUG", log_path=second_path, root_logger=logger, history_limit=5000)
+
+            self.assertIsNot(first, second)
+            logger.info("written to second path")
+            for handler in logger.handlers:
+                handler.flush()
+            self.assertIn("written to second path", second_path.read_text(encoding="utf-8"))
+            second.close()
 
     def test_restore_bounds_oversized_physical_log_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -339,7 +397,7 @@ class LoggingSystemTests(unittest.TestCase):
             for handler in logger.handlers:
                 handler.flush()
 
-            self.assertIs(first, second)
+            self.assertIsNot(first, second)
             self.assertEqual(len(logger.handlers), 3)
             self.assertEqual(
                 sum(bool(getattr(handler, "_cms_tg_ingest_logging_handler", False)) for handler in logger.handlers),
@@ -348,8 +406,8 @@ class LoggingSystemTests(unittest.TestCase):
             self.assertEqual(unsafe_stream.getvalue(), "")
             self.assertNotIn("top-secret", stream.getvalue())
             self.assertNotIn("share-secret", path.read_text(encoding="utf-8"))
-            self.assertNotIn("top-secret", first.hub.snapshot(LogFilter("all", 1000, ""))[0].text)
-            first.close()
+            self.assertNotIn("top-secret", second.hub.snapshot(LogFilter("all", 1000, ""))[0].text)
+            second.close()
 
     def test_small_rotation_keeps_exact_backup_count(self):
         with tempfile.TemporaryDirectory() as tmp:

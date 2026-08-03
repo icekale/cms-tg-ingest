@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 from .background_jobs import redact_background_text
-from .logging_system import redact_text
+from .logging_system import LogFilter, redact_text
 from .media.strm import iter_strm_files
 from .models import TaskSnapshot, TaskStage, TaskStatus
 from .quality_rules import QUALITY_RULE_VERSION, QualityRuleEngine, quality_attempt_count
@@ -389,6 +389,96 @@ def serialize_background_job(background_jobs: Any | None, *, prefix: str = "") -
         "started_at": getattr(snapshot, "started_at", None),
         "finished_at": getattr(snapshot, "finished_at", None),
         "error": redact_background_text(getattr(snapshot, "error", "")),
+    }
+
+
+_LOG_REPAIR_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("等待超时", "任务阶段等待超时：可在任务详情执行 retry/restore，或检查 Emby/CMS 与目标目录"),
+    ("p115_risk_control", "115 风控或频率限制：等待冷却结束后再重试"),
+    ("风控", "115 风控或频率限制：等待冷却结束后再重试"),
+    ("Cannot reach", "网络瞬时错误：稍后重试即可"),
+    ("SSL:", "网络瞬时错误（SSL）：稍后重试即可"),
+    ("Network unreachable", "网络不可达：检查网络/代理后重试"),
+    ("Task stage failed", "任务阶段失败：可在任务详情执行 retry"),
+    ("Traceback", "程序异常：需要检查对应模块的异常堆栈"),
+    ("Exception", "程序异常：需要检查对应模块"),
+    ("Failed to", "外部操作失败：检查配置或稍后重试"),
+)
+
+
+def _log_repair_hints(entries: list[Any]) -> list[dict[str, Any]]:
+    matches: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        text = str(getattr(entry, "text", "") or "")
+        for marker, hint in _LOG_REPAIR_PATTERNS:
+            if marker in text:
+                item = matches.setdefault(marker, {"marker": marker, "hint": hint, "count": 0, "sample": ""})
+                item["count"] += 1
+                if not item["sample"]:
+                    item["sample"] = text[:160]
+                break
+    return sorted(matches.values(), key=lambda item: item["count"], reverse=True)[:10]
+
+
+def api_log_analysis(
+    log_hub: Any,
+    *,
+    lines: int = 500,
+    since_seconds: int = 0,
+    logger: str = "",
+    keyword: str = "",
+    level: str = "main",
+) -> dict[str, Any]:
+    normalized_lines = max(1, min(int(lines), 5000))
+    normalized_since = max(0, min(int(since_seconds), 7 * 24 * 3600))
+    normalized_level = str(level or "main") if str(level or "main") in {"main", "ERROR", "all"} else "main"
+    normalized_logger = str(logger or "").strip()[:100]
+    normalized_keyword = str(keyword or "").strip()[:100]
+    spec = LogFilter(normalized_level, normalized_lines, normalized_keyword, normalized_logger)
+    entries = tuple(log_hub.snapshot(spec))
+    if normalized_since > 0:
+        cutoff = time.time() - normalized_since
+        entries = tuple(entry for entry in entries if entry.created_at >= cutoff)
+    entries = entries[:normalized_lines]
+
+    error_count = sum(1 for entry in entries if entry.level in {"ERROR", "CRITICAL"})
+    warning_count = sum(1 for entry in entries if entry.level == "WARNING")
+    logger_counts: dict[str, int] = {}
+    repeated: dict[tuple[str, str, str], int] = {}
+    for entry in entries:
+        logger_counts[str(entry.logger or "root")] = logger_counts.get(str(entry.logger or "root"), 0) + 1
+        key = (str(entry.level or ""), str(entry.logger or ""), str(entry.text or "")[:120])
+        repeated[key] = repeated.get(key, 0) + 1
+    top_loggers = sorted(logger_counts.items(), key=lambda item: item[1], reverse=True)[:10]
+    repeated_patterns = [
+        {
+            "level": level_name,
+            "logger": logger_name,
+            "prefix": text_prefix,
+            "count": count,
+        }
+        for (level_name, logger_name, text_prefix), count in sorted(
+            repeated.items(), key=lambda item: item[1], reverse=True
+        )[:10]
+    ]
+    return {
+        "generated_at": time.time(),
+        "requested": {
+            "lines": normalized_lines,
+            "since_seconds": normalized_since,
+            "logger": normalized_logger,
+            "keyword": normalized_keyword,
+            "level": normalized_level,
+        },
+        "summary": {
+            "total": len(entries),
+            "error_count": error_count,
+            "warning_count": warning_count,
+            "top_loggers": [{"logger": name, "count": count} for name, count in top_loggers],
+            "repeated_patterns": repeated_patterns,
+        },
+        "repair_hints": _log_repair_hints(entries),
+        "entries": [entry.payload() for entry in entries],
     }
 
 

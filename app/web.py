@@ -42,6 +42,7 @@ from .strm_mode import STRM_MODE_LABELS
 from .web_api import (
     api_response,
     api_task_detail,
+    api_log_analysis,
     api_quality,
     api_quality_runs,
     api_tasks,
@@ -63,7 +64,9 @@ SSE_WRITE_TIMEOUT_SECONDS = 5.0
 LEGACY_LIFECYCLE_REASON = "旧版任务引擎模式不支持终止或删除任务"
 TASK_NOT_FOUND_MESSAGE = "任务不存在或已过期"
 _LOG_STREAM_PATH = "/api/v1/logs/stream"
-_LOG_QUERY_KEYS = frozenset({"filter_type", "lines", "keyword", "token"})
+_LOG_ANALYZE_PATH = "/api/v1/logs/analyze"
+_LOG_QUERY_KEYS = frozenset({"filter_type", "lines", "keyword", "logger", "token"})
+_LOG_ANALYZE_QUERY_KEYS = frozenset({"lines", "since_seconds", "logger", "keyword", "level", "token"})
 
 
 class _WebThreadingHTTPServer(ThreadingHTTPServer):
@@ -1461,12 +1464,49 @@ class WebApp:
                 query.get("filter_type", ["main"])[0],
                 query.get("lines", [1000])[0],
                 query.get("keyword", [""])[0],
+                query.get("logger", [""])[0],
             )
         except ValueError:
             return 400, {"Content-Type": "text/plain; charset=utf-8"}, b"Bad Request", None
 
         auth_headers = {"Set-Cookie": self._web_token_cookie()} if authorization_source == "header" else {}
         return 200, auth_headers, b"", spec
+
+    def handle_log_analysis(
+        self,
+        path: str,
+        headers: dict[str, str],
+    ) -> tuple[int, dict[str, str], bytes]:
+        try:
+            parsed = _parse_request_target(path)
+        except (TypeError, ValueError):
+            return 400, {"Content-Type": "text/plain; charset=utf-8"}, b"Bad Request"
+        if parsed.path != _LOG_ANALYZE_PATH:
+            return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"Not Found"
+        if not self._authorization_source(path, headers):
+            return 403, {"Content-Type": "text/plain; charset=utf-8"}, b"Forbidden"
+        try:
+            query = parse_qs(parsed.query, keep_blank_values=True)
+        except (TypeError, ValueError):
+            return 400, {"Content-Type": "text/plain; charset=utf-8"}, b"Bad Request"
+        if set(query) - _LOG_ANALYZE_QUERY_KEYS or any(len(values) != 1 for values in query.values()):
+            return 400, {"Content-Type": "text/plain; charset=utf-8"}, b"Bad Request"
+        if self.log_hub is None:
+            return 503, {"Content-Type": "text/plain; charset=utf-8"}, b"Service Unavailable"
+        try:
+            lines = int(query.get("lines", ["500"])[0])
+            since_seconds = int(query.get("since_seconds", ["0"])[0])
+        except (TypeError, ValueError):
+            return 400, {"Content-Type": "text/plain; charset=utf-8"}, b"Bad Request"
+        payload = api_log_analysis(
+            self.log_hub,
+            lines=lines,
+            since_seconds=since_seconds,
+            logger=query.get("logger", [""])[0],
+            keyword=query.get("keyword", [""])[0],
+            level=query.get("level", ["main"])[0],
+        )
+        return api_response(payload)
 
     def handle_request(
         self,
@@ -2115,6 +2155,9 @@ def start_web_server(
             if parsed.path == _LOG_STREAM_PATH:
                 self._serve_log_stream()
                 return
+            if parsed.path == _LOG_ANALYZE_PATH:
+                self._serve_log_analysis()
+                return
             self._serve()
 
         def do_POST(self):
@@ -2235,7 +2278,7 @@ def start_web_server(
                     elif event.kind == "closed":
                         break
                     elif event.kind == "gap":
-                        self.wfile.write(encode_sse_event("gap", {"reason": "slow_client"}))
+                        self.wfile.write(encode_sse_event("gap", {"reason": "slow_client", "dropped": event.dropped}))
                         self.wfile.flush()
                         break
                     else:
@@ -2259,6 +2302,15 @@ def start_web_server(
                         self.close_connection = True
                     finally:
                         sse_capacity.release()
+
+        def _serve_log_analysis(self) -> None:
+            status, headers, body = app.handle_log_analysis(self.path, dict(self.headers))
+            self.send_response(status)
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
 
         def _serve(self, body: bytes = b""):
             status, headers, payload = app.handle_request(self.command, self.path, dict(self.headers), body)
