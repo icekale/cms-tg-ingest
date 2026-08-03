@@ -32,7 +32,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("GHCR", readme)
         self.assertIn("DOCKERHUB_USERNAME", readme)
         self.assertIn("DOCKERHUB_TOKEN", readme)
-        self.assertIn("git tag v0.2.64", readme)
+        self.assertIn("git tag v0.2.65", readme)
         self.assertIn(
             "docker pull icekale/cms-tg-ingest:0.2.48\n# 将 compose 的 image 改为 0.2.48",
             readme,
@@ -42,7 +42,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         overview = (ROOT / "docs/dockerhub-overview.md").read_text(encoding="utf-8")
 
         for term in (
-            "image: icekale/cms-tg-ingest:0.2.64",
+            "image: icekale/cms-tg-ingest:0.2.65",
             "env_file:",
             "./data:/data",
             "115-cookies.txt:/config/115-cookies.txt:ro",
