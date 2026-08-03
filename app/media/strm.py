@@ -703,8 +703,8 @@ def validate_self_share_strm_merge(source: Path, destination: Path, row: dict[st
         issue = validate_self_share_strm_file(existing, expected_marker)
         if not issue:
             continue
-        if "/d/" in issue:
-            return issue
+        if "/d/" in issue or "直链" in issue:
+            continue
         try:
             text = existing.read_text(encoding="utf-8", errors="replace")
         except OSError:

@@ -3158,6 +3158,26 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
             self.assertIn("STRM 不是预期的分享链接", issue)
 
+    def test_merge_validation_keeps_unrelated_direct_strm_and_replaces_current_share(self):
+        from app.media.strm import validate_self_share_strm_merge
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "share" / "Show-[tmdb=73375]"
+            dest = Path(tmp) / "library" / "Show-[tmdb=73375]"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            (source / "current.strm").write_text("http://cms/s/ownshare_1212_current.mkv", encoding="utf-8")
+            (dest / "other-direct.strm").write_text("http://cms/d/other.mkv", encoding="utf-8")
+            row = {
+                "workflow_mode": "self_share_sync",
+                "own_share_code": "ownshare",
+                "own_share_receive_code": "1212",
+            }
+
+            issue = validate_self_share_strm_merge(source, dest, row)
+
+            self.assertEqual(issue, "")
+
     def test_explicit_source_tmdb_rejects_unmarked_strm_destination_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             destination = Path(tmp) / "library" / "123 (2026)"
@@ -3223,7 +3243,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             )
 
             self.assertEqual(updated["move_status"], "error")
-            self.assertIn("直链 STRM", updated["move_error"])
+            self.assertIn("STRM 不是预期的分享链接", updated["move_error"])
             self.assertTrue(source.exists())
             self.assertFalse((dest / "episode.strm").exists())
             self.assertEqual((dest / "other-direct.strm").read_text(encoding="utf-8"), direct_marker)
@@ -4590,11 +4610,11 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 required_relative_path="Season 03/Show - S03E03.strm",
             )
 
-            self.assertEqual(status, "move_failed")
+            self.assertEqual(status, "restored")
             self.assertTrue(preserved.exists())
             self.assertEqual(preserved.read_text(encoding="utf-8"), "http://cms/d/direct/S03E02.mkv")
-            self.assertTrue((source / "Show - S03E03.strm").exists())
-            self.assertFalse((dest / "Show - S03E03.strm").exists())
+            self.assertFalse((source / "Show - S03E03.strm").exists())
+            self.assertTrue((dest / "Show - S03E03.strm").exists())
 
     def test_restore_single_episode_requires_source_episode_before_merging_other_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
