@@ -3117,6 +3117,47 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
             self.assertIn("STRM 不是预期的分享链接", issue)
 
+    def test_merge_validation_allows_other_share_markers_when_current_share_present(self):
+        from app.media.strm import validate_self_share_strm_merge
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "share" / "Show-[tmdb=73375]"
+            dest = Path(tmp) / "library" / "Show-[tmdb=73375]"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            (source / "old.strm").write_text("http://cms/s/othershare_1212_old.mkv", encoding="utf-8")
+            (source / "current.strm").write_text("http://cms/s/ownshare_1212_current.mkv", encoding="utf-8")
+            (dest / "legacy.strm").write_text("http://cms/s/othershare_1212_legacy.mkv", encoding="utf-8")
+            row = {
+                "workflow_mode": "self_share_sync",
+                "own_share_code": "ownshare",
+                "own_share_receive_code": "1212",
+            }
+
+            issue = validate_self_share_strm_merge(source, dest, row)
+
+            self.assertEqual(issue, "")
+
+    def test_merge_validation_fails_without_any_matching_source(self):
+        from app.media.strm import validate_self_share_strm_merge
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "share" / "Show-[tmdb=73375]"
+            dest = Path(tmp) / "library" / "Show-[tmdb=73375]"
+            source.mkdir(parents=True)
+            dest.mkdir(parents=True)
+            (source / "old.strm").write_text("http://cms/s/othershare_1212_old.mkv", encoding="utf-8")
+            (dest / "legacy.strm").write_text("http://cms/s/othershare_1212_legacy.mkv", encoding="utf-8")
+            row = {
+                "workflow_mode": "self_share_sync",
+                "own_share_code": "ownshare",
+                "own_share_receive_code": "1212",
+            }
+
+            issue = validate_self_share_strm_merge(source, dest, row)
+
+            self.assertIn("STRM 不是预期的分享链接", issue)
+
     def test_explicit_source_tmdb_rejects_unmarked_strm_destination_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             destination = Path(tmp) / "library" / "123 (2026)"

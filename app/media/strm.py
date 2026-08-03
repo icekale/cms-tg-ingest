@@ -687,14 +687,31 @@ def validate_self_share_strm_merge(source: Path, destination: Path, row: dict[st
         return "等待自有分享码，暂不移动 STRM"
     receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
     expected_marker = f"/s/{own_share_code}_{receive_code}_"
+    source_has_expected = False
+    for source_file in iter_strm_files(source):
+        if not validate_self_share_strm_file(source_file, expected_marker):
+            source_has_expected = True
+            break
+    if not source_has_expected:
+        first = next(iter(iter_strm_files(source)), source)
+        return f"STRM 不是预期的分享链接：{first}"
     for existing in iter_strm_files(destination):
         relative = existing.relative_to(destination)
         replacement = safe_resolve(source / relative)
         if is_relative_to(replacement, source) and replacement.is_file():
             continue
         issue = validate_self_share_strm_file(existing, expected_marker)
-        if issue:
+        if not issue:
+            continue
+        if "/d/" in issue:
             return issue
+        try:
+            text = existing.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return issue
+        if re.search(r"/s/[A-Za-z0-9]+_[A-Za-z0-9]*_", text):
+            continue
+        return issue
     return ""
 
 
