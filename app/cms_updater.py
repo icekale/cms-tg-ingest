@@ -32,6 +32,7 @@ def docker_pull_image(socket_path: str, image: str, tag: str = "latest") -> str:
     socket_path = str(socket_path or "").strip()
     if not image or not socket_path:
         return "no docker socket or image configured"
+    is_digest = "@" in image
     if "@" in image:
         repo, explicit_tag = image, ""
     elif ":" in image:
@@ -40,25 +41,32 @@ def docker_pull_image(socket_path: str, image: str, tag: str = "latest") -> str:
             repo, explicit_tag = image, ""
     else:
         repo, explicit_tag = image, ""
-    pull_tag = explicit_tag or tag
+    pull_tag = explicit_tag or ("" if is_digest else tag)
+    conn = None
     try:
-        conn = _UnixHTTPConnection(socket_path)
+        conn = _UnixHTTPConnection(socket_path, timeout=600)
+        query = f"fromImage={quote(repo, safe='')}"
+        if pull_tag:
+            query += f"&tag={quote(pull_tag, safe='')}"
         conn.request(
             "POST",
-            f"/images/create?fromImage={quote(repo, safe='')}&tag={quote(pull_tag, safe='')}",
+            f"/images/create?{query}",
         )
         response = conn.getresponse()
-        response.read(8192)
+        while response.read(65536):
+            pass
         status = int(response.status or 0)
         conn.close()
+        conn = None
         if status in {200, 201}:
             return "pulled"
         return f"pull failed status={status}"
     except Exception as exc:  # noqa: BLE001 - updater must never crash the loop
-        try:
-            conn.close()
-        except Exception:
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
         return f"pull error: {type(exc).__name__}: {exc}"
 
 
@@ -218,8 +226,6 @@ def start_cms_version_check_loop(
     interval_seconds: int = 3600,
 ) -> Any:
     import threading
-
-    interval = max(5, int(interval_seconds))
 
     def loop() -> None:
         while not stop_event.wait(checker.effective_interval()):

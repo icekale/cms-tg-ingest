@@ -2050,7 +2050,6 @@ class WebApp:
                 )
                 return status, {**response_headers, **auth_headers}, response_body
             payload = self.cms_version_checker.check()
-            payload["enabled"] = True
             status, response_headers, response_body = api_response(payload)
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/settings/cms-version":
@@ -2082,7 +2081,6 @@ class WebApp:
                     status=400,
                 )
                 return status, {**response_headers, **auth_headers}, response_body
-            payload["enabled"] = True
             status, response_headers, response_body = api_response(payload)
             return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path == "/api/v1/settings/strm-mode":

@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from app.cms_updater import CmsVersionChecker, docker_pull_image
 from app.clients.cms import CmsClient
@@ -108,6 +108,77 @@ class CmsUpdaterTests(unittest.TestCase):
         self.assertIn("fromImage=imaliang%2Fcloud-media-sync", captured["url"])
         self.assertIn("tag=latest", captured["url"])
 
+    def test_docker_pull_omits_tag_for_digest(self):
+        captured = {}
+
+        class FakeResponse:
+            status = 200
+
+            def read(self, size):
+                return b""
+
+            def close(self):
+                pass
+
+        class FakeConn:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, method, url):
+                captured["url"] = url
+
+            def getresponse(self):
+                return FakeResponse()
+
+            def close(self):
+                pass
+
+        with patch("app.cms_updater._UnixHTTPConnection", FakeConn):
+            result = docker_pull_image("/tmp/fake.sock", "repo/app@sha256:abcd")
+
+        self.assertEqual(result, "pulled")
+        self.assertIn("fromImage=repo%2Fapp%40sha256%3Aabcd", captured["url"])
+        self.assertNotIn("tag=", captured["url"])
+
+    def test_docker_pull_consumes_full_stream(self):
+        reads = []
+
+        class FakeResponse:
+            status = 200
+
+            def __init__(self):
+                self.remaining = 65536 * 3
+
+            def read(self, size):
+                if self.remaining <= 0:
+                    return b""
+                amount = min(size, self.remaining)
+                self.remaining -= amount
+                reads.append(amount)
+                return b"x" * amount
+
+            def close(self):
+                pass
+
+        class FakeConn:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, method, url):
+                pass
+
+            def getresponse(self):
+                return FakeResponse()
+
+            def close(self):
+                pass
+
+        with patch("app.cms_updater._UnixHTTPConnection", FakeConn):
+            result = docker_pull_image("/tmp/fake.sock", "nginx:1.25")
+
+        self.assertEqual(result, "pulled")
+        self.assertGreater(len(reads), 2)
+
     def test_api_cms_version_reports_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = self.make_store(tmp)
@@ -123,6 +194,15 @@ class CmsUpdaterTests(unittest.TestCase):
     def test_api_cms_version_disabled_without_checker(self):
         payload = api_cms_version(None)
         self.assertFalse(payload["enabled"])
+
+    def test_api_cms_version_reports_disabled_when_checker_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(tmp)
+            checker = CmsVersionChecker(store, FakeCms("1.0.0"))
+
+            payload = api_cms_version(checker)
+
+            self.assertFalse(payload["enabled"])
 
     def test_runtime_overrides_change_effective_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -149,6 +229,17 @@ class CmsUpdaterTests(unittest.TestCase):
 
 
 class CmsVersionClientTests(unittest.TestCase):
+    def test_login_ignores_version_when_login_fails(self):
+        cms = CmsClient.__new__(CmsClient)
+        cms._cached_version = ""
+        cms.config = Mock(cms_base_url="http://cms", cms_username="u", cms_password="p")
+        cms.http = Mock(request=Mock(return_value={"code": 500, "data": {"version": "v9.9"}}))
+
+        with self.assertRaises(RuntimeError):
+            cms.login()
+
+        self.assertEqual(cms._cached_version, "")
+
     def test_get_version_uses_login_response(self):
         cms = CmsClient.__new__(CmsClient)
 

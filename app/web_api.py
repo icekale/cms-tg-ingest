@@ -784,5 +784,4 @@ def api_cms_version(checker: Any | None = None) -> dict[str, Any]:
     if checker is None or not callable(getattr(checker, "status", None)):
         return {"enabled": False, "current_version": "", "update_ready": False}
     payload = checker.status()
-    payload["enabled"] = True
     return _safe_api_value(payload)

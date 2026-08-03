@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.71 - 2026-08-04
+
+- 修复 CMS 版本检测的 `enabled` 回显：`GET /api/v1/cms/version`、`GET/POST /api/v1/settings/cms-version` 与手动检查接口不再强制返回 `enabled=true`，Web 设置里关闭检测会真实生效并正确回显。
+- 修复 auto-pull：Docker 拉镜像改为完整读取响应流（避免大镜像被提前断开导致假成功），并修正 digest 引用不再误传 `tag=latest`；连接超时放宽到 10 分钟。
+- 修复前端设置页：加载后正确初始化检查频率；频率输入为 0 时不再被误当成 1440 分钟；无法获取 CMS 版本时给出明确提示。
+- CMS 登录失败时不再缓存返回的版本字段。
+
 ## 0.2.70 - 2026-08-04
 
 - 修复 CMS 版本检测读不到版本号：实测该 CMS（cloud-media-sync）仅在登录接口 `/api/auth/login` 返回 `version`（如 `v0.4.9.1 - PRO`），原探测的 `/api/version` 等路径全部 404。现在优先从登录响应缓存版本，登录失败时仍回退探测。

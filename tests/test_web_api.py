@@ -394,6 +394,7 @@ class WebApiTests(unittest.TestCase):
 
             def status(self):
                 return {
+                    "enabled": True,
                     "current_version": "1.0.0",
                     "update_ready": False,
                     "image": "",
@@ -474,6 +475,47 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(post_payload["image"], "cms:latest")
             self.assertEqual(reset_status, 200)
             self.assertEqual(reset_payload["interval_seconds"], 3600)
+
+    def test_cms_version_settings_respects_disable_choice(self):
+        from app.cms_updater import CmsVersionChecker
+
+        class FakeCmsVersion:
+            def get_version(self):
+                return "1.0.0"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            checker = CmsVersionChecker(store, FakeCmsVersion())
+            app = WebApp(store, cms_version_checker=checker)
+
+            post_status, _post_headers, post_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/cms-version",
+                {"Content-Type": "application/json"},
+                json.dumps({"enabled": False, "interval_seconds": 86400}).encode(),
+            )
+            post_payload = json.loads(post_body)
+            get_status, _get_headers, get_body = app.handle_request(
+                "GET",
+                "/api/v1/settings/cms-version",
+                {},
+                b"",
+            )
+            get_payload = json.loads(get_body)
+            check_status, _check_headers, check_body = app.handle_request(
+                "POST",
+                "/api/v1/cms/version/check",
+                {},
+                b"",
+            )
+            check_payload = json.loads(check_body)
+
+            self.assertEqual(post_status, 200)
+            self.assertFalse(post_payload["enabled"])
+            self.assertEqual(get_status, 200)
+            self.assertFalse(get_payload["enabled"])
+            self.assertEqual(check_status, 200)
+            self.assertFalse(check_payload["enabled"])
 
     def test_quality_run_api_deduplicates_duplicate_clicks(self):
         with tempfile.TemporaryDirectory() as tmp:

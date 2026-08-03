@@ -20,6 +20,7 @@ async function load() {
   try {
     settings.value = await api.settings()
     cms.value = await api.cmsVersion()
+    cms.value.interval_minutes = Math.round(cms.value.interval_seconds / 60)
     mode.value = settings.value.strm_default_mode
     reviewMode.value = settings.value.self_share_review.mode
     receiveCid.value = ''
@@ -86,7 +87,8 @@ async function saveReviewMode(value) {
 async function saveCmsVersion() {
   cmsSaving.value = true
   try {
-    const intervalMinutes = Number(cms.value.interval_minutes) || 1440
+    const minutes = Number(cms.value.interval_minutes)
+    const intervalMinutes = Number.isFinite(minutes) && minutes > 0 ? minutes : 1440
     cms.value = await api.saveCmsVersion({
       enabled: cms.value.enabled,
       interval_seconds: Math.round(intervalMinutes * 60),
@@ -113,7 +115,13 @@ async function checkCmsVersion() {
   try {
     cms.value = await api.cmsVersionCheck()
     cms.value.interval_minutes = Math.round(cms.value.interval_seconds / 60)
-    message.success(cms.value.update_ready ? `检测到新版本：${cms.value.current_version}` : '当前已是最新版本')
+    if (!cms.value.current_version) {
+      message.success('未获取到 CMS 版本')
+    } else if (cms.value.update_ready) {
+      message.success(`检测到新版本：${cms.value.current_version}`)
+    } else {
+      message.success('当前已是最新版本')
+    }
   } catch (err) { message.error(err.message) } finally { cmsSaving.value = false }
 }
 

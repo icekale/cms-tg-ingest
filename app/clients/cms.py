@@ -54,9 +54,9 @@ class CmsClient:
             payload={"username": self.config.cms_username, "password": self.config.cms_password},
         )
         token = ((resp.get("data") or {}).get("token") or "").strip()
-        self._cached_version = str((resp.get("data") or {}).get("version") or "").strip()
         if resp.get("code") != 200 or not token:
             raise RuntimeError(resp.get("msg") or "CMS login failed")
+        self._cached_version = str((resp.get("data") or {}).get("version") or "").strip()
         self.token = token
 
     @staticmethod
