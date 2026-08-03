@@ -59,6 +59,8 @@ class CmsVersionChecker:
         store: Any,
         cms: Any,
         *,
+        enabled: bool = False,
+        interval_seconds: int = 3600,
         image: str = "",
         container: str = "cms",
         docker_socket: str = "/var/run/docker.sock",
@@ -66,32 +68,98 @@ class CmsVersionChecker:
     ) -> None:
         self.store = store
         self.cms = cms
-        self.image = str(image or "").strip()
-        self.container = str(container or "cms").strip()
-        self.docker_socket = str(docker_socket or "").strip()
-        self.auto_pull = bool(auto_pull)
+        self._defaults = {
+            "enabled": bool(enabled),
+            "interval_seconds": max(300, int(interval_seconds)),
+            "image": str(image or "").strip(),
+            "container": str(container or "cms").strip(),
+            "docker_socket": str(docker_socket or "").strip(),
+            "auto_pull": bool(auto_pull),
+        }
+
+    def _effective(self) -> dict[str, Any]:
+        overrides = self.store.get_cms_version_overrides()
+        settings = dict(self._defaults)
+        for key, value in overrides.items():
+            if key not in settings:
+                continue
+            if key in {"enabled", "auto_pull"}:
+                settings[key] = bool(value)
+            elif key == "interval_seconds":
+                try:
+                    settings[key] = max(300, int(value))
+                except (TypeError, ValueError):
+                    pass
+            else:
+                settings[key] = str(value or "").strip()
+        return settings
+
+    def effective_interval(self) -> int:
+        return int(self._effective()["interval_seconds"])
+
+    def update_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
+        allowed = {
+            "enabled",
+            "interval_seconds",
+            "image",
+            "container",
+            "docker_socket",
+            "auto_pull",
+        }
+        clean: dict[str, Any] = {}
+        for key, value in (patch or {}).items():
+            if key not in allowed or value is None:
+                continue
+            if key in {"enabled", "auto_pull"}:
+                clean[key] = bool(value)
+            elif key == "interval_seconds":
+                try:
+                    clean[key] = max(300, int(value))
+                except (TypeError, ValueError):
+                    continue
+            else:
+                clean[key] = str(value or "").strip()
+        self.store.set_cms_version_overrides(clean)
+        return self._effective()
+
+    def reset_settings(self) -> dict[str, Any]:
+        self.store.clear_cms_version_overrides()
+        return self._effective()
 
     def status(self) -> dict[str, Any]:
+        settings = self._effective()
         state = self.store.get_runtime_state(CMS_VERSION_STATE_KEY)
-        if not state:
-            return {
-                "current_version": "",
-                "last_seen_version": "",
-                "last_seen_at": 0,
-                "last_changed_at": 0,
-                "update_ready": False,
-                "image": self.image,
-                "container": self.container,
-                "pull_result": "",
-                "message": "",
+        payload: dict[str, Any] = {}
+        if state:
+            try:
+                stored = json.loads(str(state["value"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                stored = {}
+            if isinstance(stored, dict):
+                payload.update(stored)
+        payload.update(
+            {
+                "enabled": settings["enabled"],
+                "interval_seconds": settings["interval_seconds"],
+                "image": settings["image"],
+                "container": settings["container"],
+                "docker_socket": settings["docker_socket"],
+                "auto_pull": settings["auto_pull"],
             }
-        try:
-            payload = json.loads(str(state["value"] or "{}"))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            payload = {}
-        return payload if isinstance(payload, dict) else {}
+        )
+        payload.setdefault("current_version", "")
+        payload.setdefault("last_seen_version", "")
+        payload.setdefault("last_seen_at", 0)
+        payload.setdefault("last_changed_at", 0)
+        payload.setdefault("update_ready", False)
+        payload.setdefault("pull_result", "")
+        payload.setdefault("message", "")
+        return payload
 
     def check(self, *, notify: Callable[[str, str], None] | None = None) -> dict[str, Any]:
+        settings = self._effective()
+        if not settings["enabled"]:
+            return self.status()
         version = str(self.cms.get_version() or "").strip()
         state = self.status()
         last_seen = str(state.get("last_seen_version") or "").strip()
@@ -105,15 +173,19 @@ class CmsVersionChecker:
             "last_seen_at": now,
             "last_changed_at": now if changed else float(state.get("last_changed_at") or 0),
             "update_ready": state.get("update_ready") if not changed else True,
-            "image": self.image,
-            "container": self.container,
+            "image": settings["image"],
+            "container": settings["container"],
             "pull_result": state.get("pull_result") or "",
             "message": state.get("message") or "",
+            "enabled": True,
+            "interval_seconds": settings["interval_seconds"],
+            "docker_socket": settings["docker_socket"],
+            "auto_pull": settings["auto_pull"],
         }
         if changed:
             pull_result = ""
-            if self.auto_pull and self.image:
-                pull_result = docker_pull_image(self.docker_socket, self.image)
+            if settings["auto_pull"] and settings["image"]:
+                pull_result = docker_pull_image(settings["docker_socket"], settings["image"])
             payload["update_ready"] = True
             payload["pull_result"] = pull_result
             payload["message"] = f"检测到 CMS 新版本 {version}，请执行更新"
@@ -141,7 +213,7 @@ def start_cms_version_check_loop(
     interval = max(5, int(interval_seconds))
 
     def loop() -> None:
-        while not stop_event.wait(interval):
+        while not stop_event.wait(checker.effective_interval()):
             try:
                 checker.check(
                     notify=lambda version, pull_result: telegram.send_message(

@@ -25,7 +25,7 @@ class CmsUpdaterTests(unittest.TestCase):
     def test_initial_check_sets_baseline_without_notify(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = self.make_store(tmp)
-            checker = CmsVersionChecker(store, FakeCms("1.0.0"))
+            checker = CmsVersionChecker(store, FakeCms("1.0.0"), enabled=True)
             notified = []
 
             payload = checker.check(notify=lambda version, pull: notified.append(version))
@@ -37,7 +37,7 @@ class CmsUpdaterTests(unittest.TestCase):
     def test_new_version_detects_update_and_notifies_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = self.make_store(tmp)
-            checker = CmsVersionChecker(store, FakeCms("1.0.0"))
+            checker = CmsVersionChecker(store, FakeCms("1.0.0"), enabled=True)
             checker.check()
             checker.cms.version = "1.1.0"
             notified = []
@@ -55,6 +55,7 @@ class CmsUpdaterTests(unittest.TestCase):
             checker = CmsVersionChecker(
                 store,
                 FakeCms("1.0.0"),
+                enabled=True,
                 image="icekale/cms:latest",
                 auto_pull=True,
                 docker_socket="/tmp/does-not-exist.sock",
@@ -74,7 +75,7 @@ class CmsUpdaterTests(unittest.TestCase):
     def test_api_cms_version_reports_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = self.make_store(tmp)
-            checker = CmsVersionChecker(store, FakeCms("2.0.0"))
+            checker = CmsVersionChecker(store, FakeCms("2.0.0"), enabled=True)
             checker.check()
 
             payload = api_cms_version(checker)
@@ -86,6 +87,29 @@ class CmsUpdaterTests(unittest.TestCase):
     def test_api_cms_version_disabled_without_checker(self):
         payload = api_cms_version(None)
         self.assertFalse(payload["enabled"])
+
+    def test_runtime_overrides_change_effective_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(tmp)
+            checker = CmsVersionChecker(store, FakeCms("1.0.0"))
+
+            updated = checker.update_settings(
+                {
+                    "enabled": True,
+                    "interval_seconds": 86400,
+                    "image": "imaliang/cloud-media-sync:latest",
+                    "container": "cloud-media-sync",
+                    "auto_pull": True,
+                }
+            )
+
+            self.assertTrue(updated["enabled"])
+            self.assertEqual(updated["interval_seconds"], 86400)
+            self.assertEqual(updated["image"], "imaliang/cloud-media-sync:latest")
+            self.assertTrue(updated["auto_pull"])
+            self.assertEqual(checker.effective_interval(), 86400)
+            checker.reset_settings()
+            self.assertFalse(checker._effective()["enabled"])
 
 
 class CmsVersionClientTests(unittest.TestCase):

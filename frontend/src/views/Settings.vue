@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, ref } from 'vue'
-import { NButton, NCard, NInput, NSelect, NSpace, NText, useMessage } from 'naive-ui'
+import { NButton, NCard, NInput, NSelect, NSpace, NSwitch, NText, useMessage } from 'naive-ui'
 import { api } from '../api'
 
 const message = useMessage()
@@ -12,11 +12,14 @@ const receiveCode = ref('')
 const receiveCid = ref('')
 const reviewMode = ref('env')
 const savingReview = ref(false)
+const cms = ref(null)
+const cmsSaving = ref(false)
 
 async function load() {
   loading.value = true
   try {
     settings.value = await api.settings()
+    cms.value = await api.cmsVersion()
     mode.value = settings.value.strm_default_mode
     reviewMode.value = settings.value.self_share_review.mode
     receiveCid.value = ''
@@ -80,6 +83,40 @@ async function saveReviewMode(value) {
   } catch (err) { message.error(err.message) } finally { savingReview.value = false }
 }
 
+async function saveCmsVersion() {
+  cmsSaving.value = true
+  try {
+    const intervalMinutes = Number(cms.value.interval_minutes) || 1440
+    cms.value = await api.saveCmsVersion({
+      enabled: cms.value.enabled,
+      interval_seconds: Math.round(intervalMinutes * 60),
+      image: cms.value.image,
+      container: cms.value.container,
+      docker_socket: cms.value.docker_socket,
+      auto_pull: cms.value.auto_pull,
+    })
+    cms.value.interval_minutes = Math.round(cms.value.interval_seconds / 60)
+    message.success('CMS 版本更新设置已保存')
+  } catch (err) { message.error(err.message) } finally { cmsSaving.value = false }
+}
+
+async function resetCmsVersion() {
+  try {
+    cms.value = await api.resetCmsVersion()
+    cms.value.interval_minutes = Math.round(cms.value.interval_seconds / 60)
+    message.success('已恢复环境默认设置')
+  } catch (err) { message.error(err.message) }
+}
+
+async function checkCmsVersion() {
+  cmsSaving.value = true
+  try {
+    cms.value = await api.cmsVersionCheck()
+    cms.value.interval_minutes = Math.round(cms.value.interval_seconds / 60)
+    message.success(cms.value.update_ready ? `检测到新版本：${cms.value.current_version}` : '当前已是最新版本')
+  } catch (err) { message.error(err.message) } finally { cmsSaving.value = false }
+}
+
 onMounted(load)
 </script>
 
@@ -120,6 +157,22 @@ onMounted(load)
         <n-button secondary @click="clearReceiveCid">使用环境配置</n-button>
       </n-space>
       <n-text depth="3">用于 115 转存和云下载的目标目录。Web 保存值写入 TaskStore，重启后仍保留。</n-text>
+    </n-space>
+  </n-card>
+  <n-card v-if="cms" title="CMS 版本更新" class="section-card">
+    <n-space vertical :size="12">
+      <n-space align="center"><n-text depth="3">启用检测</n-text><n-switch v-model:value="cms.enabled" /></n-space>
+      <n-space align="center"><n-text depth="3">检查频率（分钟）</n-text><n-input v-model:value="cms.interval_minutes" type="number" min="5" style="width: 140px" /></n-space>
+      <n-space align="center"><n-text depth="3">更新镜像</n-text><n-input v-model:value="cms.image" placeholder="例如 imaliang/cloud-media-sync:latest" style="width: 320px" /></n-space>
+      <n-space align="center"><n-text depth="3">容器名</n-text><n-input v-model:value="cms.container" placeholder="例如 cloud-media-sync" style="width: 200px" /></n-space>
+      <n-space align="center"><n-text depth="3">Docker Socket</n-text><n-input v-model:value="cms.docker_socket" placeholder="/var/run/docker.sock" style="width: 260px" /></n-space>
+      <n-space align="center"><n-text depth="3">自动拉取镜像</n-text><n-switch v-model:value="cms.auto_pull" /></n-space>
+      <n-text depth="3">当前版本：{{ cms.current_version || '未知' }}；上次检测：{{ cms.last_seen_version || '-' }}；{{ cms.message || '未运行检测' }}</n-text>
+      <n-space>
+        <n-button type="primary" :loading="cmsSaving" @click="saveCmsVersion">保存</n-button>
+        <n-button secondary @click="checkCmsVersion">立即检查</n-button>
+        <n-button secondary @click="resetCmsVersion">恢复环境默认</n-button>
+      </n-space>
     </n-space>
   </n-card>
 </template>

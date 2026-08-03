@@ -56,3 +56,22 @@ test('task purge request sends ids and dry_run flag', async () => {
     globalThis.fetch = originalFetch
   }
 })
+
+test('cms version settings save posts overrides', async () => {
+  const originalFetch = globalThis.fetch
+  let requestedPath = ''
+  let requestedBody = ''
+  globalThis.fetch = async (url, options) => {
+    requestedPath = url
+    requestedBody = options.body
+    return { ok: true, status: 200, json: async () => ({ enabled: true, interval_seconds: 86400 }) }
+  }
+
+  try {
+    await api.saveCmsVersion({ enabled: true, interval_seconds: 86400, image: 'cms:latest', auto_pull: true })
+    assert.equal(requestedPath, '/api/v1/settings/cms-version')
+    assert.deepEqual(JSON.parse(requestedBody), { enabled: true, interval_seconds: 86400, image: 'cms:latest', auto_pull: true })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})

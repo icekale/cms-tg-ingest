@@ -113,6 +113,7 @@ docker compose logs -f cms-tg-ingest
 - 日志页支持级别、关键字和来源（logger）过滤；慢客户端丢行时页面会提示并自动重连。
 - AI 分析接口：`GET /api/v1/logs/analyze` 返回结构化摘要（错误/告警统计、重复模式、修复提示与最近条目），供外部 AI 分析和调用管理 API 修复。
 - CMS 版本检测：`CMS_VERSION_CHECK_ENABLED=true` 后定时探测 CMS 版本，新版本出现时 Telegram 通知并标记 `update_ready`；`CMS_UPDATE_IMAGE` + `CMS_AUTO_PULL_ENABLED=true` 可自动拉取镜像，容器切换在宿主机执行 `scripts/update-cms-container.sh`。
+- Web 设置页新增“CMS 版本更新”配置（开关、频率、镜像、容器、Socket、自动拉取），保存后优先于 `.env`。
 
 首次部署检查：
 

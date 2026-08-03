@@ -2053,6 +2053,38 @@ class WebApp:
             payload["enabled"] = True
             status, response_headers, response_body = api_response(payload)
             return status, {**response_headers, **auth_headers}, response_body
+        if method == "GET" and path == "/api/v1/settings/cms-version":
+            status, response_headers, response_body = api_response(
+                api_cms_version(self.cms_version_checker)
+            )
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path in {
+            "/api/v1/settings/cms-version",
+            "/api/v1/settings/cms-version/reset",
+        }:
+            if self.cms_version_checker is None or not callable(
+                getattr(self.cms_version_checker, "update_settings", None)
+            ):
+                status, response_headers, response_body = api_response(
+                    {"error": "cms_version_check_disabled"},
+                    status=409,
+                )
+                return status, {**response_headers, **auth_headers}, response_body
+            try:
+                if path.endswith("/reset"):
+                    payload = self.cms_version_checker.reset_settings()
+                else:
+                    values = self._api_body(body, headers)
+                    payload = self.cms_version_checker.update_settings(values)
+            except (UnicodeDecodeError, TypeError, ValueError, KeyError) as exc:
+                status, response_headers, response_body = api_response(
+                    {"error": str(exc)},
+                    status=400,
+                )
+                return status, {**response_headers, **auth_headers}, response_body
+            payload["enabled"] = True
+            status, response_headers, response_body = api_response(payload)
+            return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path == "/api/v1/settings/strm-mode":
             try:
                 values = self._api_body(body, headers)

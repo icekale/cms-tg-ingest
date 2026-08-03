@@ -4783,10 +4783,12 @@ def run_forever(
         )
 
     cms_version_checker = None
-    if getattr(config, "cms_version_check_enabled", False) and cms and task_store:
+    if cms and task_store:
         cms_version_checker = CmsVersionChecker(
             task_store,
             cms,
+            enabled=bool(getattr(config, "cms_version_check_enabled", False)),
+            interval_seconds=int(getattr(config, "cms_version_check_interval_seconds", 3600)),
             image=str(getattr(config, "cms_update_image", "") or ""),
             container=str(getattr(config, "cms_update_container", "cms") or "cms"),
             docker_socket=str(getattr(config, "cms_update_docker_socket", "/var/run/docker.sock") or ""),

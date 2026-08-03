@@ -1350,6 +1350,22 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(trend[0]["scanned_count"], 25)
             self.assertEqual(trend[1]["failed_count"], 1)
 
+    def test_cms_version_overrides_merge_and_clear(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            self.assertEqual(store.get_cms_version_overrides(), {})
+            merged = store.set_cms_version_overrides(
+                {"enabled": True, "interval_seconds": 86400, "image": "cms:latest"}
+            )
+            self.assertTrue(merged["enabled"])
+            self.assertEqual(merged["interval_seconds"], 86400)
+            merged = store.set_cms_version_overrides({"auto_pull": True})
+            self.assertTrue(merged["auto_pull"])
+            self.assertTrue(merged["enabled"])
+            store.clear_cms_version_overrides()
+            self.assertEqual(store.get_cms_version_overrides(), {})
+
     def test_own_share_receive_code_override_can_be_set_and_cleared(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

@@ -432,6 +432,49 @@ class WebApiTests(unittest.TestCase):
             self.assertTrue(check_payload["update_ready"])
             self.assertEqual(checker.calls, 1)
 
+    def test_cms_version_settings_api_read_write_reset(self):
+        from app.cms_updater import CmsVersionChecker
+
+        class FakeCmsVersion:
+            def get_version(self):
+                return "1.0.0"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            checker = CmsVersionChecker(store, FakeCmsVersion(), enabled=True)
+            app = WebApp(store, cms_version_checker=checker)
+
+            get_status, _get_headers, get_body = app.handle_request(
+                "GET",
+                "/api/v1/settings/cms-version",
+                {},
+                b"",
+            )
+            get_payload = json.loads(get_body)
+            post_status, _post_headers, post_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/cms-version",
+                {"Content-Type": "application/json"},
+                json.dumps({"enabled": True, "interval_seconds": 86400, "image": "cms:latest"}).encode(),
+            )
+            post_payload = json.loads(post_body)
+            reset_status, _reset_headers, reset_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/cms-version/reset",
+                {},
+                b"",
+            )
+            reset_payload = json.loads(reset_body)
+
+            self.assertEqual(get_status, 200)
+            self.assertTrue(get_payload["enabled"])
+            self.assertEqual(get_payload["interval_seconds"], 3600)
+            self.assertEqual(post_status, 200)
+            self.assertEqual(post_payload["interval_seconds"], 86400)
+            self.assertEqual(post_payload["image"], "cms:latest")
+            self.assertEqual(reset_status, 200)
+            self.assertEqual(reset_payload["interval_seconds"], 3600)
+
     def test_quality_run_api_deduplicates_duplicate_clicks(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

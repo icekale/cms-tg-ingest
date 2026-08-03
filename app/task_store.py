@@ -733,6 +733,33 @@ class TaskStore:
     def clear_self_share_review_mode_override(self) -> None:
         self.delete_runtime_state(SELF_SHARE_REVIEW_MODE_KEY)
 
+    def get_cms_version_overrides(self) -> dict[str, Any]:
+        state = self.get_runtime_state("cms_version_overrides")
+        if not state:
+            return {}
+        try:
+            payload = json.loads(str(state["value"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def set_cms_version_overrides(self, patch: dict[str, Any]) -> dict[str, Any]:
+        current = self.get_cms_version_overrides()
+        merged = dict(current)
+        for key, value in patch.items():
+            if value is None:
+                merged.pop(key, None)
+            else:
+                merged[str(key)] = value
+        self.set_runtime_state(
+            "cms_version_overrides",
+            json.dumps(merged, ensure_ascii=False, sort_keys=True),
+        )
+        return merged
+
+    def clear_cms_version_overrides(self) -> None:
+        self.delete_runtime_state("cms_version_overrides")
+
     def wake_self_share_review_tasks(self, now: float | None = None) -> int:
         current_time = time.time() if now is None else float(now)
         with self._lock, self._connection() as conn:

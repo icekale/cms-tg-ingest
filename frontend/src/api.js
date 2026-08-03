@@ -38,4 +38,8 @@ export const api = {
   hdhiveItemConfirm: (id) => request(`hdhive/items/${id}/confirm`, { method: 'POST' }),
   hdhiveSettings: (settings) => request('hdhive/settings', { method: 'POST', body: JSON.stringify(settings) }),
   hdhiveRun: () => request('hdhive/run', { method: 'POST' }),
+  cmsVersion: () => request('settings/cms-version'),
+  saveCmsVersion: (settings) => request('settings/cms-version', { method: 'POST', body: JSON.stringify(settings) }),
+  resetCmsVersion: () => request('settings/cms-version/reset', { method: 'POST' }),
+  cmsVersionCheck: () => request('cms/version/check', { method: 'POST' }),
 }
