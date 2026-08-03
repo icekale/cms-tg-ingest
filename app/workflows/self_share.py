@@ -3071,12 +3071,18 @@ class BridgeSelfShareTaskWorkflow:
                 delay,
                 restore_metadata,
             )
+        if restore_status == "move_failed":
+            return StageResult.defer(
+                "等待已移动 STRM 目标目录恢复",
+                delay,
+                restore_metadata or metadata,
+            )
         if terminal:
             return StageResult.needs_action(
                 "任务状态已完成，但目标 STRM 未通过自有分享校验，请检查媒体库目录",
                 metadata,
             )
-        if restore_status not in {"skipped", "error", "move_failed"}:
+        if restore_status not in {"skipped", "error"}:
             return StageResult.defer(
                 "等待已移动 STRM 目标目录恢复",
                 delay,

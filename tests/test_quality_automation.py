@@ -2007,7 +2007,7 @@ class QualityArchiveTests(unittest.TestCase):
 
 
 class QualityAutoRestoreTests(unittest.TestCase):
-    def make_service(self, tmp):
+    def make_service(self, tmp, submission_store=None):
         library = Path(tmp) / "library"
         library.mkdir(parents=True)
         config = Config(
@@ -2019,7 +2019,12 @@ class QualityAutoRestoreTests(unittest.TestCase):
             task_db_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
         )
-        return QualityAutomation(TaskStore(Path(tmp) / "tasks.db"), config, allowed_roots=[library]), library
+        return QualityAutomation(
+            TaskStore(Path(tmp) / "tasks.db"),
+            config,
+            allowed_roots=[library],
+            submission_store=submission_store,
+        ), library
 
     def completed_missing_task(self, store, dest_path, **extra_metadata):
         task = store.upsert_task("restore", "", "https://115cdn.com/s/restore?password=1212")
@@ -2119,6 +2124,47 @@ class QualityAutoRestoreTests(unittest.TestCase):
             self.assertEqual(plans[cooled.id].action, "skip")
             self.assertEqual(plans[cooled.id].reason, "cooldown")
             self.assertEqual(plans[capped.id].action, "skip")
+
+    def test_restore_falls_back_to_submission_move_status(self):
+        from bridge import ShareKey, SubmissionStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
+            row = submission_store.upsert_submission(
+                ShareKey("restore2", "1212"),
+                "https://115cdn.com/s/restore2?password=1212",
+                "completed",
+                title="任务",
+            )
+            service, library = self.make_service(tmp, submission_store=submission_store)
+            destination = library / "movie"
+            submission_store.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(library / "src"),
+                dest_path=str(destination),
+                category_final="华语电影",
+            )
+            task = service.store.upsert_task("restore2", "", "https://115cdn.com/s/restore2?password=1212")
+            task = service.store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "done",
+                submission_id=int(row["id"]),
+                metadata_patch={
+                    "dest_path": str(destination),
+                    "own_share_code": "own",
+                    "own_share_receive_code": "1212",
+                    "own_share_file_id": "fid-own",
+                    "emby_status": "confirmed",
+                },
+            )
+            issue = QualityIssue("missing_dest", "destination directory is missing", str(destination), task.id)
+
+            plan = service._plan([task], [issue], now=100.0)[0]
+
+            self.assertEqual(plan.action, "restore")
 
 
 class QualityScanPerformanceTests(unittest.TestCase):
@@ -2233,7 +2279,7 @@ class QualityScanPerformanceTests(unittest.TestCase):
 
 
 class QualityShareRevalidateTests(unittest.TestCase):
-    def make_service(self, tmp):
+    def make_service(self, tmp, share_inspector=None):
         library = Path(tmp) / "library"
         library.mkdir(parents=True)
         config = Config(
@@ -2245,7 +2291,12 @@ class QualityShareRevalidateTests(unittest.TestCase):
             task_db_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
         )
-        return QualityAutomation(TaskStore(Path(tmp) / "tasks.db"), config, allowed_roots=[library]), library
+        return QualityAutomation(
+            TaskStore(Path(tmp) / "tasks.db"),
+            config,
+            allowed_roots=[library],
+            share_inspector=share_inspector,
+        ), library
 
     def invalid_share_task(self, store, **extra_metadata):
         task = store.upsert_task("share", "", "https://115cdn.com/s/share")
@@ -2311,6 +2362,88 @@ class QualityShareRevalidateTests(unittest.TestCase):
 
             self.assertFalse(service._auto_revalidate_share(cleaned, 100.0))
             self.assertFalse(service._auto_revalidate_share(service.store.find_task(claimed.id), 100.0))
+
+    def test_completed_task_stale_invalid_marker_cleared_when_share_valid(self):
+        from bridge import ShareKey, SubmissionStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
+            row = submission_store.upsert_submission(
+                ShareKey("done", "1212"),
+                "https://115cdn.com/s/done?password=1212",
+                "completed",
+                title="任务",
+            )
+            submission_store.update_self_share(int(row["id"]), share_validation_status="invalid")
+            service, library = self.make_service(
+                tmp,
+                share_inspector=lambda code, pwd: {"share_state": "1", "have_vio_file": False},
+            )
+            service.submission_store = submission_store
+            task = service.store.upsert_task("done", "", "https://115cdn.com/s/done?password=1212")
+            task = service.store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "done",
+                submission_id=int(row["id"]),
+                metadata_patch={
+                    "dest_path": str(library / "movie"),
+                    "own_share_code": "own",
+                    "own_share_receive_code": "1212",
+                    "share_validation_status": "valid",
+                },
+            )
+
+            revalidated = service._auto_revalidate_share(task, 100.0)
+
+            self.assertTrue(revalidated)
+            self.assertEqual(
+                submission_store.find_by_id(int(row["id"]))["share_validation_status"],
+                "valid",
+            )
+            self.assertEqual(
+                service.store.find_task(task.id).metadata["quality_share_recheck_count"],
+                1,
+            )
+
+    def test_completed_task_marker_kept_when_share_still_invalid(self):
+        from bridge import ShareKey, SubmissionStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
+            row = submission_store.upsert_submission(
+                ShareKey("done2", "1212"),
+                "https://115cdn.com/s/done2?password=1212",
+                "completed",
+                title="任务",
+            )
+            submission_store.update_self_share(int(row["id"]), share_validation_status="invalid")
+            service, library = self.make_service(
+                tmp,
+                share_inspector=lambda code, pwd: {"share_state": "6", "have_vio_file": True},
+            )
+            service.submission_store = submission_store
+            task = service.store.upsert_task("done2", "", "https://115cdn.com/s/done2?password=1212")
+            task = service.store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "done",
+                submission_id=int(row["id"]),
+                metadata_patch={
+                    "dest_path": str(library / "movie"),
+                    "own_share_code": "own",
+                    "own_share_receive_code": "1212",
+                    "share_validation_status": "valid",
+                },
+            )
+
+            self.assertFalse(service._auto_revalidate_share(task, 100.0))
+            self.assertEqual(
+                submission_store.find_by_id(int(row["id"]))["share_validation_status"],
+                "invalid",
+            )
 
 
 class QualityRetentionTests(unittest.TestCase):

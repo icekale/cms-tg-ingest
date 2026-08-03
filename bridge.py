@@ -4649,6 +4649,11 @@ def run_forever(
             config,
             move_config=move_config,
             submission_store=store,
+            share_inspector=(
+                (lambda share_code, receive_code: p115.inspect_share(share_code, receive_code))
+                if p115 is not None
+                else None
+            ),
             repair_adapter=_QualityRepairAdapter(
                 store,
                 task_store,

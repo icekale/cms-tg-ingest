@@ -5027,14 +5027,14 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertTrue((dest / "movie.strm").exists())
             self.assertFalse(source.exists())
 
-    def test_moved_stage_fails_permanent_restore_outcomes_instead_of_deferring_forever(self):
+    def test_moved_stage_fails_permanent_restore_outcomes_but_defers_transient_move_failed(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
             row = self._self_share_row()
             task = SimpleNamespace(metadata={})
             metadata = {"dest_path": str(Path(tmp) / "library" / "missing")}
 
-            for restore_status in ("skipped", "error", "move_failed"):
+            for restore_status in ("skipped", "error"):
                 with self.subTest(restore_status=restore_status), patch(
                     "app.workflows.self_share.restore_missing_self_share_library_folder",
                     return_value=(restore_status, {"restore_reason": restore_status}),
@@ -5043,6 +5043,15 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
 
                 self.assertEqual(result.outcome, StageOutcome.FAILED)
                 self.assertEqual(result.metadata["restore_reason"], restore_status)
+
+            with patch(
+                "app.workflows.self_share.restore_missing_self_share_library_folder",
+                return_value=("move_failed", {"restore_reason": "STRM 源目录仍在更新"}),
+            ):
+                result = workflow._restore_missing_moved_destination(task, row, metadata)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(result.metadata["restore_reason"], "STRM 源目录仍在更新")
 
     def test_emby_confirmed_stage_revalidates_stored_confirmation(self):
         with tempfile.TemporaryDirectory() as tmp:

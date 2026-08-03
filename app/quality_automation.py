@@ -208,6 +208,7 @@ class QualityAutomation:
         allowed_roots: Iterable[str | Path] | None = None,
         repair_adapter: object | None = None,
         submission_store: object | None = None,
+        share_inspector: object | None = None,
         on_enabled_changed: object | None = None,
         rule_engine: QualityRuleEngine | None = None,
         share_identity_resolver: ShareIdentityResolver | None = None,
@@ -245,6 +246,7 @@ class QualityAutomation:
         self.allowed_roots = tuple(safe_resolve(Path(root)) for root in roots)
         self.repair_adapter = repair_adapter
         self.submission_store = submission_store
+        self.share_inspector = share_inspector if callable(share_inspector) else None
         self.on_enabled_changed = on_enabled_changed
         self.share_identity_resolver = share_identity_resolver if callable(share_identity_resolver) else None
 
@@ -989,6 +991,12 @@ class QualityAutomation:
         """Requeue an invalid-share task so TaskRunner re-inspects the live share."""
         if self._is_archived(task):
             return False
+        if task.status == TaskStatus.SUCCEEDED and task.current_stage in {
+            TaskStage.MOVED,
+            TaskStage.EMBY_CONFIRMED,
+            TaskStage.CLEANED,
+        }:
+            return self._revalidate_stale_share_marker(task, now)
         if task.status != TaskStatus.NEEDS_ACTION or task.current_stage != TaskStage.SHARE_VALIDATED:
             return False
         if str(task.claimed_by or "").strip() or str(task.claim_token or "").strip():
@@ -1042,6 +1050,81 @@ class QualityAutomation:
             expected_updated_at=task.updated_at,
         )
         return updated is not None
+
+    def _revalidate_stale_share_marker(self, task: TaskSnapshot, now: float) -> bool:
+        """Clear a stale invalid share marker on a completed task when the live share is valid."""
+        if self.share_inspector is None or self.submission_store is None:
+            return False
+        submission_id = task.submission_id or task.metadata.get("submission_id")
+        if submission_id in (None, ""):
+            return False
+        try:
+            row = self.submission_store.find_by_id(int(submission_id))
+        except (TypeError, ValueError, AttributeError):
+            return False
+        if not isinstance(row, dict):
+            return False
+        if str(row.get("share_validation_status") or "").strip().lower() != "invalid":
+            return False
+        own_code = str(
+            task.metadata.get("own_share_code") or row.get("own_share_code") or ""
+        ).strip()
+        own_pwd = str(
+            task.metadata.get("own_share_receive_code")
+            or row.get("own_share_receive_code")
+            or "1212"
+        ).strip() or "1212"
+        if not own_code:
+            return False
+        if self._risk_controlled(task, now):
+            return False
+        try:
+            attempts = int(task.metadata.get("quality_share_recheck_count") or 0)
+        except (TypeError, ValueError):
+            attempts = 0
+        if attempts >= self.MAX_SHARE_REVALIDATE_ATTEMPTS:
+            return False
+        try:
+            next_at = float(task.metadata.get("quality_share_recheck_next_at") or 0)
+        except (TypeError, ValueError):
+            next_at = 0
+        if next_at > now:
+            return False
+        try:
+            state = self.share_inspector(own_code, own_pwd)
+        except Exception:
+            return False
+        if not isinstance(state, dict):
+            return False
+        share_state = str(state.get("share_state") or "").strip().lower()
+        have_vio_file = str(state.get("have_vio_file") or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if share_state not in {"0", "1", "true"} or have_vio_file:
+            return False
+        timestamp = time.time()
+        try:
+            self.submission_store.update_self_share(
+                int(submission_id),
+                share_validation_status="valid",
+                share_validation_error="",
+            )
+        except (TypeError, ValueError, AttributeError):
+            return False
+        self.store.record_event(
+            task.id,
+            task.current_stage,
+            task.status,
+            "自动复验：自有分享恢复可用，已清除失效标记",
+            metadata_patch={
+                "quality_share_recheck_count": attempts + 1,
+                "quality_share_recheck_last_at": timestamp,
+                "quality_share_recheck_next_at": timestamp + self.SHARE_REVALIDATE_COOLDOWN_SECONDS,
+            },
+        )
+        return True
 
     def _retire_unfixable_task(
         self,
@@ -1349,7 +1432,7 @@ class QualityAutomation:
             return False
         if task.status != TaskStatus.SUCCEEDED:
             return False
-        if str(task.metadata.get("move_status") or "").strip().lower() != "moved":
+        if self._task_move_status(task) != "moved":
             return False
         if bool(task.metadata.get("quality_repair_queued")):
             return False
@@ -1365,6 +1448,23 @@ class QualityAutomation:
         if invalid in {"invalid", "invalid_share_cleaned", "source_deleted"}:
             return False
         return quality_attempt_count(task) < int(self.rule_config["max_attempts"])
+
+    def _task_move_status(self, task: TaskSnapshot) -> str:
+        value = str(task.metadata.get("move_status") or "").strip().lower()
+        if value:
+            return value
+        if self.submission_store is None:
+            return ""
+        submission_id = task.submission_id or task.metadata.get("submission_id")
+        if submission_id in (None, ""):
+            return ""
+        try:
+            row = self.submission_store.find_by_id(int(submission_id))
+        except (TypeError, ValueError, AttributeError):
+            return ""
+        if not isinstance(row, dict):
+            return ""
+        return str(row.get("move_status") or "").strip().lower()
 
     def _apply_budgets(
         self,
