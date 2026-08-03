@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import time
 from pathlib import Path
@@ -343,11 +344,26 @@ def validate_self_share_strm_source(source: Path, row: dict[str, Any]) -> str:
         return "等待自有分享码，暂不移动 STRM"
     receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
     expected_marker = f"/s/{own_share_code}_{receive_code}_"
+    matched_any = False
+    first_issue = ""
     for path in sorted(iter_strm_files(source)):
         issue = validate_self_share_strm_file(path, expected_marker)
-        if issue:
+        if not issue:
+            matched_any = True
+            continue
+        if "/d/" in issue:
             return issue
-    return ""
+        if not first_issue:
+            first_issue = issue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        if re.search(r"/s/[A-Za-z0-9]+_[A-Za-z0-9]*_", text):
+            continue
+    if matched_any:
+        return ""
+    return first_issue or ""
 
 
 def _canonical_manifest_tmdb_id(row: dict[str, Any]) -> str:

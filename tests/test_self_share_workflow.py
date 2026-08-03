@@ -3084,6 +3084,39 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertIn("任务 TMDB 1228710", issue)
             self.assertIn("未知", issue)
 
+    def test_source_validation_allows_other_share_markers_when_current_share_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "share" / "Show-[tmdb=73375]"
+            source.mkdir(parents=True)
+            (source / "old.strm").write_text("http://cms/s/othershare_1212_old.mkv", encoding="utf-8")
+            (source / "current.strm").write_text("http://cms/s/ownshare_1212_current.mkv", encoding="utf-8")
+            row = {
+                "workflow_mode": "self_share_sync",
+                "own_share_code": "ownshare",
+                "own_share_receive_code": "1212",
+                "recognition_json": json.dumps({"tmdb_id": "73375"}),
+            }
+
+            issue = bridge.validate_self_share_strm_source(source, row)
+
+            self.assertEqual(issue, "")
+
+    def test_source_validation_still_fails_when_no_marker_matches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "share" / "Show-[tmdb=73375]"
+            source.mkdir(parents=True)
+            (source / "old.strm").write_text("http://cms/s/othershare_1212_old.mkv", encoding="utf-8")
+            row = {
+                "workflow_mode": "self_share_sync",
+                "own_share_code": "ownshare",
+                "own_share_receive_code": "1212",
+                "recognition_json": json.dumps({"tmdb_id": "73375"}),
+            }
+
+            issue = bridge.validate_self_share_strm_source(source, row)
+
+            self.assertIn("STRM 不是预期的分享链接", issue)
+
     def test_explicit_source_tmdb_rejects_unmarked_strm_destination_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             destination = Path(tmp) / "library" / "123 (2026)"
