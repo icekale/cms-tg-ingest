@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.64 - 2026-08-03
+
+- 修复 `#283` 类问题：任务已确认 Emby 时允许按 TMDB 匹配旧目录条目并更新路径，不再因 Emby 路径与任务目录不同而反复超时。
+- 修复 `#368` 类问题：自有分享 STRM 同步尚未生成新分享标记时，`STRM_READY` 阶段改为延迟重试而不是直接失败（直链 STRM 仍立即失败）。
+- 新增 CMS 版本检测与更新：`CMS_VERSION_CHECK_ENABLED=true` 时定时探测 CMS 版本，出现新版本通过 Telegram 通知并标记 `update_ready`；可配置 `CMS_UPDATE_IMAGE` + `CMS_AUTO_PULL_ENABLED=true` 自动拉取镜像；容器切换在宿主机执行 `scripts/update-cms-container.sh`。
+- 新增 `GET/POST /api/v1/cms/version` 状态与手动检查接口。
+
 ## 0.2.63 - 2026-08-03
 
 - 日志功能：修复历史恢复遇到毫秒时间戳丢失级别/logger 的问题；`configure_logging` 重复调用时按新参数重建；hub 只保存脱敏后的消息正文并避免重复脱敏。
