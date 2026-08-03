@@ -1177,7 +1177,7 @@ class QualityAutomation:
                 return QualityRepairPlan(
                     action="restore",
                     reason=match.rule_id,
-                    target_stage=TaskStage.EMBY_CONFIRMED.value,
+                    target_stage=TaskStage.MOVED.value,
                     **base,
                 )
             if quality_attempt_count(task) >= int(self.rule_config["max_attempts"]):
@@ -1209,6 +1209,8 @@ class QualityAutomation:
         if task.current_stage not in {TaskStage.MOVED, TaskStage.EMBY_CONFIRMED, TaskStage.CLEANED}:
             return False
         if task.status != TaskStatus.SUCCEEDED:
+            return False
+        if str(task.metadata.get("move_status") or "").strip().lower() != "moved":
             return False
         if bool(task.metadata.get("quality_repair_queued")):
             return False
@@ -1546,7 +1548,7 @@ class QualityAutomation:
         )
         metadata = {
             "retry_from_stage": task.current_stage.value,
-            "retry_stage": TaskStage.EMBY_CONFIRMED.value,
+            "retry_stage": TaskStage.MOVED.value,
             "quality_repair_action": "restore",
             "quality_repair_reason": plan.reason,
             "quality_rule_id": plan.rule_id,
@@ -1564,7 +1566,7 @@ class QualityAutomation:
             task.current_stage,
             {TaskStatus.SUCCEEDED},
             require_unclaimed=True,
-            target_stage=TaskStage.EMBY_CONFIRMED,
+            target_stage=TaskStage.MOVED,
             target_status=TaskStatus.PENDING,
             target_event_message="自动巡检已排队：restore",
             metadata_patch=metadata,

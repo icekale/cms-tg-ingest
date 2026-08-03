@@ -1964,6 +1964,8 @@ class QualityAutoRestoreTests(unittest.TestCase):
             "own_share_code": "own",
             "own_share_receive_code": "1212",
             "own_share_file_id": "fid-own",
+            "move_status": "moved",
+            "emby_status": "confirmed",
         }
         metadata.update(extra_metadata)
         return store.record_event(
@@ -1984,15 +1986,15 @@ class QualityAutoRestoreTests(unittest.TestCase):
             plan = service._plan([task], [issue], now=100.0)[0]
 
             self.assertEqual(plan.action, "restore")
-            self.assertEqual(plan.target_stage, "emby_confirmed")
+            self.assertEqual(plan.target_stage, "moved")
 
             executed = service.execute_plan(plan, "run-1")
             current = service.store.find_task(task.id)
             self.assertEqual(executed.execution_status, "queued")
-            self.assertEqual(current.current_stage, TaskStage.EMBY_CONFIRMED)
+            self.assertEqual(current.current_stage, TaskStage.MOVED)
             self.assertEqual(current.status, TaskStatus.PENDING)
             self.assertEqual(current.next_run_at, 0)
-            self.assertEqual(current.metadata["retry_stage"], "emby_confirmed")
+            self.assertEqual(current.metadata["retry_stage"], "moved")
             self.assertEqual(current.metadata["retry_from_stage"], "cleaned")
             self.assertTrue(current.metadata.get("quality_repair_queued"))
 
