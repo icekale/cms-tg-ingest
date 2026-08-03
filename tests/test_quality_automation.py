@@ -109,6 +109,15 @@ class QualityAutomationConfigTests(unittest.TestCase):
 
         self.assertEqual(config.quality_archive_after_seconds, 86400)
 
+    def test_quality_unfixable_retention_days_parses_from_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            env["QUALITY_UNFIXABLE_RETENTION_DAYS"] = "14"
+            with patch.dict(os.environ, env, clear=True):
+                config = Config.from_env()
+
+        self.assertEqual(config.quality_unfixable_retention_days, 14)
+
     def test_quality_automation_rejects_invalid_time(self):
         with tempfile.TemporaryDirectory() as tmp:
             for value in ("2:50", "24:00", "02:60", "02:50:00"):
@@ -2221,6 +2230,178 @@ class QualityScanPerformanceTests(unittest.TestCase):
                 service.run_once("cache-run-2")
 
             self.assertEqual([task.id for task in calls[1]], [task.id])
+
+
+class QualityShareRevalidateTests(unittest.TestCase):
+    def make_service(self, tmp):
+        library = Path(tmp) / "library"
+        library.mkdir(parents=True)
+        config = Config(
+            tg_bot_token="token",
+            tg_allowed_chat_id="chat",
+            cms_base_url="http://cms",
+            cms_username="user",
+            cms_password="pass",
+            task_db_path=str(Path(tmp) / "tasks.db"),
+            quality_auto_enabled=True,
+        )
+        return QualityAutomation(TaskStore(Path(tmp) / "tasks.db"), config, allowed_roots=[library]), library
+
+    def invalid_share_task(self, store, **extra_metadata):
+        task = store.upsert_task("share", "", "https://115cdn.com/s/share")
+        metadata = {
+            "own_share_code": "own",
+            "own_share_receive_code": "1212",
+            "share_validation_status": "invalid",
+            "invalid_share_status": "invalid",
+        }
+        metadata.update(extra_metadata)
+        return store.record_event(
+            task.id,
+            TaskStage.SHARE_VALIDATED,
+            TaskStatus.NEEDS_ACTION,
+            "自有分享已被 115 判定为不可用",
+            error_type="needs_action",
+            error_summary="自有分享已被 115 判定为不可用",
+            metadata_patch=metadata,
+        )
+
+    def test_revalidates_eligible_invalid_share(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _ = self.make_service(tmp)
+            task = self.invalid_share_task(service.store)
+
+            revalidated = service._auto_revalidate_share(task, 100.0)
+
+            self.assertTrue(revalidated)
+            current = service.store.find_task(task.id)
+            self.assertEqual(current.current_stage, TaskStage.SHARE_VALIDATED)
+            self.assertEqual(current.status, TaskStatus.PENDING)
+            self.assertEqual(current.next_run_at, 0)
+            self.assertEqual(current.metadata.get("share_validation_status"), "")
+            self.assertEqual(current.metadata["quality_share_recheck_count"], 1)
+            self.assertGreater(current.metadata["quality_share_recheck_next_at"], 100.0)
+            self.assertIn("自动复验", service.store.list_events(task.id)[-1]["message"])
+
+    def test_share_revalidate_respects_cooldown_and_attempt_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _ = self.make_service(tmp)
+            capped = self.invalid_share_task(service.store, quality_share_recheck_count=3)
+            cooled = self.invalid_share_task(service.store, quality_share_recheck_next_at=200.0)
+
+            self.assertFalse(service._auto_revalidate_share(capped, 100.0))
+            self.assertFalse(service._auto_revalidate_share(cooled, 100.0))
+
+    def test_share_revalidate_ignores_cleaned_source_and_claimed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _ = self.make_service(tmp)
+            cleaned = self.invalid_share_task(service.store, invalid_share_status="invalid_share_cleaned")
+            claimed = self.invalid_share_task(service.store)
+            service.store.compare_and_set_transition(
+                claimed.id,
+                TaskStage.SHARE_VALIDATED,
+                {TaskStatus.NEEDS_ACTION},
+                require_unclaimed=True,
+                target_stage=TaskStage.SHARE_VALIDATED,
+                target_status=TaskStatus.NEEDS_ACTION,
+                target_event_message="claim",
+                claim_by="worker-1",
+                expected_updated_at=claimed.updated_at,
+            )
+
+            self.assertFalse(service._auto_revalidate_share(cleaned, 100.0))
+            self.assertFalse(service._auto_revalidate_share(service.store.find_task(claimed.id), 100.0))
+
+
+class QualityRetentionTests(unittest.TestCase):
+    def make_service(self, tmp, retention_days=1, submission_store=None):
+        library = Path(tmp) / "library"
+        library.mkdir(parents=True)
+        config = Config(
+            tg_bot_token="token",
+            tg_allowed_chat_id="chat",
+            cms_base_url="http://cms",
+            cms_username="user",
+            cms_password="pass",
+            task_db_path=str(Path(tmp) / "tasks.db"),
+            quality_auto_enabled=True,
+            quality_unfixable_retention_days=retention_days,
+        )
+        return QualityAutomation(
+            TaskStore(Path(tmp) / "tasks.db"),
+            config,
+            allowed_roots=[library],
+            submission_store=submission_store,
+        )
+
+    def unfixable_terminal_task(self, store, *, rule_id="terminal_invalid_share", age_seconds=2 * 86400, submission_id=None):
+        task = store.upsert_task("unfixable", "", "https://115cdn.com/s/unfixable")
+        metadata = {
+            "quality_rule_id": rule_id,
+            "quality_issue_codes": ["invalid_share"],
+            "quality_terminal_since": time.time() - age_seconds,
+        }
+        return store.record_event(
+            task.id,
+            TaskStage.NEEDS_ACTION,
+            TaskStatus.NEEDS_ACTION,
+            "terminal",
+            submission_id=submission_id,
+            metadata_patch=metadata,
+        )
+
+    def test_retires_old_unfixable_terminal_task_with_submission(self):
+        from bridge import ShareKey, SubmissionStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
+            row = submission_store.upsert_submission(
+                ShareKey("unfixable", "1212"),
+                "https://115cdn.com/s/unfixable?password=1212",
+                "completed",
+                title="任务",
+            )
+            service = self.make_service(tmp, submission_store=submission_store)
+            task = self.unfixable_terminal_task(service.store, submission_id=int(row["id"]))
+
+            retired = service._retire_unfixable_task(task, time.time(), "run-1")
+
+            self.assertTrue(retired)
+            self.assertIsNone(service.store.find_task(task.id))
+            self.assertIsNone(submission_store.find_by_id(int(row["id"])))
+
+    def test_keeps_recent_or_recoverable_terminal_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self.make_service(tmp)
+            library = Path(tmp) / "library"
+            recent = self.unfixable_terminal_task(service.store, age_seconds=3600)
+            recoverable = self.unfixable_terminal_task(service.store, rule_id="missing_strm")
+            service.store.patch_metadata(
+                recoverable.id,
+                {
+                    "retry_stage": "emby_confirmed",
+                    "dest_path": str(library / "movie"),
+                    "own_share_code": "own",
+                    "own_share_receive_code": "1212",
+                    "quality_issue_codes": ["missing_strm"],
+                },
+            )
+            (library / "movie").mkdir(parents=True)
+            (library / "movie" / "movie.strm").write_text("https://cms/s/own_1212_movie.mkv", encoding="utf-8")
+            recoverable = service.store.find_task(recoverable.id)
+            service.store.patch_metadata(recoverable.id, {"error_type": "stage_wait_timeout", "error_summary": "等待超时"})
+            recoverable = service.store.find_task(recoverable.id)
+
+            self.assertFalse(service._retire_unfixable_task(recent, time.time(), "run-1"))
+            self.assertFalse(service._retire_unfixable_task(recoverable, time.time(), "run-1"))
+
+    def test_retention_disabled_when_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self.make_service(tmp, retention_days=0)
+            task = self.unfixable_terminal_task(service.store)
+
+            self.assertFalse(service._retire_unfixable_task(task, time.time(), "run-1"))
+            self.assertIsNotNone(service.store.find_task(task.id))
 
 
 

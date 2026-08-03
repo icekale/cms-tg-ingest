@@ -23,6 +23,7 @@ from .quality_rules import (
     rule_config,
 )
 from .strm_mode import effective_task_strm_mode
+from .task_actions import delete_task_record_and_submission
 from .task_store import (
     TaskStore,
     build_reprocess_metadata,
@@ -177,6 +178,8 @@ class QualityAutomation:
     )
     AUTO_RECHECK_ERROR_TYPES = frozenset({"stage_wait_timeout", "organizing_timeout"})
     AUTO_RECHECK_ISSUE_CODES = frozenset({"missing_dest", "missing_strm", "unexpected_strm"})
+    SHARE_REVALIDATE_COOLDOWN_SECONDS = 6 * 60 * 60
+    MAX_SHARE_REVALIDATE_ATTEMPTS = 3
     ARCHIVE_TERMINAL_RULES = frozenset({"unsafe_path", "terminal_invalid_share"})
     ARCHIVE_ISSUE_CODES = frozenset(
         {"unsafe_metadata", "unsafe_path", "invalid_share", "invalid_share_cleaned", "source_deleted"}
@@ -204,6 +207,7 @@ class QualityAutomation:
         move_config: MoveConfig | None = None,
         allowed_roots: Iterable[str | Path] | None = None,
         repair_adapter: object | None = None,
+        submission_store: object | None = None,
         on_enabled_changed: object | None = None,
         rule_engine: QualityRuleEngine | None = None,
         share_identity_resolver: ShareIdentityResolver | None = None,
@@ -227,6 +231,11 @@ class QualityAutomation:
         self.rule_engine = rule_engine or QualityRuleEngine()
         self.rule_config = self._load_rule_config()
         self.archive_after_seconds = max(1, int(config.quality_archive_after_seconds))
+        self.unfixable_retention_seconds = (
+            max(1, int(config.quality_unfixable_retention_days)) * 24 * 3600
+            if int(config.quality_unfixable_retention_days) > 0
+            else 0
+        )
 
         if allowed_roots is None:
             move_config = move_config or MoveConfig.from_config(config)
@@ -235,6 +244,7 @@ class QualityAutomation:
             roots = list(allowed_roots)
         self.allowed_roots = tuple(safe_resolve(Path(root)) for root in roots)
         self.repair_adapter = repair_adapter
+        self.submission_store = submission_store
         self.on_enabled_changed = on_enabled_changed
         self.share_identity_resolver = share_identity_resolver if callable(share_identity_resolver) else None
 
@@ -466,12 +476,17 @@ class QualityAutomation:
             scan_limit = min(self.MAX_TASKS, max(limit, limit * self.SCAN_TASK_MULTIPLIER))
             tasks = self.store.list_recent_tasks(limit=scan_limit)
             current_time = local_now.timestamp()
+            retired_ids: set[int] = set()
             for task in tasks:
                 try:
                     self._ensure_terminal_marker(task, current_time)
                     self._archive_terminal_task(task, current_time, run_id)
+                    revalidated = self._auto_revalidate_share(task, current_time)
+                    if not revalidated and self._retire_unfixable_task(task, current_time, run_id):
+                        retired_ids.add(task.id)
                 except Exception:
-                    LOG.debug("Quality archive failed task_id=%s", task.id, exc_info=True)
+                    LOG.debug("Quality cleanup failed task_id=%s", task.id, exc_info=True)
+            tasks = [task for task in tasks if task.id not in retired_ids]
             scan_tasks = [
                 task for task in tasks if self._scan_skip_reason(task, current_time) is None
             ]
@@ -969,6 +984,121 @@ class QualityAutomation:
             "quality-auto",
         )
         return updated is not None
+
+    def _auto_revalidate_share(self, task: TaskSnapshot, now: float) -> bool:
+        """Requeue an invalid-share task so TaskRunner re-inspects the live share."""
+        if self._is_archived(task):
+            return False
+        if task.status != TaskStatus.NEEDS_ACTION or task.current_stage != TaskStage.SHARE_VALIDATED:
+            return False
+        if str(task.claimed_by or "").strip() or str(task.claim_token or "").strip():
+            return False
+        metadata = task.metadata
+        if str(metadata.get("share_validation_status") or "").strip().lower() != "invalid":
+            return False
+        if str(metadata.get("invalid_share_status") or "").strip().lower() in {
+            "invalid_share_cleaned",
+            "source_deleted",
+        }:
+            return False
+        if not str(metadata.get("own_share_code") or "").strip():
+            return False
+        if self._risk_controlled(task, now):
+            return False
+        try:
+            attempts = int(metadata.get("quality_share_recheck_count") or 0)
+        except (TypeError, ValueError):
+            attempts = 0
+        if attempts >= self.MAX_SHARE_REVALIDATE_ATTEMPTS:
+            return False
+        try:
+            next_at = float(metadata.get("quality_share_recheck_next_at") or 0)
+        except (TypeError, ValueError):
+            next_at = 0
+        if next_at > now:
+            return False
+        timestamp = time.time()
+        updated = self.store.record_event(
+            task.id,
+            TaskStage.SHARE_VALIDATED,
+            TaskStatus.PENDING,
+            "自动复验：清除失效标记并重新验证分享",
+            error_type="",
+            error_summary="",
+            error_detail="",
+            metadata_patch={
+                "share_validation_status": "",
+                "share_validation_error": "",
+                "invalid_share_status": "",
+                "share_review_status": "pending",
+                "quality_share_recheck_count": attempts + 1,
+                "quality_share_recheck_last_at": timestamp,
+                "quality_share_recheck_next_at": timestamp + self.SHARE_REVALIDATE_COOLDOWN_SECONDS,
+            },
+            next_run_at=0,
+            clear_claim=True,
+            expected_stage=TaskStage.SHARE_VALIDATED,
+            expected_status=TaskStatus.NEEDS_ACTION,
+            expected_updated_at=task.updated_at,
+        )
+        return updated is not None
+
+    def _retire_unfixable_task(
+        self,
+        task: TaskSnapshot,
+        now: float,
+        run_id: str,
+    ) -> bool:
+        """Delete old terminal tasks that can never be repaired (retention policy)."""
+        if self.unfixable_retention_seconds <= 0:
+            return False
+        terminal = task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {
+            TaskStage.FAILED,
+            TaskStage.NEEDS_ACTION,
+        }
+        if not terminal:
+            return False
+        if str(task.claimed_by or "").strip() or str(task.claim_token or "").strip():
+            return False
+        if self._recheck_candidate(task, now):
+            return False
+        metadata = task.metadata
+        rule_id = str(metadata.get("quality_rule_id") or "").strip()
+        raw_codes = metadata.get("quality_issue_codes") or []
+        if isinstance(raw_codes, str):
+            raw_codes = [part.strip() for part in raw_codes.split(",") if part.strip()]
+        issue_codes = {str(code) for code in raw_codes if str(code).strip()}
+        submission_id = task.submission_id or metadata.get("submission_id")
+        own_code = str(metadata.get("own_share_code") or "").strip()
+        orphan = submission_id in (None, "") and not own_code and task.current_stage in {
+            TaskStage.RECEIVED,
+            TaskStage.NEEDS_ACTION,
+        }
+        if (
+            rule_id not in self.ARCHIVE_TERMINAL_RULES
+            and not (issue_codes & self.ARCHIVE_ISSUE_CODES)
+            and not orphan
+        ):
+            return False
+        try:
+            base = float(
+                metadata.get("quality_terminal_since")
+                or metadata.get("quality_archived_at")
+                or 0
+            )
+        except (TypeError, ValueError):
+            base = 0
+        if base <= 0:
+            try:
+                base = float(task.updated_at or task.created_at or 0)
+            except (TypeError, ValueError):
+                base = 0
+        if now - base < self.unfixable_retention_seconds:
+            return False
+        result = delete_task_record_and_submission(self.store, self.submission_store, task.id)
+        if result.applied:
+            LOG.info("Retired unfixable terminal task task_id=%s run_id=%s", task.id, run_id)
+        return result.applied
 
     def _recheck_candidate(self, task: TaskSnapshot, now: float) -> bool:
         """True when a waiting task is eligible for an automatic recovery recheck."""

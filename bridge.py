@@ -4648,6 +4648,7 @@ def run_forever(
             task_store,
             config,
             move_config=move_config,
+            submission_store=store,
             repair_adapter=_QualityRepairAdapter(
                 store,
                 task_store,
