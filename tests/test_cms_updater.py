@@ -72,6 +72,42 @@ class CmsUpdaterTests(unittest.TestCase):
         result = docker_pull_image("/tmp/does-not-exist.sock", "icekale/cms", "latest")
         self.assertTrue(result.startswith("pull error") or "no docker socket" in result)
 
+    def test_docker_pull_parses_tag_from_image_ref(self):
+        captured = {}
+
+        class FakeResponse:
+            status = 200
+
+            def read(self, size):
+                return b""
+
+            def close(self):
+                pass
+
+        class FakeConn:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, method, url):
+                captured["url"] = url
+
+            def getresponse(self):
+                return FakeResponse()
+
+            def close(self):
+                pass
+
+        with patch("app.cms_updater._UnixHTTPConnection", FakeConn):
+            result = docker_pull_image(
+                "/tmp/fake.sock", "imaliang/cloud-media-sync:latest"
+            )
+
+        self.assertEqual(result, "pulled")
+        self.assertNotIn("%3Alatest", captured["url"])
+        self.assertIn("/images/create?", captured["url"])
+        self.assertIn("fromImage=imaliang%2Fcloud-media-sync", captured["url"])
+        self.assertIn("tag=latest", captured["url"])
+
     def test_api_cms_version_reports_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = self.make_store(tmp)

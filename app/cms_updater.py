@@ -32,11 +32,20 @@ def docker_pull_image(socket_path: str, image: str, tag: str = "latest") -> str:
     socket_path = str(socket_path or "").strip()
     if not image or not socket_path:
         return "no docker socket or image configured"
+    if "@" in image:
+        repo, explicit_tag = image, ""
+    elif ":" in image:
+        repo, _, explicit_tag = image.rpartition(":")
+        if "/" in explicit_tag or not repo:
+            repo, explicit_tag = image, ""
+    else:
+        repo, explicit_tag = image, ""
+    pull_tag = explicit_tag or tag
     try:
         conn = _UnixHTTPConnection(socket_path)
         conn.request(
             "POST",
-            f"/v1.41/images/create?fromImage={quote(image, safe='')}&tag={quote(tag, safe='')}",
+            f"/images/create?fromImage={quote(repo, safe='')}&tag={quote(pull_tag, safe='')}",
         )
         response = conn.getresponse()
         response.read(8192)
