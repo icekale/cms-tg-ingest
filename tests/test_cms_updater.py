@@ -149,7 +149,16 @@ class CmsUpdaterTests(unittest.TestCase):
 
 
 class CmsVersionClientTests(unittest.TestCase):
-    def test_get_version_probes_common_endpoints(self):
+    def test_get_version_uses_login_response(self):
+        cms = CmsClient.__new__(CmsClient)
+
+        def fake_login():
+            cms._cached_version = "v1.2.3"
+
+        with patch.object(cms, "login", side_effect=fake_login):
+            self.assertEqual(cms.get_version(), "v1.2.3")
+
+    def test_get_version_probes_common_endpoints_as_fallback(self):
         cms = CmsClient.__new__(CmsClient)
         calls = []
 
@@ -160,8 +169,9 @@ class CmsVersionClientTests(unittest.TestCase):
             return {"data": {}}
 
         cms._authorized = fake_authorized
+        with patch.object(cms, "login", side_effect=lambda: setattr(cms, "_cached_version", "")):
+            self.assertEqual(cms.get_version(), "1.2.3")
 
-        self.assertEqual(cms.get_version(), "1.2.3")
         self.assertIn("/api/version", calls)
 
 

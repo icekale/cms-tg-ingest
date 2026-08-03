@@ -45,6 +45,7 @@ class CmsClient:
         self.config = config
         self.http = http or HttpJson(config.http_timeout)
         self.token = ""
+        self._cached_version = ""
 
     def login(self) -> None:
         resp = self.http.request(
@@ -53,6 +54,7 @@ class CmsClient:
             payload={"username": self.config.cms_username, "password": self.config.cms_password},
         )
         token = ((resp.get("data") or {}).get("token") or "").strip()
+        self._cached_version = str((resp.get("data") or {}).get("version") or "").strip()
         if resp.get("code") != 200 or not token:
             raise RuntimeError(resp.get("msg") or "CMS login failed")
         self.token = token
@@ -221,7 +223,13 @@ class CmsClient:
         return True
 
     def get_version(self) -> str:
-        """Best-effort CMS version detection across common API endpoints."""
+        """Best-effort CMS version detection, preferring the login response."""
+        try:
+            self.login()
+        except Exception:
+            pass
+        if self._cached_version:
+            return self._cached_version
         for path in ("/api/version", "/api/app/version", "/api/system/version"):
             try:
                 resp = self._authorized(path, method="GET", safe_get_attempts=1)
