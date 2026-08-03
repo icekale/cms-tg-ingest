@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.69 - 2026-08-04
+
+- 修复 CMS 版本检测 auto-pull 的 Docker API 请求：镜像引用带 tag（如 `imaliang/cloud-media-sync:latest`）时不再被整体当作 `fromImage` 导致 400；tag 单独解析，并使用非固定 API 版本路径，兼容新旧 Docker 守护进程。
+
 ## 0.2.68 - 2026-08-04
 
 - CMS 版本检测与更新支持 Web 设置：设置页新增“CMS 版本更新”面板（开关、频率、镜像、容器名、Docker Socket、自动拉取），保存写入 TaskStore 并优先于 `.env`；检查循环始终运行，未启用时静默跳过。
