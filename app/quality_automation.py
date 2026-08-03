@@ -42,6 +42,7 @@ class QualityRepairPlan:
     risk_level: str = ""
     rule_version: str = QUALITY_RULE_VERSION
     planned_updated_at: float = 0
+    target_stage: str = ""
 
 
 @dataclass(frozen=True)
@@ -70,11 +71,106 @@ class QualityRunSummary:
     budget_used: dict[str, object] = field(default_factory=dict)
 
 
+_NO_NOTIFY_SKIP_REASONS = frozenset(
+    {
+        "terminal_task",
+        "task_busy",
+        "max_tasks",
+        "115_check_budget",
+        "cooldown",
+        "risk_control",
+        "p115_cooldown",
+        "manual_suppressed",
+        "rule_version_changed",
+        "task_missing",
+        "task_changed",
+        "claim_lost",
+        "unsupported_action",
+    }
+)
+NOTIFY_STATE_KEY = "quality_auto_last_notify"
+
+
+def open_manual_task_ids(summary: QualityRunSummary) -> frozenset[int]:
+    """Return task ids that need attention but are not terminal or busy."""
+    return frozenset(
+        plan.task_id
+        for plan in summary.plans
+        if plan.execution_status == "skipped" and plan.reason not in _NO_NOTIFY_SKIP_REASONS
+    )
+
+
+def quality_notify_signature(summary: QualityRunSummary) -> str:
+    """Stable signature of actionable plans so unchanged work is not re-notified."""
+    actionable = sorted(
+        (plan.task_id, plan.rule_id, plan.execution_status)
+        for plan in summary.plans
+        if plan.execution_status in {"queued", "failed"}
+    )
+    return json.dumps(actionable, ensure_ascii=False, sort_keys=True) if actionable else ""
+
+
+def should_notify_quality_run(
+    summary: QualityRunSummary,
+    previous_signature: str = "",
+    previous_open_ids: frozenset[int] = frozenset(),
+) -> tuple[bool, str]:
+    """Decide whether a finished quality run needs Telegram attention."""
+    signature = quality_notify_signature(summary)
+    if summary.failed_count or (signature and signature != previous_signature):
+        return True, signature
+    if open_manual_task_ids(summary) - previous_open_ids:
+        return True, signature
+    return False, signature
+
+
+def load_quality_notify_state(store: TaskStore) -> tuple[str, frozenset[int]]:
+    row = store.get_runtime_state(NOTIFY_STATE_KEY)
+    if not row:
+        return "", frozenset()
+    try:
+        payload = json.loads(str(row["value"] or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return "", frozenset()
+    signature = str(payload.get("signature") or "")
+    raw_ids = payload.get("open_ids") or []
+    open_ids = frozenset(int(item) for item in raw_ids if str(item).isdigit())
+    return signature, open_ids
+
+
+def save_quality_notify_state(
+    store: TaskStore,
+    signature: str,
+    open_ids: frozenset[int],
+) -> None:
+    store.set_runtime_state(
+        NOTIFY_STATE_KEY,
+        json.dumps(
+            {"signature": signature, "open_ids": sorted(int(item) for item in open_ids)},
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+    )
+
+
 class QualityAutomation:
     STALE_RUN_SECONDS = 21600
     MAX_TASKS = 1000
     SCAN_TASK_MULTIPLIER = 10
     MAX_115_CHECK_LIMIT = 100
+    AUTO_RECHECK_COOLDOWN_SECONDS = 6 * 60 * 60
+    MAX_AUTO_RECHECK_ATTEMPTS = 3
+    AUTO_RECHECK_RECOVERABLE_STAGES = frozenset(
+        {
+            TaskStage.STRM_READY,
+            TaskStage.CMS_DELETE_SETTLED,
+            TaskStage.MOVED,
+            TaskStage.EMBY_CONFIRMED,
+            TaskStage.CLEANED,
+        }
+    )
+    AUTO_RECHECK_ERROR_TYPES = frozenset({"stage_wait_timeout", "organizing_timeout"})
+    AUTO_RECHECK_ISSUE_CODES = frozenset({"missing_dest", "missing_strm", "unexpected_strm"})
     _STATUS_KEY = "quality_auto_status"
     _SUMMARY_KEY = "quality_auto_last_summary"
     _CURRENT_RUN_KEY = "quality_auto_current_run_id"
@@ -427,6 +523,23 @@ class QualityAutomation:
         )
         if not self._persist_summary(summary, finished_timestamp):
             return replace(summary, status="superseded", error="quality run lease was superseded")
+        self.store.record_quality_run(
+            summary.run_id,
+            local_now.date().isoformat(),
+            summary.status,
+            datetime.fromisoformat(summary.started_at).timestamp(),
+            finished_timestamp,
+            scanned_count=summary.scanned_count,
+            issue_count=summary.issue_count,
+            planned_count=summary.planned_count,
+            queued_count=summary.queued_count,
+            failed_count=summary.failed_count,
+            skipped_count=summary.skipped_count,
+            manual_count=summary.manual_count,
+            cooldown_count=summary.cooldown_count,
+            rule_counts=summary.rule_counts,
+            budget_used=summary.budget_used,
+        )
         return summary
 
     def run_now(self) -> bool:
@@ -675,6 +788,9 @@ class QualityAutomation:
                 if self._safe_metadata(task):
                     match = self.rule_engine.evaluate(task, [], config=self.rule_config)
                     if match.rule_id == "no_issue":
+                        recheck = self._auto_recheck_plan(task, now=current_time)
+                        if recheck is not None:
+                            plans.append(recheck)
                         continue
                     current = task
                     if run_id:
@@ -702,6 +818,65 @@ class QualityAutomation:
                     )
                 )
         return plans
+
+    def _auto_recheck_plan(self, task: TaskSnapshot, now: float) -> QualityRepairPlan | None:
+        """Requeue a waiting task only after its recoverable STRM issue is gone."""
+        if task.status != TaskStatus.NEEDS_ACTION or task.current_stage != TaskStage.NEEDS_ACTION:
+            return None
+        if str(task.claimed_by or "").strip() or str(task.claim_token or "").strip():
+            return None
+        try:
+            if float(task.metadata.get("termination_requested_at") or 0) > 0:
+                return None
+        except (TypeError, ValueError):
+            return None
+        metadata = task.metadata
+        raw_stage = str(metadata.get("retry_stage") or "").strip()
+        try:
+            retry_stage = TaskStage(raw_stage)
+        except ValueError:
+            return None
+        if retry_stage not in self.AUTO_RECHECK_RECOVERABLE_STAGES:
+            return None
+        error_type = str(task.error_type or "").strip()
+        raw_codes = metadata.get("quality_issue_codes") or []
+        if isinstance(raw_codes, str):
+            raw_codes = [part.strip() for part in raw_codes.split(",") if part.strip()]
+        issue_codes = {str(code) for code in raw_codes if str(code).strip()}
+        summary_text = str(task.error_summary or "")
+        recoverable_marker = (
+            error_type in self.AUTO_RECHECK_ERROR_TYPES
+            or bool(issue_codes & self.AUTO_RECHECK_ISSUE_CODES)
+            or "等待超时" in summary_text
+        )
+        if not recoverable_marker:
+            return None
+        if not self._safe_metadata(task):
+            return None
+        if self._risk_controlled(task, now):
+            return None
+        try:
+            attempts = int(metadata.get("quality_auto_recheck_count") or 0)
+        except (TypeError, ValueError):
+            attempts = 0
+        if attempts >= self.MAX_AUTO_RECHECK_ATTEMPTS:
+            return None
+        try:
+            next_at = float(metadata.get("quality_auto_recheck_next_at") or 0)
+        except (TypeError, ValueError):
+            next_at = 0
+        if next_at > now:
+            return None
+        return QualityRepairPlan(
+            task_id=task.id,
+            action="requeue",
+            reason="auto_recheck_recovered",
+            title=task.title,
+            rule_id="auto_recheck",
+            risk_level="medium",
+            planned_updated_at=task.updated_at,
+            target_stage=retry_stage.value,
+        )
 
     def _persist_rule_match(
         self,
@@ -855,13 +1030,15 @@ class QualityAutomation:
         """Atomically reserve a task before handing repair work to an adapter."""
         if plan.action == "skip":
             return plan
-        if plan.action != "reprocess":
-            return replace(plan, execution_status="skipped", reason="unsupported_action")
         task = self.store.find_task(plan.task_id)
         if task is None:
             return replace(plan, execution_status="skipped", reason="task_missing")
         if plan.planned_updated_at and task.updated_at != plan.planned_updated_at:
             return replace(plan, execution_status="skipped", reason="task_changed")
+        if plan.action == "requeue":
+            return self._execute_auto_recheck(plan, task, run_id)
+        if plan.action != "reprocess":
+            return replace(plan, execution_status="skipped", reason="unsupported_action")
         if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {
             TaskStage.FAILED,
             TaskStage.NEEDS_ACTION,
@@ -1021,6 +1198,58 @@ class QualityAutomation:
             except Exception:
                 pass
             return replace(plan, execution_status="failed", reason="repair_failed")
+        return replace(plan, execution_status="queued")
+
+    def _execute_auto_recheck(
+        self,
+        plan: QualityRepairPlan,
+        task: TaskSnapshot,
+        run_id: str,
+    ) -> QualityRepairPlan:
+        try:
+            target_stage = TaskStage(str(plan.target_stage or ""))
+        except ValueError:
+            return replace(plan, execution_status="skipped", reason="invalid_target_stage")
+        if target_stage not in self.AUTO_RECHECK_RECOVERABLE_STAGES:
+            return replace(plan, execution_status="skipped", reason="invalid_target_stage")
+        if task.status != TaskStatus.NEEDS_ACTION or task.current_stage != TaskStage.NEEDS_ACTION:
+            return replace(plan, execution_status="skipped", reason="task_changed")
+        if task.claimed_by.strip() or task.claim_token.strip():
+            return replace(plan, execution_status="skipped", reason="task_busy")
+        if not self._safe_metadata(task) or self._risk_controlled(task, time.time()):
+            return replace(plan, execution_status="skipped", reason="risk_control")
+        try:
+            attempts = int(task.metadata.get("quality_auto_recheck_count") or 0)
+        except (TypeError, ValueError):
+            attempts = 0
+        if attempts >= self.MAX_AUTO_RECHECK_ATTEMPTS:
+            return replace(plan, execution_status="skipped", reason="manual_required")
+        now = time.time()
+        next_at = now + self.AUTO_RECHECK_COOLDOWN_SECONDS
+        updated = self.store.compare_and_set_transition(
+            task.id,
+            TaskStage.NEEDS_ACTION,
+            {TaskStatus.NEEDS_ACTION},
+            require_unclaimed=True,
+            target_stage=target_stage,
+            target_status=TaskStatus.PENDING,
+            target_event_message="自动复检：目标 STRM/媒体目录已恢复，重新入队",
+            metadata_patch={
+                "quality_auto_recheck_count": attempts + 1,
+                "quality_auto_recheck_last_at": now,
+                "quality_auto_recheck_next_at": next_at,
+                "quality_auto_recheck_target_stage": target_stage.value,
+                "quality_repair_action": "requeue",
+                "quality_rule_id": "auto_recheck",
+                "quality_last_run_id": str(run_id),
+            },
+            next_run_at=0,
+            clear_errors=True,
+            clear_claim=True,
+            expected_updated_at=task.updated_at,
+        )
+        if updated is None:
+            return replace(plan, execution_status="skipped", reason="task_changed")
         return replace(plan, execution_status="queued")
 
     def _record_owned_repair_event(

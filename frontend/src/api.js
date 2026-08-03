@@ -15,6 +15,7 @@ export const api = {
   task: (id) => request(`tasks/${id}`),
   health: () => request('health'),
   quality: () => request('quality'),
+  qualityRuns: () => request('quality/runs'),
   qualityAction: (action, payload) => request(`quality/action/${action}`, { method: 'POST', body: JSON.stringify(payload) }),
   hdhive: () => request('hdhive'),
   setDefaultMode: (mode) => request('settings/strm-mode', { method: 'POST', body: JSON.stringify({ mode }) }),

@@ -8,6 +8,7 @@ import { displayTaskTitle } from '../taskView'
 
 const message = useMessage()
 const payload = ref({ items: [], rule_counts: {}, manual_count: 0, cooldown_count: 0, automation: null })
+const runs = ref({ items: [], trend: [] })
 const loading = ref(false)
 const busyAction = ref('')
 const settings = ref({ enabled: false, time: '02:50', timezone: 'Asia/Shanghai', max_tasks: 50, check_limit: 3 })
@@ -21,6 +22,11 @@ async function load() {
     const data = await api.quality()
     payload.value = data
     if (data.automation) settings.value = { ...settings.value, ...data.automation }
+    try {
+      runs.value = await api.qualityRuns()
+    } catch (err) {
+      runs.value = { items: [], trend: [] }
+    }
   } catch (err) {
     message.error(err.message)
   } finally {
@@ -136,6 +142,15 @@ const columns = [
   { title: '操作', key: 'actions', minWidth: 180, render: actionCell },
 ]
 
+const runColumns = [
+  { title: '日期', key: 'run_date', width: 120 },
+  { title: '状态', key: 'status', width: 100 },
+  { title: '扫描任务', key: 'scanned_count', width: 100 },
+  { title: '问题', key: 'issue_count', width: 80 },
+  { title: '排队', key: 'queued_count', width: 80 },
+  { title: '失败', key: 'failed_count', width: 80 },
+]
+
 onMounted(load)
 </script>
 
@@ -164,5 +179,9 @@ onMounted(load)
 
   <n-card title="人工处理队列">
     <n-data-table :columns="columns" :data="issues" :loading="loading" :pagination="{ pageSize: 12 }" :scroll-x="1250" />
+  </n-card>
+
+  <n-card title="近 30 天巡检趋势" class="section-card">
+    <n-data-table :columns="runColumns" :data="runs.items" :pagination="{ pageSize: 10 }" :scroll-x="700" />
   </n-card>
 </template>

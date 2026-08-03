@@ -6,7 +6,7 @@ from pathlib import Path
 import bridge
 from app.config import Config
 from app.models import TaskStage, TaskStatus
-from app.quality_automation import QualityAutomation
+from app.quality_automation import QualityAutomation, QualityRepairPlan, QualityRunSummary
 from app.task_store import TaskStore
 from app.telegram_ui import format_quality_manual_report, quality_manual_keyboard, quality_manual_rows
 
@@ -163,6 +163,52 @@ class QualityTelegramTests(unittest.TestCase):
 
             self.assertEqual(service.store.quality_state(task.id)["quality_manual_status"], "open")
             self.assertIn("规则或操作已过期", telegram.answers[-1][1])
+
+    def test_notify_quality_run_ignores_terminal_skips(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _task = self.make_service(tmp)
+            telegram = FakeTelegram()
+            summary = QualityRunSummary(
+                run_id="run-x",
+                status="succeeded",
+                plans=(
+                    QualityRepairPlan(
+                        task_id=1,
+                        action="skip",
+                        reason="terminal_task",
+                        execution_status="skipped",
+                    ),
+                ),
+            )
+
+            bridge.notify_quality_run(service, telegram, "464100862", summary)
+            bridge.notify_quality_run(service, telegram, "464100862", summary)
+
+            self.assertEqual(telegram.messages, [])
+
+    def test_notify_quality_run_sends_new_actionable_work_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _task = self.make_service(tmp)
+            telegram = FakeTelegram()
+            summary = QualityRunSummary(
+                run_id="run-y",
+                status="succeeded",
+                plans=(
+                    QualityRepairPlan(
+                        task_id=7,
+                        action="reprocess",
+                        reason="strm_mode_mismatch",
+                        rule_id="strm_mode_mismatch",
+                        execution_status="queued",
+                    ),
+                ),
+            )
+
+            bridge.notify_quality_run(service, telegram, "464100862", summary)
+            bridge.notify_quality_run(service, telegram, "464100862", summary)
+
+            self.assertEqual(len(telegram.messages), 1)
+            self.assertIn("质量", telegram.messages[0][1])
 
 
 if __name__ == "__main__":

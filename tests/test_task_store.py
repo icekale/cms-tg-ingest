@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import threading
 import tempfile
@@ -1301,6 +1302,53 @@ class TaskStoreTests(unittest.TestCase):
 
             self.assertEqual(store.get_runtime_state("task_runner"), {"value": "running", "updated_at": 123.0})
             self.assertIsNone(store.get_runtime_state("missing"))
+
+    def test_quality_run_history_upserts_by_run_id_and_lists_newest_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            store.record_quality_run(
+                "run-1",
+                "2026-08-01",
+                "succeeded",
+                10.0,
+                12.0,
+                issue_count=3,
+                scanned_count=100,
+                rule_counts={"unsafe_path": 2},
+            )
+            store.record_quality_run("run-2", "2026-08-02", "failed", 20.0, 25.0, failed_count=1)
+            store.record_quality_run(
+                "run-1",
+                "2026-08-01",
+                "succeeded",
+                10.0,
+                13.0,
+                issue_count=4,
+                rule_counts={"unsafe_path": 2},
+            )
+
+            runs = store.list_quality_runs(limit=10)
+
+            self.assertEqual([row["run_id"] for row in runs], ["run-2", "run-1"])
+            first = next(row for row in runs if row["run_id"] == "run-1")
+            self.assertEqual(first["issue_count"], 4)
+            self.assertEqual(json.loads(first["rule_counts_json"]), {"unsafe_path": 2})
+
+    def test_quality_run_trend_groups_by_date_and_respects_days(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            now = time.time()
+            store.record_quality_run("a", "day1", "succeeded", now - 2 * 86400, now, scanned_count=10)
+            store.record_quality_run("b", "day1", "succeeded", now - 2 * 86400, now, scanned_count=15)
+            store.record_quality_run("c", "day2", "failed", now - 86400, now, failed_count=1)
+            store.record_quality_run("old", "old-day", "succeeded", now - 31 * 86400, now, scanned_count=999)
+
+            trend = store.quality_run_trend(days=30)
+
+            self.assertEqual([row["run_date"] for row in trend], ["day1", "day2"])
+            self.assertEqual(trend[0]["runs"], 2)
+            self.assertEqual(trend[0]["scanned_count"], 25)
+            self.assertEqual(trend[1]["failed_count"], 1)
 
     def test_own_share_receive_code_override_can_be_set_and_cleared(self):
         with tempfile.TemporaryDirectory() as tmp:

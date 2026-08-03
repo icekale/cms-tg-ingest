@@ -140,7 +140,14 @@ from app.media.strm import (
 
 from app.models import TaskStage, TaskStatus
 from app.quality import format_task_quality_report, scan_task_quality
-from app.quality_automation import QualityAutomation, QualityRunSummary
+from app.quality_automation import (
+    QualityAutomation,
+    QualityRunSummary,
+    load_quality_notify_state,
+    open_manual_task_ids,
+    save_quality_notify_state,
+    should_notify_quality_run,
+)
 from app.task_bridge import (
     ensure_task_for_link,
     record_failure,
@@ -310,6 +317,30 @@ def _quality_attention_message(summary: QualityRunSummary) -> str:
     return "\n".join(lines)
 
 
+def notify_quality_run(
+    automation: QualityAutomation,
+    telegram: Any,
+    chat_id: str,
+    summary: QualityRunSummary,
+) -> None:
+    """Send one Telegram attention message only when a run has new actionable work."""
+    previous_signature, previous_open_ids = load_quality_notify_state(automation.store)
+    should_send, signature = should_notify_quality_run(
+        summary,
+        previous_signature,
+        previous_open_ids,
+    )
+    if not should_send:
+        return
+    rows = _quality_rows_for_telegram(automation)
+    telegram.send_message(
+        chat_id,
+        _quality_attention_message(summary),
+        reply_markup=quality_manual_keyboard(rows),
+    )
+    save_quality_notify_state(automation.store, signature, open_manual_task_ids(summary))
+
+
 def start_quality_automation_loop(
     automation: QualityAutomation,
     telegram: Any,
@@ -323,13 +354,8 @@ def start_quality_automation_loop(
         while not stop_event.wait(interval):
             try:
                 summary = automation.run_if_due()
-                if summary and (summary.failed_count or any(plan.execution_status in {"failed", "skipped"} for plan in summary.plans)):
-                    rows = _quality_rows_for_telegram(automation)
-                    telegram.send_message(
-                        chat_id,
-                        _quality_attention_message(summary),
-                        reply_markup=quality_manual_keyboard(rows),
-                    )
+                if summary:
+                    notify_quality_run(automation, telegram, chat_id, summary)
             except Exception:
                 LOG.exception("Quality automation loop failed")
 

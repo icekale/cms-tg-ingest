@@ -311,6 +311,32 @@ class WebApiTests(unittest.TestCase):
             self.assertNotIn(str(destination), body.decode())
             self.assertIn("movie.strm", item["detail"])
 
+    def test_quality_runs_api_exposes_history_and_trend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            now = time.time()
+            store.record_quality_run(
+                "run-1",
+                "day1",
+                "succeeded",
+                now - 86400,
+                now,
+                scanned_count=10,
+                issue_count=2,
+                rule_counts={"unsafe_path": 1},
+            )
+            app = WebApp(store)
+
+            status, _headers, body = app.handle_request("GET", "/api/v1/quality/runs", {}, b"")
+            payload = json.loads(body)
+
+            self.assertEqual(status, 200)
+            self.assertEqual(len(payload["items"]), 1)
+            self.assertEqual(payload["items"][0]["run_id"], "run-1")
+            self.assertEqual(payload["items"][0]["rule_counts"], {"unsafe_path": 1})
+            self.assertEqual(payload["trend"][0]["run_date"], "day1")
+            self.assertEqual(payload["trend"][0]["scanned_count"], 10)
+
     def test_quality_run_api_deduplicates_duplicate_clicks(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

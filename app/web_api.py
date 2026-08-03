@@ -635,3 +635,56 @@ def api_quality(
         payload["automation"] = snapshot if isinstance(snapshot, dict) else {}
     payload["background_job"] = serialize_background_job(background_jobs, prefix="quality:run")
     return payload
+
+
+def api_quality_runs(
+    store: TaskStore,
+    *,
+    limit: int = 30,
+    days: int = 30,
+) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for row in store.list_quality_runs(limit=limit):
+        try:
+            rule_counts = json.loads(row.get("rule_counts_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            rule_counts = {}
+        try:
+            budget_used = json.loads(row.get("budget_used_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            budget_used = {}
+        items.append(
+            {
+                "run_id": str(row.get("run_id") or ""),
+                "run_date": str(row.get("run_date") or ""),
+                "status": str(row.get("status") or ""),
+                "started_at": float(row.get("started_at") or 0),
+                "finished_at": float(row.get("finished_at") or 0),
+                "scanned_count": int(row.get("scanned_count") or 0),
+                "issue_count": int(row.get("issue_count") or 0),
+                "planned_count": int(row.get("planned_count") or 0),
+                "queued_count": int(row.get("queued_count") or 0),
+                "failed_count": int(row.get("failed_count") or 0),
+                "skipped_count": int(row.get("skipped_count") or 0),
+                "manual_count": int(row.get("manual_count") or 0),
+                "cooldown_count": int(row.get("cooldown_count") or 0),
+                "rule_counts": rule_counts if isinstance(rule_counts, dict) else {},
+                "budget_used": budget_used if isinstance(budget_used, dict) else {},
+            }
+        )
+    trend: list[dict[str, Any]] = []
+    for row in store.quality_run_trend(days=days):
+        trend.append(
+            {
+                "run_date": str(row.get("run_date") or ""),
+                "runs": int(row.get("runs") or 0),
+                "scanned_count": int(row.get("scanned_count") or 0),
+                "issue_count": int(row.get("issue_count") or 0),
+                "planned_count": int(row.get("planned_count") or 0),
+                "queued_count": int(row.get("queued_count") or 0),
+                "failed_count": int(row.get("failed_count") or 0),
+                "manual_count": int(row.get("manual_count") or 0),
+                "cooldown_count": int(row.get("cooldown_count") or 0),
+            }
+        )
+    return {"items": items, "trend": trend}

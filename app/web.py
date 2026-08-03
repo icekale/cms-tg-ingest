@@ -42,6 +42,7 @@ from .web_api import (
     api_response,
     api_task_detail,
     api_quality,
+    api_quality_runs,
     api_tasks,
     quality_items,
     serialize_health,
@@ -1933,6 +1934,11 @@ class WebApp:
         if method == "GET" and path == "/api/v1/quality":
             status, response_headers, response_body = api_response(
                 api_quality(self.store, quality_automation=self.quality_automation, background_jobs=self.background_jobs)
+            )
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "GET" and path == "/api/v1/quality/runs":
+            status, response_headers, response_body = api_response(
+                api_quality_runs(self.store, limit=30, days=30)
             )
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/hdhive":

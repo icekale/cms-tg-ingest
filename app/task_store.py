@@ -337,6 +337,30 @@ class TaskStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS quality_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL UNIQUE,
+                    run_date TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at REAL NOT NULL,
+                    finished_at REAL NOT NULL DEFAULT 0,
+                    scanned_count INTEGER NOT NULL DEFAULT 0,
+                    issue_count INTEGER NOT NULL DEFAULT 0,
+                    planned_count INTEGER NOT NULL DEFAULT 0,
+                    queued_count INTEGER NOT NULL DEFAULT 0,
+                    failed_count INTEGER NOT NULL DEFAULT 0,
+                    skipped_count INTEGER NOT NULL DEFAULT 0,
+                    manual_count INTEGER NOT NULL DEFAULT 0,
+                    cooldown_count INTEGER NOT NULL DEFAULT 0,
+                    rule_counts_json TEXT NOT NULL DEFAULT '{}',
+                    budget_used_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_quality_runs_started ON quality_runs(started_at)")
 
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
@@ -543,6 +567,109 @@ class TaskStore:
     def delete_runtime_state(self, key: str) -> None:
         with self._lock, self._connection() as conn:
             conn.execute("DELETE FROM runtime_state WHERE key = ?", (str(key),))
+
+    def record_quality_run(
+        self,
+        run_id: str,
+        run_date: str,
+        status: str,
+        started_at: float,
+        finished_at: float | None = None,
+        *,
+        scanned_count: int = 0,
+        issue_count: int = 0,
+        planned_count: int = 0,
+        queued_count: int = 0,
+        failed_count: int = 0,
+        skipped_count: int = 0,
+        manual_count: int = 0,
+        cooldown_count: int = 0,
+        rule_counts: dict[str, int] | None = None,
+        budget_used: dict[str, object] | None = None,
+    ) -> None:
+        now = time.time()
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO quality_runs (
+                    run_id, run_date, status, started_at, finished_at,
+                    scanned_count, issue_count, planned_count, queued_count,
+                    failed_count, skipped_count, manual_count, cooldown_count,
+                    rule_counts_json, budget_used_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    run_date = excluded.run_date,
+                    status = excluded.status,
+                    started_at = excluded.started_at,
+                    finished_at = excluded.finished_at,
+                    scanned_count = excluded.scanned_count,
+                    issue_count = excluded.issue_count,
+                    planned_count = excluded.planned_count,
+                    queued_count = excluded.queued_count,
+                    failed_count = excluded.failed_count,
+                    skipped_count = excluded.skipped_count,
+                    manual_count = excluded.manual_count,
+                    cooldown_count = excluded.cooldown_count,
+                    rule_counts_json = excluded.rule_counts_json,
+                    budget_used_json = excluded.budget_used_json,
+                    created_at = excluded.created_at
+                """,
+                (
+                    str(run_id),
+                    str(run_date),
+                    str(status),
+                    float(started_at),
+                    float(finished_at or 0),
+                    int(scanned_count),
+                    int(issue_count),
+                    int(planned_count),
+                    int(queued_count),
+                    int(failed_count),
+                    int(skipped_count),
+                    int(manual_count),
+                    int(cooldown_count),
+                    json.dumps(rule_counts or {}, ensure_ascii=False, sort_keys=True),
+                    json.dumps(budget_used or {}, ensure_ascii=False, sort_keys=True),
+                    now,
+                ),
+            )
+
+    def list_quality_runs(self, limit: int = 30) -> list[dict[str, Any]]:
+        normalized_limit = max(1, min(int(limit), 365))
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM quality_runs
+                ORDER BY started_at DESC, id DESC
+                LIMIT ?
+                """,
+                (normalized_limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def quality_run_trend(self, days: int = 30) -> list[dict[str, Any]]:
+        cutoff = time.time() - max(1, int(days)) * 86400
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT run_date,
+                       COUNT(*) AS runs,
+                       SUM(scanned_count) AS scanned_count,
+                       SUM(issue_count) AS issue_count,
+                       SUM(planned_count) AS planned_count,
+                       SUM(queued_count) AS queued_count,
+                       SUM(failed_count) AS failed_count,
+                       SUM(manual_count) AS manual_count,
+                       SUM(cooldown_count) AS cooldown_count
+                FROM quality_runs
+                WHERE started_at >= ?
+                GROUP BY run_date
+                ORDER BY run_date ASC
+                """,
+                (cutoff,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_default_strm_mode(self) -> str:
         state = self.get_runtime_state(STRM_DEFAULT_MODE_KEY)

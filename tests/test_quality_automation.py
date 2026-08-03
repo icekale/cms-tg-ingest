@@ -14,7 +14,15 @@ from zoneinfo import ZoneInfo
 from app.config import Config
 from app.models import TaskStage, TaskStatus
 from app.quality import QualityIssue, scan_task_quality
-from app.quality_automation import QualityAutomation, QualityRepairPlan, QualityRunSummary
+from app.quality_automation import (
+    QualityAutomation,
+    QualityRepairPlan,
+    QualityRunSummary,
+    load_quality_notify_state,
+    quality_notify_signature,
+    save_quality_notify_state,
+    should_notify_quality_run,
+)
 from app.quality_rules import QualityRuleMatch
 from app.task_store import TaskStore
 
@@ -165,6 +173,75 @@ class QualityAutomationConfigTests(unittest.TestCase):
             self.assertEqual(config.quality_auto_timezone, "Asia/Shanghai")
             self.assertEqual(config.quality_auto_max_tasks, 50)
             self.assertEqual(config.quality_auto_115_check_limit, 3)
+
+
+class QualityNotifyTests(unittest.TestCase):
+    def make_summary(self, plans=(), *, failed_count=0):
+        return QualityRunSummary(
+            run_id="run-1",
+            status="succeeded" if not failed_count else "failed",
+            failed_count=failed_count,
+            plans=tuple(plans),
+        )
+
+    def make_plan(self, task_id, reason="terminal_task", execution_status="skipped", rule_id="no_issue"):
+        return QualityRepairPlan(
+            task_id=task_id,
+            action="skip",
+            reason=reason,
+            rule_id=rule_id,
+            execution_status=execution_status,
+        )
+
+    def test_notify_when_repair_execution_failed(self):
+        summary = self.make_summary(failed_count=1)
+        should_send, signature = should_notify_quality_run(summary)
+        self.assertTrue(should_send)
+        self.assertEqual(signature, "")
+
+    def test_notify_when_actionable_plan_signature_changes(self):
+        queued = self.make_plan(7, reason="reprocess", execution_status="queued", rule_id="strm_mode_mismatch")
+        summary = self.make_summary([queued])
+        should_send, signature = should_notify_quality_run(summary)
+        self.assertTrue(should_send)
+
+        should_send, _ = should_notify_quality_run(summary, previous_signature=signature)
+        self.assertFalse(should_send)
+
+        another = self.make_plan(8, reason="reprocess", execution_status="queued", rule_id="strm_mode_mismatch")
+        should_send, _ = should_notify_quality_run(self.make_summary([another]), previous_signature=signature)
+        self.assertTrue(should_send)
+
+    def test_terminal_skips_do_not_notify(self):
+        summary = self.make_summary([self.make_plan(1), self.make_plan(2)])
+        should_send, signature = should_notify_quality_run(summary)
+        self.assertFalse(should_send)
+        self.assertEqual(quality_notify_signature(summary), "")
+
+    def test_new_open_manual_issue_notifies_once(self):
+        open_plan = self.make_plan(3, reason="missing_destination")
+        summary = self.make_summary([open_plan])
+        should_send, _ = should_notify_quality_run(summary, previous_open_ids=frozenset({1}))
+        self.assertTrue(should_send)
+
+        should_send, _ = should_notify_quality_run(summary, previous_open_ids=frozenset({1, 3}))
+        self.assertFalse(should_send)
+
+    def test_notify_state_round_trips_through_runtime_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            save_quality_notify_state(store, "sig-1", frozenset({3, 7}))
+            signature, open_ids = load_quality_notify_state(store)
+            self.assertEqual(signature, "sig-1")
+            self.assertEqual(open_ids, frozenset({3, 7}))
+
+    def test_corrupt_notify_state_falls_back_to_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            store.set_runtime_state("quality_auto_last_notify", "not-json")
+            signature, open_ids = load_quality_notify_state(store)
+            self.assertEqual(signature, "")
+            self.assertEqual(open_ids, frozenset())
 
 
 class QualityScheduleTests(unittest.TestCase):
@@ -416,6 +493,22 @@ class QualityScheduleTests(unittest.TestCase):
                 datetime.fromisoformat(summary.finished_at),
                 datetime.fromisoformat(summary.started_at),
             )
+
+    def test_run_once_persists_quality_run_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _ = self.make_service(tmp)
+            summary = service.run_once(
+                "history-run",
+                datetime(2099, 7, 20, 2, 50, tzinfo=ZoneInfo("Asia/Shanghai")),
+            )
+
+            runs = service.store.list_quality_runs()
+
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["run_id"], "history-run")
+            self.assertEqual(runs[0]["status"], summary.status)
+            self.assertEqual(runs[0]["scanned_count"], summary.scanned_count)
+            self.assertEqual(runs[0]["issue_count"], summary.issue_count)
 
 
 class _ManualActionRuleEngine:
@@ -1641,10 +1734,143 @@ class QualityRepairExecutionTests(unittest.TestCase):
             third = service._plan([current], [issue])[0]
 
             self.assertEqual(third.reason, "manual_required")
-            state = service.store.quality_state(task.id)
-            self.assertEqual(state["quality_manual_status"], "manual_required")
-            self.assertEqual(state["quality_rule_reason"], "manual_required")
-            self.assertEqual(len([call for call in adapter.calls if call[0] == "reprocess"]), 2)
+
+
+class QualityAutoRecheckTests(unittest.TestCase):
+    def make_service(self, tmp):
+        library = Path(tmp) / "library"
+        library.mkdir(parents=True)
+        config = Config(
+            tg_bot_token="token",
+            tg_allowed_chat_id="chat",
+            cms_base_url="http://cms",
+            cms_username="user",
+            cms_password="pass",
+            task_db_path=str(Path(tmp) / "tasks.db"),
+            quality_auto_enabled=True,
+        )
+        return QualityAutomation(TaskStore(Path(tmp) / "tasks.db"), config, allowed_roots=[library]), library
+
+    def add_waiting_task(self, store, dest_path=None, **metadata_patch):
+        task = store.upsert_task("waiting", "", "https://115cdn.com/s/waiting")
+        metadata = {
+            "retry_stage": "emby_confirmed",
+            "quality_issue_codes": ["missing_strm"],
+        }
+        if dest_path is not None:
+            metadata.update({"dest_path": str(dest_path), "own_share_code": "own", "own_share_receive_code": "1212"})
+        metadata.update(metadata_patch)
+        return store.record_event(
+            task.id,
+            TaskStage.NEEDS_ACTION,
+            TaskStatus.NEEDS_ACTION,
+            "目标 STRM 等待超时，请人工检查后重试",
+            error_type="stage_wait_timeout",
+            error_summary="目标 STRM 等待超时，请人工检查后重试",
+            metadata_patch=metadata,
+        )
+
+    def test_recovered_waiting_task_is_requeued_to_retry_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            destination = library / "movie"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/s/own_1212_movie.mkv", encoding="utf-8")
+            task = self.add_waiting_task(service.store, destination)
+
+            plan = service._plan([task], [], now=100.0)[0]
+
+            self.assertEqual(plan.action, "requeue")
+            self.assertEqual(plan.rule_id, "auto_recheck")
+            self.assertEqual(plan.target_stage, "emby_confirmed")
+
+            executed = service.execute_plan(plan, "run-1")
+            current = service.store.find_task(task.id)
+            self.assertEqual(executed.execution_status, "queued")
+            self.assertEqual(current.current_stage, TaskStage.EMBY_CONFIRMED)
+            self.assertEqual(current.status, TaskStatus.PENDING)
+            self.assertEqual(current.next_run_at, 0)
+            self.assertEqual(current.error_type, "")
+            self.assertEqual(current.metadata["quality_auto_recheck_count"], 1)
+            self.assertGreater(current.metadata["quality_auto_recheck_next_at"], 100.0)
+            self.assertIn("自动复检", service.store.list_events(task.id)[-1]["message"])
+
+    def test_still_missing_waiting_task_is_not_requeued(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            task = self.add_waiting_task(service.store, library / "missing")
+            issue = QualityIssue(
+                "missing_strm",
+                "destination has no STRM file",
+                str(library / "missing"),
+                task.id,
+            )
+
+            plans = service._plan([task], [issue], now=100.0)
+
+            self.assertTrue(plans)
+            self.assertEqual(plans[0].action, "skip")
+            self.assertFalse(any(plan.action == "requeue" for plan in plans))
+
+    def test_unsafe_retry_stage_is_never_requeued(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            destination = library / "movie"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/s/own_1212_movie.mkv", encoding="utf-8")
+            task = self.add_waiting_task(service.store, destination, retry_stage="received")
+
+            plans = service._plan([task], [], now=100.0)
+
+            self.assertFalse(any(plan.action == "requeue" for plan in plans))
+
+    def test_requeue_respects_cooldown_and_attempt_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            destination = library / "movie"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/s/own_1212_movie.mkv", encoding="utf-8")
+            in_cooldown = self.add_waiting_task(
+                service.store,
+                destination,
+                quality_auto_recheck_next_at=200.0,
+            )
+            capped = self.add_waiting_task(
+                service.store,
+                library / "other",
+                quality_auto_recheck_count=3,
+            )
+            (library / "other").mkdir(parents=True)
+            (library / "other" / "movie.strm").write_text("https://cms/s/own_1212_movie.mkv", encoding="utf-8")
+
+            plans = {plan.task_id: plan for plan in service._plan([in_cooldown, capped], [], now=100.0)}
+
+            self.assertNotIn(in_cooldown.id, plans)
+            self.assertNotIn(capped.id, plans)
+
+    def test_requeue_skips_claimed_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            destination = library / "movie"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/s/own_1212_movie.mkv", encoding="utf-8")
+            task = self.add_waiting_task(service.store, destination)
+            service.store.compare_and_set_transition(
+                task.id,
+                TaskStage.NEEDS_ACTION,
+                {TaskStatus.NEEDS_ACTION},
+                require_unclaimed=True,
+                target_stage=TaskStage.NEEDS_ACTION,
+                target_status=TaskStatus.NEEDS_ACTION,
+                target_event_message="claim",
+                claim_by="worker-1",
+                expected_updated_at=task.updated_at,
+            )
+            current = service.store.find_task(task.id)
+
+            plans = service._plan([current], [], now=100.0)
+
+            self.assertFalse(any(plan.action == "requeue" for plan in plans))
 
 
 

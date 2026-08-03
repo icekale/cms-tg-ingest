@@ -21,3 +21,19 @@ test('lifecycle requests surface backend Chinese reasons for conflicts and missi
     globalThis.fetch = originalFetch
   }
 })
+
+test('quality runs request targets the history endpoint', async () => {
+  const originalFetch = globalThis.fetch
+  let requestedPath = ''
+  globalThis.fetch = async (url) => {
+    requestedPath = url
+    return { ok: true, status: 200, json: async () => ({ items: [], trend: [] }) }
+  }
+
+  try {
+    await api.qualityRuns()
+    assert.equal(requestedPath, '/api/v1/quality/runs')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
