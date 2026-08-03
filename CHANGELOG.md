@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.70 - 2026-08-04
+
+- 修复 CMS 版本检测读不到版本号：实测该 CMS（cloud-media-sync）仅在登录接口 `/api/auth/login` 返回 `version`（如 `v0.4.9.1 - PRO`），原探测的 `/api/version` 等路径全部 404。现在优先从登录响应缓存版本，登录失败时仍回退探测。
+
 ## 0.2.69 - 2026-08-04
 
 - 修复 CMS 版本检测 auto-pull 的 Docker API 请求：镜像引用带 tag（如 `imaliang/cloud-media-sync:latest`）时不再被整体当作 `fromImage` 导致 400；tag 单独解析，并使用非固定 API 版本路径，兼容新旧 Docker 守护进程。
