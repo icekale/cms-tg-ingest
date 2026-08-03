@@ -411,6 +411,7 @@ docker compose exec cms-tg-ingest python /app/doctor.py --quiet
 - 日志页支持级别、关键字和来源（logger）过滤；慢客户端丢行时页面会提示并自动重连。
 - 可选开启 `LOG_RATE_LIMIT_ENABLED=true`，相同级别+来源+消息 1 秒内只保留一条，减少高频重复日志（默认关闭）。
 - AI 分析接口：`GET /api/v1/logs/analyze?lines=500&since_seconds=3600&logger=task_runner&keyword=失败&level=ERROR` 返回结构化日志摘要（错误/告警统计、重复模式、修复提示和最近条目），方便外部 AI 直接分析并调用现有任务/清理 API 修复。
+- CMS 版本检测：设置 `CMS_VERSION_CHECK_ENABLED=true` 后，程序定时探测 CMS 版本，出现新版本时通过 Telegram 通知并标记 `update_ready`；可配置 `CMS_UPDATE_IMAGE` 与 `CMS_AUTO_PULL_ENABLED=true` 在检测到新版本时自动拉取镜像。容器切换仍需在宿主机执行 `./scripts/update-cms-container.sh <CMS_COMPOSE_DIR>`（需要 docker socket 时，容器内只负责拉取，不自动重建）。
 
 如果任务卡住：
 

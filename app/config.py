@@ -115,6 +115,12 @@ class Config:
     hdhive_subscription_auto_enabled: bool = True
     hdhive_subscription_time: str = "01:30"
     hdhive_subscription_timezone: str = "Asia/Shanghai"
+    cms_version_check_enabled: bool = False
+    cms_version_check_interval_seconds: int = 3600
+    cms_update_image: str = ""
+    cms_update_container: str = "cms"
+    cms_update_docker_socket: str = "/var/run/docker.sock"
+    cms_auto_pull_enabled: bool = False
     workflow_mode: str = "direct"
     p115_cookie_path: str = "/config/115-cookies.txt"
     p115_min_request_interval_seconds: float = 2.0
@@ -236,6 +242,18 @@ class Config:
             hdhive_subscription_timezone=parse_quality_auto_timezone(
                 os.environ.get("HDHIVE_SUBSCRIPTION_TIMEZONE", "Asia/Shanghai")
             ),
+            cms_version_check_enabled=parse_bool_env(
+                os.environ.get("CMS_VERSION_CHECK_ENABLED"), False
+            ),
+            cms_version_check_interval_seconds=positive_int_env(
+                "CMS_VERSION_CHECK_INTERVAL_SECONDS", 3600
+            ),
+            cms_update_image=os.environ.get("CMS_UPDATE_IMAGE", ""),
+            cms_update_container=os.environ.get("CMS_UPDATE_CONTAINER", "cms"),
+            cms_update_docker_socket=os.environ.get(
+                "CMS_UPDATE_DOCKER_SOCKET", "/var/run/docker.sock"
+            ),
+            cms_auto_pull_enabled=parse_bool_env(os.environ.get("CMS_AUTO_PULL_ENABLED"), False),
             workflow_mode=workflow_mode,
             p115_cookie_path=os.environ.get("P115_COOKIE_PATH", "/config/115-cookies.txt"),
             p115_min_request_interval_seconds=env_float("P115_MIN_REQUEST_INTERVAL_SECONDS", 2.0),

@@ -4988,6 +4988,72 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(stored["emby_item_id"], "emby-item")
             self.assertEqual(stored["emby_parent"], "电影库")
             self.assertEqual(confirmed.metadata["library"], "电影库")
+
+    def test_emby_confirmed_stage_accepts_existing_item_in_legacy_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            emby = FakeEmby()
+            workflow = self._workflow(tmp, emby=emby)
+            row = self._self_share_row()
+            dest = Path(tmp) / "library" / "movies" / "S-双喜-2025-[tmdb=123456]"
+            legacy = Path(tmp) / "library" / "movies" / "旧目录-双喜"
+            self._write_strm(dest)
+            legacy.mkdir(parents=True)
+            (legacy / "movie.strm").write_text("https://115.com/s/owncode_ownpwd_/movie.mkv", encoding="utf-8")
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(self.config.strm_root / row["own_share_file_name"]),
+                dest_path=str(dest),
+                category_final="华语电影",
+            ) or row
+            row = self.submissions.update_emby(
+                int(row["id"]),
+                "confirmed",
+                item_id="legacy-emby-item",
+                title="双喜",
+                path=str(legacy / "movie.strm"),
+                parent="电影库",
+            ) or row
+            emby.items_by_tmdb["123456"] = {
+                "Id": "legacy-emby-item",
+                "Name": "双喜",
+                "Path": str(legacy / "movie.strm"),
+                "ParentId": "parent-id",
+                "LibraryName": "电影库",
+                "ProviderIds": {"Tmdb": "123456"},
+            }
+            task = self._claim_task("abc", "1234", TaskStage.EMBY_CONFIRMED, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(stored["emby_item_id"], "legacy-emby-item")
+
+    def test_strm_ready_defers_while_share_sync_pending_instead_of_failing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._self_share_row(title="S-双喜-2025-[tmdb=123456]")
+            source = self.config.strm_root / row["own_share_file_name"]
+            self._write_strm(source, content="https://115.com/s/othercode_otherpwd_/movie.mkv")
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                share_sync_status="submitted",
+            ) or row
+            task = self._claim_task(
+                row["share_code"],
+                row["receive_code"],
+                TaskStage.STRM_READY,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIn("等待自有分享 STRM 生成", result.message)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertNotEqual(stored["move_status"], "error")
             self.assertEqual(stored["cleanup_status"], None)
 
 

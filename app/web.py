@@ -45,6 +45,7 @@ from .web_api import (
     api_log_analysis,
     api_quality,
     api_quality_runs,
+    api_cms_version,
     api_tasks,
     quality_items,
     serialize_health,
@@ -1352,6 +1353,7 @@ class WebApp:
         max_retries: int = 3,
         background_jobs: BackgroundJobCoordinator | None = None,
         log_hub: LogHub | None = None,
+        cms_version_checker: Any | None = None,
     ):
         self.store = store
         self.web_token = web_token
@@ -1366,6 +1368,7 @@ class WebApp:
         self._owns_background_jobs = background_jobs is None
         self.background_jobs = background_jobs or BackgroundJobCoordinator()
         self.log_hub = log_hub
+        self.cms_version_checker = cms_version_checker
 
     def _submit_background(self, key: str, callable: Any, *, description: str) -> JobSubmission:
         return self.background_jobs.submit(key, callable, description=description)
@@ -2032,6 +2035,24 @@ class WebApp:
                 return status, {**response_headers, **auth_headers}, response_body
             status, response_headers, response_body = api_response(payload)
             return status, {**response_headers, **auth_headers}, response_body
+        if method == "GET" and path == "/api/v1/cms/version":
+            status, response_headers, response_body = api_response(
+                api_cms_version(self.cms_version_checker)
+            )
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path == "/api/v1/cms/version/check":
+            if self.cms_version_checker is None or not callable(
+                getattr(self.cms_version_checker, "check", None)
+            ):
+                status, response_headers, response_body = api_response(
+                    {"error": "cms_version_check_disabled"},
+                    status=409,
+                )
+                return status, {**response_headers, **auth_headers}, response_body
+            payload = self.cms_version_checker.check()
+            payload["enabled"] = True
+            status, response_headers, response_body = api_response(payload)
+            return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path == "/api/v1/settings/strm-mode":
             try:
                 values = self._api_body(body, headers)
@@ -2128,6 +2149,7 @@ def start_web_server(
     max_retries: int = 3,
     background_jobs: BackgroundJobCoordinator | None = None,
     log_hub: LogHub | None = None,
+    cms_version_checker: Any | None = None,
 ) -> ThreadingHTTPServer:
     app = WebApp(
         store,
@@ -2142,6 +2164,7 @@ def start_web_server(
         max_retries=max_retries,
         background_jobs=background_jobs,
         log_hub=log_hub,
+        cms_version_checker=cms_version_checker,
     )
     sse_capacity = BoundedSemaphore(max(1, int(SSE_MAX_CLIENTS)))
 

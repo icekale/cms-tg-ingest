@@ -387,6 +387,51 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(payload["trend"][0]["run_date"], "day1")
             self.assertEqual(payload["trend"][0]["scanned_count"], 10)
 
+    def test_cms_version_api_reports_and_triggers_check(self):
+        class FakeChecker:
+            def __init__(self):
+                self.calls = 0
+
+            def status(self):
+                return {
+                    "current_version": "1.0.0",
+                    "update_ready": False,
+                    "image": "",
+                    "container": "cms",
+                    "pull_result": "",
+                    "message": "",
+                }
+
+            def check(self):
+                self.calls += 1
+                return {
+                    **self.status(),
+                    "current_version": "1.1.0",
+                    "update_ready": True,
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            checker = FakeChecker()
+            store = TaskStore(Path(tmp) / "tasks.db")
+            app = WebApp(store, cms_version_checker=checker)
+
+            status, _headers, body = app.handle_request("GET", "/api/v1/cms/version", {}, b"")
+            payload = json.loads(body)
+            check_status, _check_headers, check_body = app.handle_request(
+                "POST",
+                "/api/v1/cms/version/check",
+                {},
+                b"",
+            )
+            check_payload = json.loads(check_body)
+
+            self.assertEqual(status, 200)
+            self.assertTrue(payload["enabled"])
+            self.assertEqual(payload["current_version"], "1.0.0")
+            self.assertEqual(check_status, 200)
+            self.assertTrue(check_payload["update_ready"])
+            self.assertEqual(checker.calls, 1)
+
     def test_quality_run_api_deduplicates_duplicate_clicks(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

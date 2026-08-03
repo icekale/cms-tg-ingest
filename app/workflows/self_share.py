@@ -2333,6 +2333,18 @@ class BridgeSelfShareTaskWorkflow:
         metadata["source_path"] = str(source)
         issue = validate_self_share_strm_source(source, row)
         if issue:
+            share_sync_status = str(
+                row.get("share_sync_status") or task.metadata.get("share_sync_status") or ""
+            ).strip().lower()
+            if (
+                share_sync_status in {"submitted", "restore_submitted"}
+                and "直链" not in issue
+            ):
+                return StageResult.defer(
+                    "等待自有分享 STRM 生成",
+                    min(self.self_share_config.auto_organize_retry_seconds or 30, 5),
+                    metadata,
+                )
             if hasattr(self.store, "update_move"):
                 self.store.update_move(
                     int(row["id"]),
@@ -3164,6 +3176,9 @@ class BridgeSelfShareTaskWorkflow:
         expected = str(row.get("dest_path") or (task_metadata or {}).get("dest_path") or "").strip()
         if not expected:
             return find_emby_match(self.emby, recognition, row, recent_limit=30)
+        already_confirmed = str(
+            row.get("emby_status") or (task_metadata or {}).get("emby_status") or ""
+        ).strip().lower() == "confirmed"
         tmdb_id = expected_task_tmdb_id(recognition, row)
         candidates: list[dict] = []
         if tmdb_id and hasattr(self.emby, "find_items_by_tmdb"):
@@ -3191,7 +3206,7 @@ class BridgeSelfShareTaskWorkflow:
                     continue
             elif not match_emby_item([item], recognition, row):
                 continue
-            if self._emby_match_in_moved_dest(item, row, task_metadata):
+            if self._emby_match_in_moved_dest(item, row, task_metadata) or already_confirmed:
                 return item
         return None
 

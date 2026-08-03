@@ -45,6 +45,7 @@ from app.clients.p115 import (
 )
 from app.backup import BackupScheduler, start_backup_loop
 from app.background_jobs import BackgroundJobCoordinator
+from app.cms_updater import CmsVersionChecker, start_cms_version_check_loop
 from app.logging_system import LogHub, configure_logging
 
 from app.config import (
@@ -488,6 +489,7 @@ def maybe_start_web_server(
     *,
     background_jobs: BackgroundJobCoordinator | None = None,
     log_hub: LogHub | None = None,
+    cms_version_checker: Any | None = None,
 ):
     if not config.web_enabled:
         return None
@@ -507,6 +509,8 @@ def maybe_start_web_server(
         kwargs["hdhive_scheduler"] = hdhive_scheduler
     if background_jobs is not None:
         kwargs["background_jobs"] = background_jobs
+    if cms_version_checker is not None:
+        kwargs["cms_version_checker"] = cms_version_checker
     try:
         starter_parameters = inspect.signature(starter).parameters
         supports_self_share_config = "self_share_config" in starter_parameters or any(
@@ -579,6 +583,7 @@ def call_maybe_start_web_server(
     frontend_dist_path: str | None = None,
     background_jobs: BackgroundJobCoordinator | None = None,
     log_hub: LogHub | None = None,
+    cms_version_checker: Any | None = None,
 ):
     try:
         parameters = inspect.signature(maybe_start_web_server).parameters
@@ -606,7 +611,8 @@ def call_maybe_start_web_server(
     supports_max_retries = supports_keyword("max_retries")
     supports_background_jobs = supports_keyword("background_jobs")
     supports_log_hub = supports_keyword("log_hub")
-    if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler or supports_frontend_dist_path or supports_max_retries or supports_background_jobs or supports_log_hub:
+    supports_cms_version_checker = supports_keyword("cms_version_checker")
+    if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler or supports_frontend_dist_path or supports_max_retries or supports_background_jobs or supports_log_hub or supports_cms_version_checker:
         kwargs = {}
         if supports_submission_store:
             kwargs["submission_store"] = submission_store
@@ -622,6 +628,8 @@ def call_maybe_start_web_server(
             kwargs["background_jobs"] = background_jobs
         if supports_log_hub:
             kwargs["log_hub"] = log_hub
+        if supports_cms_version_checker:
+            kwargs["cms_version_checker"] = cms_version_checker
         return maybe_start_web_server(config, task_store, **kwargs)
     return maybe_start_web_server(config, task_store)
 
@@ -4774,6 +4782,24 @@ def run_forever(
             getattr(config, "hdhive_subscription_timezone", "Asia/Shanghai"),
         )
 
+    cms_version_checker = None
+    if getattr(config, "cms_version_check_enabled", False) and cms and task_store:
+        cms_version_checker = CmsVersionChecker(
+            task_store,
+            cms,
+            image=str(getattr(config, "cms_update_image", "") or ""),
+            container=str(getattr(config, "cms_update_container", "cms") or "cms"),
+            docker_socket=str(getattr(config, "cms_update_docker_socket", "/var/run/docker.sock") or ""),
+            auto_pull=bool(getattr(config, "cms_auto_pull_enabled", False)),
+        )
+        start_cms_version_check_loop(
+            cms_version_checker,
+            telegram,
+            config.tg_allowed_chat_id,
+            stop_event,
+            interval_seconds=int(getattr(config, "cms_version_check_interval_seconds", 3600)),
+        )
+
     web_server = call_maybe_start_web_server(
         config,
         task_store,
@@ -4781,6 +4807,7 @@ def run_forever(
         quality_automation=quality_automation,
         hdhive_service=hdhive_subscription_service,
         hdhive_scheduler=hdhive_subscription_scheduler,
+        cms_version_checker=cms_version_checker,
         frontend_dist_path=getattr(config, "frontend_dist_path", "/app/frontend/dist"),
         background_jobs=background_jobs,
         log_hub=log_hub,

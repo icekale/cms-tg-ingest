@@ -219,3 +219,22 @@ class CmsClient:
         except Exception:
             return False
         return True
+
+    def get_version(self) -> str:
+        """Best-effort CMS version detection across common API endpoints."""
+        for path in ("/api/version", "/api/app/version", "/api/system/version"):
+            try:
+                resp = self._authorized(path, method="GET", safe_get_attempts=1)
+            except Exception:
+                continue
+            if not isinstance(resp, dict):
+                continue
+            data = resp.get("data")
+            if isinstance(data, dict):
+                candidate = data.get("version") or data.get("ver") or data.get("current_version")
+            else:
+                candidate = resp.get("version") or resp.get("ver")
+            value = str(candidate or "").strip()
+            if value:
+                return value
+        return ""
