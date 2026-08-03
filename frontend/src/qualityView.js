@@ -19,6 +19,7 @@ const STATUS_LABELS = {
   manual_required: '需要人工',
   snoozed: '已暂缓',
   ignored: '已忽略',
+  archived: '已归档',
 }
 
 function uniqueValues(values) {

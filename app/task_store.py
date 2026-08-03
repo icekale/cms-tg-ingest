@@ -146,6 +146,8 @@ QUALITY_STATE_DEFAULTS: dict[str, Any] = {
     "quality_repair_queued": False,
     "quality_repair_started_at": 0,
     "quality_repair_deadline_at": 0,
+    "quality_archived_at": 0,
+    "quality_archived_reason": "",
     "quality_snoozed_until": 0,
 }
 
@@ -1753,6 +1755,8 @@ class TaskStore:
                     "quality_run_id",
                     "quality_last_run_id",
                     "quality_last_attempt_at",
+                    "quality_archived_at",
+                    "quality_archived_reason",
                 )
                 if rule_id is None
                 else (
@@ -1760,6 +1764,8 @@ class TaskStore:
                 "quality_run_id",
                 "quality_last_run_id",
                 "quality_last_attempt_at",
+                "quality_archived_at",
+                "quality_archived_reason",
                 )
             ),
             rule_id=rule_id,

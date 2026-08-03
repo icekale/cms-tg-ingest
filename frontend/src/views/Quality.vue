@@ -135,7 +135,7 @@ const columns = [
   { title: '任务', key: 'task', minWidth: 210, render: taskCell },
   { title: '规则', key: 'rule_id', minWidth: 170 },
   { title: '风险', key: 'risk_level', width: 90, render: (row) => h(NTag, { size: 'small', type: qualityRiskType(row.risk_level) }, { default: () => row.risk_level || '-' }) },
-  { title: '状态', key: 'manual_status', width: 100, render: (row) => h(NTag, { size: 'small' }, { default: () => qualityStatusLabel(row.manual_status) }) },
+  { title: '状态', key: 'manual_status', width: 100, render: (row) => h(NTag, { size: 'small' }, { default: () => qualityStatusLabel(row.archived ? 'archived' : row.manual_status) }) },
   { title: '尝试', key: 'attempts', width: 70 },
   { title: '问题', key: 'issue_codes', minWidth: 150, render: (row) => (row.issue_codes || []).join(', ') || '-' },
   { title: '证据', key: 'evidence', minWidth: 230, render: (row) => h('div', { class: 'quality-evidence' }, (row.evidence || []).join('\n') || row.detail || '-') },

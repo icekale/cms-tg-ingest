@@ -1070,10 +1070,8 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertIsNotNone(service.store.claim_next_runnable("worker", now=1000))
 
             summary = service.run_once("busy-run")
-            plan = next(plan for plan in summary.plans if plan.task_id == task.id)
 
-            self.assertEqual(plan.action, "skip")
-            self.assertEqual(plan.reason, "task_busy")
+            self.assertFalse(any(plan.task_id == task.id for plan in summary.plans))
 
     def test_safe_task_without_issues_is_still_evaluated_without_a_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1871,6 +1869,292 @@ class QualityAutoRecheckTests(unittest.TestCase):
             plans = service._plan([current], [], now=100.0)
 
             self.assertFalse(any(plan.action == "requeue" for plan in plans))
+
+
+class QualityArchiveTests(unittest.TestCase):
+    def make_service(self, tmp):
+        library = Path(tmp) / "library"
+        library.mkdir(parents=True)
+        config = Config(
+            tg_bot_token="token",
+            tg_allowed_chat_id="chat",
+            cms_base_url="http://cms",
+            cms_username="user",
+            cms_password="pass",
+            task_db_path=str(Path(tmp) / "tasks.db"),
+            quality_auto_enabled=True,
+        )
+        return QualityAutomation(TaskStore(Path(tmp) / "tasks.db"), config, allowed_roots=[library]), library
+
+    def terminal_task(self, store, *, rule_id="unsafe_path", issue_codes=("unsafe_metadata",), age_seconds=8 * 86400):
+        task = store.upsert_task("legacy", "", "https://115cdn.com/s/legacy")
+        task = store.record_event(
+            task.id,
+            TaskStage.NEEDS_ACTION,
+            TaskStatus.NEEDS_ACTION,
+            "legacy terminal",
+            error_type="",
+            error_summary="",
+            metadata_patch={"quality_rule_id": rule_id, "quality_issue_codes": list(issue_codes)},
+        )
+        with store._connection() as conn:
+            conn.execute(
+                "UPDATE tasks SET updated_at = ? WHERE id = ?",
+                (time.time() - age_seconds, task.id),
+            )
+        return store.find_task(task.id)
+
+    def test_old_terminal_unsafe_task_is_archived_and_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _ = self.make_service(tmp)
+            task = self.terminal_task(service.store)
+
+            archived = service._archive_terminal_task(task, time.time(), "run-1")
+
+            self.assertTrue(archived)
+            current = service.store.find_task(task.id)
+            self.assertGreater(float(current.metadata.get("quality_archived_at") or 0), 0)
+            self.assertTrue(service._is_archived(current))
+            self.assertEqual(service._scan_skip_reason(current, time.time()), "archived")
+            plans = service._plan([current], [], now=time.time())
+            self.assertTrue(plans)
+            self.assertEqual(plans[0].reason, "archived")
+
+    def test_resume_clears_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _ = self.make_service(tmp)
+            task = self.terminal_task(service.store)
+            service._archive_terminal_task(task, time.time(), "run-1")
+
+            result = service.manual_action(task.id, "unsafe_path", "resume", "tester", rule_version="1")
+
+            self.assertEqual(result["status"], "resumed")
+            current = service.store.find_task(task.id)
+            self.assertFalse(service._is_archived(current))
+
+    def test_recent_or_non_archive_rule_terminal_task_is_not_archived(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _ = self.make_service(tmp)
+            recent = self.terminal_task(service.store, age_seconds=3600)
+            other_rule = self.terminal_task(service.store, rule_id="missing_strm", issue_codes=("missing_strm",))
+
+            self.assertFalse(service._archive_terminal_task(recent, time.time(), "run-1"))
+            self.assertFalse(service._archive_terminal_task(other_rule, time.time(), "run-1"))
+
+
+class QualityAutoRestoreTests(unittest.TestCase):
+    def make_service(self, tmp):
+        library = Path(tmp) / "library"
+        library.mkdir(parents=True)
+        config = Config(
+            tg_bot_token="token",
+            tg_allowed_chat_id="chat",
+            cms_base_url="http://cms",
+            cms_username="user",
+            cms_password="pass",
+            task_db_path=str(Path(tmp) / "tasks.db"),
+            quality_auto_enabled=True,
+        )
+        return QualityAutomation(TaskStore(Path(tmp) / "tasks.db"), config, allowed_roots=[library]), library
+
+    def completed_missing_task(self, store, dest_path, **extra_metadata):
+        task = store.upsert_task("restore", "", "https://115cdn.com/s/restore?password=1212")
+        metadata = {
+            "dest_path": str(dest_path),
+            "own_share_code": "own",
+            "own_share_receive_code": "1212",
+            "own_share_file_id": "fid-own",
+        }
+        metadata.update(extra_metadata)
+        return store.record_event(
+            task.id,
+            TaskStage.CLEANED,
+            TaskStatus.SUCCEEDED,
+            "done",
+            metadata_patch=metadata,
+        )
+
+    def test_completed_missing_destination_auto_restores_with_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            destination = library / "movie"
+            task = self.completed_missing_task(service.store, destination)
+            issue = QualityIssue("missing_dest", "destination directory is missing", str(destination), task.id)
+
+            plan = service._plan([task], [issue], now=100.0)[0]
+
+            self.assertEqual(plan.action, "restore")
+            self.assertEqual(plan.target_stage, "emby_confirmed")
+
+            executed = service.execute_plan(plan, "run-1")
+            current = service.store.find_task(task.id)
+            self.assertEqual(executed.execution_status, "queued")
+            self.assertEqual(current.current_stage, TaskStage.EMBY_CONFIRMED)
+            self.assertEqual(current.status, TaskStatus.PENDING)
+            self.assertEqual(current.next_run_at, 0)
+            self.assertEqual(current.metadata["retry_stage"], "emby_confirmed")
+            self.assertEqual(current.metadata["retry_from_stage"], "cleaned")
+            self.assertTrue(current.metadata.get("quality_repair_queued"))
+
+    def test_missing_destination_without_share_evidence_is_not_auto_restored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            destination = library / "movie"
+            task = self.completed_missing_task(
+                service.store,
+                destination,
+                own_share_file_id="",
+                own_share_code="",
+            )
+            issue = QualityIssue("missing_dest", "destination directory is missing", str(destination), task.id)
+
+            plan = service._plan([task], [issue], now=100.0)[0]
+
+            self.assertEqual(plan.action, "skip")
+            self.assertEqual(plan.reason, "missing_destination")
+
+    def test_invalid_share_and_risk_control_block_auto_restore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            destination = library / "movie"
+            invalid = self.completed_missing_task(
+                service.store,
+                library / "invalid",
+                share_validation_status="invalid",
+            )
+            risky = self.completed_missing_task(
+                service.store,
+                library / "risky",
+                p115_risk_controlled=True,
+            )
+            issues = [
+                QualityIssue("missing_dest", "missing", str(destination), invalid.id),
+                QualityIssue("missing_dest", "missing", str(destination), risky.id),
+            ]
+
+            plans = {plan.task_id: plan for plan in service._plan([invalid, risky], issues, now=100.0)}
+
+            self.assertEqual(plans[invalid.id].action, "skip")
+            self.assertEqual(plans[risky.id].action, "skip")
+
+    def test_restore_respects_cooldown_and_attempt_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            destination = library / "movie"
+            cooled = self.completed_missing_task(service.store, destination, quality_next_eligible_at=200.0)
+            capped = self.completed_missing_task(service.store, library / "capped", quality_repair_attempts=2)
+            issues = [
+                QualityIssue("missing_dest", "missing", str(destination), cooled.id),
+                QualityIssue("missing_dest", "missing", str(library / "capped"), capped.id),
+            ]
+
+            plans = {plan.task_id: plan for plan in service._plan([cooled, capped], issues, now=100.0)}
+
+            self.assertEqual(plans[cooled.id].action, "skip")
+            self.assertEqual(plans[cooled.id].reason, "cooldown")
+            self.assertEqual(plans[capped.id].action, "skip")
+
+
+class QualityScanPerformanceTests(unittest.TestCase):
+    def make_service(self, tmp):
+        library = Path(tmp) / "library"
+        library.mkdir(parents=True)
+        config = Config(
+            tg_bot_token="token",
+            tg_allowed_chat_id="chat",
+            cms_base_url="http://cms",
+            cms_username="user",
+            cms_password="pass",
+            task_db_path=str(Path(tmp) / "tasks.db"),
+            quality_auto_enabled=True,
+        )
+        return QualityAutomation(TaskStore(Path(tmp) / "tasks.db"), config, allowed_roots=[library]), library
+
+    def healthy_task(self, store, dest, *, share_code="own"):
+        task = store.upsert_task(share_code, "", f"https://115cdn.com/s/{share_code}")
+        return store.record_event(
+            task.id,
+            TaskStage.CLEANED,
+            TaskStatus.SUCCEEDED,
+            "done",
+            metadata_patch={
+                "dest_path": str(dest),
+                "own_share_code": share_code,
+                "own_share_receive_code": "1212",
+                "own_share_file_id": "fid",
+            },
+        )
+
+    def test_scan_skip_reason_keeps_recheck_and_skips_terminal_and_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            recheck_task = service.store.upsert_task("recheck", "", "https://115cdn.com/s/recheck")
+            recheck_task = service.store.record_event(
+                recheck_task.id,
+                TaskStage.NEEDS_ACTION,
+                TaskStatus.NEEDS_ACTION,
+                "wait",
+                error_type="stage_wait_timeout",
+                error_summary="等待超时",
+                metadata_patch={"retry_stage": "emby_confirmed", "quality_issue_codes": ["missing_strm"]},
+            )
+            plain_terminal = service.store.upsert_task("plain", "", "https://115cdn.com/s/plain")
+            plain_terminal = service.store.record_event(
+                plain_terminal.id,
+                TaskStage.NEEDS_ACTION,
+                TaskStatus.NEEDS_ACTION,
+                "wait",
+            )
+            cooled = self.healthy_task(service.store, library / "movie", share_code="cooled")
+            service.store.patch_metadata(cooled.id, {"quality_next_eligible_at": 200.0})
+            cooled = service.store.find_task(cooled.id)
+
+            now = 100.0
+            self.assertIsNone(service._scan_skip_reason(recheck_task, now))
+            self.assertEqual(service._scan_skip_reason(plain_terminal, now), "terminal")
+            self.assertEqual(service._scan_skip_reason(cooled, now), "cooldown")
+
+    def test_directory_cache_reuses_previous_scan_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            destination = library / "movie"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/s/own_1212_movie.mkv", encoding="utf-8")
+            task = self.healthy_task(service.store, destination)
+            calls: list[list] = []
+
+            def fake_scan(*args, **kwargs):
+                calls.append(kwargs.get("tasks") or [])
+                return []
+
+            with patch("app.quality_automation.scan_task_quality", side_effect=fake_scan):
+                service.run_once("cache-run-1")
+                service.run_once("cache-run-2")
+
+            self.assertEqual(len(calls), 2)
+            self.assertEqual([task.id for task in calls[0]], [task.id])
+            self.assertEqual(calls[1], [])
+
+    def test_directory_cache_rescans_after_content_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            destination = library / "movie"
+            destination.mkdir(parents=True)
+            strm_file = destination / "movie.strm"
+            strm_file.write_text("https://cms/s/own_1212_movie.mkv", encoding="utf-8")
+            task = self.healthy_task(service.store, destination)
+            calls: list[list] = []
+
+            def fake_scan(*args, **kwargs):
+                calls.append(kwargs.get("tasks") or [])
+                return []
+
+            with patch("app.quality_automation.scan_task_quality", side_effect=fake_scan):
+                service.run_once("cache-run-1")
+                strm_file.write_text("https://cms/d/direct.mkv", encoding="utf-8")
+                service.run_once("cache-run-2")
+
+            self.assertEqual([task.id for task in calls[1]], [task.id])
 
 
 

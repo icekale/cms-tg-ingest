@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import time
@@ -21,6 +22,7 @@ from .quality_rules import (
     risk_cooldown_is_active,
     rule_config,
 )
+from .strm_mode import effective_task_strm_mode
 from .task_store import (
     TaskStore,
     build_reprocess_metadata,
@@ -28,6 +30,9 @@ from .task_store import (
     reprocess_stage_for,
 )
 from .task_runner import QUALITY_REPAIR_WAIT_SECONDS
+
+
+LOG = logging.getLogger("cms-tg-ingest")
 
 
 @dataclass(frozen=True)
@@ -86,6 +91,7 @@ _NO_NOTIFY_SKIP_REASONS = frozenset(
         "task_changed",
         "claim_lost",
         "unsupported_action",
+        "archived",
     }
 )
 NOTIFY_STATE_KEY = "quality_auto_last_notify"
@@ -171,6 +177,13 @@ class QualityAutomation:
     )
     AUTO_RECHECK_ERROR_TYPES = frozenset({"stage_wait_timeout", "organizing_timeout"})
     AUTO_RECHECK_ISSUE_CODES = frozenset({"missing_dest", "missing_strm", "unexpected_strm"})
+    ARCHIVE_AFTER_SECONDS = 7 * 24 * 60 * 60
+    ARCHIVE_TERMINAL_RULES = frozenset({"unsafe_path", "terminal_invalid_share"})
+    ARCHIVE_ISSUE_CODES = frozenset(
+        {"unsafe_metadata", "unsafe_path", "invalid_share", "invalid_share_cleaned", "source_deleted"}
+    )
+    SCAN_CACHE_PREFIX = "quality_dir_fp:"
+    SCAN_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
     _STATUS_KEY = "quality_auto_status"
     _SUMMARY_KEY = "quality_auto_last_summary"
     _CURRENT_RUN_KEY = "quality_auto_current_run_id"
@@ -452,16 +465,52 @@ class QualityAutomation:
             limit = max(1, int(self.config.quality_auto_max_tasks))
             scan_limit = min(self.MAX_TASKS, max(limit, limit * self.SCAN_TASK_MULTIPLIER))
             tasks = self.store.list_recent_tasks(limit=scan_limit)
+            current_time = local_now.timestamp()
+            for task in tasks:
+                try:
+                    self._archive_terminal_task(task, current_time, run_id)
+                except Exception:
+                    LOG.debug("Quality archive failed task_id=%s", task.id, exc_info=True)
+            scan_tasks = [
+                task for task in tasks if self._scan_skip_reason(task, current_time) is None
+            ]
+            cached_issues: list[QualityIssue] = []
+            fresh_tasks: list[TaskSnapshot] = []
+            for task in scan_tasks:
+                fingerprint = self._directory_fingerprint(str(task.metadata.get("dest_path") or ""))
+                cache = self._load_scan_cache(task) if fingerprint is not None else None
+                if cache is not None and cache.get("fingerprint") == list(fingerprint):
+                    for item in cache.get("issues") or []:
+                        cached_issues.append(
+                            QualityIssue(
+                                str(item.get("code") or ""),
+                                str(item.get("message") or ""),
+                                str(item.get("detail") or ""),
+                                task.id,
+                                task.title,
+                            )
+                        )
+                    continue
+                fresh_tasks.append(task)
             issues = scan_task_quality(
                 self.store,
                 limit=scan_limit,
                 allowed_roots=self.allowed_roots,
-                tasks=tasks,
+                tasks=fresh_tasks,
                 share_identity_resolver=self.share_identity_resolver,
             )
+            issues.extend(cached_issues)
+            for task in fresh_tasks:
+                fingerprint = self._directory_fingerprint(str(task.metadata.get("dest_path") or ""))
+                if fingerprint is not None:
+                    self._store_scan_cache(
+                        task,
+                        fingerprint,
+                        [issue for issue in issues if issue.task_id == task.id],
+                    )
             issues.extend(
                 QualityIssue("invalid_share", "115 已明确确认自有分享失效", task_id=task.id)
-                for task in tasks
+                for task in scan_tasks
                 if str(
                     task.metadata.get("invalid_share_status")
                     or task.metadata.get("share_validation_status")
@@ -469,7 +518,7 @@ class QualityAutomation:
                 ).strip().lower()
                 == "invalid"
             )
-            plans = self._plan(tasks, issues, run_id=run_id, now=local_now.timestamp())
+            plans = self._plan(scan_tasks, issues, run_id=run_id, now=current_time)
             plans, budget = self._apply_budgets(
                 plans,
                 max_tasks=limit,
@@ -499,7 +548,7 @@ class QualityAutomation:
                 queued_count=sum(plan.execution_status == "queued" for plan in plans),
                 skipped_count=sum(plan.action == "skip" or plan.execution_status == "skipped" for plan in plans),
                 failed_count=failed_count,
-                scanned_count=len(tasks),
+                scanned_count=len(scan_tasks),
                 plans=tuple(plans),
                 rule_counts=rule_counts,
                 manual_count=manual_count,
@@ -580,6 +629,7 @@ class QualityAutomation:
             TaskStage.FAILED,
             TaskStage.NEEDS_ACTION,
         }
+        archived = self._is_archived(task)
         safe = self._safe_metadata(task)
         source_evidence = self._has_source_evidence(task)
         risk_controlled = self._risk_controlled(task, current_time)
@@ -602,7 +652,9 @@ class QualityAutomation:
             if str(value).strip().lower() in {"view", "snooze", "ignore", "resume"}
         }
         actions = ["view"]
-        if manual_status in {"snoozed", "ignored", "manual_required"}:
+        if archived:
+            actions.append("resume")
+        elif manual_status in {"snoozed", "ignored", "manual_required"}:
             actions.append("resume")
         elif not queued and not busy and not terminal:
             actions.extend(action for action in ("snooze", "ignore") if action in rule_actions)
@@ -619,6 +671,7 @@ class QualityAutomation:
             "risk_level": match.risk_level,
             "issue_codes": list(match.issue_codes),
             "manual_status": manual_status,
+            "archived": archived,
             "attempts": quality_attempt_count(task),
             "next_eligible_at": next_eligible,
             "available_actions": actions,
@@ -656,7 +709,8 @@ class QualityAutomation:
         if normalized_action in {"execute", "reprocess"} and bool(task.metadata.get("quality_repair_queued")):
             return {"status": "conflict", "task": task, "action": normalized_action, "reason": "already_queued"}
         descriptor = self.quality_descriptor(task)
-        if str(rule_id or "").strip() != str(descriptor["rule_id"]):
+        archived = bool(descriptor.get("archived"))
+        if not archived and str(rule_id or "").strip() != str(descriptor["rule_id"]):
             return {"status": "rejected", "task": task, "action": normalized_action, "reason": "rule_mismatch"}
         stored_version = str(task.metadata.get("quality_rule_version") or "").strip()
         if rule_version is not None and str(rule_version).strip() != QUALITY_RULE_VERSION:
@@ -821,6 +875,8 @@ class QualityAutomation:
 
     def _auto_recheck_plan(self, task: TaskSnapshot, now: float) -> QualityRepairPlan | None:
         """Requeue a waiting task only after its recoverable STRM issue is gone."""
+        if self._is_archived(task):
+            return None
         if task.status != TaskStatus.NEEDS_ACTION or task.current_stage != TaskStage.NEEDS_ACTION:
             return None
         if str(task.claimed_by or "").strip() or str(task.claim_token or "").strip():
@@ -878,6 +934,184 @@ class QualityAutomation:
             target_stage=retry_stage.value,
         )
 
+    @staticmethod
+    def _is_archived(task: TaskSnapshot) -> bool:
+        try:
+            return float(task.metadata.get("quality_archived_at") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _archive_terminal_task(
+        self,
+        task: TaskSnapshot,
+        now: float,
+        run_id: str,
+    ) -> bool:
+        """Archive old terminal tasks that can never be auto-repaired."""
+        if self._is_archived(task):
+            return False
+        terminal = task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {
+            TaskStage.FAILED,
+            TaskStage.NEEDS_ACTION,
+        }
+        if not terminal:
+            return False
+        try:
+            updated_at = float(task.updated_at or task.created_at or 0)
+        except (TypeError, ValueError):
+            updated_at = 0
+        if now - updated_at < self.ARCHIVE_AFTER_SECONDS:
+            return False
+        rule_id = str(task.metadata.get("quality_rule_id") or "").strip()
+        reason = str(task.metadata.get("quality_rule_reason") or rule_id or "").strip()[:200]
+        raw_codes = task.metadata.get("quality_issue_codes") or []
+        if isinstance(raw_codes, str):
+            raw_codes = [part.strip() for part in raw_codes.split(",") if part.strip()]
+        issue_codes = {str(code) for code in raw_codes if str(code).strip()}
+        if rule_id not in self.ARCHIVE_TERMINAL_RULES and not (issue_codes & self.ARCHIVE_ISSUE_CODES):
+            return False
+        updated = self.store.update_quality_state(
+            task.id,
+            task.updated_at,
+            {
+                "quality_archived_at": now,
+                "quality_archived_reason": reason or "legacy_terminal",
+            },
+            "质量巡检已归档历史遗留问题",
+            "quality-auto",
+            rule_id=rule_id or "manual_required",
+            action="archive",
+        )
+        return updated is not None
+
+    def _recheck_candidate(self, task: TaskSnapshot) -> bool:
+        if self._is_archived(task):
+            return False
+        if task.status != TaskStatus.NEEDS_ACTION or task.current_stage != TaskStage.NEEDS_ACTION:
+            return False
+        if str(task.claimed_by or "").strip() or str(task.claim_token or "").strip():
+            return False
+        try:
+            retry_stage = TaskStage(str(task.metadata.get("retry_stage") or ""))
+        except ValueError:
+            return False
+        if retry_stage not in self.AUTO_RECHECK_RECOVERABLE_STAGES:
+            return False
+        error_type = str(task.error_type or "").strip()
+        raw_codes = task.metadata.get("quality_issue_codes") or []
+        if isinstance(raw_codes, str):
+            raw_codes = [part.strip() for part in raw_codes.split(",") if part.strip()]
+        issue_codes = {str(code) for code in raw_codes if str(code).strip()}
+        return (
+            error_type in self.AUTO_RECHECK_ERROR_TYPES
+            or bool(issue_codes & self.AUTO_RECHECK_ISSUE_CODES)
+            or "等待超时" in str(task.error_summary or "")
+        )
+
+    def _scan_skip_reason(self, task: TaskSnapshot, now: float) -> str | None:
+        if self._is_archived(task):
+            return "archived"
+        if str(task.claimed_by or "").strip() or str(task.claim_token or "").strip():
+            return "busy"
+        terminal = task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {
+            TaskStage.FAILED,
+            TaskStage.NEEDS_ACTION,
+        }
+        if terminal:
+            return None if self._recheck_candidate(task) else "terminal"
+        try:
+            next_eligible = float(task.metadata.get("quality_next_eligible_at") or 0)
+        except (TypeError, ValueError):
+            next_eligible = 0
+        if next_eligible > now:
+            return "cooldown"
+        return None
+
+    @staticmethod
+    def _directory_fingerprint(path: str | Path) -> tuple[int, int, float] | None:
+        try:
+            destination = Path(path)
+        except (TypeError, ValueError):
+            return None
+        if not destination.is_dir():
+            return None
+        file_count = 0
+        total_bytes = 0
+        newest_mtime = 0.0
+        try:
+            for child in destination.rglob("*.strm"):
+                if not child.is_file():
+                    continue
+                file_count += 1
+                try:
+                    stat = child.stat()
+                except OSError:
+                    continue
+                total_bytes += int(stat.st_size or 0)
+                newest_mtime = max(newest_mtime, float(stat.st_mtime or 0))
+        except OSError:
+            return None
+        return (file_count, total_bytes, newest_mtime)
+
+    def _scan_cache_key(self, task: TaskSnapshot) -> str:
+        dest_path = str(task.metadata.get("dest_path") or "").strip()
+        try:
+            mode = effective_task_strm_mode(task)
+        except ValueError:
+            mode = "shared"
+        own_code = str(task.metadata.get("own_share_code") or "").strip()
+        receive_code = str(task.metadata.get("own_share_receive_code") or "1212").strip() or "1212"
+        return f"{self.SCAN_CACHE_PREFIX}{dest_path}|{mode}|{own_code}|{receive_code}"
+
+    def _load_scan_cache(self, task: TaskSnapshot) -> dict[str, Any] | None:
+        row = self.store.get_runtime_state(self._scan_cache_key(task))
+        if not row:
+            return None
+        try:
+            payload = json.loads(str(row["value"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        try:
+            cached_at = float(payload.get("cached_at") or 0)
+        except (TypeError, ValueError):
+            cached_at = 0
+        if time.time() - cached_at > self.SCAN_CACHE_TTL_SECONDS:
+            return None
+        return payload
+
+    def _store_scan_cache(
+        self,
+        task: TaskSnapshot,
+        fingerprint: tuple[int, int, float],
+        issues: list[QualityIssue],
+    ) -> None:
+        try:
+            mode = effective_task_strm_mode(task)
+        except ValueError:
+            mode = "shared"
+        own_code = str(task.metadata.get("own_share_code") or "").strip()
+        receive_code = str(task.metadata.get("own_share_receive_code") or "1212").strip() or "1212"
+        self.store.set_runtime_state(
+            self._scan_cache_key(task),
+            json.dumps(
+                {
+                    "fingerprint": list(fingerprint),
+                    "mode": mode,
+                    "own_share_code": own_code,
+                    "receive_code": receive_code,
+                    "issues": [
+                        {"code": issue.code, "message": issue.message, "detail": issue.detail}
+                        for issue in issues
+                    ],
+                    "cached_at": time.time(),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
+
     def _persist_rule_match(
         self,
         task: TaskSnapshot,
@@ -912,6 +1146,8 @@ class QualityAutomation:
         }
         if task.status == TaskStatus.RUNNING or task.claimed_by.strip():
             return QualityRepairPlan(action="skip", reason="task_busy", execution_status="skipped", **base)
+        if self._is_archived(task):
+            return QualityRepairPlan(action="skip", reason="archived", execution_status="skipped", **base)
         if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {
             TaskStage.FAILED,
             TaskStage.NEEDS_ACTION,
@@ -936,6 +1172,20 @@ class QualityAutomation:
             next_eligible = 0
         if next_eligible > now:
             return QualityRepairPlan(action="skip", reason="cooldown", execution_status="skipped", **base)
+        if match.rule_id in {"missing_destination", "missing_strm"}:
+            if self._restore_eligible(task, now):
+                return QualityRepairPlan(
+                    action="restore",
+                    reason=match.rule_id,
+                    target_stage=TaskStage.EMBY_CONFIRMED.value,
+                    **base,
+                )
+            if quality_attempt_count(task) >= int(self.rule_config["max_attempts"]):
+                current = self._mark_manual_required(task)
+                if current.updated_at != task.updated_at:
+                    base["planned_updated_at"] = current.updated_at
+                return QualityRepairPlan(action="skip", reason="manual_required", execution_status="skipped", **base)
+            return QualityRepairPlan(action="skip", reason=match.rule_id, execution_status="skipped", **base)
         if not match.auto_allowed or match.auto_action != "reprocess":
             if match.rule_id == "repeated_failure":
                 current = self._mark_manual_required(task)
@@ -954,6 +1204,26 @@ class QualityAutomation:
         if self._risk_controlled(task, now):
             return QualityRepairPlan(action="skip", reason="risk_control", execution_status="skipped", **base)
         return QualityRepairPlan(action="reprocess", reason=match.rule_id, **base)
+
+    def _restore_eligible(self, task: TaskSnapshot, now: float) -> bool:
+        if task.current_stage not in {TaskStage.MOVED, TaskStage.EMBY_CONFIRMED, TaskStage.CLEANED}:
+            return False
+        if task.status != TaskStatus.SUCCEEDED:
+            return False
+        if bool(task.metadata.get("quality_repair_queued")):
+            return False
+        if not self._safe_metadata(task) or self._risk_controlled(task, now):
+            return False
+        if not self._has_source_evidence(task):
+            return False
+        if not str(task.metadata.get("own_share_file_id") or "").strip():
+            return False
+        invalid = str(
+            task.metadata.get("share_validation_status") or task.metadata.get("invalid_share_status") or ""
+        ).strip().lower()
+        if invalid in {"invalid", "invalid_share_cleaned", "source_deleted"}:
+            return False
+        return quality_attempt_count(task) < int(self.rule_config["max_attempts"])
 
     def _apply_budgets(
         self,
@@ -1037,6 +1307,8 @@ class QualityAutomation:
             return replace(plan, execution_status="skipped", reason="task_changed")
         if plan.action == "requeue":
             return self._execute_auto_recheck(plan, task, run_id)
+        if plan.action == "restore":
+            return self._execute_auto_restore(plan, task, run_id)
         if plan.action != "reprocess":
             return replace(plan, execution_status="skipped", reason="unsupported_action")
         if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {
@@ -1243,6 +1515,59 @@ class QualityAutomation:
                 "quality_rule_id": "auto_recheck",
                 "quality_last_run_id": str(run_id),
             },
+            next_run_at=0,
+            clear_errors=True,
+            clear_claim=True,
+            expected_updated_at=task.updated_at,
+        )
+        if updated is None:
+            return replace(plan, execution_status="skipped", reason="task_changed")
+        return replace(plan, execution_status="queued")
+
+    def _execute_auto_restore(
+        self,
+        plan: QualityRepairPlan,
+        task: TaskSnapshot,
+        run_id: str,
+    ) -> QualityRepairPlan:
+        if task.current_stage not in {TaskStage.MOVED, TaskStage.EMBY_CONFIRMED, TaskStage.CLEANED}:
+            return replace(plan, execution_status="skipped", reason="task_changed")
+        if task.status != TaskStatus.SUCCEEDED:
+            return replace(plan, execution_status="skipped", reason="task_changed")
+        if task.claimed_by.strip() or task.claim_token.strip():
+            return replace(plan, execution_status="skipped", reason="task_busy")
+        if not self._restore_eligible(task, time.time()):
+            return replace(plan, execution_status="skipped", reason="missing_source_evidence")
+        now = time.time()
+        attempts = quality_attempt_count(task)
+        next_eligible_at = now + min(
+            int(self.rule_config["cooldown_seconds"]) * (2**attempts),
+            self.MAX_COOLDOWN_SECONDS,
+        )
+        metadata = {
+            "retry_from_stage": task.current_stage.value,
+            "retry_stage": TaskStage.EMBY_CONFIRMED.value,
+            "quality_repair_action": "restore",
+            "quality_repair_reason": plan.reason,
+            "quality_rule_id": plan.rule_id,
+            "quality_rule_version": QUALITY_RULE_VERSION,
+            "quality_last_run_id": str(run_id),
+            "quality_last_attempt_at": now,
+            "quality_repair_attempts": attempts + 1,
+            "quality_repair_started_at": now,
+            "quality_repair_deadline_at": now + QUALITY_REPAIR_WAIT_SECONDS,
+            "quality_next_eligible_at": next_eligible_at,
+            "quality_repair_queued": True,
+        }
+        updated = self.store.compare_and_set_transition(
+            task.id,
+            task.current_stage,
+            {TaskStatus.SUCCEEDED},
+            require_unclaimed=True,
+            target_stage=TaskStage.EMBY_CONFIRMED,
+            target_status=TaskStatus.PENDING,
+            target_event_message="自动巡检已排队：restore",
+            metadata_patch=metadata,
             next_run_at=0,
             clear_errors=True,
             clear_claim=True,
