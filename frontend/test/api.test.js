@@ -37,3 +37,22 @@ test('quality runs request targets the history endpoint', async () => {
     globalThis.fetch = originalFetch
   }
 })
+
+test('task purge request sends ids and dry_run flag', async () => {
+  const originalFetch = globalThis.fetch
+  let requestedPath = ''
+  let requestedBody = ''
+  globalThis.fetch = async (url, options) => {
+    requestedPath = url
+    requestedBody = options.body
+    return { ok: true, status: 200, json: async () => ({ deleted: [], rejected: [] }) }
+  }
+
+  try {
+    await api.purgeTasks([7, 8], true)
+    assert.equal(requestedPath, '/api/v1/tasks/purge')
+    assert.deepEqual(JSON.parse(requestedBody), { ids: [7, 8], dry_run: true })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})

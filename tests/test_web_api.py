@@ -30,6 +30,56 @@ from app.web_api import (
 
 
 class WebApiTests(unittest.TestCase):
+    def test_task_purge_api_dry_run_then_deletes_task_and_submission(self):
+        import bridge
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            row = submission_store.upsert_submission(
+                bridge.ShareKey("purge", "1234"),
+                "https://115cdn.com/s/purge?password=1234",
+                "completed",
+                title="任务",
+            )
+            task = store.upsert_task("purge", "1234", "https://115cdn.com/s/purge?password=1234")
+            store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "done",
+                submission_id=int(row["id"]),
+            )
+            app = WebApp(store, submission_store=submission_store)
+
+            dry_status, _dry_headers, dry_body = app.handle_request(
+                "POST",
+                "/api/v1/tasks/purge",
+                {"Content-Type": "application/json"},
+                json.dumps({"ids": [task.id], "dry_run": True}).encode(),
+            )
+            dry = json.loads(dry_body)
+
+            self.assertEqual(dry_status, 200)
+            self.assertTrue(dry["dry_run"])
+            self.assertEqual(dry["deleted"][0]["id"], task.id)
+            self.assertIsNotNone(store.find_task(task.id))
+            self.assertIsNotNone(submission_store.find_by_id(int(row["id"])))
+
+            status, _headers, body = app.handle_request(
+                "POST",
+                "/api/v1/tasks/purge",
+                {"Content-Type": "application/json"},
+                json.dumps({"ids": [task.id]}).encode(),
+            )
+            payload = json.loads(body)
+
+            self.assertEqual(status, 200)
+            self.assertFalse(payload["dry_run"])
+            self.assertEqual(payload["deleted"][0]["id"], task.id)
+            self.assertIsNone(store.find_task(task.id))
+            self.assertIsNone(submission_store.find_by_id(int(row["id"])))
+
     def test_completed_task_exposes_missing_media_directory_drift(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

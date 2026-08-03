@@ -849,6 +849,11 @@ class SubmissionStore:
             row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
         return self._row_to_dict(row)
 
+    def delete_submission(self, row_id: int) -> bool:
+        with self._lock, self._connection() as conn:
+            cursor = conn.execute("DELETE FROM submissions WHERE id = ?", (int(row_id),))
+        return int(cursor.rowcount or 0) == 1
+
     def update_category(self, row_id: int, choice: str | None, status: str) -> dict[str, Any] | None:
         with self._lock, self._connection() as conn:
             conn.execute(

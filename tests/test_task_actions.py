@@ -132,6 +132,62 @@ class TaskActionsTest(unittest.TestCase):
         self.assertFalse(result.applied)
         self.assertEqual(store.find_task(task.id).claimed_by, "new-worker")
 
+    def test_delete_task_record_and_submission_removes_task_and_row(self):
+        from bridge import ShareKey, SubmissionStore
+        from app.task_actions import delete_task_record_and_submission
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
+            row = submission_store.upsert_submission(
+                ShareKey("abc", "1234"),
+                "https://115cdn.com/s/abc?password=1234",
+                "completed",
+                title="任务",
+            )
+            task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            task = task_store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "done",
+                submission_id=int(row["id"]),
+            )
+
+            result = delete_task_record_and_submission(task_store, submission_store, task.id)
+
+            self.assertTrue(result.applied)
+            self.assertIsNone(task_store.find_task(task.id))
+            self.assertIsNone(submission_store.find_by_id(int(row["id"])))
+
+    def test_delete_task_record_and_submission_uses_metadata_submission_id(self):
+        from bridge import ShareKey, SubmissionStore
+        from app.task_actions import delete_task_record_and_submission
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
+            row = submission_store.upsert_submission(
+                ShareKey("meta", "1234"),
+                "https://115cdn.com/s/meta?password=1234",
+                "completed",
+                title="任务",
+            )
+            task = task_store.upsert_task("meta", "1234", "https://115cdn.com/s/meta?password=1234")
+            task = task_store.record_event(
+                task.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "done",
+                metadata_patch={"submission_id": int(row["id"])},
+            )
+
+            result = delete_task_record_and_submission(task_store, submission_store, task.id)
+
+            self.assertTrue(result.applied)
+            self.assertIsNone(task_store.find_task(task.id))
+            self.assertIsNone(submission_store.find_by_id(int(row["id"])))
+
 
 if __name__ == "__main__":
     unittest.main()

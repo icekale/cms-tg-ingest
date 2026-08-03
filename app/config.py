@@ -154,6 +154,7 @@ class Config:
     quality_auto_timezone: str = "Asia/Shanghai"
     quality_auto_max_tasks: int = 50
     quality_auto_115_check_limit: int = 3
+    quality_archive_after_seconds: int = 7 * 24 * 3600
     backup_enabled: bool = True
     backup_time: str = "03:30"
     backup_timezone: str = "Asia/Shanghai"
@@ -275,6 +276,9 @@ class Config:
             ),
             quality_auto_max_tasks=positive_int_env("QUALITY_AUTO_MAX_TASKS", 50),
             quality_auto_115_check_limit=positive_int_env("QUALITY_AUTO_115_CHECK_LIMIT", 3),
+            quality_archive_after_seconds=positive_int_env(
+                "QUALITY_ARCHIVE_AFTER_SECONDS", 7 * 24 * 3600
+            ),
             backup_enabled=parse_bool_env(os.environ.get("BACKUP_ENABLED"), True),
             backup_time=parse_quality_auto_time(os.environ.get("BACKUP_TIME", "03:30")),
             backup_timezone=parse_quality_auto_timezone(os.environ.get("BACKUP_TIMEZONE", "Asia/Shanghai")),

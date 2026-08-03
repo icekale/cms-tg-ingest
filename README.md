@@ -318,6 +318,7 @@ QUALITY_AUTO_TIME=02:50
 QUALITY_AUTO_TIMEZONE=Asia/Shanghai
 QUALITY_AUTO_MAX_TASKS=50
 QUALITY_AUTO_115_CHECK_LIMIT=3
+QUALITY_ARCHIVE_AFTER_SECONDS=604800
 ```
 
 质量巡检只读取本地 TaskStore 和 STRM 文件，检查缺失 STRM、直链 STRM、异常目录和需要恢复的任务。它不扫描整个 115 网盘。风控、未知分享状态和路径不安全时只记录问题，不自动删除文件。

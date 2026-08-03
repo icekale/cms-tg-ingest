@@ -177,7 +177,6 @@ class QualityAutomation:
     )
     AUTO_RECHECK_ERROR_TYPES = frozenset({"stage_wait_timeout", "organizing_timeout"})
     AUTO_RECHECK_ISSUE_CODES = frozenset({"missing_dest", "missing_strm", "unexpected_strm"})
-    ARCHIVE_AFTER_SECONDS = 7 * 24 * 60 * 60
     ARCHIVE_TERMINAL_RULES = frozenset({"unsafe_path", "terminal_invalid_share"})
     ARCHIVE_ISSUE_CODES = frozenset(
         {"unsafe_metadata", "unsafe_path", "invalid_share", "invalid_share_cleaned", "source_deleted"}
@@ -227,6 +226,7 @@ class QualityAutomation:
         self._run_time = self._parse_run_time(config.quality_auto_time)
         self.rule_engine = rule_engine or QualityRuleEngine()
         self.rule_config = self._load_rule_config()
+        self.archive_after_seconds = max(1, int(config.quality_archive_after_seconds))
 
         if allowed_roots is None:
             move_config = move_config or MoveConfig.from_config(config)
@@ -468,6 +468,7 @@ class QualityAutomation:
             current_time = local_now.timestamp()
             for task in tasks:
                 try:
+                    self._ensure_terminal_marker(task, current_time)
                     self._archive_terminal_task(task, current_time, run_id)
                 except Exception:
                     LOG.debug("Quality archive failed task_id=%s", task.id, exc_info=True)
@@ -875,54 +876,9 @@ class QualityAutomation:
 
     def _auto_recheck_plan(self, task: TaskSnapshot, now: float) -> QualityRepairPlan | None:
         """Requeue a waiting task only after its recoverable STRM issue is gone."""
-        if self._is_archived(task):
+        if not self._recheck_candidate(task, now):
             return None
-        if task.status != TaskStatus.NEEDS_ACTION or task.current_stage != TaskStage.NEEDS_ACTION:
-            return None
-        if str(task.claimed_by or "").strip() or str(task.claim_token or "").strip():
-            return None
-        try:
-            if float(task.metadata.get("termination_requested_at") or 0) > 0:
-                return None
-        except (TypeError, ValueError):
-            return None
-        metadata = task.metadata
-        raw_stage = str(metadata.get("retry_stage") or "").strip()
-        try:
-            retry_stage = TaskStage(raw_stage)
-        except ValueError:
-            return None
-        if retry_stage not in self.AUTO_RECHECK_RECOVERABLE_STAGES:
-            return None
-        error_type = str(task.error_type or "").strip()
-        raw_codes = metadata.get("quality_issue_codes") or []
-        if isinstance(raw_codes, str):
-            raw_codes = [part.strip() for part in raw_codes.split(",") if part.strip()]
-        issue_codes = {str(code) for code in raw_codes if str(code).strip()}
-        summary_text = str(task.error_summary or "")
-        recoverable_marker = (
-            error_type in self.AUTO_RECHECK_ERROR_TYPES
-            or bool(issue_codes & self.AUTO_RECHECK_ISSUE_CODES)
-            or "等待超时" in summary_text
-        )
-        if not recoverable_marker:
-            return None
-        if not self._safe_metadata(task):
-            return None
-        if self._risk_controlled(task, now):
-            return None
-        try:
-            attempts = int(metadata.get("quality_auto_recheck_count") or 0)
-        except (TypeError, ValueError):
-            attempts = 0
-        if attempts >= self.MAX_AUTO_RECHECK_ATTEMPTS:
-            return None
-        try:
-            next_at = float(metadata.get("quality_auto_recheck_next_at") or 0)
-        except (TypeError, ValueError):
-            next_at = 0
-        if next_at > now:
-            return None
+        retry_stage = TaskStage(str(task.metadata.get("retry_stage") or ""))
         return QualityRepairPlan(
             task_id=task.id,
             action="requeue",
@@ -957,10 +913,15 @@ class QualityAutomation:
         if not terminal:
             return False
         try:
-            updated_at = float(task.updated_at or task.created_at or 0)
+            terminal_since = float(task.metadata.get("quality_terminal_since") or 0)
         except (TypeError, ValueError):
-            updated_at = 0
-        if now - updated_at < self.ARCHIVE_AFTER_SECONDS:
+            terminal_since = 0
+        if terminal_since <= 0:
+            try:
+                terminal_since = float(task.updated_at or task.created_at or 0)
+            except (TypeError, ValueError):
+                terminal_since = 0
+        if now - terminal_since < self.archive_after_seconds:
             return False
         rule_id = str(task.metadata.get("quality_rule_id") or "").strip()
         reason = str(task.metadata.get("quality_rule_reason") or rule_id or "").strip()[:200]
@@ -984,12 +945,43 @@ class QualityAutomation:
         )
         return updated is not None
 
-    def _recheck_candidate(self, task: TaskSnapshot) -> bool:
+    def _ensure_terminal_marker(self, task: TaskSnapshot, now: float) -> bool:
+        """Record the first observed terminal time so archiving is deterministic."""
+        if self._is_archived(task):
+            return False
+        terminal = task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {
+            TaskStage.FAILED,
+            TaskStage.NEEDS_ACTION,
+        }
+        if not terminal:
+            return False
+        try:
+            existing = float(task.metadata.get("quality_terminal_since") or 0)
+        except (TypeError, ValueError):
+            existing = 0
+        if existing > 0:
+            return False
+        updated = self.store.update_quality_state(
+            task.id,
+            task.updated_at,
+            {"quality_terminal_since": now},
+            "质量巡检记录终态时间",
+            "quality-auto",
+        )
+        return updated is not None
+
+    def _recheck_candidate(self, task: TaskSnapshot, now: float) -> bool:
+        """True when a waiting task is eligible for an automatic recovery recheck."""
         if self._is_archived(task):
             return False
         if task.status != TaskStatus.NEEDS_ACTION or task.current_stage != TaskStage.NEEDS_ACTION:
             return False
         if str(task.claimed_by or "").strip() or str(task.claim_token or "").strip():
+            return False
+        try:
+            if float(task.metadata.get("termination_requested_at") or 0) > 0:
+                return False
+        except (TypeError, ValueError):
             return False
         try:
             retry_stage = TaskStage(str(task.metadata.get("retry_stage") or ""))
@@ -1002,11 +994,28 @@ class QualityAutomation:
         if isinstance(raw_codes, str):
             raw_codes = [part.strip() for part in raw_codes.split(",") if part.strip()]
         issue_codes = {str(code) for code in raw_codes if str(code).strip()}
-        return (
+        recoverable_marker = (
             error_type in self.AUTO_RECHECK_ERROR_TYPES
             or bool(issue_codes & self.AUTO_RECHECK_ISSUE_CODES)
             or "等待超时" in str(task.error_summary or "")
         )
+        if not recoverable_marker:
+            return False
+        if not self._safe_metadata(task):
+            return False
+        if self._risk_controlled(task, now):
+            return False
+        try:
+            attempts = int(task.metadata.get("quality_auto_recheck_count") or 0)
+        except (TypeError, ValueError):
+            attempts = 0
+        if attempts >= self.MAX_AUTO_RECHECK_ATTEMPTS:
+            return False
+        try:
+            next_at = float(task.metadata.get("quality_auto_recheck_next_at") or 0)
+        except (TypeError, ValueError):
+            next_at = 0
+        return next_at <= now
 
     def _scan_skip_reason(self, task: TaskSnapshot, now: float) -> str | None:
         if self._is_archived(task):
@@ -1018,7 +1027,7 @@ class QualityAutomation:
             TaskStage.NEEDS_ACTION,
         }
         if terminal:
-            return None if self._recheck_candidate(task) else "terminal"
+            return None if self._recheck_candidate(task, now) else "terminal"
         try:
             next_eligible = float(task.metadata.get("quality_next_eligible_at") or 0)
         except (TypeError, ValueError):

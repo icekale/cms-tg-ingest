@@ -28,6 +28,7 @@ from .task_diagnostics import (
     is_unscheduled_active_task,
 )
 from .task_actions import TASK_ACTIONS, apply_task_action, available_task_actions, delete_task_record
+from .task_actions import available_lifecycle_actions, delete_task_record_and_submission
 from .config import normalize_task_max_retries
 from .task_engine import decide_retry, stage_display_name
 from .task_health import build_task_health, format_task_health
@@ -1670,6 +1671,48 @@ class WebApp:
         body: bytes,
         auth_headers: dict[str, str],
     ) -> tuple[int, dict[str, str], bytes]:
+        if method == "POST" and path == "/api/v1/tasks/purge":
+            try:
+                values = self._api_body(body, headers)
+            except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError):
+                status, response_headers, response_body = api_response(
+                    {"error": "invalid_request"},
+                    status=400,
+                )
+                return status, {**response_headers, **auth_headers}, response_body
+            raw_ids = values.get("ids") or []
+            if isinstance(raw_ids, str):
+                raw_ids = [raw_ids]
+            ids: list[int] = []
+            for value in raw_ids:
+                try:
+                    candidate = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if candidate > 0:
+                    ids.append(candidate)
+            dry_run = bool(values.get("dry_run"))
+            deleted: list[dict[str, Any]] = []
+            rejected: list[dict[str, Any]] = []
+            for task_id in ids:
+                if dry_run:
+                    task = self.store.find_task(task_id)
+                    if task is None:
+                        rejected.append({"id": task_id, "reason": "任务不存在或已过期"})
+                    elif "delete" not in available_lifecycle_actions(task):
+                        rejected.append({"id": task_id, "reason": "任务尚未结束或正在执行"})
+                    else:
+                        deleted.append({"id": task_id, "reason": "可删除"})
+                    continue
+                result = delete_task_record_and_submission(self.store, self.submission_store, task_id)
+                if result.applied:
+                    deleted.append({"id": task_id, "reason": result.reason})
+                else:
+                    rejected.append({"id": task_id, "reason": result.reason})
+            status, response_headers, response_body = api_response(
+                {"dry_run": dry_run, "deleted": deleted, "rejected": rejected}
+            )
+            return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path.startswith("/api/v1/tasks/"):
             parts = path.split("/")
             if len(parts) == 7 and parts[5] == "actions" and parts[4].isdigit():

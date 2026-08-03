@@ -116,6 +116,31 @@ def delete_task_record(store: TaskStore, task_id: int) -> TaskActionResult:
     return TaskActionResult(True, task, "任务已删除")
 
 
+def delete_task_record_and_submission(
+    task_store: TaskStore,
+    submission_store: Any,
+    task_id: int,
+) -> TaskActionResult:
+    """Delete one terminal task and its linked submission record together."""
+    task = task_store.find_task(task_id)
+    if task is None:
+        return TaskActionResult(False, None, "任务不存在或已过期")
+    submission_id = task.submission_id or task.metadata.get("submission_id")
+    result = delete_task_record(task_store, task_id)
+    if not result.applied:
+        return result
+    submission_removed = True
+    if submission_id not in (None, "") and submission_store is not None:
+        try:
+            submission_removed = bool(submission_store.delete_submission(int(submission_id)))
+        except (AttributeError, TypeError, ValueError):
+            submission_removed = False
+    reason = result.reason
+    if submission_id not in (None, "") and not submission_removed:
+        reason = f"{result.reason}；提交记录未能删除"
+    return TaskActionResult(True, result.task, reason)
+
+
 def apply_task_action(
     store: TaskStore,
     task_id: int,

@@ -100,6 +100,15 @@ class QualityAutomationConfigTests(unittest.TestCase):
         self.assertEqual(config.quality_auto_max_tasks, 12)
         self.assertEqual(config.quality_auto_115_check_limit, 7)
 
+    def test_quality_archive_after_seconds_parses_from_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            env["QUALITY_ARCHIVE_AFTER_SECONDS"] = "86400"
+            with patch.dict(os.environ, env, clear=True):
+                config = Config.from_env()
+
+        self.assertEqual(config.quality_archive_after_seconds, 86400)
+
     def test_quality_automation_rejects_invalid_time(self):
         with tempfile.TemporaryDirectory() as tmp:
             for value in ("2:50", "24:00", "02:60", "02:50:00"):
@@ -1870,9 +1879,25 @@ class QualityAutoRecheckTests(unittest.TestCase):
 
             self.assertFalse(any(plan.action == "requeue" for plan in plans))
 
+    def test_exhausted_or_cooldown_recheck_candidate_is_skipped_from_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            destination = library / "movie"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/s/own_1212_movie.mkv", encoding="utf-8")
+            exhausted = self.add_waiting_task(service.store, destination, quality_auto_recheck_count=3)
+            cooled = self.add_waiting_task(service.store, destination, quality_auto_recheck_next_at=200.0)
+
+            self.assertEqual(service._scan_skip_reason(exhausted, 100.0), "terminal")
+            self.assertEqual(service._scan_skip_reason(cooled, 100.0), "terminal")
+            self.assertFalse(service._recheck_candidate(exhausted, 100.0))
+            self.assertFalse(service._recheck_candidate(cooled, 100.0))
+            self.assertIsNone(service._auto_recheck_plan(exhausted, 100.0))
+            self.assertIsNone(service._auto_recheck_plan(cooled, 100.0))
+
 
 class QualityArchiveTests(unittest.TestCase):
-    def make_service(self, tmp):
+    def make_service(self, tmp, archive_after_seconds=7 * 24 * 60 * 60):
         library = Path(tmp) / "library"
         library.mkdir(parents=True)
         config = Config(
@@ -1883,6 +1908,7 @@ class QualityArchiveTests(unittest.TestCase):
             cms_password="pass",
             task_db_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
+            quality_archive_after_seconds=archive_after_seconds,
         )
         return QualityAutomation(TaskStore(Path(tmp) / "tasks.db"), config, allowed_roots=[library]), library
 
@@ -1940,6 +1966,35 @@ class QualityArchiveTests(unittest.TestCase):
 
             self.assertFalse(service._archive_terminal_task(recent, time.time(), "run-1"))
             self.assertFalse(service._archive_terminal_task(other_rule, time.time(), "run-1"))
+
+    def test_terminal_marker_is_recorded_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _ = self.make_service(tmp)
+            task = self.terminal_task(service.store)
+
+            first = service._ensure_terminal_marker(task, 100.0)
+            current = service.store.find_task(task.id)
+            second = service._ensure_terminal_marker(current, 200.0)
+
+            self.assertTrue(first)
+            self.assertFalse(second)
+            self.assertAlmostEqual(float(current.metadata["quality_terminal_since"]), 100.0)
+
+    def test_archive_uses_terminal_marker_not_recent_updated_at(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _ = self.make_service(tmp, archive_after_seconds=86400)
+            task = self.terminal_task(service.store)
+            service.store.patch_metadata(
+                task.id,
+                {
+                    "quality_terminal_since": time.time() - 2 * 86400,
+                    "quality_rule_id": "unsafe_path",
+                    "quality_issue_codes": ["unsafe_metadata"],
+                },
+            )
+            current = service.store.find_task(task.id)
+
+            self.assertTrue(service._archive_terminal_task(current, time.time(), "run-1"))
 
 
 class QualityAutoRestoreTests(unittest.TestCase):
@@ -2090,6 +2145,9 @@ class QualityScanPerformanceTests(unittest.TestCase):
     def test_scan_skip_reason_keeps_recheck_and_skips_terminal_and_cooldown(self):
         with tempfile.TemporaryDirectory() as tmp:
             service, library = self.make_service(tmp)
+            destination = library / "movie"
+            destination.mkdir(parents=True)
+            (destination / "movie.strm").write_text("https://cms/s/own_1212_movie.mkv", encoding="utf-8")
             recheck_task = service.store.upsert_task("recheck", "", "https://115cdn.com/s/recheck")
             recheck_task = service.store.record_event(
                 recheck_task.id,
@@ -2098,7 +2156,13 @@ class QualityScanPerformanceTests(unittest.TestCase):
                 "wait",
                 error_type="stage_wait_timeout",
                 error_summary="等待超时",
-                metadata_patch={"retry_stage": "emby_confirmed", "quality_issue_codes": ["missing_strm"]},
+                metadata_patch={
+                    "retry_stage": "emby_confirmed",
+                    "quality_issue_codes": ["missing_strm"],
+                    "dest_path": str(destination),
+                    "own_share_code": "own",
+                    "own_share_receive_code": "1212",
+                },
             )
             plain_terminal = service.store.upsert_task("plain", "", "https://115cdn.com/s/plain")
             plain_terminal = service.store.record_event(

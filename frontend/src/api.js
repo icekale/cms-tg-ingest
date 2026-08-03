@@ -27,6 +27,7 @@ export const api = {
   setTaskMode: (id, mode) => request(`tasks/${id}/strm-mode`, { method: 'POST', body: JSON.stringify({ mode }) }),
   taskAction: (id, action) => request(`tasks/${id}/actions/${action}`, { method: 'POST' }),
   deleteTask: (id) => request(`tasks/${id}`, { method: 'DELETE' }),
+  purgeTasks: (ids, dryRun = false) => request('tasks/purge', { method: 'POST', body: JSON.stringify({ ids, dry_run: dryRun }) }),
   clearHistory: () => request('history/clear', { method: 'POST' }),
   qualityFix: () => request('quality/fix', { method: 'POST' }),
   qualityRun: () => request('quality/run', { method: 'POST' }),
