@@ -1427,6 +1427,59 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(updated.metadata["update_requested_run"], 1)
             self.assertEqual(updated.metadata["update_received_run"], 0)
 
+    def test_start_series_update_task_reports_reset_exception_accurately(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            row, task, _recognition = self.make_completed_target(submission_store, task_store)
+
+            with patch.object(
+                submission_store,
+                "reset_self_share_for_update",
+                side_effect=RuntimeError("submission reset crashed"),
+            ):
+                updated, result = bridge.start_series_update_task(
+                    task,
+                    submission_store,
+                    task_store,
+                    source="文本追更",
+                )
+
+            self.assertEqual(result, "failed")
+            self.assertIsNotNone(updated)
+            self.assertEqual(updated.current_stage, TaskStage.FAILED)
+            self.assertEqual(updated.status, TaskStatus.FAILED)
+            self.assertEqual(updated.error_type, "submission_reset_failed")
+            self.assertEqual(updated.error_summary, "追更准备失败：无法重置原任务提交记录")
+            events = task_store.list_events(task.id)
+            self.assertIn("submission reset crashed", events[-1]["error_detail"])
+            self.assertEqual(submission_store.find_by_id(int(row["id"]))["workflow_phase"], "cleanup_completed")
+
+    def test_start_series_update_task_reports_missing_submission_accurately(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            row, task, _recognition = self.make_completed_target(submission_store, task_store)
+
+            with patch.object(
+                submission_store,
+                "reset_self_share_for_update",
+                return_value=None,
+            ):
+                updated, result = bridge.start_series_update_task(
+                    task,
+                    submission_store,
+                    task_store,
+                    source="文本追更",
+                )
+
+            self.assertEqual(result, "failed")
+            self.assertIsNotNone(updated)
+            self.assertEqual(updated.current_stage, TaskStage.FAILED)
+            self.assertEqual(updated.status, TaskStatus.FAILED)
+            self.assertEqual(updated.error_type, "submission_missing")
+            self.assertEqual(updated.error_summary, "追更准备失败：原任务提交记录不存在或已被清理")
+
     def test_start_series_update_task_rejects_claimed_completed_series_without_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")

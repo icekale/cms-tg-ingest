@@ -3599,19 +3599,28 @@ def start_series_update_task(
         )
         if frozen is None:
             return None, "not_eligible"
+    reset_error = ""
     try:
         updated_row = store.reset_self_share_for_update(int(row["id"]))
-    except Exception:
+    except Exception as exc:
         LOG.exception("Failed to reset series update submission")
         updated_row = None
+        reset_error = str(exc) or exc.__class__.__name__
     if not updated_row:
+        if reset_error:
+            failure_message = "追更准备失败：无法重置原任务提交记录"
+            failure_type = "submission_reset_failed"
+        else:
+            failure_message = "追更准备失败：原任务提交记录不存在或已被清理"
+            failure_type = "submission_missing"
         failed = task_store.record_event(
             frozen.id,
             TaskStage.FAILED,
             TaskStatus.FAILED,
-            "追更准备失败：原任务记录不存在",
-            error_type="submission_missing",
-            error_summary="原任务记录不存在",
+            failure_message,
+            error_type=failure_type,
+            error_summary=failure_message,
+            error_detail=reset_error,
             next_run_at=-1,
             expected_stage=TaskStage.RECEIVED,
             expected_status=TaskStatus.PENDING,
