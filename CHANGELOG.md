@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.61 - 2026-08-03
+
+- 自动复检候选收敛：复检次数耗尽或仍在冷却的等待任务不再每天扫描，转为终态归档候选，避免无限巡检循环。
+- 归档时间确定性：任务首次进入终态记录 `quality_terminal_since`，归档年龄不再被 `updated_at` 刷新无限推迟；新增 `QUALITY_ARCHIVE_AFTER_SECONDS` 可配置。
+- 任务联动删除：新增 `POST /api/v1/tasks/purge`（支持 `dry_run`），任务与其提交记录可一次删除，前端提供 `purgeTasks` API。
+- 不可修复任务自动保留策略：`terminal_invalid_share`/`unsafe_path`/孤儿终态任务超过保留期自动删除（默认 30 天，`QUALITY_UNFIXABLE_RETENTION_DAYS` 可配置，0 关闭）。
+- 失效分享自动复验：`share_validation_status=invalid` 的分享任务在冷却后自动清除失效标记并重新验证（最多 3 次），分享恢复可用后不再需要手工处理。
+
 ## 0.2.60 - 2026-08-03
 
 - 修复自动恢复 STRM 入队到 `EMBY_CONFIRMED` 阶段的问题：当任务已确认 Emby 且目录缺失时该阶段会直接完成、不恢复 STRM。现在自动恢复改入 `MOVED` 阶段，并要求 `move_status=moved`，确保真正执行恢复并继续后续阶段。
