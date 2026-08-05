@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import html
+from hmac import compare_digest
 import json
 import mimetypes
 import time
@@ -1402,16 +1403,18 @@ class WebApp:
             query = parse_qs(_parse_request_target(path).query)
         except (TypeError, ValueError):
             return ""
-        if query.get("token", [""])[0] == self.web_token:
+        if compare_digest(query.get("token", [""])[0], self.web_token):
             return "query"
-        if self._header_value(headers, "X-Web-Token") == self.web_token:
+        if compare_digest(self._header_value(headers, "X-Web-Token"), self.web_token):
             return "header"
         cookie = SimpleCookie()
         try:
             cookie.load(self._header_value(headers, "Cookie"))
         except CookieError:
             return ""
-        if cookie.get("cms_web_token") and unquote(cookie["cms_web_token"].value) == self.web_token:
+        if cookie.get("cms_web_token") and compare_digest(
+            unquote(cookie["cms_web_token"].value), self.web_token
+        ):
             return "cookie"
         return ""
 

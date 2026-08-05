@@ -196,10 +196,15 @@ class Config:
         else:
             strm_default_mode = "shared"
         self_share_review_grace_seconds = positive_int_env("SELF_SHARE_REVIEW_GRACE_SECONDS", 86400)
-        self_share_review_checkpoints_seconds = parse_review_checkpoints(
-            os.environ.get("SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS", "600,3600,21600,86400"),
-            self_share_review_grace_seconds,
-        )
+        if "SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS" in os.environ:
+            self_share_review_checkpoints_seconds = parse_review_checkpoints(
+                os.environ["SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS"],
+                self_share_review_grace_seconds,
+            )
+        elif self_share_review_grace_seconds == 86400:
+            self_share_review_checkpoints_seconds = (600, 3600, 21600, 86400)
+        else:
+            self_share_review_checkpoints_seconds = (self_share_review_grace_seconds,)
         return cls(
             tg_bot_token=os.environ["TG_BOT_TOKEN"],
             tg_allowed_chat_id=os.environ["TG_ALLOWED_CHAT_ID"],

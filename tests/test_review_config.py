@@ -34,6 +34,35 @@ class ReviewConfigTests(unittest.TestCase):
         self.assertEqual(config.self_share_review_checkpoints_seconds, (600, 3600, 21600, 86400))
         self.assertEqual(config.self_share_review_list_cache_seconds, 300)
 
+    def test_from_env_derives_checkpoints_from_custom_grace(self):
+        env = {
+            "TG_BOT_TOKEN": "token",
+            "TG_ALLOWED_CHAT_ID": "chat",
+            "CMS_BASE_URL": "http://cms",
+            "CMS_USERNAME": "user",
+            "CMS_PASSWORD": "password",
+            "SELF_SHARE_REVIEW_GRACE_SECONDS": "3600",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            config = Config.from_env()
+
+        self.assertEqual(config.self_share_review_grace_seconds, 3600)
+        self.assertEqual(config.self_share_review_checkpoints_seconds, (3600,))
+
+    def test_from_env_rejects_checkpoints_mismatching_grace(self):
+        env = {
+            "TG_BOT_TOKEN": "token",
+            "TG_ALLOWED_CHAT_ID": "chat",
+            "CMS_BASE_URL": "http://cms",
+            "CMS_USERNAME": "user",
+            "CMS_PASSWORD": "password",
+            "SELF_SHARE_REVIEW_GRACE_SECONDS": "3600",
+            "SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS": "600,3600,21600,86400",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(ValueError):
+                Config.from_env()
+
 
 if __name__ == "__main__":
     unittest.main()

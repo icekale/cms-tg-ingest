@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.72 - 2026-08-05
+
+- 配置健壮性：只设置 `SELF_SHARE_REVIEW_GRACE_SECONDS`（如 3600）而不同步设置检查点时会直接启动失败；现在未显式配置 `SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS` 时自动以宽限期作为唯一检查点，显式配置仍严格校验末尾必须等于宽限期。
+- Web 安全：`X-Web-Token`、URL query token 与 cookie 校验改用恒定时间比较（`hmac.compare_digest`），避免时序侧信道。
+
 ## 0.2.71 - 2026-08-04
 
 - 修复 CMS 版本检测的 `enabled` 回显：`GET /api/v1/cms/version`、`GET/POST /api/v1/settings/cms-version` 与手动检查接口不再强制返回 `enabled=true`，Web 设置里关闭检测会真实生效并正确回显。
