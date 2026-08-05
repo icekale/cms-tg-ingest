@@ -1,6 +1,15 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { NLayoutFooter } from 'naive-ui'
+import {
+  NConfigProvider,
+  NLayout,
+  NLayoutContent,
+  NLayoutFooter,
+  NLayoutHeader,
+  NLayoutSider,
+  NMenu,
+  NMessageProvider,
+} from 'naive-ui'
 import { RouterView, useRoute, useRouter } from 'vue-router'
 import { api } from './api'
 

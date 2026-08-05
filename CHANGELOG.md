@@ -4,6 +4,7 @@
 
 - 配置健壮性：只设置 `SELF_SHARE_REVIEW_GRACE_SECONDS`（如 3600）而不同步设置检查点时会直接启动失败；现在未显式配置 `SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS` 时自动以宽限期作为唯一检查点，显式配置仍严格校验末尾必须等于宽限期。
 - Web 安全：`X-Web-Token`、URL query token 与 cookie 校验改用恒定时间比较（`hmac.compare_digest`），避免时序侧信道。
+- 前端按路由拆包：路由组件改为动态导入，移除 main.js 的 naive-ui 全局注册（各视图显式导入所需组件），主包从约 677KB 降到约 326KB，消除 Vite chunk 体积警告，并修复 Overview 页 `NStatistic` 缺少显式导入的问题。
 
 ## 0.2.71 - 2026-08-04
 

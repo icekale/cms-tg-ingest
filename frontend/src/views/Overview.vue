@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, ref } from 'vue'
-import { NButton, NCard, NPopconfirm, NSpace, NTag, useMessage } from 'naive-ui'
+import { NButton, NCard, NPopconfirm, NSpace, NStatistic, NTag, useMessage } from 'naive-ui'
 import { RouterLink } from 'vue-router'
 import { api } from '../api'
 import { displayTaskTitle } from '../taskView'
