@@ -17,7 +17,7 @@ from .task_diagnostics import explain_task_slowness, format_stage_observability
 from .task_health import build_task_health
 from .quality import redact_quality_detail, scan_task_quality
 from .strm_mode import effective_task_strm_mode
-from .task_actions import available_lifecycle_actions, task_termination_requested
+from .task_actions import available_lifecycle_actions, available_task_actions, task_termination_requested
 from .task_store import TaskStore
 
 
@@ -277,12 +277,18 @@ def serialize_task(
     *,
     now: float | None = None,
     lifecycle_actions_enabled: bool = True,
+    max_retries: int = 3,
     include_completion_drift: bool = False,
 ) -> dict[str, Any]:
     current_time = time.time() if now is None else float(now)
     elapsed, p115_calls = format_stage_observability(task)
     termination_requested = task_termination_requested(task)
-    available_actions = sorted(available_lifecycle_actions(task)) if lifecycle_actions_enabled else []
+    if lifecycle_actions_enabled:
+        available_actions = sorted(
+            available_lifecycle_actions(task) | available_task_actions(task, max_retries=max_retries)
+        )
+    else:
+        available_actions = []
     return _safe_api_value({
         "id": task.id,
         "title": task.title or task.share_code,
@@ -562,11 +568,17 @@ def api_tasks(
     limit: int = 100,
     now: float | None = None,
     lifecycle_actions_enabled: bool = True,
+    max_retries: int = 3,
 ) -> dict[str, Any]:
     tasks = store.list_recent_tasks(limit=max(1, min(int(limit), 500)))
     return {
         "items": [
-            serialize_task(task, now=now, lifecycle_actions_enabled=lifecycle_actions_enabled)
+            serialize_task(
+                task,
+                now=now,
+                lifecycle_actions_enabled=lifecycle_actions_enabled,
+                max_retries=max_retries,
+            )
             for task in tasks
         ],
         "count": len(tasks),
@@ -579,6 +591,7 @@ def api_task_detail(
     *,
     now: float | None = None,
     lifecycle_actions_enabled: bool = True,
+    max_retries: int = 3,
 ) -> dict[str, Any] | None:
     task = store.find_task(task_id)
     if task is None:
@@ -587,6 +600,7 @@ def api_task_detail(
         task,
         now=now,
         lifecycle_actions_enabled=lifecycle_actions_enabled,
+        max_retries=max_retries,
         include_completion_drift=True,
     )
     result["events"] = [serialize_event(event) for event in store.list_events(task.id)]

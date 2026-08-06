@@ -9,13 +9,12 @@ const route = useRoute()
 const message = useMessage()
 const task = ref(null)
 const busyAction = ref('')
-const terminalStatuses = ['succeeded', 'failed', 'needs_action']
-const downstreamStages = ['moved', 'emby_confirmed', 'cleaned']
 const modeOptions = [
   { label: '自有分享 STRM', value: 'shared' },
   { label: '直链 STRM', value: 'direct' },
   { label: '原始分享 STRM', value: 'source_shared' },
 ]
+const actionSet = () => new Set(Array.isArray(task.value?.available_actions) ? task.value.available_actions : [])
 
 async function load() {
   try { task.value = await api.task(route.params.id) } catch (err) { message.error(err.message) }
@@ -28,9 +27,10 @@ async function changeMode(mode) {
   } catch (err) { message.error(err.message); await load() }
 }
 
-const canRetry = computed(() => task.value && task.value.status === 'failed' && !task.value.claimed)
-const canDownstream = computed(() => task.value && downstreamStages.includes(task.value.stage) && terminalStatuses.includes(task.value.status) && !task.value.claimed)
-const canReprocess = computed(() => task.value && terminalStatuses.includes(task.value.status) && !task.value.claimed)
+const canRetry = computed(() => actionSet().has('retry'))
+const canEmby = computed(() => actionSet().has('emby'))
+const canRestore = computed(() => actionSet().has('restore'))
+const canReprocess = computed(() => actionSet().has('reprocess'))
 
 async function runAction(action) {
   if (['restore', 'reprocess'].includes(action) && !window.confirm(action === 'restore' ? '确认恢复该任务的 STRM？' : '确认从头重跑该任务？')) return
@@ -62,8 +62,8 @@ onMounted(load)
     </n-descriptions>
     <n-space style="margin-top: 18px">
       <n-button v-if="canRetry" type="primary" :loading="busyAction === 'retry'" @click="runAction('retry')">重试 retry</n-button>
-      <n-button v-if="canDownstream" :loading="busyAction === 'emby'" @click="runAction('emby')">查 Emby emby</n-button>
-      <n-button v-if="canDownstream" :loading="busyAction === 'restore'" @click="runAction('restore')">恢复 STRM restore</n-button>
+      <n-button v-if="canEmby" :loading="busyAction === 'emby'" @click="runAction('emby')">查 Emby emby</n-button>
+      <n-button v-if="canRestore" :loading="busyAction === 'restore'" @click="runAction('restore')">恢复 STRM restore</n-button>
       <n-button v-if="canReprocess" type="warning" :loading="busyAction === 'reprocess'" @click="runAction('reprocess')">从头重跑 reprocess</n-button>
       <n-button secondary @click="load">刷新</n-button>
     </n-space>

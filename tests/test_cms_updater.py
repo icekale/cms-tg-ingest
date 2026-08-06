@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from app.cms_updater import CmsVersionChecker, docker_pull_image
+from app.cms_updater import CmsVersionChecker, docker_container_started_at, docker_pull_image
 from app.clients.cms import CmsClient
 from app.task_store import TaskStore
 from app.web_api import api_cms_version
@@ -48,6 +48,62 @@ class CmsUpdaterTests(unittest.TestCase):
             self.assertEqual(notified, ["1.1.0"])
             state = json.loads(store.get_runtime_state("cms_version_state")["value"])
             self.assertEqual(state["current_version"], "1.1.0")
+
+    def test_update_ready_clears_after_container_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(tmp)
+            checker = CmsVersionChecker(
+                store,
+                FakeCms("1.0.0"),
+                enabled=True,
+                docker_socket="/tmp/fake.sock",
+                container="cms",
+            )
+            with patch(
+                "app.cms_updater.docker_container_started_at", return_value="2026-08-06T10:00:00Z"
+            ):
+                checker.check()
+                checker.cms.version = "1.1.0"
+                self.assertTrue(checker.check()["update_ready"])
+                # Admin updates the container; it restarts with a new StartedAt
+                # and now reports the previously seen version.
+                with patch(
+                    "app.cms_updater.docker_container_started_at",
+                    return_value="2026-08-06T11:00:00Z",
+                ):
+                    payload = checker.check()
+                self.assertFalse(payload["update_ready"])
+                self.assertEqual(payload["last_container_started_at"], "2026-08-06T11:00:00Z")
+
+    def test_update_ready_survives_maintenance_restart_of_old_container(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(tmp)
+            checker = CmsVersionChecker(
+                store,
+                FakeCms("1.0.0"),
+                enabled=True,
+                docker_socket="/tmp/fake.sock",
+                container="cms",
+            )
+            with patch(
+                "app.cms_updater.docker_container_started_at", return_value="2026-08-06T10:00:00Z"
+            ):
+                checker.check()
+                checker.cms.version = "1.1.0"
+                self.assertTrue(checker.check()["update_ready"])
+                # A restart that does NOT adopt the new version re-arms the flag.
+                checker.cms.version = "1.0.0"
+                with patch(
+                    "app.cms_updater.docker_container_started_at",
+                    return_value="2026-08-06T11:00:00Z",
+                ):
+                    payload = checker.check()
+                self.assertTrue(payload["update_ready"])
+
+    def test_docker_container_started_at_returns_empty_on_error(self):
+        self.assertEqual(docker_container_started_at("/tmp/does-not-exist.sock", "cms"), "")
+        self.assertEqual(docker_container_started_at("", "cms"), "")
+        self.assertEqual(docker_container_started_at("/tmp/fake.sock", ""), "")
 
     def test_auto_pull_is_attempted_when_configured(self):
         with tempfile.TemporaryDirectory() as tmp:

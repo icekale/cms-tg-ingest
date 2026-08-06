@@ -2390,7 +2390,7 @@ class TaskStore:
             if expected_updated_at is not None and float(row["updated_at"] or 0) != float(expected_updated_at):
                 return None
             metadata = self._merge_metadata(row["metadata_json"], {"quality_cleanup_run_id": str(run_id)})
-            conn.execute(
+            claimed_cursor = conn.execute(
                 """
                 UPDATE tasks
                 SET metadata_json = ?, claimed_by = ?, claimed_at = ?, claim_token = ?,
@@ -2410,7 +2410,10 @@ class TaskStore:
                     stale_before,
                 ),
             )
-            if conn.total_changes < 1:
+            # Use the statement's own rowcount instead of the connection-wide
+            # total_changes, which also counts rows touched by triggers or by
+            # the earlier SELECTs on some SQLite build/PRAGMA combinations.
+            if claimed_cursor.rowcount < 1:
                 return None
             claimed = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
         return self._snapshot(claimed) if claimed else None

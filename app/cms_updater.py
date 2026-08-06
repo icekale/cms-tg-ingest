@@ -70,6 +70,40 @@ def docker_pull_image(socket_path: str, image: str, tag: str = "latest") -> str:
         return f"pull error: {type(exc).__name__}: {exc}"
 
 
+def docker_container_started_at(socket_path: str, container: str) -> str:
+    """Return the container's ``State.StartedAt`` via the Docker Engine API.
+
+    Returns "" when the socket is unavailable, the container does not exist,
+    or any other error occurs, so version checks never fail because of it.
+    """
+    socket_path = str(socket_path or "").strip()
+    container = str(container or "").strip()
+    if not socket_path or not container:
+        return ""
+    conn = None
+    try:
+        conn = _UnixHTTPConnection(socket_path, timeout=15)
+        conn.request("GET", f"/containers/{quote(container, safe='')}/json")
+        response = conn.getresponse()
+        body = response.read(65536)
+        status = int(response.status or 0)
+        conn.close()
+        conn = None
+        if status != 200:
+            return ""
+        payload = json.loads(body.decode("utf-8", "replace"))
+        return str(payload.get("State", {}).get("StartedAt") or "")
+    except Exception as exc:  # noqa: BLE001 - introspection must never crash the loop
+        LOG.debug("docker container started_at lookup failed: %s", exc)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as close_exc:  # noqa: BLE001
+                LOG.debug("closing docker socket connection failed: %s", close_exc)
+                pass
+        return ""
+
+
 class CmsVersionChecker:
     def __init__(
         self,
@@ -169,6 +203,7 @@ class CmsVersionChecker:
         payload.setdefault("last_seen_at", 0)
         payload.setdefault("last_changed_at", 0)
         payload.setdefault("update_ready", False)
+        payload.setdefault("last_container_started_at", "")
         payload.setdefault("pull_result", "")
         payload.setdefault("message", "")
         return payload
@@ -184,12 +219,16 @@ class CmsVersionChecker:
         now = time.time()
         if not version:
             return state
+        started_at = docker_container_started_at(settings["docker_socket"], settings["container"])
+        last_started_at = str(state.get("last_container_started_at") or "")
+        container_restarted = bool(started_at and last_started_at and started_at != last_started_at)
         payload = {
             "current_version": version,
             "last_seen_version": version,
             "last_seen_at": now,
             "last_changed_at": now if changed else float(state.get("last_changed_at") or 0),
-            "update_ready": state.get("update_ready") if not changed else True,
+            "update_ready": True if changed else (False if container_restarted else state.get("update_ready")),
+            "last_container_started_at": started_at,
             "image": settings["image"],
             "container": settings["container"],
             "pull_result": state.get("pull_result") or "",

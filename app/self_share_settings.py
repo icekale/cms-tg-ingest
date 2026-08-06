@@ -26,6 +26,18 @@ class SelfShareReceiveCid:
     value: str
     source: str
 
+    @property
+    def masked(self) -> str:
+        if not self.value:
+            return ""
+        if len(self.value) <= 8:
+            return "****"
+        return f"{self.value[:4]}****{self.value[-4:]}"
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.value)
+
 
 @dataclass(frozen=True)
 class SelfShareReviewPolicy:

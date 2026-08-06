@@ -41,6 +41,9 @@ _STAGE_MAX_DEFER_COUNT = {
     TaskStage.STRM_READY: 20,
     TaskStage.CMS_DELETE_SETTLED: 30,
     TaskStage.EMBY_CONFIRMED: 20,
+    # Waiting on the upstream task's own CMS sync; bounded so a stuck upstream
+    # (or lost completion event) cannot head-of-line block the queue forever.
+    TaskStage.SHARE_SYNC_SUBMITTED: 30,
 }
 QUALITY_REPAIR_WAIT_SECONDS = 24 * 60 * 60
 QUALITY_REPAIR_METADATA_KEYS = (

@@ -79,8 +79,8 @@ _CHINESE_SEASON_RANGE_RE = re.compile(
     re.IGNORECASE,
 )
 _UPDATED_THROUGH_RE = re.compile(
-    r"(?:第(?P<chinese_season>[0-9一二三四五六七八九十百]+)季|S(?P<season>\d{1,3}))"
-    r".{0,24}?(?:更新至|更)\s*E?(?P<end>\d{1,3})集?",
+    r"(?:(?:第(?P<chinese_season>[0-9一二三四五六七八九十百]+)季|S(?P<season>\d{1,3}))\s*)?"
+    r".{0,24}?(?:更新至|更)\s*第?E?(?P<end>\d{1,3})集?",
     re.IGNORECASE,
 )
 _RESOLUTION_RE = re.compile(r"(8k|4k|2160p|1440p|1080p|720p|576p|480p)", re.IGNORECASE)
@@ -129,7 +129,7 @@ def _episode_range(season: int, start: int, end: int) -> tuple[EpisodeKey, ...]:
     return tuple(EpisodeKey(season, number) for number in range(start, end + 1))
 
 
-def _parse_episode_keys(value: str) -> tuple[EpisodeKey, ...]:
+def _parse_episode_keys(value: str, default_season: int | None = None) -> tuple[EpisodeKey, ...]:
     text = str(value or "")
     range_match = _EPISODE_RANGE_RE.search(text)
     if range_match:
@@ -148,7 +148,15 @@ def _parse_episode_keys(value: str) -> tuple[EpisodeKey, ...]:
             return _episode_range(season, int(chinese_range.group("start")), int(chinese_range.group("end")))
     updated_through = _UPDATED_THROUGH_RE.search(text)
     if updated_through:
-        season = _season_number(updated_through.group("chinese_season")) if updated_through.group("chinese_season") else int(updated_through.group("season"))
+        if updated_through.group("chinese_season"):
+            season = _season_number(updated_through.group("chinese_season"))
+        elif updated_through.group("season") is not None:
+            season = int(updated_through.group("season"))
+        else:
+            # A season-less "更新至第20集" note is interpreted against the
+            # resource's own season when known; otherwise it is skipped rather
+            # than guessed (a wrong season would corrupt emby matching).
+            season = default_season
         if season is not None:
             return _episode_range(season, 1, int(updated_through.group("end")))
     match = _EPISODE_RE.search(text)
@@ -174,7 +182,13 @@ def episode_keys(resource: HdhiveResource) -> tuple[EpisodeKey, ...]:
         getattr(resource, "title", ""),
     ):
         if value:
-            parsed = _parse_episode_keys(str(value))
+            default_season = None
+            if resource.season_number is not None:
+                try:
+                    default_season = int(resource.season_number)
+                except (TypeError, ValueError):
+                    default_season = None
+            parsed = _parse_episode_keys(str(value), default_season=default_season)
             if parsed:
                 return parsed
     return ()
@@ -551,6 +565,16 @@ class HdhiveSubscriptionService:
                         time.time(),
                     )
                 except Exception as exc:
+                    # The unlock failure is surfaced through the pending
+                    # counter, but swallow it silently and it becomes
+                    # un-debuggable in production logs.
+                    LOG.warning(
+                        "hdhive unlock failed for item %s (sub %s): %s",
+                        selected_item.id,
+                        getattr(subscription, "id", "?"),
+                        exc,
+                        exc_info=True,
+                    )
                     self.store.mark_item_unlock_unknown(selected_item.id)
                     pending += 1
                     continue

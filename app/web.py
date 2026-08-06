@@ -1403,7 +1403,11 @@ class WebApp:
 
     def _self_share_receive_cid_payload(self) -> dict[str, Any]:
         resolved = resolve_self_share_receive_cid(self.store, self.self_share_config)
-        return {"value": resolved.value, "source": resolved.source}
+        return {
+            "configured": resolved.configured,
+            "masked": resolved.masked,
+            "source": resolved.source,
+        }
 
     def _self_share_review_payload(self) -> dict[str, Any]:
         resolved = resolve_self_share_review_policy(self.store, self.self_share_config)
@@ -1810,6 +1814,7 @@ class WebApp:
                         self.store,
                         task_id,
                         lifecycle_actions_enabled=self.task_engine_enabled,
+                        max_retries=self.max_retries,
                     )
                 )
                 return status, {**response_headers, **auth_headers}, response_body
@@ -2012,7 +2017,11 @@ class WebApp:
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/tasks":
             status, response_headers, response_body = api_response(
-                api_tasks(self.store, lifecycle_actions_enabled=self.task_engine_enabled)
+                api_tasks(
+                    self.store,
+                    lifecycle_actions_enabled=self.task_engine_enabled,
+                    max_retries=self.max_retries,
+                )
             )
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path.startswith("/api/v1/tasks/"):
@@ -2024,6 +2033,7 @@ class WebApp:
                 self.store,
                 task_id,
                 lifecycle_actions_enabled=self.task_engine_enabled,
+                max_retries=self.max_retries,
             )
             status, response_headers, response_body = api_response(
                 detail if detail is not None else {"error": "task_not_found"},
@@ -2172,6 +2182,7 @@ class WebApp:
                         self.store,
                         task.id,
                         lifecycle_actions_enabled=self.task_engine_enabled,
+                        max_retries=self.max_retries,
                     )
                 }
             )

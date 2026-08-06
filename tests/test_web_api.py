@@ -1048,11 +1048,20 @@ class WebApiTests(unittest.TestCase):
         initial = json.loads(initial_body)["self_share_receive_cid"]
         updated = json.loads(updated_body)["self_share_receive_cid"]
         self.assertEqual(initial_status, 200)
-        self.assertEqual(initial, {"value": "3298928530653445613", "source": "env"})
+        self.assertEqual(
+            initial,
+            {"configured": True, "masked": "3298****5613", "source": "env"},
+        )
         self.assertEqual(set_status, 200)
-        self.assertEqual(json.loads(set_body)["self_share_receive_cid"]["value"], "3481694068122059860")
+        self.assertEqual(
+            json.loads(set_body)["self_share_receive_cid"],
+            {"configured": True, "masked": "3481****9860", "source": "web"},
+        )
         self.assertEqual(updated_status, 200)
-        self.assertEqual(updated, {"value": "3481694068122059860", "source": "web"})
+        self.assertEqual(updated, {"configured": True, "masked": "3481****9860", "source": "web"})
+        # The raw receive CID must never be echoed back by the API.
+        self.assertNotIn("value", initial)
+        self.assertNotIn("value", updated)
 
     def test_self_share_receive_cid_api_rejects_invalid_value(self):
         with tempfile.TemporaryDirectory() as tmp:

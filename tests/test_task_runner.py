@@ -1239,6 +1239,43 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.claimed_by, "")
             self.assertEqual(updated.metadata["retry_stage"], TaskStage.STRM_READY.value)
 
+    def test_share_sync_submitted_wait_is_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
+            store.record_event(
+                task.id,
+                TaskStage.SHARE_SYNC_SUBMITTED,
+                TaskStatus.RUNNING,
+                "等待上一条 CMS 分享同步完成",
+                tmdb_id="123456",
+                metadata_patch={
+                    "_defer_stage": TaskStage.SHARE_SYNC_SUBMITTED.value,
+                    "_defer_message": "等待上一条 CMS 分享同步完成",
+                    "_defer_count": 29,
+                    "_lock_key": "tmdb:123456",
+                    "_lock_waiting": False,
+                    "tmdb_id": "123456",
+                },
+                next_run_at=1.0,
+                clear_claim=True,
+            )
+            runner = TaskRunner(
+                store,
+                FakeWorkflow([StageResult.defer("等待上一条 CMS 分享同步完成", delay_seconds=15)]),
+                worker_id="worker-1",
+                now=lambda: 1.0,
+            )
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(updated.current_stage, TaskStage.NEEDS_ACTION)
+            self.assertEqual(updated.status, TaskStatus.NEEDS_ACTION)
+            self.assertEqual(updated.error_type, "stage_wait_timeout")
+            self.assertIn("等待上一条 CMS 分享同步完成", updated.error_summary)
+            self.assertEqual(updated.claimed_by, "")
+
     def test_quality_repair_wait_does_not_timeout_before_deadline(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

@@ -158,7 +158,7 @@ onMounted(load)
   </n-card>
   <n-card v-if="settings" title="待整理目录" class="section-card">
     <n-space vertical :size="12">
-      <n-text depth="3">当前：{{ settings.self_share_receive_cid.value || '未配置' }}（来源：{{ settings.self_share_receive_cid.source }}）</n-text>
+      <n-text depth="3">当前：{{ settings.self_share_receive_cid.masked || '未配置' }}（来源：{{ settings.self_share_receive_cid.source }}）</n-text>
       <n-space>
         <n-input v-model:value="receiveCid" placeholder="例如 3481694068122059860" style="width: 260px" />
         <n-button type="primary" :disabled="!receiveCid" @click="saveReceiveCid">保存</n-button>

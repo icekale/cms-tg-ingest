@@ -605,12 +605,23 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
             "第三季 第1-5集 4K": ("S03E01", "S03E05"),
             "S03更新至E04 4K": ("S03E01", "S03E04"),
             "第三季(2026)【更05集】": ("S03E01", "S03E05"),
+            "第三季 更新至第08集": ("S03E01", "S03E08"),
         }
 
         for remark, expected in cases.items():
             with self.subTest(remark=remark):
                 parsed = episode_keys(resource("bundle", episode_key="", remark=remark))
                 self.assertEqual((parsed[0].normalized, parsed[-1].normalized), expected)
+
+    def test_resource_remark_without_season_uses_resource_season(self):
+        parsed = episode_keys(
+            resource("bundle", episode_key="", remark="更新至第20集", season_number=3)
+        )
+        self.assertEqual((parsed[0].normalized, parsed[-1].normalized), ("S03E01", "S03E20"))
+
+        # Without any season information the note is skipped, not guessed.
+        parsed = episode_keys(resource("bundle", episode_key="", remark="更新至第20集"))
+        self.assertEqual(parsed, ())
 
     def test_resource_remark_range_is_not_skipped_when_one_emby_episode_is_missing(self):
         emby = FakeEmby({"S03E01"})
