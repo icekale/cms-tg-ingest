@@ -35,6 +35,7 @@ _RULE_PRIORITIES = {
     "terminal_invalid_share": 100,
     "unsafe_path": 90,
     "risk_controlled": 80,
+    "dead_direct_link": 75,
     "strm_mode_mismatch": 70,
     "missing_destination": 60,
     "missing_strm": 50,
@@ -271,6 +272,19 @@ class QualityRuleEngine:
         mismatch_issues = tuple(
             issue for issue in issue_list if mode_rule_for_issue(mode, issue.code) == "strm_mode_mismatch"
         )
+        dead_direct_issues = tuple(issue for issue in issue_list if issue.code == "dead_direct_link")
+        if dead_direct_issues:
+            # The direct link was probed against the CMS and confirmed dead:
+            # surfaced as a separate high-risk rule so it stands out from a plain
+            # direct_strm and can be dismissed/cleaned explicitly.
+            return _match(
+                "dead_direct_link",
+                "high",
+                "direct link STRM confirmed dead by playback probe",
+                ("dead_direct_link", "direct_strm"),
+                manual_actions=_REPEATED_FAILURE_MANUAL_ACTIONS,
+                evidence=(issue.detail for issue in dead_direct_issues if issue.detail),
+            )
         if mismatch_issues:
             if attempts_exhausted(task, controls):
                 return _match(

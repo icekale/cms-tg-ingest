@@ -218,6 +218,7 @@ class QualityAutomation:
         on_enabled_changed: object | None = None,
         rule_engine: QualityRuleEngine | None = None,
         share_identity_resolver: ShareIdentityResolver | None = None,
+        strm_url_probe: object | None = None,
     ) -> None:
         self.store = store
         self.config = config
@@ -256,6 +257,7 @@ class QualityAutomation:
         self.share_inspector = share_inspector if callable(share_inspector) else None
         self.on_enabled_changed = on_enabled_changed
         self.share_identity_resolver = share_identity_resolver if callable(share_identity_resolver) else None
+        self.strm_url_probe = strm_url_probe if callable(strm_url_probe) else None
 
     def _load_rule_config(self) -> dict[str, bool | int]:
         values: dict[str, object] = dict(self.DEFAULT_RULE_CONFIG)
@@ -533,6 +535,15 @@ class QualityAutomation:
                         fingerprint,
                         [issue for issue in issues if issue.task_id == task.id],
                     )
+            if self.strm_url_probe is not None:
+                scan_ids = {task.id for task in scan_tasks}
+                probed: list[QualityIssue] = []
+                for task in scan_tasks:
+                    task_issues = [issue for issue in issues if issue.task_id == task.id]
+                    if any(issue.code == "direct_strm" for issue in task_issues):
+                        task_issues = self._probe_direct_strm_issues(task, task_issues)
+                    probed.extend(task_issues)
+                issues = probed + [issue for issue in issues if issue.task_id not in scan_ids]
             issues.extend(
                 QualityIssue("invalid_share", "115 已明确确认自有分享失效", task_id=task.id)
                 for task in scan_tasks
@@ -645,6 +656,19 @@ class QualityAutomation:
                 share_identity_resolver=self.share_identity_resolver,
             )
         )
+        # Surface confirmed-dead direct links from stored probe results without
+        # any external call (probe happens during scheduled runs only).
+        dead_map = self._dead_direct_paths(task)
+        if dead_map:
+            upgraded: list[QualityIssue] = []
+            for issue in issue_list:
+                if issue.code == "direct_strm" and str(issue.detail).strip() in dead_map:
+                    upgraded.append(
+                        QualityIssue("dead_direct_link", "直链 STRM 已确认失效", issue.detail, issue.task_id, issue.title)
+                    )
+                else:
+                    upgraded.append(issue)
+            issue_list = tuple(upgraded)
         match = self.rule_engine.evaluate(task, issue_list, config=self.rule_config)
         state = self.store.quality_state(task.id, now=current_time)
         manual_status = str(state.get("quality_manual_status") or "open").strip().lower()
@@ -1008,6 +1032,105 @@ class QualityAutomation:
                 codes.append(code)
         return tuple(codes)
 
+    _DEAD_DIRECT_PROBE_COOLDOWN_SECONDS = 24 * 60 * 60
+
+    def _dead_direct_paths(self, task: TaskSnapshot) -> dict[str, float]:
+        """Confirmed-dead direct-link strm paths (path -> probed_at) from metadata."""
+        raw = task.metadata.get("quality_dead_direct") or {}
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                raw = {}
+        if not isinstance(raw, dict):
+            return {}
+        result: dict[str, float] = {}
+        for path, probed_at in raw.items():
+            try:
+                result[str(path)] = float(probed_at)
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    def _probe_direct_strm_issues(
+        self,
+        task: TaskSnapshot,
+        issues: list[QualityIssue],
+        *,
+        now: float | None = None,
+    ) -> list[QualityIssue]:
+        """Confirm /d/ direct links against the CMS playback probe.
+
+        direct_strm issues whose file URL responds 200/206 stay as-is; files
+        that fail the probe (or raise) are re-tagged as dead_direct_link and
+        remembered in task metadata (24h cooldown) so the web descriptor does
+        not need external calls. Never raises; probe failures degrade to
+        "unknown" (issue unchanged).
+        """
+        if self.strm_url_probe is None:
+            return issues
+        current_time = time.time() if now is None else float(now)
+        direct = [issue for issue in issues if issue.code == "direct_strm" and str(issue.detail).strip()]
+        if not direct:
+            return issues
+        dead_map = self._dead_direct_paths(task)
+        changed = False
+        output: list[QualityIssue] = []
+        probed_paths: dict[str, float] = {}
+        for issue in issues:
+            if issue.code != "direct_strm":
+                output.append(issue)
+                continue
+            path = str(issue.detail).strip()
+            if not path:
+                output.append(issue)
+                continue
+            if path in dead_map and current_time - dead_map[path] <= self._DEAD_DIRECT_PROBE_COOLDOWN_SECONDS:
+                output.append(
+                    QualityIssue("dead_direct_link", "直链 STRM 已确认失效", issue.detail, issue.task_id, issue.title)
+                )
+                continue
+            if path in dead_map and current_time - dead_map[path] > self._DEAD_DIRECT_PROBE_COOLDOWN_SECONDS:
+                # Stale probe result: re-check below.
+                pass
+            try:
+                url = Path(path).read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                output.append(issue)
+                continue
+            if not url.startswith("http"):
+                output.append(issue)
+                continue
+            try:
+                alive = bool(self.strm_url_probe(url))
+            except Exception:
+                LOG.debug("Direct strm probe failed path=%s", path, exc_info=True)
+                alive = True  # unknown -> keep the plain direct_strm marker
+            if alive:
+                probed_paths[path] = current_time
+                output.append(issue)
+            else:
+                changed = True
+                probed_paths[path] = current_time
+                output.append(
+                    QualityIssue("dead_direct_link", "直链 STRM 已确认失效", issue.detail, issue.task_id, issue.title)
+                )
+        if changed or probed_paths:
+            merged = dict(dead_map)
+            merged.update(probed_paths)
+            try:
+                self.store.update_quality_state(
+                    task.id,
+                    task.updated_at,
+                    {"quality_dead_direct": json.dumps(merged, ensure_ascii=False, sort_keys=True)},
+                    "直链 STRM 探测完成",
+                    "quality-auto",
+                    rule_id=str(task.metadata.get("quality_rule_id") or "") or None,
+                )
+            except Exception:
+                LOG.debug("Failed to persist direct strm probe state task_id=%s", task.id, exc_info=True)
+        return output
+
     def _share_alive_state(self, share_code: str, receive_code: str) -> str:
         """Best-effort 115 share liveness probe: valid / invalid / unknown.
 
@@ -1056,6 +1179,7 @@ class QualityAutomation:
         own_code = str(task.metadata.get("own_share_code") or "").strip()
         receive_code = str(task.metadata.get("own_share_receive_code") or "1212").strip() or "1212"
         live_codes = self.store.list_live_share_codes()
+        dead_direct = self._dead_direct_paths(task)
         candidates: list[dict[str, object]] = []
         share_states: dict[str, str] = {}
         checked_codes: list[str] = []
@@ -1069,6 +1193,17 @@ class QualityAutomation:
             except OSError:
                 continue
             if "/d/" in text:
+                # Direct links are cleaned only when the playback probe already
+                # confirmed them dead (recorded during scheduled runs).
+                if str(path) in dead_direct:
+                    candidates.append(
+                        {
+                            "path": str(path),
+                            "share_code": "",
+                            "reason": "dead_direct_link_confirmed",
+                            "share_state": "invalid",
+                        }
+                    )
                 continue
             codes = [code for code in self._extract_strm_share_codes(text) if code and code != own_code]
             if not codes:
@@ -1124,6 +1259,7 @@ class QualityAutomation:
         live_codes = self.store.list_live_share_codes()
         own_code = str(task.metadata.get("own_share_code") or "").strip()
         receive_code = str(task.metadata.get("own_share_receive_code") or "1212").strip() or "1212"
+        dead_direct = self._dead_direct_paths(task)
         removed: list[dict[str, object]] = []
         skipped: list[dict[str, object]] = []
         checked_states: dict[str, str] = {}
@@ -1144,17 +1280,23 @@ class QualityAutomation:
             except OSError:
                 skipped.append({"path": str(path), "reason": "unreadable"})
                 continue
-            if "/d/" in text:
+            is_dead_direct = str(path) in dead_direct and "/d/" in text
+            if "/d/" in text and not is_dead_direct:
                 skipped.append({"path": str(path), "reason": "became_direct"})
                 continue
             codes = [code for code in self._extract_strm_share_codes(text) if code and code != own_code]
-            if not codes or all(code in live_codes for code in codes):
+            if not is_dead_direct and (not codes or all(code in live_codes for code in codes)):
                 skipped.append({"path": str(path), "reason": "share_became_live"})
                 continue
             # A share that is still alive on 115 is protected by default: deleting
             # its strm breaks playback (the #368 lesson). The caller must opt in
-            # with allow_alive to remove such files.
-            if not allow_alive and self.share_inspector is not None:
+            # with allow_alive to remove such files. Confirmed-dead direct links
+            # are never protected (they are already verified dead).
+            if (
+                not allow_alive
+                and not is_dead_direct
+                and self.share_inspector is not None
+            ):
                 alive_code = None
                 for code in codes:
                     if code in live_codes:
@@ -1178,7 +1320,7 @@ class QualityAutomation:
             operation_key = f"quality-strm-cleanup-{digest}-{time.monotonic_ns():x}"
             request: dict[str, object] = {
                 "path": str(path),
-                "share_code": codes[0],
+                "share_code": codes[0] if codes else "",
                 "dry_run": False,
                 # Content snapshot so a deletion can be rolled back exactly, even
                 # if the referenced share is gone later. strm files are plain
@@ -1197,7 +1339,7 @@ class QualityAutomation:
                 continue
             if started is not None:
                 self.store.complete_operation(task.id, operation_key, result={"removed": True})
-            removed.append({"path": str(path), "share_code": codes[0]})
+            removed.append({"path": str(path), "share_code": codes[0] if codes else ""})
         resumed = False
         if removed:
             try:

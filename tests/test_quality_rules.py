@@ -281,6 +281,33 @@ class QualityRuleEngineTests(unittest.TestCase):
         self.assertEqual(unsafe.rule_id, "unsafe_path")
         self.assertEqual(risk.rule_id, "risk_controlled")
 
+    def test_dead_direct_link_gets_high_risk_manual_rule(self):
+        for mode in ("shared", "direct", "source_shared"):
+            with self.subTest(mode=mode):
+                match = self.engine.evaluate(
+                    task(strm_mode=mode),
+                    [QualityIssue("dead_direct_link", "dead", "/library/dead.strm")],
+                    config={"allow_auto_reprocess": True, "max_attempts": 3},
+                )
+
+                self.assertEqual(match.rule_id, "dead_direct_link")
+                self.assertFalse(match.auto_allowed)
+                for action in ("view", "snooze", "ignore", "resume"):
+                    self.assertIn(action, match.manual_actions)
+
+    def test_dead_direct_link_takes_priority_over_plain_direct_strm(self):
+        match = self.engine.evaluate(
+            task(strm_mode="shared"),
+            [
+                QualityIssue("direct_strm", "direct", "/library/a.strm"),
+                QualityIssue("dead_direct_link", "dead", "/library/b.strm"),
+            ],
+            config={"allow_auto_reprocess": True, "max_attempts": 3},
+        )
+
+        self.assertEqual(match.rule_id, "dead_direct_link")
+        self.assertIn("dead_direct_link", match.issue_codes)
+
     def test_retry_limit_and_repeated_failure_are_manual(self):
         match = self.engine.evaluate(
             task(retry_count=3),

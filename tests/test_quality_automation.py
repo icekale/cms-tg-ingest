@@ -1516,6 +1516,85 @@ class QualityStrmCleanupTests(unittest.TestCase):
 
             self.assertEqual(len(result["removed"]), 1)
 
+    def test_probe_direct_strm_upgrades_dead_links(self):
+        probe_results = {"alive": True, "dead": False}
+
+        def fake_probe(url):
+            return probe_results[url.split("/s/")[-1].split("/")[0]] if "/s/" in url else probe_results["dead"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            service.strm_url_probe = lambda url: "dead" not in url
+            dest = library / "episode"
+            self.write_strm(dest, "alive.strm", "http://cms/d/alive.mkv")
+            self.write_strm(dest, "dead.strm", "http://cms/d/dead.mkv")
+            task = self.add_task(service.store, "episode", dest, own_share_code="ownA")
+
+            issues = [
+                QualityIssue("direct_strm", "发现直链 STRM", str(dest / "alive.strm"), task.id, "t"),
+                QualityIssue("direct_strm", "发现直链 STRM", str(dest / "dead.strm"), task.id, "t"),
+            ]
+            upgraded = service._probe_direct_strm_issues(task, issues)
+            codes = {issue.code for issue in upgraded}
+
+            self.assertEqual(codes, {"direct_strm", "dead_direct_link"})
+            dead = [i for i in upgraded if i.code == "dead_direct_link"]
+            self.assertEqual(len(dead), 1)
+            self.assertIn("dead.strm", dead[0].detail)
+            metadata = service.store.find_task(task.id).metadata
+            self.assertIn("quality_dead_direct", metadata)
+
+    def test_probe_direct_strm_skips_when_no_probe_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            dest = library / "episode"
+            task = self.add_task(service.store, "episode", dest, own_share_code="ownA")
+            issues = [QualityIssue("direct_strm", "发现直链 STRM", str(dest / "x.strm"), task.id, "t")]
+
+            upgraded = service._probe_direct_strm_issues(task, issues)
+
+            self.assertEqual([i.code for i in upgraded], ["direct_strm"])
+
+    def test_cleanup_can_remove_confirmed_dead_direct_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            dest = library / "episode"
+            self.write_strm(dest, "deadlink.strm", "http://cms/d/dead.mkv")
+            task = self.add_task(service.store, "episode", dest, own_share_code="ownA")
+            dead_path = str((dest / "deadlink.strm").resolve())
+            # Simulate a previously confirmed dead direct link.
+            service.store.update_quality_state(
+                task.id,
+                service.store.find_task(task.id).updated_at,
+                {"quality_dead_direct": json.dumps({dead_path: time.time()}, ensure_ascii=False)},
+                "probe",
+                "quality-auto",
+            )
+            self.assertIn("quality_dead_direct", service.store.find_task(task.id).metadata)
+
+            candidates = service.stale_strm_candidates(service.store.find_task(task.id))
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0]["reason"], "dead_direct_link_confirmed")
+
+            result = service.cleanup_stale_strm(task.id, [dead_path], actor="tester")
+
+            self.assertEqual(len(result["removed"]), 1)
+            self.assertFalse((dest / "deadlink.strm").exists())
+
+    def test_cleanup_still_blocks_unconfirmed_direct_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            dest = library / "episode"
+            self.write_strm(dest, "direct.strm", "http://cms/d/x.mkv")
+            task = self.add_task(service.store, "episode", dest, own_share_code="ownA")
+
+            candidates = service.stale_strm_candidates(task)
+            result = service.cleanup_stale_strm(task.id, [str(dest / "direct.strm")], actor="tester")
+
+            self.assertEqual(candidates, [])
+            self.assertEqual(result["removed"], [])
+            self.assertEqual(result["skipped"][0]["reason"], "not_candidate")
+
 
 class FakeQualityRepairAdapter:
     def __init__(self):

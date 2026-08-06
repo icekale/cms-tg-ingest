@@ -4669,6 +4669,9 @@ def run_forever(
             ),
             on_enabled_changed=set_invalid_probe_enabled,
             share_identity_resolver=lambda task: quality_share_identity_for_task(store, task),
+            strm_url_probe=(
+                (lambda url: cms.probe_strm_url(url)) if cms is not None else None
+            ),
         )
         set_invalid_probe_enabled(bool(quality_automation.config.quality_auto_enabled))
         quality_thread = start_quality_automation_loop(

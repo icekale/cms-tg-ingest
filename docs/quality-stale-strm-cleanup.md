@@ -14,6 +14,7 @@
 - 每文件一条 `task_operations`（type=`quality_strm_cleanup`）；删除后任务问题清空且 `manual_required` 时自动恢复评估。
 - 直链（`/d/`）文件不参与；执行前按新鲜扫描复检（文件变化/分享复活 → 跳过）。
 - v0.2.77：dry-run 支持 `check_shares`（对候选分享码逐个调用 115 `inspect_share`，缓存+上限 20 码），每条候选标注 `share_state`（valid/invalid/unknown）；执行默认 `allow_alive=false`——分享在 115 仍有效的文件会被保护跳过（防误删断链，线上 #368 教训），需显式 `allow_alive=true` 才删；前端对有效分享的文件默认不勾选并标注“分享仍有效”。
+- v0.2.78：直链 STRM 自动探测——定时巡检时对 `/d/` 文件调用 CMS `probe_strm_url` 确认是否死链，结果写入任务元数据（24h 冷却），确认失效的升级为 `dead_direct_link` 规则（high，可忽略/可清理）；web 页面零外部调用（只读元数据）；清理动作可删除“已确认失效”的直链文件，未确认的直链仍不参与。
 
 ## 目标
 
