@@ -1,6 +1,6 @@
 <script setup>
 import { computed, h, onMounted, ref } from 'vue'
-import { NButton, NCard, NDataTable, NSpace, NTag, useMessage } from 'naive-ui'
+import { NButton, NCard, NCheckbox, NCheckboxGroup, NDataTable, NModal, NSpace, NTag, useMessage } from 'naive-ui'
 import { RouterLink } from 'vue-router'
 import { api } from '../api'
 import { mergeQualityRows, qualityActionLabel, qualityRiskType, qualityStatusLabel } from '../qualityView'
@@ -120,15 +120,21 @@ function taskCell(row) {
 function actionCell(row) {
   const actions = ['execute', 'reprocess', 'snooze', 'ignore', 'resume']
     .filter((action) => (row.available_actions || []).includes(action))
-  return h(NSpace, { size: 6 }, {
-    default: () => actions.map((action) => h(NButton, {
+  const buttons = actions.map((action) => h(NButton, {
+    size: 'small',
+    type: action === 'ignore' ? 'error' : action === 'execute' || action === 'reprocess' ? 'warning' : 'default',
+    secondary: action !== 'ignore',
+    loading: busyAction.value === `${row.task_id}:${action}`,
+    onClick: () => runQualityAction(row, action),
+  }, { default: () => qualityActionLabel(action) }))
+  if (payload.value.cleanup_enabled) {
+    buttons.push(h(NButton, {
       size: 'small',
-      type: action === 'ignore' ? 'error' : action === 'execute' || action === 'reprocess' ? 'warning' : 'default',
-      secondary: action !== 'ignore',
-      loading: busyAction.value === `${row.task_id}:${action}`,
-      onClick: () => runQualityAction(row, action),
-    }, { default: () => qualityActionLabel(action) })),
-  })
+      secondary: true,
+      onClick: () => openCleanup(row),
+    }, { default: () => '失效 STRM' }))
+  }
+  return h(NSpace, { size: 6 }, { default: () => buttons })
 }
 
 const columns = [
@@ -157,6 +163,38 @@ const runColumns = [
   { title: '排队', key: 'queued_count', width: 80 },
   { title: '失败', key: 'failed_count', width: 80 },
 ]
+
+const cleanup = ref({ show: false, taskId: 0, candidates: [], checked: [], running: false, result: null, error: '' })
+
+async function openCleanup(row) {
+  cleanup.value = { show: true, taskId: row.task_id, candidates: [], checked: [], running: false, result: null, error: '' }
+  try {
+    const payload = await api.qualityCleanupDryRun(row.task_id)
+    cleanup.value.candidates = payload.candidates || []
+    cleanup.value.checked = (payload.candidates || []).map((c) => c.path)
+    if (payload.error) cleanup.value.error = payload.error
+  } catch (err) {
+    cleanup.value.error = err.message
+  }
+}
+
+async function runCleanup() {
+  if (!cleanup.value.checked.length) return
+  cleanup.value.running = true
+  cleanup.value.error = ''
+  try {
+    cleanup.value.result = await api.qualityCleanupRun(cleanup.value.taskId, cleanup.value.checked)
+  } catch (err) {
+    cleanup.value.error = err.message
+  } finally {
+    cleanup.value.running = false
+  }
+}
+
+function cleanupFileName(path) {
+  const parts = String(path || '').split('/')
+  return parts[parts.length - 1] || path
+}
 
 onMounted(load)
 </script>
@@ -191,4 +229,37 @@ onMounted(load)
   <n-card title="近 30 天巡检趋势" class="section-card">
     <n-data-table :columns="runColumns" :data="runs.items" :pagination="{ pageSize: 10 }" :scroll-x="700" />
   </n-card>
+
+  <n-modal v-model:show="cleanup.show" preset="card" title="清理失效 STRM" style="width: 640px">
+    <template v-if="cleanup.result">
+      <p>已删除 <b>{{ cleanup.result.removed?.length || 0 }}</b> 个失效 STRM，跳过 <b>{{ cleanup.result.skipped?.length || 0 }}</b> 个。</p>
+      <p v-if="cleanup.result.resumed" class="muted">任务已无质量问题，已自动恢复自动评估。</p>
+      <p v-if="cleanup.result.skipped?.length" class="muted">
+        跳过原因：{{ cleanup.result.skipped.map((s) => `${cleanupFileName(s.path)}: ${s.reason}`).join('；') }}
+      </p>
+      <n-space style="margin-top: 12px"><n-button type="primary" @click="cleanup.show = false; load()">关闭</n-button></n-space>
+    </template>
+    <template v-else-if="cleanup.error">
+      <p class="muted">{{ cleanup.error }}</p>
+      <n-space style="margin-top: 12px"><n-button @click="cleanup.show = false">关闭</n-button></n-space>
+    </template>
+    <template v-else-if="cleanup.candidates.length">
+      <p class="muted">以下 STRM 引用了已无存活任务引用的分享码，删除不会影响其他任务（直链文件不在此列）：</p>
+      <n-checkbox-group v-model:value="cleanup.checked" style="max-height: 320px; overflow: auto">
+        <n-checkbox v-for="c in cleanup.candidates" :key="c.path" :value="c.path" :title="c.path">
+          {{ cleanupFileName(c.path) }}（{{ c.share_code }}）
+        </n-checkbox>
+      </n-checkbox-group>
+      <n-space style="margin-top: 12px">
+        <n-button type="primary" :loading="cleanup.running" :disabled="!cleanup.checked.length" @click="runCleanup">
+          删除所选（{{ cleanup.checked.length }}）
+        </n-button>
+        <n-button @click="cleanup.show = false">取消</n-button>
+      </n-space>
+    </template>
+    <template v-else>
+      <p class="muted">没有可清理的失效 STRM 文件。</p>
+      <n-space style="margin-top: 12px"><n-button @click="cleanup.show = false">关闭</n-button></n-space>
+    </template>
+  </n-modal>
 </template>

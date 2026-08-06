@@ -118,6 +118,21 @@ class QualityAutomationConfigTests(unittest.TestCase):
 
         self.assertEqual(config.quality_unfixable_retention_days, 14)
 
+    def test_quality_strm_cleanup_defaults_to_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):
+            config = Config.from_env()
+
+        self.assertFalse(config.quality_strm_cleanup_enabled)
+
+    def test_quality_strm_cleanup_parses_from_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            env["QUALITY_STRM_CLEANUP_ENABLED"] = "true"
+            with patch.dict(os.environ, env, clear=True):
+                config = Config.from_env()
+
+        self.assertTrue(config.quality_strm_cleanup_enabled)
+
     def test_quality_automation_rejects_invalid_time(self):
         with tempfile.TemporaryDirectory() as tmp:
             for value in ("2:50", "24:00", "02:60", "02:50:00"):
@@ -1212,6 +1227,187 @@ class QualityPlanningTests(unittest.TestCase):
 
             self.assertEqual(summary.scanned_count, 2)
             self.assertEqual(summary.planned_count, 1)
+
+
+class QualityStrmCleanupTests(unittest.TestCase):
+    def make_service(self, tmp):
+        library = Path(tmp) / "library"
+        config = Config(
+            tg_bot_token="token",
+            tg_allowed_chat_id="chat",
+            cms_base_url="http://cms",
+            cms_username="user",
+            cms_password="pass",
+            task_db_path=str(Path(tmp) / "tasks.db"),
+            quality_auto_enabled=True,
+            quality_strm_cleanup_enabled=True,
+        )
+        service = QualityAutomation(TaskStore(Path(tmp) / "tasks.db"), config, allowed_roots=[library])
+        return service, library
+
+    @staticmethod
+    def add_task(store, share_code, dest_path=None, own_share_code="own", **extra_metadata):
+        task = store.upsert_task(share_code, "", f"https://115cdn.com/s/{share_code}")
+        metadata = {}
+        if dest_path is not None:
+            metadata.update({"dest_path": str(dest_path), "own_share_code": own_share_code})
+        metadata.update(extra_metadata)
+        return store.record_event(
+            task.id,
+            TaskStage.MOVED,
+            TaskStatus.SUCCEEDED,
+            "moved",
+            metadata_patch=metadata,
+        )
+
+    @staticmethod
+    def write_strm(directory: Path, name: str, marker: str):
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / name).write_text(marker, encoding="utf-8")
+
+    def test_stale_strm_candidates_list_only_dead_share_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            dest = library / "episode"
+            self.write_strm(dest, "own.strm", "https://cms/s/ownA_1212_own.mkv")
+            self.write_strm(dest, "live.strm", "https://cms/s/liveB_1212_live.mkv")
+            self.write_strm(dest, "dead.strm", "https://cms/s/deadC_1212_dead.mkv")
+            self.write_strm(dest, "direct.strm", "https://cms/d/direct.mkv")
+            # A still-alive task references liveB (valid, not archived).
+            self.add_task(
+                service.store,
+                "live-holder",
+                library / "holder",
+                own_share_code="liveB",
+                share_validation_status="valid",
+            )
+            task = self.add_task(service.store, "episode", dest, own_share_code="ownA")
+
+            candidates = service.stale_strm_candidates(task)
+            paths = {str(item["path"]).split("/")[-1] for item in candidates}
+
+            self.assertEqual(paths, {"dead.strm"})
+            self.assertEqual(candidates[0]["share_code"], "deadC")
+            self.assertEqual(candidates[0]["reason"], "no_live_task_references_share")
+
+    def test_stale_strm_candidates_require_cleanup_enabled_and_dest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            dest = library / "episode"
+            self.write_strm(dest, "dead.strm", "https://cms/s/deadC_1212_dead.mkv")
+            task = self.add_task(service.store, "episode", dest, own_share_code="ownA")
+
+            self.assertEqual(len(service.stale_strm_candidates(task)), 1)
+            service.strm_cleanup_enabled = False
+            self.assertEqual(service.stale_strm_candidates(task), [])
+
+            missing_dest = self.add_task(service.store, "no-dest", None, own_share_code="ownA")
+            self.assertEqual(service.stale_strm_candidates(missing_dest), [])
+
+    def test_cleanup_removes_confirmed_files_and_records_operations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            dest = library / "episode"
+            self.write_strm(dest, "own.strm", "https://cms/s/ownA_1212_own.mkv")
+            self.write_strm(dest, "dead.strm", "https://cms/s/deadC_1212_dead.mkv")
+            task = self.add_task(service.store, "episode", dest, own_share_code="ownA")
+            dead_path = str((dest / "dead.strm").resolve())
+
+            result = service.cleanup_stale_strm(task.id, [dead_path], actor="tester")
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(len(result["removed"]), 1)
+            self.assertEqual(result["removed"][0]["share_code"], "deadC")
+            self.assertFalse((dest / "dead.strm").exists())
+            self.assertTrue((dest / "own.strm").exists())
+            import hashlib as _hashlib
+
+            key = f"quality-strm-cleanup-{_hashlib.sha256(dead_path.encode('utf-8')).hexdigest()[:16]}"
+            operation = service.store.find_operation(task.id, key)
+            self.assertIsNotNone(operation)
+            self.assertEqual(operation.operation_type, "quality_strm_cleanup")
+            self.assertEqual(operation.status, "succeeded")
+            self.assertEqual(operation.request.get("path"), dead_path)
+
+    def test_cleanup_skips_non_candidate_and_changed_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            dest = library / "episode"
+            self.write_strm(dest, "dead.strm", "https://cms/s/deadC_1212_dead.mkv")
+            task = self.add_task(service.store, "episode", dest, own_share_code="ownA")
+
+            result = service.cleanup_stale_strm(
+                task.id,
+                [str(dest / "not-listed.strm"), str(Path(tmp) / "outside" / "x.strm")],
+                actor="tester",
+            )
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["removed"], [])
+            self.assertEqual(len(result["skipped"]), 2)
+            self.assertTrue(all(item["reason"] in {"not_candidate", "invalid_path"} for item in result["skipped"]))
+
+    def test_cleanup_resumes_manual_required_task_when_issues_clear(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            dest = library / "episode"
+            self.write_strm(dest, "own.strm", "https://cms/s/ownA_1212_own.mkv")
+            self.write_strm(dest, "dead.strm", "https://cms/s/deadC_1212_dead.mkv")
+            task = self.add_task(
+                service.store,
+                "episode",
+                dest,
+                own_share_code="ownA",
+                quality_repair_attempts=2,
+            )
+            service.store.update_quality_state(
+                task.id,
+                service.store.find_task(task.id).updated_at,
+                {"quality_manual_status": "manual_required", "quality_rule_id": "repeated_failure"},
+                "attempts exhausted",
+                "quality-auto",
+            )
+
+            result = service.cleanup_stale_strm(task.id, [str(dest / "dead.strm")], actor="tester")
+
+            self.assertTrue(result["resumed"])
+            state = service.store.quality_state(task.id)
+            self.assertEqual(str(state.get("quality_manual_status") or "").strip().lower(), "open")
+
+    def test_cleanup_does_not_resume_when_missing_strm_remains(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            dest = library / "episode"
+            self.write_strm(dest, "dead.strm", "https://cms/s/deadC_1212_dead.mkv")
+            task = self.add_task(
+                service.store,
+                "episode",
+                dest,
+                own_share_code="ownA",
+                quality_repair_attempts=2,
+            )
+            service.store.update_quality_state(
+                task.id,
+                service.store.find_task(task.id).updated_at,
+                {"quality_manual_status": "manual_required", "quality_rule_id": "repeated_failure"},
+                "attempts exhausted",
+                "quality-auto",
+            )
+
+            result = service.cleanup_stale_strm(task.id, [str(dest / "dead.strm")], actor="tester")
+
+            self.assertEqual(len(result["removed"]), 1)
+            self.assertFalse(result["resumed"])
+            state = service.store.quality_state(task.id)
+            self.assertEqual(str(state.get("quality_manual_status") or "").strip().lower(), "manual_required")
+
+    def test_cleanup_disabled_empty_or_unknown_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            self.assertEqual(service.cleanup_stale_strm(1, [], actor="tester")["status"], "empty")
+            self.assertEqual(service.cleanup_stale_strm(1, ["/x.strm"], actor="tester")["status"], "not_found")
+            service.strm_cleanup_enabled = False
+            self.assertEqual(service.cleanup_stale_strm(1, ["/x.strm"], actor="tester")["status"], "disabled")
 
 
 class FakeQualityRepairAdapter:

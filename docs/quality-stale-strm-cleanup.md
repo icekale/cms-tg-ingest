@@ -1,10 +1,18 @@
-# 失效 STRM 清理动作 — Dry-Run 设计（v0.2.74 规划，未实现）
+# 失效 STRM 清理动作 — Dry-Run 设计（v0.2.75 已实现）
 
 > 背景：质量巡检线上实例 24 个问题全部来自任务 #368 — dest 目录 `Q-...-[tmdb=94997]`
 > 内残留 22 个指向旧分享 code 的 STRM（`unexpected_strm`）+ 2 个直链（`direct_strm`）。
 > 根因：转存目录按剧集文件夹复用，每集任务重新分享整个文件夹；`merge_self_share_strm_folder`
 > （`app/media/strm.py`）只覆盖"源中有同名文件"的项，**从不删除目标目录中无对应的旧 STRM**，
 > 旧分享失效后这些文件成为死链。巡检正确识别了死链，但此前没有任何清理路径（只能 SSH 手动删）。
+
+## 实现状态（v0.2.75）
+
+- `QUALITY_STRM_CLEANUP_ENABLED`（默认 false）开关；开启后质量页每行出现“失效 STRM”按钮。
+- `POST /api/v1/quality/cleanup/dry-run`（body `{task_id}`）→ 候选清单；`POST /api/v1/quality/cleanup/run`（body `{task_id, paths}`）→ 逐文件复检后删除。
+- 实现位置：`QualityAutomation.stale_strm_candidates` / `cleanup_stale_strm`（`app/quality_automation.py`），存活判定 `TaskStore.list_live_share_codes`（`app/task_store.py`）。
+- 每文件一条 `task_operations`（type=`quality_strm_cleanup`）；删除后任务问题清空且 `manual_required` 时自动恢复评估。
+- 直链（`/d/`）文件不参与；执行前按新鲜扫描复检（文件变化/分享复活 → 跳过）。
 
 ## 目标
 

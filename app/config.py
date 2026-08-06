@@ -162,6 +162,7 @@ class Config:
     quality_auto_115_check_limit: int = 3
     quality_archive_after_seconds: int = 7 * 24 * 3600
     quality_unfixable_retention_days: int = 30
+    quality_strm_cleanup_enabled: bool = False
     backup_enabled: bool = True
     backup_time: str = "03:30"
     backup_timezone: str = "Asia/Shanghai"
@@ -305,6 +306,9 @@ class Config:
             ),
             quality_unfixable_retention_days=positive_int_env(
                 "QUALITY_UNFIXABLE_RETENTION_DAYS", 30
+            ),
+            quality_strm_cleanup_enabled=parse_bool_env(
+                os.environ.get("QUALITY_STRM_CLEANUP_ENABLED"), False
             ),
             backup_enabled=parse_bool_env(os.environ.get("BACKUP_ENABLED"), True),
             backup_time=parse_quality_auto_time(os.environ.get("BACKUP_TIME", "03:30")),

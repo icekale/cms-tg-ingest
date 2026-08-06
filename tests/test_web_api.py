@@ -691,6 +691,82 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(json.loads(resumed_again_body)["status"], "resumed")
             self.assertEqual(invalid_status, 409)
             self.assertEqual(json.loads(invalid_body)["error"], "quality_action_not_allowed")
+
+    def test_quality_cleanup_endpoints_require_enabled_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            quality, root = self._quality_service(tmp, store)
+            app = WebApp(store, quality_automation=quality)
+
+            dry_status, _, dry_body = app.handle_request(
+                "POST",
+                "/api/v1/quality/cleanup/dry-run",
+                {"Content-Type": "application/json"},
+                b'{"task_id": 1}',
+            )
+            run_status, _, run_body = app.handle_request(
+                "POST",
+                "/api/v1/quality/cleanup/run",
+                {"Content-Type": "application/json"},
+                b'{"task_id": 1, "paths": ["/tmp/x.strm"]}',
+            )
+
+            self.assertEqual(dry_status, 409)
+            self.assertEqual(json.loads(dry_body)["error"], "quality_strm_cleanup_disabled")
+            self.assertEqual(run_status, 409)
+            self.assertEqual(json.loads(run_body)["error"], "quality_strm_cleanup_disabled")
+
+    def test_quality_cleanup_dry_run_and_run_endpoints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            quality, root = self._quality_service(tmp, store)
+            quality.strm_cleanup_enabled = True
+            destination = root / "episode"
+            destination.mkdir(parents=True)
+            (destination / "dead.strm").write_text("https://cms/s/deadC_1212_x.mkv", encoding="utf-8")
+            task = store.upsert_task("cleanup-api", "", "https://115cdn.com/s/cleanup-api")
+            store.record_event(
+                task.id,
+                TaskStage.MOVED,
+                TaskStatus.SUCCEEDED,
+                "moved",
+                metadata_patch={"dest_path": str(destination), "own_share_code": "ownA"},
+            )
+            app = WebApp(store, quality_automation=quality)
+            dead_path = str((destination / "dead.strm").resolve())
+
+            dry_status, _, dry_body = app.handle_request(
+                "POST",
+                "/api/v1/quality/cleanup/dry-run",
+                {"Content-Type": "application/json"},
+                json.dumps({"task_id": task.id}).encode(),
+            )
+            dry_payload = json.loads(dry_body)
+            self.assertEqual(dry_status, 200)
+            self.assertEqual(len(dry_payload["candidates"]), 1)
+            self.assertEqual(dry_payload["candidates"][0]["path"], dead_path)
+            self.assertTrue((destination / "dead.strm").exists())
+
+            run_status, _, run_body = app.handle_request(
+                "POST",
+                "/api/v1/quality/cleanup/run",
+                {"Content-Type": "application/json"},
+                json.dumps({"task_id": task.id, "paths": [dead_path]}).encode(),
+            )
+            run_payload = json.loads(run_body)
+            self.assertEqual(run_status, 200)
+            self.assertEqual(len(run_payload["removed"]), 1)
+            self.assertFalse((destination / "dead.strm").exists())
+
+            bad_status, _, bad_body = app.handle_request(
+                "POST",
+                "/api/v1/quality/cleanup/dry-run",
+                {"Content-Type": "application/json"},
+                b'{"task_id": "not-a-number"}',
+            )
+            self.assertEqual(bad_status, 400)
+            self.assertEqual(json.loads(bad_body)["error"], "invalid_task_id")
+
     def test_health_api_exposes_runner_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

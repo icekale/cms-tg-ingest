@@ -1867,6 +1867,51 @@ class WebApp:
             status, result = _run_quality_action(self.quality_automation, values, route_action)
             response_status, response_headers, response_body = api_response(result, status=status)
             return response_status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path in {
+            "/api/v1/quality/cleanup/dry-run",
+            "/api/v1/quality/cleanup/run",
+        }:
+            if self.quality_automation is None or not self.quality_automation.strm_cleanup_enabled:
+                status, response_headers, response_body = api_response(
+                    {"error": "quality_strm_cleanup_disabled"}, status=409
+                )
+                return status, {**response_headers, **auth_headers}, response_body
+            try:
+                values = self._api_body(body, headers)
+            except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError):
+                status, response_headers, response_body = api_response(
+                    {"error": "invalid_quality_cleanup_request"}, status=400
+                )
+                return status, {**response_headers, **auth_headers}, response_body
+            task_id = _quality_task_id(values.get("task_id"))
+            if task_id is None:
+                status, response_headers, response_body = api_response(
+                    {"error": "invalid_task_id"}, status=400
+                )
+                return status, {**response_headers, **auth_headers}, response_body
+            if path == "/api/v1/quality/cleanup/dry-run":
+                task = self.store.find_task(task_id)
+                if task is None:
+                    status, response_headers, response_body = api_response(
+                        {"error": "task_not_found"}, status=404
+                    )
+                    return status, {**response_headers, **auth_headers}, response_body
+                candidates = self.quality_automation.stale_strm_candidates(task)
+                status, response_headers, response_body = api_response(
+                    {"enabled": True, "task_id": task_id, "candidates": candidates}
+                )
+                return status, {**response_headers, **auth_headers}, response_body
+            raw_paths = values.get("paths") or []
+            if not isinstance(raw_paths, list):
+                status, response_headers, response_body = api_response(
+                    {"error": "invalid_paths"}, status=400
+                )
+                return status, {**response_headers, **auth_headers}, response_body
+            result = self.quality_automation.cleanup_stale_strm(
+                task_id, [str(item) for item in raw_paths], actor="web"
+            )
+            status, response_headers, response_body = api_response(result)
+            return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path == "/api/v1/quality/fix":
             fixed = fix_quality_issues(self.store, self.quality_automation)
             status, response_headers, response_body = api_response({"fixed": fixed})

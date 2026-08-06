@@ -1180,6 +1180,33 @@ class TaskStore:
             ).fetchone()
         return self._snapshot(row) if row else None
 
+    def list_live_share_codes(self) -> set[str]:
+        """Own share codes still referenced by an alive task.
+
+        A code is "live" when some task has it as own_share_code and the share
+        is not confirmed dead (share_validation_status not invalid, no
+        invalid_share_status/invalid_share_cleaned/source_deleted marker, task
+        not quality-archived). Used by stale-STRM cleanup to avoid deleting
+        files that another task may still serve to Emby.
+        """
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT json_extract(metadata_json, '$.own_share_code') AS code
+                FROM tasks
+                WHERE json_valid(metadata_json)
+                  AND COALESCE(json_extract(metadata_json, '$.own_share_code'), '') <> ''
+                  AND COALESCE(json_extract(metadata_json, '$.share_validation_status'), '')
+                      NOT IN ('invalid', 'invalid_share_cleaned')
+                  AND COALESCE(json_extract(metadata_json, '$.invalid_share_status'), '')
+                      NOT IN ('invalid', 'invalid_share_cleaned')
+                  AND COALESCE(json_extract(metadata_json, '$.source_deleted'), '')
+                      NOT IN ('1', 'true', 'yes', 'on', 'enabled')
+                  AND COALESCE(json_extract(metadata_json, '$.quality_archived_at'), 0) <= 0
+                """
+            ).fetchall()
+        return {str(row["code"]).strip() for row in rows if str(row["code"] or "").strip()}
+
     def list_recent_tasks(self, limit: int = 20) -> list[TaskSnapshot]:
         with self._lock, self._connection() as conn:
             rows = conn.execute("SELECT * FROM tasks ORDER BY updated_at DESC, id DESC LIMIT ?", (limit,)).fetchall()

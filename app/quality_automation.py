@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -12,6 +13,7 @@ from typing import Any, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import Config, MoveConfig, is_relative_to, is_under_any_root, safe_resolve
+from .media.strm import UnsafeMediaPathError, iter_strm_files
 from .models import TaskSnapshot, TaskStage, TaskStatus
 from .quality import QualityIssue, ShareIdentityResolver, scan_task_quality
 from .quality_rules import (
@@ -34,6 +36,8 @@ from .task_runner import QUALITY_REPAIR_WAIT_SECONDS
 
 
 LOG = logging.getLogger("cms-tg-ingest")
+
+_STRM_SHARE_MARKER_RE = re.compile(r"/s/([A-Za-z0-9]+)_[A-Za-z0-9]*_")
 
 
 @dataclass(frozen=True)
@@ -180,6 +184,7 @@ class QualityAutomation:
     AUTO_RECHECK_ISSUE_CODES = frozenset({"missing_dest", "missing_strm", "unexpected_strm"})
     SHARE_REVALIDATE_COOLDOWN_SECONDS = 6 * 60 * 60
     MAX_SHARE_REVALIDATE_ATTEMPTS = 3
+    MAX_STRM_CLEANUP_PATHS = 500
     ARCHIVE_TERMINAL_RULES = frozenset({"unsafe_path", "terminal_invalid_share"})
     ARCHIVE_ISSUE_CODES = frozenset(
         {"unsafe_metadata", "unsafe_path", "invalid_share", "invalid_share_cleaned", "source_deleted"}
@@ -231,6 +236,7 @@ class QualityAutomation:
         self._run_time = self._parse_run_time(config.quality_auto_time)
         self.rule_engine = rule_engine or QualityRuleEngine()
         self.rule_config = self._load_rule_config()
+        self.strm_cleanup_enabled = bool(config.quality_strm_cleanup_enabled)
         self.archive_after_seconds = max(1, int(config.quality_archive_after_seconds))
         self.unfixable_retention_seconds = (
             max(1, int(config.quality_unfixable_retention_days)) * 24 * 3600
@@ -990,6 +996,166 @@ class QualityAutomation:
             "quality-auto",
         )
         return updated is not None
+
+    @staticmethod
+    def _extract_strm_share_codes(text: str) -> tuple[str, ...]:
+        """All /s/{code}_{receive}_ share codes referenced by one strm file."""
+        codes: list[str] = []
+        for match in _STRM_SHARE_MARKER_RE.finditer(text):
+            code = match.group(1)
+            if code and code not in codes:
+                codes.append(code)
+        return tuple(codes)
+
+    def stale_strm_candidates(self, task: TaskSnapshot) -> list[dict[str, object]]:
+        """Preview which strm files in the task's dest folder reference dead shares.
+
+        A file is a candidate only when it references at least one own-share code
+        that is NOT the current task's and NOT referenced by any alive task, is
+        not a direct link (/d/), and lives inside allowed roots. Never deletes.
+        """
+        if not self.strm_cleanup_enabled:
+            return []
+        dest_value = str(task.metadata.get("dest_path") or "").strip()
+        if not dest_value:
+            return []
+        dest = safe_resolve(Path(dest_value))
+        if not is_under_any_root(dest, self.allowed_roots) or not dest.is_dir():
+            return []
+        own_code = str(task.metadata.get("own_share_code") or "").strip()
+        live_codes = self.store.list_live_share_codes()
+        candidates: list[dict[str, object]] = []
+        try:
+            strm_files = sorted(iter_strm_files(dest, allowed_roots=self.allowed_roots))
+        except UnsafeMediaPathError:
+            return []
+        for path in strm_files:
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if "/d/" in text:
+                continue
+            codes = [code for code in self._extract_strm_share_codes(text) if code and code != own_code]
+            if not codes:
+                continue
+            dead = [code for code in codes if code not in live_codes]
+            if not dead:
+                continue
+            candidates.append(
+                {
+                    "path": str(path),
+                    "share_code": dead[0],
+                    "reason": "no_live_task_references_share",
+                }
+            )
+        return candidates
+
+    def cleanup_stale_strm(
+        self,
+        task_id: int,
+        paths: Iterable[str],
+        *,
+        actor: str = "web",
+    ) -> dict[str, object]:
+        """Delete confirmed stale strm files with a fresh per-file re-check.
+
+        Every requested path must still be a candidate from a fresh scan at
+        execution time (file exists, still references a dead share, not a
+        direct link, inside allowed roots). One task_operations row is written
+        per file. When the task's issues are fully cleared and it was waiting on
+        manual review, evaluation is automatically resumed.
+        """
+        if not self.strm_cleanup_enabled:
+            return {"status": "disabled", "removed": [], "skipped": [], "resumed": False}
+        requested = [str(item).strip() for item in paths if str(item).strip()]
+        if not requested:
+            return {"status": "empty", "removed": [], "skipped": [], "resumed": False}
+        if len(requested) > self.MAX_STRM_CLEANUP_PATHS:
+            return {"status": "too_many", "removed": [], "skipped": [], "resumed": False}
+        task = self.store.find_task(int(task_id))
+        if task is None:
+            return {"status": "not_found", "removed": [], "skipped": [], "resumed": False}
+        candidates = {str(item["path"]) for item in self.stale_strm_candidates(task)}
+        live_codes = self.store.list_live_share_codes()
+        own_code = str(task.metadata.get("own_share_code") or "").strip()
+        removed: list[dict[str, object]] = []
+        skipped: list[dict[str, object]] = []
+        for raw_path in requested:
+            try:
+                path = safe_resolve(Path(raw_path))
+            except (TypeError, ValueError, OSError):
+                skipped.append({"path": raw_path, "reason": "invalid_path"})
+                continue
+            if str(path) not in candidates:
+                skipped.append({"path": str(path), "reason": "not_candidate"})
+                continue
+            if not is_under_any_root(path, self.allowed_roots) or not path.is_file():
+                skipped.append({"path": str(path), "reason": "path_changed"})
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                skipped.append({"path": str(path), "reason": "unreadable"})
+                continue
+            if "/d/" in text:
+                skipped.append({"path": str(path), "reason": "became_direct"})
+                continue
+            codes = [code for code in self._extract_strm_share_codes(text) if code and code != own_code]
+            if not codes or all(code in live_codes for code in codes):
+                skipped.append({"path": str(path), "reason": "share_became_live"})
+                continue
+            digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
+            operation_key = f"quality-strm-cleanup-{digest}"
+            request: dict[str, object] = {
+                "path": str(path),
+                "share_code": codes[0],
+                "dry_run": False,
+            }
+            operation = self.store.prepare_operation(task.id, operation_key, "quality_strm_cleanup", request)
+            started = self.store.start_operation(task.id, operation_key) if operation is not None else None
+            try:
+                path.unlink()
+            except OSError as exc:
+                if started is not None:
+                    self.store.mark_operation_failed(task.id, operation_key, error=str(exc))
+                skipped.append({"path": str(path), "reason": "unlink_failed", "error": str(exc)[:160]})
+                continue
+            if started is not None:
+                self.store.complete_operation(task.id, operation_key, result={"removed": True})
+            removed.append({"path": str(path), "share_code": codes[0]})
+        resumed = False
+        if removed:
+            try:
+                issues = scan_task_quality(
+                    self.store,
+                    tasks=[task],
+                    allowed_roots=self.allowed_roots,
+                    share_identity_resolver=self.share_identity_resolver,
+                )
+            except Exception:
+                LOG.debug("Stale-STRM cleanup rescan failed task_id=%s", task.id, exc_info=True)
+                issues = []
+            state = self.store.quality_state(task.id)
+            manual_status = str(state.get("quality_manual_status") or "").strip().lower()
+            rule_id = str(state.get("quality_rule_id") or "").strip() or None
+            if not issues and manual_status == "manual_required":
+                try:
+                    self.store.resume_quality(
+                        task.id,
+                        actor,
+                        rule_id=rule_id,
+                        expected_updated_at=task.updated_at,
+                    )
+                    resumed = True
+                except Exception:
+                    LOG.debug("Failed to auto-resume quality after stale strm cleanup task_id=%s", task.id, exc_info=True)
+        return {
+            "status": "ok",
+            "removed": removed,
+            "skipped": skipped,
+            "resumed": resumed,
+        }
 
     def _auto_revalidate_share(self, task: TaskSnapshot, now: float) -> bool:
         """Requeue an invalid-share task so TaskRunner re-inspects the live share."""

@@ -742,6 +742,7 @@ def api_quality(
     if quality_automation is not None:
         snapshot = quality_automation.status_snapshot()
         payload["automation"] = snapshot if isinstance(snapshot, dict) else {}
+        payload["cleanup_enabled"] = bool(getattr(quality_automation, "strm_cleanup_enabled", False))
     payload["background_job"] = serialize_background_job(background_jobs, prefix="quality:run")
     return payload
 

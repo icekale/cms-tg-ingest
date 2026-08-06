@@ -324,6 +324,8 @@ QUALITY_UNFIXABLE_RETENTION_DAYS=30
 
 质量巡检只读取本地 TaskStore 和 STRM 文件，检查缺失 STRM、直链 STRM、异常目录和需要恢复的任务。它不扫描整个 115 网盘。风控、未知分享状态和路径不安全时只记录问题，不自动删除文件。
 
+失效 STRM 清理（可选，默认关闭）：转存目录按剧集文件夹复用时会残留旧分享世代的 STRM（`unexpected_strm`）。设置 `QUALITY_STRM_CLEANUP_ENABLED=true` 后，质量页每个任务行出现“失效 STRM”按钮：先预览引用“无存活任务分享码”的文件清单，勾选后显式确认才逐文件删除；直链文件不参与自动清理；删除后若任务问题清空且等待人工，会自动恢复评估。每个文件的操作记录写入任务详情。
+
 ## 数据库备份
 
 程序默认每天在 `03:30`（`Asia/Shanghai`）使用 SQLite 在线备份 API 快照 `/data/submissions.db` 和 `/data/tasks.db`，保存到 `/data/backups`，默认保留 14 天。备份文件分别命名为 `submissions-<UTC>.db` 和 `tasks-<UTC>.db`；临时快照通过 `PRAGMA quick_check` 后才会原子发布。`/health` 和 Web `/api/v1/health` 只显示最近一次备份的状态、文件数和错误摘要，不显示备份绝对路径或任何凭据。
