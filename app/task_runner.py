@@ -344,6 +344,26 @@ class TaskRunner:
             task.current_stage.value,
             self.worker_id,
         )
+        # Renewal is dying: the stage may already have external side effects, so
+        # flag the task for human review instead of letting it be re-claimed and
+        # re-run (which would replay 115/CMS operations). flag_claim_lost is a
+        # no-op when another worker now owns the claim.
+        try:
+            flagged = self.store.flag_claim_lost(
+                task.id,
+                self.worker_id,
+                task.claim_token,
+                now=self.now(),
+            )
+        except Exception:
+            LOG.debug("Failed to flag lost claim task_id=%s", task.id, exc_info=True)
+            flagged = None
+        if flagged is not None:
+            LOG.warning(
+                "Claim lost for task_id=%s stage=%s: marked needs-action, auto-replay suppressed",
+                task.id,
+                task.current_stage.value,
+            )
 
     def _set_active_claim(self, task: TaskSnapshot) -> None:
         with self._active_claim_lock:
@@ -558,7 +578,34 @@ class TaskRunner:
                 task.current_stage.value,
                 self.worker_id,
             )
+            self._flag_claim_lost_if_renewal_failed(task)
         return recorded
+
+    def _flag_claim_lost_if_renewal_failed(self, task: TaskSnapshot) -> None:
+        """Backstop: when a stage result was discarded and renewal had failed,
+        make sure the task is flagged needs-action so it is not auto-reclaimed
+        and re-run (external side effects may already have happened). Idempotent
+        and safe against foreign claims."""
+        with self._active_claim_lock:
+            renewal_failed = self._active_claim_renewal_failed
+        if not renewal_failed:
+            return
+        try:
+            flagged = self.store.flag_claim_lost(
+                task.id,
+                self.worker_id,
+                task.claim_token,
+                now=self.now(),
+            )
+        except Exception:
+            LOG.debug("Failed to flag lost claim task_id=%s", task.id, exc_info=True)
+            return
+        if flagged is not None:
+            LOG.warning(
+                "Task claim lost for task_id=%s stage=%s: marked needs-action after discarded result",
+                task.id,
+                task.current_stage.value,
+            )
 
     def _prepare_lock(self, task: TaskSnapshot) -> TaskSnapshot | None:
         lock_metadata = _lock_metadata_for_task(task)
@@ -646,6 +693,7 @@ class TaskRunner:
             )
             if committed is None:
                 LOG.warning("Discarded stale task result task_id=%s", task.id)
+                self._flag_claim_lost_if_renewal_failed(task)
                 return
             return
         if result.outcome == StageOutcome.DEFER:

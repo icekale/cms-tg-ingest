@@ -1216,6 +1216,76 @@ class TaskStore:
             ).fetchall()
         return {str(row["code"]).strip() for row in rows if str(row["code"] or "").strip()}
 
+    def flag_claim_lost(
+        self,
+        task_id: int,
+        expected_claimed_by: str,
+        expected_claim_token: str,
+        *,
+        now: float | None = None,
+    ) -> TaskSnapshot | None:
+        """Mark a RUNNING task as needs-human-action when its claim is dying.
+
+        Called by the heartbeat when claim renewal keeps failing: the stage may
+        have already performed external side effects, so the task must NOT be
+        auto-reclaimed and re-run (that would replay 115/CMS operations). The
+        transition only applies when the claim still belongs to this worker;
+        otherwise None is returned and the other owner is left untouched.
+        """
+        current_time = time.time() if now is None else float(now)
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+            if row is None:
+                return None
+            if (
+                row["status"] != TaskStatus.RUNNING.value
+                or str(row["claimed_by"] or "") != str(expected_claimed_by)
+                or str(row["claim_token"] or "") != str(expected_claim_token)
+            ):
+                return None
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except Exception:
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata["claim_renewal_failed_at"] = current_time
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = ?, current_stage = ?, claimed_by = '', claim_token = '',
+                    claimed_at = 0, claim_heartbeat_at = 0, next_run_at = -1,
+                    error_type = 'claim_renewal_failed',
+                    error_summary = '任务续租失败，阶段可能已执行但结果未提交；请确认远端状态后手动重试',
+                    metadata_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    TaskStatus.NEEDS_ACTION.value,
+                    TaskStage.NEEDS_ACTION.value,
+                    json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                    current_time,
+                    int(task_id),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO task_events (task_id, stage, status, message, error_type, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(task_id),
+                    TaskStage.NEEDS_ACTION.value,
+                    TaskStatus.NEEDS_ACTION.value,
+                    "任务续租失败：阶段可能已执行但结果未提交，已停止自动重跑，请确认后手动处理",
+                    "claim_renewal_failed",
+                    current_time,
+                ),
+            )
+            updated = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+        return self._snapshot(updated)
+
     def list_recent_tasks(self, limit: int = 20) -> list[TaskSnapshot]:
         with self._lock, self._connection() as conn:
             rows = conn.execute("SELECT * FROM tasks ORDER BY updated_at DESC, id DESC LIMIT ?", (limit,)).fetchall()

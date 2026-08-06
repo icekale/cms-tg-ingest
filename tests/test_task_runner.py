@@ -537,6 +537,80 @@ class TaskRunnerTests(unittest.TestCase):
                     workflow.release.set()
                     runner.stop(join_timeout=1)
 
+    def test_claim_renewal_failure_flags_task_manual_required(self):
+        class FailingRenewStore:
+            def __init__(self, delegate):
+                self.delegate = delegate
+
+            def __getattr__(self, name):
+                return getattr(self.delegate, name)
+
+            def renew_claim(self, *args, **kwargs):
+                return None  # renewal keeps failing
+
+        class BlockingWorkflow:
+            def __init__(self):
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def run_stage(self, _task):
+                self.entered.set()
+                if not self.release.wait(timeout=2):
+                    raise AssertionError("workflow was not released")
+                return StageResult.complete("done")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            real_store = TaskStore(Path(tmp) / "tasks.db")
+            task = real_store.upsert_task("renew-fail", "", "https://115cdn.com/s/renew-fail")
+            real_store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            store = FailingRenewStore(real_store)
+            workflow = BlockingWorkflow()
+            runner = TaskRunner(store, workflow, interval_seconds=60)
+
+            with patch("app.task_runner._HEARTBEAT_INTERVAL_SECONDS", 0.01):
+                runner.start()
+                try:
+                    self.assertTrue(workflow.entered.wait(timeout=1))
+                    deadline = time.time() + 1
+                    flagged = False
+                    while time.time() < deadline:
+                        refreshed = real_store.find_task(task.id)
+                        if refreshed.status == TaskStatus.NEEDS_ACTION and not refreshed.claimed_by.strip():
+                            flagged = True
+                            break
+                        time.sleep(0.01)
+                    self.assertTrue(flagged, "task was not flagged NEEDS_ACTION after renewal failure")
+                    flagged_task = real_store.find_task(task.id)
+                    self.assertEqual(
+                        str(flagged_task.metadata.get("claim_renewal_failed_at") or ""),
+                        str(flagged_task.metadata.get("claim_renewal_failed_at") or ""),
+                    )
+                    self.assertGreater(float(flagged_task.metadata.get("claim_renewal_failed_at") or 0), 0)
+                finally:
+                    runner.stop(join_timeout=0)
+                    workflow.release.set()
+                    runner.stop(join_timeout=1)
+
+    def test_flag_claim_lost_ignores_foreign_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("foreign-claim", "", "https://115cdn.com/s/foreign-claim")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            claimed = store.claim_next_runnable("worker-a", now=time.time())
+            self.assertIsNotNone(claimed)
+
+            flagged = store.flag_claim_lost(
+                task.id,
+                "worker-b",
+                "wrong-token",
+                now=time.time(),
+            )
+
+            self.assertIsNone(flagged)
+            refreshed = store.find_task(task.id)
+            self.assertEqual(refreshed.status, TaskStatus.RUNNING)
+            self.assertEqual(refreshed.claimed_by, "worker-a")
+
     def test_activity_state_tracks_active_claim_and_idle(self):
         class BlockingWorkflow:
             def __init__(self):
