@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.80 - 2026-08-07
+
+- 自有分享目录恢复守卫：每次成功触发 CMS `auto_organize`（云下载整理或普通 organizing 阶段）后，安排一次一次性延迟校验（15–60 秒），提前执行已有的 `restore_missing_self_share_library_folders` 恢复路径；CMS 增量同步消费积压 115 删除事件误删 `/media/share` 目录时，恢复窗口从 300 秒维护周期缩短到秒级，降低 Emby 误报 `library.deleted` 的概率。模块级去重避免任务突发时重复调度。
+
 ## 0.2.79 - 2026-08-06
 
 - 任务续租失败防御：心跳续租失败时任务不再可能被静默重新认领重跑（阶段可能已执行外部副作用），而是标记为需人工处理（`NEEDS_ACTION`，原因 `claim_renewal_failed`）并清除 claim；阶段结果因 claim 过期被丢弃时也触发同一标记。仅当 claim 仍属于当前 worker 时才生效，不影响其他实例的认领。
