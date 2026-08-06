@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.75 - 2026-08-06
+
+- 新增失效 STRM 清理动作（`QUALITY_STRM_CLEANUP_ENABLED`，默认关闭）：质量页每行新增“失效 STRM”按钮，先预览引用“已无存活任务分享码”的 STRM 清单，勾选后显式确认才逐文件删除；直链文件不参与；删除前按最新扫描逐文件复检（文件变化/分享复活/路径越界则跳过）；每个文件写入一条任务操作记录；删除后任务问题清空且等待人工时自动恢复评估。
+- `TaskStore.list_live_share_codes`：判定“存活”自有分享码（分享未确认失效、任务未归档、源未被删除）。
+- Web API：`POST /api/v1/quality/cleanup/dry-run` 与 `POST /api/v1/quality/cleanup/run`（开关关闭时返回 409），`/api/v1/quality` 新增 `cleanup_enabled`。
+- 新增 `docs/quality-stale-strm-cleanup.md` 实现说明（安全判定、执行形态、验收标准）。
+
 ## 0.2.74 - 2026-08-06
 
 - 质量巡检人工接管不再死锁：`repeated_failure`（尝试达上限）任务的手动动作放开为 `view/snooze/ignore/resume`，`manual_required` 状态下的任务在规则允许时也可暂缓/忽略，不再只能查看和恢复而陷入无限循环；风险控制、无效 STRM 模式等受限规则仍保持 `view/resume`。
