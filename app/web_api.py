@@ -358,6 +358,11 @@ def serialize_health(store: TaskStore, *, enabled: bool = True, now: float | Non
         "runner_heartbeat_at": summary.runner_heartbeat_at,
         "runner_heartbeat_stale": summary.runner_heartbeat_stale,
         "runner_state": summary.runner_state,
+        "runner_active": summary.runner_active,
+        "runner_active_task_id": summary.runner_active_task_id,
+        "runner_active_stage": summary.runner_active_stage,
+        "runner_active_since": summary.runner_active_since,
+        "runner_last_claim_attempt_at": summary.runner_last_claim_attempt_at,
         "backup": backup,
         "wait_details": list(summary.wait_details),
         "latest_problem": (

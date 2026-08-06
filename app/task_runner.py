@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import socket
@@ -63,6 +64,7 @@ _QUALITY_REPAIR_WAIT_STAGES = {
 _DEFER_METADATA_KEYS = ("_defer_stage", "_defer_message", "_defer_count")
 _HEARTBEAT_INTERVAL_SECONDS = 15.0
 _P115_RISK_COOLDOWN_STATE_KEY = "115:risk_cooldown_until"
+_ACTIVITY_STATE_KEY = "task_runner:activity"
 
 
 def new_worker_id() -> str:
@@ -236,6 +238,7 @@ class TaskRunner:
         self._claim_release_pending = False
         self._p115_risk_cooldown_until = self._load_p115_risk_cooldown()
         self._last_heartbeat_at = 0.0
+        self._last_claim_attempt_at = 0.0
 
     def _load_p115_risk_cooldown(self) -> float:
         try:
@@ -274,6 +277,42 @@ class TaskRunner:
                 self._safe_runtime_state("task_runner", "error")
                 return
             self._record_heartbeat()
+    def _record_activity(self, now: float | None = None) -> None:
+        """Persist a snapshot of what the runner is currently working on.
+
+        Written on the same 15s cadence as the heartbeat so health/doctor can
+        show "runner is processing task #N (stage X)" or that the runner has
+        been idle — the evidence needed before ever reconsidering multi-worker.
+        Never raises.
+        """
+        current_time = self.now() if now is None else float(now)
+        with self._active_claim_lock:
+            active = self._active_claim
+        try:
+            self.store.set_runtime_state(
+                _ACTIVITY_STATE_KEY,
+                json.dumps(
+                    {
+                        "active_task_id": int(active.id) if active is not None else 0,
+                        "active_stage": active.current_stage.value if active is not None else "",
+                        "active_since": float(active.claimed_at or 0) if active is not None else 0.0,
+                        "last_claim_attempt_at": self._last_claim_attempt_at,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                updated_at=current_time,
+            )
+        except Exception:
+            LOG.debug("Failed to record TaskRunner activity state", exc_info=True)
+
+    def _run_heartbeat(self) -> None:
+        while not self._stop.is_set():
+            if self._thread is None or not self._thread.is_alive():
+                self._safe_runtime_state("task_runner", "error")
+                return
+            self._record_heartbeat()
+            self._record_activity()
             try:
                 self._renew_active_claim()
             except Exception:
@@ -318,6 +357,7 @@ class TaskRunner:
                 self._active_claim_renewal_failed = False
 
     def run_once(self) -> bool:
+        self._last_claim_attempt_at = self.now()
         if self._claim_release_pending:
             self.store.clear_worker_claims(self.worker_id, now=self.now())
             self._claim_release_pending = False

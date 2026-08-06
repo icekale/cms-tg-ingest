@@ -34,6 +34,63 @@ class TaskHealthTests(unittest.TestCase):
             self.assertTrue(summary.runner_heartbeat_stale)
             self.assertIn("TaskRunner心跳: stale", report)
 
+    def test_health_reports_fresh_runner_activity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            store.set_runtime_state(
+                "task_runner:activity",
+                json.dumps(
+                    {
+                        "active_task_id": 7,
+                        "active_stage": "organizing",
+                        "active_since": 90.0,
+                        "last_claim_attempt_at": 95.0,
+                    }
+                ),
+                updated_at=99.0,
+            )
+
+            summary = build_task_health(store, enabled=True, now=100.0)
+            report = format_task_health(summary, now=100.0)
+
+            self.assertTrue(summary.runner_active)
+            self.assertEqual(summary.runner_active_task_id, 7)
+            self.assertEqual(summary.runner_active_stage, "organizing")
+            self.assertIn("Runner当前: 处理任务 #7 (organizing", report)
+
+    def test_health_reports_stale_runner_activity_as_idle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            store.set_runtime_state(
+                "task_runner:activity",
+                json.dumps(
+                    {
+                        "active_task_id": 7,
+                        "active_stage": "organizing",
+                        "active_since": 1.0,
+                        "last_claim_attempt_at": 2.0,
+                    }
+                ),
+                updated_at=1.0,
+            )
+
+            summary = build_task_health(store, enabled=True, now=100.0)
+            report = format_task_health(summary, now=100.0)
+
+            self.assertFalse(summary.runner_active)
+            self.assertEqual(summary.runner_active_task_id, 7)
+            self.assertIn("Runner当前: idle", report)
+
+    def test_health_handles_corrupt_runner_activity_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            store.set_runtime_state("task_runner:activity", "{not json", updated_at=99.0)
+
+            summary = build_task_health(store, enabled=True, now=100.0)
+
+            self.assertFalse(summary.runner_active)
+            self.assertEqual(summary.runner_active_task_id, 0)
+
     def test_health_reports_last_database_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

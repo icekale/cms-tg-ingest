@@ -1,5 +1,6 @@
-import sqlite3
+import json
 import os
+import sqlite3
 import socket
 import threading
 import tempfile
@@ -531,6 +532,51 @@ class TaskRunnerTests(unittest.TestCase):
                     self.assertEqual(renewed.claimed_at, claimed.claimed_at)
                     self.assertEqual(renewed.claim_token, claimed.claim_token)
                     self.assertEqual(renewed.updated_at, claimed.updated_at)
+                finally:
+                    runner.stop(join_timeout=0)
+                    workflow.release.set()
+                    runner.stop(join_timeout=1)
+
+    def test_activity_state_tracks_active_claim_and_idle(self):
+        class BlockingWorkflow:
+            def __init__(self):
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def run_stage(self, _task):
+                self.entered.set()
+                if not self.release.wait(timeout=2):
+                    raise AssertionError("workflow was not released")
+                return StageResult.complete("done")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("activity-state", "", "https://115cdn.com/s/activity-state")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            workflow = BlockingWorkflow()
+            runner = TaskRunner(store, workflow, interval_seconds=60)
+
+            with patch("app.task_runner._HEARTBEAT_INTERVAL_SECONDS", 0.01):
+                runner.start()
+                try:
+                    self.assertTrue(workflow.entered.wait(timeout=1))
+                    claimed = store.find_task(task.id)
+                    self.assertTrue(claimed.claimed_by)
+
+                    # Fresh runner with no claim yet -> idle snapshot.
+                    idle_runner = TaskRunner(store, workflow, interval_seconds=60)
+                    idle_runner._record_activity(now=100.0)
+                    idle_state = store.get_runtime_state("task_runner:activity")
+                    self.assertIn("active_task_id", idle_state["value"])
+                    self.assertIn('"active_task_id":0', idle_state["value"])
+
+                    # Active claim -> snapshot reflects the running task.
+                    runner._record_activity(now=101.0)
+                    state = store.get_runtime_state("task_runner:activity")
+                    payload = json.loads(state["value"])
+                    self.assertEqual(payload["active_task_id"], task.id)
+                    self.assertEqual(payload["active_stage"], "organizing")
+                    self.assertGreater(payload["active_since"], 0)
                 finally:
                     runner.stop(join_timeout=0)
                     workflow.release.set()

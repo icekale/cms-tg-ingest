@@ -30,6 +30,11 @@ class TaskHealthSummary:
     runner_heartbeat_at: float = 0.0
     runner_heartbeat_stale: bool = False
     runner_state: str = ""
+    runner_active: bool = False
+    runner_active_task_id: int = 0
+    runner_active_stage: str = ""
+    runner_active_since: float = 0.0
+    runner_last_claim_attempt_at: float = 0.0
 
 
 def _truncate(value: object, limit: int) -> str:
@@ -73,6 +78,36 @@ def build_task_health(
         and runner_heartbeat_at > 0
         and current_time - runner_heartbeat_at > RUNNER_HEARTBEAT_STALE_SECONDS
     )
+    runner_active = False
+    runner_active_task_id = 0
+    runner_active_stage = ""
+    runner_active_since = 0.0
+    runner_last_claim_attempt_at = 0.0
+    activity_state = store.get_runtime_state("task_runner:activity")
+    if activity_state:
+        try:
+            activity = json.loads(str(activity_state.get("value") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            activity = {}
+        if isinstance(activity, dict):
+            try:
+                runner_active_task_id = max(0, int(activity.get("active_task_id") or 0))
+            except (TypeError, ValueError):
+                runner_active_task_id = 0
+            runner_active_stage = str(activity.get("active_stage") or "")
+            try:
+                runner_active_since = max(0.0, float(activity.get("active_since") or 0))
+            except (TypeError, ValueError):
+                runner_active_since = 0.0
+            try:
+                runner_last_claim_attempt_at = max(0.0, float(activity.get("last_claim_attempt_at") or 0))
+            except (TypeError, ValueError):
+                runner_last_claim_attempt_at = 0.0
+            state_updated_at = max(0.0, float(activity_state.get("updated_at") or 0))
+            runner_active = bool(
+                runner_active_task_id
+                and current_time - state_updated_at <= RUNNER_HEARTBEAT_STALE_SECONDS
+            )
     wait_details = tuple(
         _format_wait_detail(task, now=current_time)
         for task in wait_tasks[:5]
@@ -93,6 +128,11 @@ def build_task_health(
         runner_heartbeat_at=runner_heartbeat_at,
         runner_heartbeat_stale=runner_heartbeat_stale,
         runner_state=aggregate.runner_state,
+        runner_active=runner_active,
+        runner_active_task_id=runner_active_task_id,
+        runner_active_stage=runner_active_stage,
+        runner_active_since=runner_active_since,
+        runner_last_claim_attempt_at=runner_last_claim_attempt_at,
     )
 
 
@@ -119,6 +159,17 @@ def format_task_health(summary: TaskHealthSummary, *, now: float | None = None) 
         lines.append("TaskRunner心跳: active")
     else:
         lines.append("TaskRunner心跳: unknown")
+    if summary.runner_active and summary.runner_active_task_id:
+        since = _duration(max(0.0, current_time - summary.runner_active_since))
+        lines.append(
+            f"Runner当前: 处理任务 #{summary.runner_active_task_id} "
+            f"({summary.runner_active_stage or '?'}，已 {since})"
+        )
+    elif summary.runner_last_claim_attempt_at > 0:
+        idle = _duration(max(0.0, current_time - summary.runner_last_claim_attempt_at))
+        lines.append(f"Runner当前: idle（上次尝试 {idle} 前）")
+    else:
+        lines.append("Runner当前: 尚未活动")
     if summary.p115_cooldown_until > current_time:
         remaining = _duration(summary.p115_cooldown_until - current_time)
         lines.append(f"115风控冷却: ACTIVE，剩余 {remaining}")
