@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.74 - 2026-08-06
+
+- 质量巡检人工接管不再死锁：`repeated_failure`（尝试达上限）任务的手动动作放开为 `view/snooze/ignore/resume`，`manual_required` 状态下的任务在规则允许时也可暂缓/忽略，不再只能查看和恢复而陷入无限循环；风险控制、无效 STRM 模式等受限规则仍保持 `view/resume`。
+- `unexpected_strm`（STRM 不是预期分享链接）不再自动重跑：此类问题多为同目录残留的旧分享世代 STRM（合并只覆盖同名文件、不清理残留），重跑只会再次轮换分享码而无法修复（线上 #368 实证）；改为人工决策（暂缓/忽略/恢复评估）。
+- 质量巡检页：新增“文件数”列展示合并后的问题文件数；证据列只显示前 3 条，超出显示“等 N 条”。
+- 新增 `docs/quality-stale-strm-cleanup.md`：失效 STRM 清理动作的 dry-run 设计（预览候选 → 显式确认后逐文件删除，含存活任务保护与操作日志）。
+
 ## 0.2.73 - 2026-08-06
 
 - TaskRunner 活动度观测：心跳同步写入 `task_runner:activity` 运行时状态（当前任务 id/阶段/开始时间/上次认领尝试），`/api/v1/health` 新增 `runner_active`、`runner_active_task_id`、`runner_active_stage`、`runner_active_since`、`runner_last_claim_attempt_at` 字段，前端"本地健康"页新增"Runner 当前"展示；新增 `docs/multi-worker-analysis.md` 多 worker 成本收益分析（结论：维持单 worker，附观察方法）。
