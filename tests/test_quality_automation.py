@@ -1430,6 +1430,92 @@ class QualityStrmCleanupTests(unittest.TestCase):
             service.strm_cleanup_enabled = False
             self.assertEqual(service.cleanup_stale_strm(1, ["/x.strm"], actor="tester")["status"], "disabled")
 
+    def test_candidates_check_shares_tags_share_state(self):
+        def fake_inspector(code, receive_code):
+            return {"share_state": "1" if code == "deadC" else "0", "have_vio_file": False}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            service.share_inspector = fake_inspector
+            dest = library / "episode"
+            self.write_strm(dest, "dead.strm", "https://cms/s/deadC_1212_dead.mkv")
+            self.write_strm(dest, "gone.strm", "https://cms/s/goneX_1212_gone.mkv")
+            task = self.add_task(service.store, "episode", dest, own_share_code="ownA")
+
+            candidates = service.stale_strm_candidates(task, check_shares=True)
+            by_code = {item["share_code"]: item["share_state"] for item in candidates}
+
+            self.assertEqual(by_code.get("deadC"), "valid")
+            self.assertEqual(by_code.get("goneX"), "invalid")
+            self.assertTrue(all(item.get("share_state") in {"valid", "invalid"} for item in candidates))
+
+    def test_candidates_without_check_shares_are_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            dest = library / "episode"
+            self.write_strm(dest, "dead.strm", "https://cms/s/deadC_1212_dead.mkv")
+            task = self.add_task(service.store, "episode", dest, own_share_code="ownA")
+
+            candidates = service.stale_strm_candidates(task, check_shares=False)
+
+            self.assertEqual(candidates[0]["share_state"], "unknown")
+
+    def test_candidates_check_shares_uses_cache_per_code(self):
+        calls = []
+
+        def fake_inspector(code, receive_code):
+            calls.append(code)
+            return {"share_state": "1", "have_vio_file": False}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            service.share_inspector = fake_inspector
+            dest = library / "episode"
+            # Two files referencing the same dead code.
+            self.write_strm(dest, "a.strm", "https://cms/s/deadC_1212_a.mkv")
+            self.write_strm(dest, "b.strm", "https://cms/s/deadC_1212_b.mkv")
+            task = self.add_task(service.store, "episode", dest, own_share_code="ownA")
+
+            candidates = service.stale_strm_candidates(task, check_shares=True)
+
+            self.assertEqual(len(candidates), 2)
+            self.assertEqual(calls, ["deadC"])
+
+    def test_cleanup_skips_alive_shares_unless_allow_alive(self):
+        def fake_inspector(code, receive_code):
+            return {"share_state": "1", "have_vio_file": False}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            service.share_inspector = fake_inspector
+            dest = library / "episode"
+            self.write_strm(dest, "dead.strm", "https://cms/s/deadC_1212_dead.mkv")
+            task = self.add_task(service.store, "episode", dest, own_share_code="ownA")
+            dead_path = str((dest / "dead.strm").resolve())
+
+            blocked = service.cleanup_stale_strm(task.id, [dead_path], actor="tester")
+            self.assertEqual(blocked["removed"], [])
+            self.assertEqual(blocked["skipped"][0]["reason"], "share_still_alive")
+            self.assertTrue((dest / "dead.strm").exists())
+
+            allowed = service.cleanup_stale_strm(
+                task.id, [dead_path], actor="tester", allow_alive=True
+            )
+            self.assertEqual(len(allowed["removed"]), 1)
+            self.assertFalse((dest / "dead.strm").exists())
+
+    def test_cleanup_without_inspector_deletes_as_before(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            service.share_inspector = None
+            dest = library / "episode"
+            self.write_strm(dest, "dead.strm", "https://cms/s/deadC_1212_dead.mkv")
+            task = self.add_task(service.store, "episode", dest, own_share_code="ownA")
+
+            result = service.cleanup_stale_strm(task.id, [str(dest / "dead.strm")], actor="tester")
+
+            self.assertEqual(len(result["removed"]), 1)
+
 
 class FakeQualityRepairAdapter:
     def __init__(self):

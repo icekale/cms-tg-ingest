@@ -169,9 +169,13 @@ const cleanup = ref({ show: false, taskId: 0, candidates: [], checked: [], runni
 async function openCleanup(row) {
   cleanup.value = { show: true, taskId: row.task_id, candidates: [], checked: [], running: false, result: null, error: '' }
   try {
-    const payload = await api.qualityCleanupDryRun(row.task_id)
+    const payload = await api.qualityCleanupDryRun(row.task_id, true)
     cleanup.value.candidates = payload.candidates || []
-    cleanup.value.checked = (payload.candidates || []).map((c) => c.path)
+    // Files whose share is still alive on 115 are NOT pre-checked: deleting them
+    // would break playback. Only confirmed-dead shares are pre-selected.
+    cleanup.value.checked = (payload.candidates || [])
+      .filter((c) => c.share_state !== 'valid')
+      .map((c) => c.path)
     if (payload.error) cleanup.value.error = payload.error
   } catch (err) {
     cleanup.value.error = err.message
@@ -183,12 +187,29 @@ async function runCleanup() {
   cleanup.value.running = true
   cleanup.value.error = ''
   try {
-    cleanup.value.result = await api.qualityCleanupRun(cleanup.value.taskId, cleanup.value.checked)
+    cleanup.value.result = await api.qualityCleanupRun(cleanup.value.taskId, cleanup.value.checked, false)
   } catch (err) {
     cleanup.value.error = err.message
   } finally {
     cleanup.value.running = false
   }
+}
+
+function cleanupShareTag(shareState) {
+  if (shareState === 'valid') return { type: 'warning', label: '分享仍有效' }
+  if (shareState === 'invalid') return { type: 'error', label: '分享已失效' }
+  return { type: 'default', label: '状态未知' }
+}
+
+const CLEANUP_SKIP_REASONS = {
+  not_candidate: '非候选（可能已被处理）',
+  invalid_path: '路径无效',
+  path_changed: '文件已变化',
+  unreadable: '无法读取',
+  became_direct: '已变为直链',
+  share_became_live: '分享已有任务引用',
+  share_still_alive: '分享在 115 仍有效（被保护）',
+  unlink_failed: '删除失败',
 }
 
 function cleanupFileName(path) {
@@ -235,7 +256,7 @@ onMounted(load)
       <p>已删除 <b>{{ cleanup.result.removed?.length || 0 }}</b> 个失效 STRM，跳过 <b>{{ cleanup.result.skipped?.length || 0 }}</b> 个。</p>
       <p v-if="cleanup.result.resumed" class="muted">任务已无质量问题，已自动恢复自动评估。</p>
       <p v-if="cleanup.result.skipped?.length" class="muted">
-        跳过原因：{{ cleanup.result.skipped.map((s) => `${cleanupFileName(s.path)}: ${s.reason}`).join('；') }}
+        跳过原因：{{ cleanup.result.skipped.map((s) => `${cleanupFileName(s.path)}: ${CLEANUP_SKIP_REASONS[s.reason] || s.reason}`).join('；') }}
       </p>
       <n-space style="margin-top: 12px"><n-button type="primary" @click="cleanup.show = false; load()">关闭</n-button></n-space>
     </template>
@@ -244,12 +265,16 @@ onMounted(load)
       <n-space style="margin-top: 12px"><n-button @click="cleanup.show = false">关闭</n-button></n-space>
     </template>
     <template v-else-if="cleanup.candidates.length">
-      <p class="muted">以下 STRM 引用了已无存活任务引用的分享码，删除不会影响其他任务（直链文件不在此列）：</p>
+      <p class="muted">以下 STRM 引用了已无存活任务引用的分享码。分享仍在 115 的默认不勾选（删除会断链）；已失效的默认勾选。</p>
       <n-checkbox-group v-model:value="cleanup.checked" style="max-height: 320px; overflow: auto">
         <n-checkbox v-for="c in cleanup.candidates" :key="c.path" :value="c.path" :title="c.path">
-          {{ cleanupFileName(c.path) }}（{{ c.share_code }}）
+          <span :class="{ 'alive-share': c.share_state === 'valid' }">{{ cleanupFileName(c.path) }}</span>
+          <n-tag size="small" :type="cleanupShareTag(c.share_state).type" style="margin-left: 6px">{{ cleanupShareTag(c.share_state).label }}</n-tag>
         </n-checkbox>
       </n-checkbox-group>
+      <p v-if="cleanup.candidates.some((c) => c.share_state === 'valid')" class="muted">
+        提示：{{ cleanup.candidates.filter((c) => c.share_state === 'valid').length }} 个文件的分享在 115 仍有效，如需删除请在下方勾选（执行时会再次验证）。
+      </p>
       <n-space style="margin-top: 12px">
         <n-button type="primary" :loading="cleanup.running" :disabled="!cleanup.checked.length" @click="runCleanup">
           删除所选（{{ cleanup.checked.length }}）
@@ -263,3 +288,10 @@ onMounted(load)
     </template>
   </n-modal>
 </template>
+
+<style scoped>
+.alive-share {
+  color: #d03050;
+  font-weight: 600;
+}
+</style>

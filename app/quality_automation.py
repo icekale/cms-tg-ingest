@@ -185,6 +185,7 @@ class QualityAutomation:
     SHARE_REVALIDATE_COOLDOWN_SECONDS = 6 * 60 * 60
     MAX_SHARE_REVALIDATE_ATTEMPTS = 3
     MAX_STRM_CLEANUP_PATHS = 500
+    MAX_SHARE_CHECKS = 20
     ARCHIVE_TERMINAL_RULES = frozenset({"unsafe_path", "terminal_invalid_share"})
     ARCHIVE_ISSUE_CODES = frozenset(
         {"unsafe_metadata", "unsafe_path", "invalid_share", "invalid_share_cleaned", "source_deleted"}
@@ -1007,7 +1008,37 @@ class QualityAutomation:
                 codes.append(code)
         return tuple(codes)
 
-    def stale_strm_candidates(self, task: TaskSnapshot) -> list[dict[str, object]]:
+    def _share_alive_state(self, share_code: str, receive_code: str) -> str:
+        """Best-effort 115 share liveness probe: valid / invalid / unknown.
+
+        unknown when no inspector is configured, the probe fails, or the
+        response is unparseable. Never raises.
+        """
+        if self.share_inspector is None:
+            return "unknown"
+        try:
+            state = self.share_inspector(str(share_code), str(receive_code))
+        except Exception:
+            LOG.debug("Share liveness probe failed code=%s", share_code, exc_info=True)
+            return "unknown"
+        if not isinstance(state, dict):
+            return "unknown"
+        share_state = str(state.get("share_state") or "").strip().lower()
+        have_vio = str(state.get("have_vio_file") or "").strip().lower() in {"1", "true", "yes"}
+        if have_vio:
+            return "invalid"
+        if share_state in {"1", "true"}:
+            return "valid"
+        if share_state in {"0", "false"}:
+            return "invalid"
+        return "unknown"
+
+    def stale_strm_candidates(
+        self,
+        task: TaskSnapshot,
+        *,
+        check_shares: bool = False,
+    ) -> list[dict[str, object]]:
         """Preview which strm files in the task's dest folder reference dead shares.
 
         A file is a candidate only when it references at least one own-share code
@@ -1023,8 +1054,11 @@ class QualityAutomation:
         if not is_under_any_root(dest, self.allowed_roots) or not dest.is_dir():
             return []
         own_code = str(task.metadata.get("own_share_code") or "").strip()
+        receive_code = str(task.metadata.get("own_share_receive_code") or "1212").strip() or "1212"
         live_codes = self.store.list_live_share_codes()
         candidates: list[dict[str, object]] = []
+        share_states: dict[str, str] = {}
+        checked_codes: list[str] = []
         try:
             strm_files = sorted(iter_strm_files(dest, allowed_roots=self.allowed_roots))
         except UnsafeMediaPathError:
@@ -1042,13 +1076,22 @@ class QualityAutomation:
             dead = [code for code in codes if code not in live_codes]
             if not dead:
                 continue
-            candidates.append(
-                {
-                    "path": str(path),
-                    "share_code": dead[0],
-                    "reason": "no_live_task_references_share",
-                }
-            )
+            candidate: dict[str, object] = {
+                "path": str(path),
+                "share_code": dead[0],
+                "reason": "no_live_task_references_share",
+                "share_state": "unknown",
+            }
+            if check_shares:
+                code = dead[0]
+                if code not in share_states:
+                    if len(checked_codes) < self.MAX_SHARE_CHECKS:
+                        share_states[code] = self._share_alive_state(code, receive_code)
+                        checked_codes.append(code)
+                    else:
+                        share_states[code] = "unknown"
+                candidate["share_state"] = share_states[code]
+            candidates.append(candidate)
         return candidates
 
     def cleanup_stale_strm(
@@ -1057,6 +1100,7 @@ class QualityAutomation:
         paths: Iterable[str],
         *,
         actor: str = "web",
+        allow_alive: bool = False,
     ) -> dict[str, object]:
         """Delete confirmed stale strm files with a fresh per-file re-check.
 
@@ -1079,8 +1123,10 @@ class QualityAutomation:
         candidates = {str(item["path"]) for item in self.stale_strm_candidates(task)}
         live_codes = self.store.list_live_share_codes()
         own_code = str(task.metadata.get("own_share_code") or "").strip()
+        receive_code = str(task.metadata.get("own_share_receive_code") or "1212").strip() or "1212"
         removed: list[dict[str, object]] = []
         skipped: list[dict[str, object]] = []
+        checked_states: dict[str, str] = {}
         for raw_path in requested:
             try:
                 path = safe_resolve(Path(raw_path))
@@ -1105,6 +1151,29 @@ class QualityAutomation:
             if not codes or all(code in live_codes for code in codes):
                 skipped.append({"path": str(path), "reason": "share_became_live"})
                 continue
+            # A share that is still alive on 115 is protected by default: deleting
+            # its strm breaks playback (the #368 lesson). The caller must opt in
+            # with allow_alive to remove such files.
+            if not allow_alive and self.share_inspector is not None:
+                alive_code = None
+                for code in codes:
+                    if code in live_codes:
+                        continue
+                    if code not in checked_states:
+                        checked_states[code] = self._share_alive_state(code, receive_code)
+                    if checked_states[code] == "valid":
+                        alive_code = code
+                        break
+                if alive_code is not None:
+                    skipped.append(
+                        {
+                            "path": str(path),
+                            "reason": "share_still_alive",
+                            "share_code": alive_code,
+                            "share_state": "valid",
+                        }
+                    )
+                    continue
             digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
             operation_key = f"quality-strm-cleanup-{digest}-{time.monotonic_ns():x}"
             request: dict[str, object] = {

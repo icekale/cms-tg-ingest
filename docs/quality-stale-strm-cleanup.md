@@ -6,13 +6,14 @@
 > （`app/media/strm.py`）只覆盖"源中有同名文件"的项，**从不删除目标目录中无对应的旧 STRM**，
 > 旧分享失效后这些文件成为死链。巡检正确识别了死链，但此前没有任何清理路径（只能 SSH 手动删）。
 
-## 实现状态（v0.2.75 起，v0.2.76 增补）
+## 实现状态（v0.2.75 起，v0.2.76/0.2.77 增补）
 
 - `QUALITY_STRM_CLEANUP_ENABLED`（默认 false）开关；开启后质量页每行出现“失效 STRM”按钮。
 - `POST /api/v1/quality/cleanup/dry-run`（body `{task_id}`）→ 候选清单；`POST /api/v1/quality/cleanup/run`（body `{task_id, paths}`）→ 逐文件复检后删除。
 - 实现位置：`QualityAutomation.stale_strm_candidates` / `cleanup_stale_strm`（`app/quality_automation.py`），存活判定 `TaskStore.list_live_share_codes`（`app/task_store.py`）。
 - 每文件一条 `task_operations`（type=`quality_strm_cleanup`）；删除后任务问题清空且 `manual_required` 时自动恢复评估。
 - 直链（`/d/`）文件不参与；执行前按新鲜扫描复检（文件变化/分享复活 → 跳过）。
+- v0.2.77：dry-run 支持 `check_shares`（对候选分享码逐个调用 115 `inspect_share`，缓存+上限 20 码），每条候选标注 `share_state`（valid/invalid/unknown）；执行默认 `allow_alive=false`——分享在 115 仍有效的文件会被保护跳过（防误删断链，线上 #368 教训），需显式 `allow_alive=true` 才删；前端对有效分享的文件默认不勾选并标注“分享仍有效”。
 
 ## 目标
 

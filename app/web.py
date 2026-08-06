@@ -1896,7 +1896,8 @@ class WebApp:
                         {"error": "task_not_found"}, status=404
                     )
                     return status, {**response_headers, **auth_headers}, response_body
-                candidates = self.quality_automation.stale_strm_candidates(task)
+                check_shares = bool(values.get("check_shares"))
+                candidates = self.quality_automation.stale_strm_candidates(task, check_shares=check_shares)
                 status, response_headers, response_body = api_response(
                     {"enabled": True, "task_id": task_id, "candidates": candidates}
                 )
@@ -1907,8 +1908,9 @@ class WebApp:
                     {"error": "invalid_paths"}, status=400
                 )
                 return status, {**response_headers, **auth_headers}, response_body
+            allow_alive = bool(values.get("allow_alive"))
             result = self.quality_automation.cleanup_stale_strm(
-                task_id, [str(item) for item in raw_paths], actor="web"
+                task_id, [str(item) for item in raw_paths], actor="web", allow_alive=allow_alive
             )
             status, response_headers, response_body = api_response(result)
             return status, {**response_headers, **auth_headers}, response_body
