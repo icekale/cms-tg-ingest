@@ -674,6 +674,10 @@ class QualityAutomation:
             actions.append("resume")
         elif manual_status in {"snoozed", "ignored", "manual_required"}:
             actions.append("resume")
+            # Human takeover must not be a dead end: allow dismissing the issue
+            # (snooze/ignore) whenever the rule exposes those actions.
+            if manual_status == "manual_required":
+                actions.extend(action for action in ("snooze", "ignore") if action in rule_actions)
         elif not queued and not busy and not terminal:
             actions.extend(action for action in ("snooze", "ignore") if action in rule_actions)
             if auto_allowed:

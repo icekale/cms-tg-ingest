@@ -142,27 +142,52 @@ class QualityRuleEngineTests(unittest.TestCase):
                 self.assertNotIn("snooze", match.manual_actions)
                 self.assertNotIn("ignore", match.manual_actions)
 
-    def test_unexpected_strm_can_reprocess_with_complete_safe_evidence(self):
-        match = self.engine.evaluate(
-            task(strm_mode="direct"),
-            [QualityIssue("unexpected_strm", "unexpected", "/library/movie.strm")],
-            config={"allow_auto_reprocess": True},
-        )
+    def test_unexpected_strm_is_never_auto_reprocessed(self):
+        # Reprocess cannot fix "directory contains strm from older share generations":
+        # merge_self_share_strm_folder only overwrites files with a source counterpart
+        # and never removes stale siblings, so re-running the pipeline just rotates the
+        # share code again. This needs a human decision (snooze/ignore/resume).
+        for mode in ("direct", "shared", "source_shared"):
+            with self.subTest(mode=mode):
+                match = self.engine.evaluate(
+                    task(strm_mode=mode),
+                    [QualityIssue("unexpected_strm", "unexpected", "/library/movie.strm")],
+                    config={"allow_auto_reprocess": True},
+                )
 
-        self.assertEqual(match.rule_id, "unexpected_strm")
-        self.assertEqual(match.auto_action, "reprocess")
-        self.assertTrue(match.auto_allowed)
+                self.assertEqual(match.rule_id, "unexpected_strm")
+                self.assertEqual(match.auto_action, "none")
+                self.assertFalse(match.auto_allowed)
 
-    def test_unexpected_strm_is_manual_without_safe_reprocess_conditions(self):
+    def test_unexpected_strm_is_manual_even_with_complete_evidence(self):
         match = self.engine.evaluate(
-            task(strm_mode="direct", retry_count=3),
+            task(strm_mode="shared", retry_count=3),
             [QualityIssue("unexpected_strm", "unexpected", "")],
             config={"allow_auto_reprocess": True, "max_attempts": 3},
         )
 
         self.assertEqual(match.rule_id, "unexpected_strm")
-        self.assertEqual(match.auto_action, "reprocess")
+        self.assertEqual(match.auto_action, "none")
         self.assertFalse(match.auto_allowed)
+
+    def test_repeated_failure_exposes_snooze_and_ignore(self):
+        # attempts exhausted -> human takeover; the human must be able to dismiss
+        # (snooze/ignore) or re-enable (resume) without an infinite loop.
+        for issues in (
+            [QualityIssue("direct_strm", "direct", "/library/movie.strm")],
+            [QualityIssue("unexpected_strm", "unexpected", "/library/movie.strm")],
+            [QualityIssue("repeated_failure", "failed repeatedly", "/library/movie.strm")],
+        ):
+            with self.subTest(issues=issues[0].code):
+                match = self.engine.evaluate(
+                    task(strm_mode="shared", quality_repair_attempts=2),
+                    issues,
+                    config={"allow_auto_reprocess": True, "max_attempts": 2},
+                )
+
+                self.assertEqual(match.rule_id, "repeated_failure")
+                for action in ("view", "snooze", "ignore", "resume"):
+                    self.assertIn(action, match.manual_actions)
 
     def test_cleaned_invalid_share_is_terminal_and_manual(self):
         match = self.engine.evaluate(

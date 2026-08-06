@@ -136,9 +136,16 @@ const columns = [
   { title: '规则', key: 'rule_id', minWidth: 170 },
   { title: '风险', key: 'risk_level', width: 90, render: (row) => h(NTag, { size: 'small', type: qualityRiskType(row.risk_level) }, { default: () => row.risk_level || '-' }) },
   { title: '状态', key: 'manual_status', width: 100, render: (row) => h(NTag, { size: 'small' }, { default: () => qualityStatusLabel(row.archived ? 'archived' : row.manual_status) }) },
+  { title: '文件数', key: 'issue_count', width: 80, render: (row) => (row.issue_count > 1 ? `${row.issue_count} 个文件` : row.issue_count || '-') },
   { title: '尝试', key: 'attempts', width: 70 },
   { title: '问题', key: 'issue_codes', minWidth: 150, render: (row) => (row.issue_codes || []).join(', ') || '-' },
-  { title: '证据', key: 'evidence', minWidth: 230, render: (row) => h('div', { class: 'quality-evidence' }, (row.evidence || []).join('\n') || row.detail || '-') },
+  { title: '证据', key: 'evidence', minWidth: 230, render: (row) => {
+    const evidence = row.evidence || []
+    if (!evidence.length) return h('div', { class: 'quality-evidence' }, row.detail || '-')
+    const shown = evidence.slice(0, 3)
+    const extra = evidence.length - shown.length
+    return h('div', { class: 'quality-evidence' }, [...shown.map((line) => h('div', line)), ...(extra > 0 ? [h('div', { class: 'muted' }, `等 ${extra} 条`)] : [])])
+  } },
   { title: '操作', key: 'actions', minWidth: 180, render: actionCell },
 ]
 

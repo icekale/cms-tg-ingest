@@ -596,8 +596,9 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertEqual(plans[missing_strm.id].action, "skip")
             self.assertEqual(plans[missing_strm.id].reason, "missing_strm")
             self.assertEqual(plans[direct.id].action, "reprocess")
-            self.assertEqual(plans[unexpected.id].action, "reprocess")
-            self.assertEqual(summary.planned_count, 2)
+            self.assertEqual(plans[unexpected.id].action, "skip")
+            self.assertEqual(plans[unexpected.id].reason, "unexpected_strm")
+            self.assertEqual(summary.planned_count, 1)
             self.assertTrue(all(isinstance(plan, QualityRepairPlan) for plan in summary.plans))
 
     def test_missing_destination_is_manual_skip_and_never_calls_adapter(self):
@@ -743,7 +744,9 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertNotIn("execute", service.quality_descriptor(missing_dest)["available_actions"])
             self.assertNotIn("execute", service.quality_descriptor(missing_strm)["available_actions"])
             self.assertIn("execute", service.quality_descriptor(mismatch)["available_actions"])
-            self.assertIn("reprocess", service.quality_descriptor(unexpected)["available_actions"])
+            # unexpected_strm is never auto-reprocessed: stale sibling strm from older
+            # share generations cannot be fixed by re-running the pipeline.
+            self.assertNotIn("reprocess", service.quality_descriptor(unexpected)["available_actions"])
 
             service.store.update_quality_state(
                 missing_dest.id,
@@ -753,7 +756,48 @@ class QualityPlanningTests(unittest.TestCase):
                 "tester",
             )
             manual_required = service.quality_descriptor(service.store.find_task(missing_dest.id))
-            self.assertEqual(manual_required["available_actions"], ["view", "resume"])
+            self.assertEqual(
+                manual_required["available_actions"], ["view", "resume", "snooze", "ignore"]
+            )
+
+    def test_manual_required_repeated_failure_can_be_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            task = self.add_task(
+                service.store,
+                "repeated-manual",
+                library / "stale",
+                own_share_code="own",
+                strm_mode="shared",
+                quality_repair_attempts=2,
+            )
+            library.mkdir(exist_ok=True)
+            (library / "stale").mkdir(exist_ok=True)
+            (library / "stale" / "movie.strm").write_text(
+                "https://cms/d/other.mkv", encoding="utf-8"
+            )
+            service.store.update_quality_state(
+                task.id,
+                service.store.find_task(task.id).updated_at,
+                {"quality_manual_status": "manual_required"},
+                "attempts exhausted",
+                "quality-auto",
+            )
+
+            descriptor = service.quality_descriptor(service.store.find_task(task.id))
+            self.assertEqual(descriptor["rule_id"], "repeated_failure")
+            for action in ("view", "snooze", "ignore", "resume"):
+                self.assertIn(action, descriptor["available_actions"])
+
+            ignored = service.manual_action(
+                task.id, "repeated_failure", "ignore", "tester", rule_version="1"
+            )
+            self.assertEqual(ignored["status"], "ignored")
+            refreshed = service.store.find_task(task.id)
+            self.assertEqual(
+                str(refreshed.metadata.get("quality_manual_status") or "").strip().lower(),
+                "ignored",
+            )
 
     def test_manual_action_snooze_resume_and_rejects_unknown_task(self):
         with tempfile.TemporaryDirectory() as tmp:

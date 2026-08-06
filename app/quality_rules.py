@@ -45,6 +45,11 @@ _RULE_PRIORITIES = {
 }
 _MANUAL_ACTIONS = ("view", "snooze", "ignore")
 _RESTRICTED_MANUAL_ACTIONS = ("view", "resume")
+# Attempts exhausted = human takeover; the human must be able to dismiss the
+# issue (snooze/ignore) or re-enable evaluation (resume) without an infinite
+# loop. Restricted actions stay for transient states (risk control, invalid
+# STRM mode) where ignoring would hide a still-active condition.
+_REPEATED_FAILURE_MANUAL_ACTIONS = ("view", "snooze", "ignore", "resume")
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on", "enabled"})
 
 
@@ -273,7 +278,7 @@ class QualityRuleEngine:
                     "high",
                     "quality attempts have reached the configured limit",
                     issue_codes,
-                manual_actions=_RESTRICTED_MANUAL_ACTIONS,
+                    manual_actions=_REPEATED_FAILURE_MANUAL_ACTIONS,
                     evidence=(issue.detail for issue in issue_list if issue.detail),
                 )
             evidence = tuple(issue.detail for issue in mismatch_issues if str(issue.detail).strip())
@@ -319,21 +324,21 @@ class QualityRuleEngine:
                     "high",
                     "quality attempts have reached the configured limit",
                     issue_codes,
-                    manual_actions=_RESTRICTED_MANUAL_ACTIONS,
+                    manual_actions=_REPEATED_FAILURE_MANUAL_ACTIONS,
                     evidence=(issue.detail for issue in issue_list if issue.detail),
                 )
-            auto_allowed = (
-                bool(controls["allow_auto_reprocess"])
-                and has_complete_evidence(unexpected_issues, "unexpected_strm")
-                and not attempts_exhausted(task, controls)
-            )
+            # Never auto-reprocess unexpected_strm: the usual cause is stale strm
+            # left by older share generations in a reused destination folder, and
+            # merge_self_share_strm_folder only overwrites files with a source
+            # counterpart - re-running the pipeline rotates the share code again
+            # without removing the stale files (see #368). Needs a human decision.
             return _match(
                 "unexpected_strm",
                 "medium",
                 "STRM content does not match the expected mode",
                 ("unexpected_strm",),
-                auto_action="reprocess",
-                auto_allowed=auto_allowed,
+                auto_action="none",
+                auto_allowed=False,
                 manual_actions=_MANUAL_ACTIONS,
                 evidence=(issue.detail for issue in unexpected_issues if issue.detail),
             )
@@ -343,7 +348,7 @@ class QualityRuleEngine:
                 "high",
                 "quality attempts have reached the configured limit",
                 issue_codes,
-                    manual_actions=_RESTRICTED_MANUAL_ACTIONS,
+                manual_actions=_REPEATED_FAILURE_MANUAL_ACTIONS,
                 evidence=(issue.detail for issue in issue_list if issue.detail),
             )
         if not issue_list or (mode == "direct" and issue_codes == ("direct_strm",)):
