@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import shutil
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +53,7 @@ from app.media.strm import (
     plan_strm_move,
     restore_canonical_strm_paths,
     restore_missing_self_share_library_folder,
+    restore_missing_self_share_library_folders,
     _single_relative_directory_name,
     validate_self_share_strm_destination,
     validate_self_share_strm_source,
@@ -69,6 +71,55 @@ _RECEIVE_RECOVERY_RETRY_SECONDS = 30
 _RECEIVE_RECOVERY_WINDOW_SECONDS = 300
 _DELETE_RECOVERY_RETRY_SECONDS = 30
 _DELETE_RECOVERY_WINDOW_SECONDS = 300
+
+_post_organize_guard_lock = threading.Lock()
+_post_organize_guard_last_scheduled_at: float = 0.0
+
+
+def schedule_post_organize_restore_guard(
+    store: Any,
+    cms: Any,
+    self_share_config: SelfShareConfig,
+    move_config: Any,
+    emby: Any | None = None,
+    delay_seconds: int = 30,
+    limit: int = 50,
+) -> threading.Thread | None:
+    """Schedule a one-shot delayed self-share restore after CMS auto-organize.
+
+    CMS consumes 115 life events inside its async auto_tidy job; a stale
+    delete_file event can remove a self-share STRM directory. Running the
+    existing restore path shortly after the trigger shrinks the deletion
+    window from the maintenance-loop cadence to seconds.
+    """
+    global _post_organize_guard_last_scheduled_at
+    delay = max(0, int(delay_seconds))
+    with _post_organize_guard_lock:
+        now = time.time()
+        if delay and now - _post_organize_guard_last_scheduled_at < delay:
+            return None
+        _post_organize_guard_last_scheduled_at = now
+
+    def run() -> None:
+        try:
+            if delay:
+                time.sleep(delay)
+            restored = restore_missing_self_share_library_folders(
+                store,
+                cms,
+                self_share_config,
+                move_config,
+                emby=emby,
+                limit=limit,
+            )
+            if restored:
+                LOG.info("Post-auto-organize guard restored %s missing self-share folders", restored)
+        except Exception:
+            LOG.warning("Post-auto-organize guard failed", exc_info=True)
+
+    thread = threading.Thread(target=run, name="post-auto-organize-restore", daemon=True)
+    thread.start()
+    return thread
 
 
 @dataclass(frozen=True)
@@ -707,6 +758,16 @@ class BridgeSelfShareTaskWorkflow:
         metadata["auto_organize_pending"] = False
         metadata["auto_organize_submitted_at"] = self._now()
         metadata.pop("auto_organize_last_error", None)
+        guard_delay = min(60, max(15, int(self.self_share_config.auto_organize_retry_seconds or 90) // 2))
+        schedule_post_organize_restore_guard(
+            store=self.store,
+            cms=self.cms,
+            self_share_config=self.self_share_config,
+            move_config=self.move_config,
+            emby=self.emby,
+            delay_seconds=guard_delay,
+            limit=50,
+        )
         return StageResult.complete("115 云下载完成，已移动到待整理目录并触发 CMS 整理", metadata)
 
     def _stage_cloud_downloading(self, task):
@@ -1455,6 +1516,15 @@ class BridgeSelfShareTaskWorkflow:
         }:
             self.cms.run_auto_organize()
             row = self.store.update_self_share(int(row["id"]), workflow_phase="auto_organize_submitted") or row
+            schedule_post_organize_restore_guard(
+                store=self.store,
+                cms=self.cms,
+                self_share_config=self.self_share_config,
+                move_config=self.move_config,
+                emby=self.emby,
+                delay_seconds=min(60, max(15, int(self.self_share_config.auto_organize_retry_seconds or 90) // 2)),
+                limit=50,
+            )
         excluded_parent_ids = set(self.self_share_config.excluded_parent_ids or set())
         receive_cid = self._task_receive_cid(task)
         if receive_cid:

@@ -980,3 +980,166 @@ class CloudIntakeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PostAutoOrganizeGuardTests(unittest.TestCase):
+    def setUp(self):
+        from app.workflows import self_share as ss
+        self.ss_module = ss
+        ss._post_organize_guard_last_scheduled_at = 0.0
+
+    def test_schedule_post_organize_restore_guard_zero_delay_invokes_restore(self):
+        from app.workflows.self_share import schedule_post_organize_restore_guard
+
+        called = {}
+
+        def fake_restore(store, cms, self_share_config, move_config, emby=None, limit=50):
+            called["store"] = store
+            called["cms"] = cms
+            called["config"] = self_share_config
+            called["move_config"] = move_config
+            called["emby"] = emby
+            called["limit"] = limit
+            return 2
+
+        store = object()
+        cms = object()
+        config = SelfShareConfig(enabled=True)
+        move_config = MoveConfig(source_roots=[], library_roots={})
+        emby = object()
+        with patch("app.workflows.self_share.restore_missing_self_share_library_folders", side_effect=fake_restore) as restore_mock:
+            thread = schedule_post_organize_restore_guard(
+                store,
+                cms,
+                config,
+                move_config,
+                emby=emby,
+                delay_seconds=0,
+                limit=10,
+            )
+            self.assertIsNotNone(thread)
+            thread.join(timeout=5)
+
+        restore_mock.assert_called_once()
+        self.assertEqual(called["store"], store)
+        self.assertEqual(called["cms"], cms)
+        self.assertEqual(called["config"], config)
+        self.assertEqual(called["move_config"], move_config)
+        self.assertEqual(called["emby"], emby)
+        self.assertEqual(called["limit"], 10)
+
+    def test_schedule_post_organize_restore_guard_dedupes_within_window(self):
+        from app.workflows.self_share import schedule_post_organize_restore_guard
+
+        store = object()
+        cms = object()
+        config = SelfShareConfig(enabled=True)
+        move_config = MoveConfig(source_roots=[], library_roots={})
+        with patch("app.workflows.self_share.restore_missing_self_share_library_folders", return_value=0) as restore_mock:
+            first = schedule_post_organize_restore_guard(
+                store, cms, config, move_config, delay_seconds=3600, limit=10
+            )
+            second = schedule_post_organize_restore_guard(
+                store, cms, config, move_config, delay_seconds=3600, limit=10
+            )
+            self.assertIsNotNone(first)
+            self.assertIsNone(second)
+        restore_mock.assert_not_called()
+        self.ss_module._post_organize_guard_last_scheduled_at = 0.0
+
+    def test_trigger_cloud_auto_organize_success_schedules_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_cloud_task("ed2k:hash:11", ED2K, title="Example.mkv")
+            submissions = FakeSubmissionStore()
+            p115 = FakeCloudP115(
+                [
+                    {
+                        "status": 11,
+                        "file_id": "folder-1",
+                        "parent_id": TARGET_CID,
+                        "file_name": "Example",
+                    },
+                ]
+            )
+            cms = FakeCms()
+            workflow = make_workflow(p115, submissions, cms=cms)
+
+            with patch(
+                "app.workflows.self_share.schedule_post_organize_restore_guard",
+                return_value=None,
+            ) as schedule_mock:
+                first = workflow.run_stage(task)
+                self.assertEqual(first.outcome.value, "defer")
+                task = task_store.record_event(
+                    task.id,
+                    TaskStage.CLOUD_DOWNLOADING,
+                    TaskStatus.RUNNING,
+                    first.message,
+                    metadata_patch=first.metadata,
+                )
+                second = workflow.run_stage(task)
+                self.assertEqual(second.outcome.value, "defer")
+                task = task_store.record_event(
+                    task.id,
+                    TaskStage.CLOUD_DOWNLOADING,
+                    TaskStatus.RUNNING,
+                    second.message,
+                    metadata_patch=second.metadata,
+                )
+                third = workflow.run_stage(task)
+
+            self.assertEqual(third.outcome.value, "complete")
+            self.assertEqual(cms.auto_organize_calls, 1)
+            schedule_mock.assert_called_once()
+            kwargs = schedule_mock.call_args.kwargs
+            self.assertEqual(kwargs["store"], submissions)
+            self.assertEqual(kwargs["cms"], cms)
+            self.assertEqual(kwargs["self_share_config"], workflow.self_share_config)
+            self.assertEqual(kwargs["move_config"], workflow.move_config)
+            self.assertIsNone(kwargs["emby"])
+            self.assertGreaterEqual(kwargs["delay_seconds"], 15)
+            self.assertLessEqual(kwargs["delay_seconds"], 60)
+
+    def test_stage_organizing_schedules_guard_after_auto_organize(self):
+        from types import SimpleNamespace
+        from app.workflows.self_share import BridgeSelfShareTaskWorkflow
+
+        submissions = FakeSubmissionStore()
+        row = submissions.upsert_submission(
+            bridge.ShareKey("swhou1y3nr6", "u148"),
+            "https://115cdn.com/s/swhou1y3nr6?password=u148",
+            "received",
+            title="Example.mkv",
+        )
+        task = SimpleNamespace(
+            id=1,
+            share_code="swhou1y3nr6",
+            receive_code="u148",
+            url="https://115cdn.com/s/swhou1y3nr6?password=u148",
+            title="Example.mkv",
+            metadata={"submission_id": row["id"], "operation_generation": 0, "update_requested_run": 0},
+        )
+        p115 = FakeCloudP115([])
+        cms = FakeCms()
+        workflow = make_workflow(p115, submissions, cms=cms)
+
+        with patch("app.workflows.self_share.schedule_post_organize_restore_guard", return_value=None) as schedule_mock:
+            with patch.object(
+                workflow,
+                "_find_organized_folder",
+                return_value=(None, {}, True, 0),
+            ):
+                result = workflow._stage_organizing(task)
+
+        self.assertEqual(cms.auto_organize_calls, 1)
+        self.assertEqual(result.outcome.value, "defer")
+        schedule_mock.assert_called_once()
+        kwargs = schedule_mock.call_args.kwargs
+        self.assertEqual(kwargs["store"], submissions)
+        self.assertEqual(kwargs["cms"], cms)
+        self.assertEqual(kwargs["self_share_config"], workflow.self_share_config)
+        self.assertEqual(kwargs["move_config"], workflow.move_config)
+        self.assertIsNone(kwargs["emby"])
+        self.assertGreaterEqual(kwargs["delay_seconds"], 15)
+        self.assertLessEqual(kwargs["delay_seconds"], 60)
