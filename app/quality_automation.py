@@ -1106,11 +1106,16 @@ class QualityAutomation:
                 skipped.append({"path": str(path), "reason": "share_became_live"})
                 continue
             digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
-            operation_key = f"quality-strm-cleanup-{digest}"
+            operation_key = f"quality-strm-cleanup-{digest}-{time.monotonic_ns():x}"
             request: dict[str, object] = {
                 "path": str(path),
                 "share_code": codes[0],
                 "dry_run": False,
+                # Content snapshot so a deletion can be rolled back exactly, even
+                # if the referenced share is gone later. strm files are plain
+                # text (~300 bytes); the task_operations table is cleared with
+                # the task history, so this stays bounded.
+                "content": text,
             }
             operation = self.store.prepare_operation(task.id, operation_key, "quality_strm_cleanup", request)
             started = self.store.start_operation(task.id, operation_key) if operation is not None else None

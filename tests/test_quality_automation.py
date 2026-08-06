@@ -1320,14 +1320,16 @@ class QualityStrmCleanupTests(unittest.TestCase):
             self.assertEqual(result["removed"][0]["share_code"], "deadC")
             self.assertFalse((dest / "dead.strm").exists())
             self.assertTrue((dest / "own.strm").exists())
-            import hashlib as _hashlib
-
-            key = f"quality-strm-cleanup-{_hashlib.sha256(dead_path.encode('utf-8')).hexdigest()[:16]}"
-            operation = service.store.find_operation(task.id, key)
-            self.assertIsNotNone(operation)
-            self.assertEqual(operation.operation_type, "quality_strm_cleanup")
-            self.assertEqual(operation.status, "succeeded")
-            self.assertEqual(operation.request.get("path"), dead_path)
+            operations = service.store.list_operations(task.id)
+            cleanup_ops = [
+                op
+                for op in operations
+                if op.operation_type == "quality_strm_cleanup" and op.status == "succeeded"
+            ]
+            self.assertEqual(len(cleanup_ops), 1)
+            self.assertEqual(cleanup_ops[0].request.get("path"), dead_path)
+            # Content snapshot enables exact rollback even if the share dies later.
+            self.assertEqual(cleanup_ops[0].request.get("content"), "https://cms/s/deadC_1212_dead.mkv")
 
     def test_cleanup_skips_non_candidate_and_changed_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1400,6 +1402,25 @@ class QualityStrmCleanupTests(unittest.TestCase):
             self.assertFalse(result["resumed"])
             state = service.store.quality_state(task.id)
             self.assertEqual(str(state.get("quality_manual_status") or "").strip().lower(), "manual_required")
+
+    def test_cleanup_same_path_again_after_rebuild_does_not_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            dest = library / "episode"
+            self.write_strm(dest, "dead.strm", "https://cms/s/deadC_1212_dead.mkv")
+            task = self.add_task(service.store, "episode", dest, own_share_code="ownA")
+
+            first = service.cleanup_stale_strm(task.id, [str(dest / "dead.strm")], actor="tester")
+            self.assertEqual(len(first["removed"]), 1)
+            # The same relative path is recreated later (e.g. by a reprocess).
+            self.write_strm(dest, "dead.strm", "https://cms/s/deadC_1212_dead.mkv")
+            second = service.cleanup_stale_strm(task.id, [str(dest / "dead.strm")], actor="tester")
+
+            self.assertEqual(len(second["removed"]), 1)
+            self.assertEqual(
+                len([op for op in service.store.list_operations(task.id) if op.operation_type == "quality_strm_cleanup"]),
+                2,
+            )
 
     def test_cleanup_disabled_empty_or_unknown_task(self):
         with tempfile.TemporaryDirectory() as tmp:

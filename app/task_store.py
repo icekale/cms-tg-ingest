@@ -459,6 +459,15 @@ class TaskStore:
             ).fetchone()
         return self._operation(row) if row is not None else None
 
+    def list_operations(self, task_id: int) -> list[TaskOperation]:
+        """All operation rows for one task, oldest first."""
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM task_operations WHERE task_id = ? ORDER BY id",
+                (int(task_id),),
+            ).fetchall()
+        return [self._operation(row) for row in rows]
+
     def start_operation(self, task_id: int, operation_key: str) -> TaskOperation | None:
         now = time.time()
         with self._lock, self._connection() as conn:
