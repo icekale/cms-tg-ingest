@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.78 - 2026-08-06
+
+- 直链 STRM 自动探测：定时巡检对 `/d/` 文件调用 CMS `probe_strm_url` 确认是否死链，结果写入任务元数据（24h 冷却，web 页面零外部调用）；确认失效的升级为 `dead_direct_link` 高优先规则（可忽略/可清理），与普通 `direct_strm`（疑似）区分。
+- 失效 STRM 清理支持“已确认失效”的直链文件（dry-run 候选 `dead_direct_link_confirmed`，可删除并记录内容快照）；未确认的直链仍不参与自动清理。
+
 ## 0.2.77 - 2026-08-06
 
 - 失效 STRM 清理增加分享存活标注与保护：dry-run 支持 `check_shares`（逐个调用 115 `inspect_share` 验证候选分享码，带缓存与 20 码上限），每条候选标注 `share_state`（有效/失效/未知）；执行默认保护“分享在 115 仍有效”的文件（`share_still_alive` 跳过），需显式 `allow_alive=true` 才删除——避免把仍可播放的分享 STRM 当死链删掉（线上 #368 教训：22 个 unexpected_strm 实为有效播放链接）。前端对有效分享的文件默认不勾选并标红提示。
