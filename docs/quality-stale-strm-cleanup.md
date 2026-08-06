@@ -6,7 +6,7 @@
 > （`app/media/strm.py`）只覆盖"源中有同名文件"的项，**从不删除目标目录中无对应的旧 STRM**，
 > 旧分享失效后这些文件成为死链。巡检正确识别了死链，但此前没有任何清理路径（只能 SSH 手动删）。
 
-## 实现状态（v0.2.75 起，至 v0.2.78）
+## 实现状态（v0.2.75 起，至 v0.2.79）
 
 - `QUALITY_STRM_CLEANUP_ENABLED`（默认 false）开关；开启后质量页每行出现“失效 STRM”按钮。
 - `POST /api/v1/quality/cleanup/dry-run`（body `{task_id}`）→ 候选清单；`POST /api/v1/quality/cleanup/run`（body `{task_id, paths}`）→ 逐文件复检后删除。
