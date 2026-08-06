@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.73 - 2026-08-06
+
+- TaskRunner 活动度观测：心跳同步写入 `task_runner:activity` 运行时状态（当前任务 id/阶段/开始时间/上次认领尝试），`/api/v1/health` 新增 `runner_active`、`runner_active_task_id`、`runner_active_stage`、`runner_active_since`、`runner_last_claim_attempt_at` 字段，前端"本地健康"页新增"Runner 当前"展示；新增 `docs/multi-worker-analysis.md` 多 worker 成本收益分析（结论：维持单 worker，附观察方法）。
+- 任务详情页动作按钮不再依赖前端启发式判断，改由后端 `available_actions`（生命周期动作 ∪ 任务动作）统一下发，`canRetry`/`canEmby`/`canRestore`/`canReprocess` 与后端状态保持一致。
+- 自分享接收 cid 安全脱敏：API 不再回显原始值，只返回 `masked`（首4+`****`+尾4）与 `configured`，设置页展示脱敏结果。
+- 修复 `claim_quality_cleanup` 误判：改用 `conn.total_changes` 判断是否真正更新（原 `rowcount` 在部分驱动下恒为 1，导致已无任务可领时仍报成功）。
+- HDHive 订阅解析支持无季度前缀的"更新至第N集"（用资源自身季度兜底）；订阅解锁异常不再静默吞掉，记录 warning 与堆栈。
+- `SHARE_SYNC_SUBMITTED` 阶段加入 defer 次数上限（30），与其余阶段一致，避免无限期推迟。
+- 修复 `update_ready` 粘性标记：检测到容器重启（`StartedAt` 变化）后自动清除，避免重启后仍提示"有更新"；新增 Docker Engine API 读取启动时间，异常时安全降级。
+- 修复恒定时间比较对非 ASCII token 抛 `TypeError` 的问题：先按 UTF-8 编码再比较，编码失败即拒绝（fail-closed）。
+- HTTP 重试尊重 `Retry-After` 但设 300 秒上限，防止异常/恶意超长等待值挂起请求。
+- 媒体分类修复：印度语 2 字符标记改为带词边界的匹配（原去空格后词边界失效可能误匹配）；`extract_tmdb_search_query` 多词优先、单字符标记仅在紧随标记时回退；`extract_year_from_name` 剥离分辨率后缀，与 115 目录匹配行为一致。
+- 备份保留修复：旧备份清理改为扫描目标目录全部 `*.db`（原按当前备份 stem 前缀匹配会漏清理历史备份）；同日失败重试设 4 次上限（保留每小时重试设计，不再整天重试）。
+- 修复 `quality_automation.py` 缺失的 `Any` 导入（ruff F821）。
 ## 0.2.72 - 2026-08-05
 
 - 配置健壮性：只设置 `SELF_SHARE_REVIEW_GRACE_SECONDS`（如 3600）而不同步设置检查点时会直接启动失败；现在未显式配置 `SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS` 时自动以宽限期作为唯一检查点，显式配置仍严格校验末尾必须等于宽限期。

@@ -25,7 +25,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 固定版本镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.2.72
+docker pull icekale/cms-tg-ingest:0.2.73
 ```
 
 ### 完整 Docker Compose
