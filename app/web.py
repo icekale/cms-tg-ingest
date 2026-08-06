@@ -3,6 +3,19 @@ from __future__ import annotations
 import errno
 import html
 from hmac import compare_digest
+def _constant_time_equals(provided: object, expected: object) -> bool:
+    """Constant-time string comparison that tolerates non-ASCII input.
+
+    ``hmac.compare_digest`` raises TypeError for non-ASCII str arguments, so
+    encode both sides as UTF-8 bytes first. Non-encodable inputs simply fail
+    closed.
+    """
+    try:
+        provided_bytes = str(provided or "").encode("utf-8")
+        expected_bytes = str(expected or "").encode("utf-8")
+    except (TypeError, UnicodeEncodeError):
+        return False
+    return compare_digest(provided_bytes, expected_bytes)
 import json
 import mimetypes
 import time
@@ -1403,16 +1416,16 @@ class WebApp:
             query = parse_qs(_parse_request_target(path).query)
         except (TypeError, ValueError):
             return ""
-        if compare_digest(query.get("token", [""])[0], self.web_token):
+        if _constant_time_equals(query.get("token", [""])[0], self.web_token):
             return "query"
-        if compare_digest(self._header_value(headers, "X-Web-Token"), self.web_token):
+        if _constant_time_equals(self._header_value(headers, "X-Web-Token"), self.web_token):
             return "header"
         cookie = SimpleCookie()
         try:
             cookie.load(self._header_value(headers, "Cookie"))
         except CookieError:
             return ""
-        if cookie.get("cms_web_token") and compare_digest(
+        if cookie.get("cms_web_token") and _constant_time_equals(
             unquote(cookie["cms_web_token"].value), self.web_token
         ):
             return "cookie"

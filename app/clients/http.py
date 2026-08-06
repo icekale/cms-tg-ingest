@@ -105,6 +105,9 @@ _SENSITIVE_PATH_VALUE_RE = re.compile(
     rf"(?P<prefix>/(?:{_SENSITIVE_KEY_PATTERN})(?:/|=))(?P<value>[^/?#]+)",
     re.IGNORECASE,
 )
+# A misbehaving or hostile upstream must not be able to park a worker thread
+# for hours via a large Retry-After header.
+_MAX_RETRY_AFTER_SECONDS = 300.0
 _SENSITIVE_ENCODED_ASSIGNMENT_RE = re.compile(
     rf"(?P<key>{_SENSITIVE_KEY_PATTERN})(?P<separator>%3d|=)"
     rf"(?P<value>[^&;\s<>\"']+)",
@@ -219,7 +222,10 @@ def _read_response(req: urllib.request.Request, timeout: int, safe_get_attempts:
                 return resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
             if attempt + 1 < attempts and _safe_get_retryable(req, exc):
-                delay = max(0.2, float(_retry_after_seconds(exc)))
+                delay = min(
+                    _MAX_RETRY_AFTER_SECONDS,
+                    max(0.2, float(_retry_after_seconds(exc))),
+                )
                 exc.close()
                 time.sleep(delay)
                 continue

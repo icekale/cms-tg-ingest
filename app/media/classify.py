@@ -42,7 +42,12 @@ ASIAN_MOVIE_LANGUAGE_MARKERS = {
     "id",
     "印尼语",
 }
-INDIAN_MOVIE_MARKERS = {"印度", "印地", "宝莱坞", "bollywood", "hindi", "andhadhun", "tamil", "telugu", "hi", "ta", "te", "印地语", "泰米尔语", "泰卢固语"}
+INDIAN_MOVIE_MARKERS = {"印度", "印地", "宝莱坞", "bollywood", "hindi", "andhadhun", "tamil", "telugu", "印地语", "泰米尔语", "泰卢固语"}
+# Two-letter language codes (hi/ta/te) collide with common English words when
+# matched as substrings ("ta" in "Titanic", "te" in "Interest", "hi" in
+# "Spirited Away"). Only treat them as hints when they appear as standalone
+# words in the raw (un-normalized) name, e.g. "Hi Nanna".
+INDIAN_TWO_LETTER_MARKERS = ("hi", "ta", "te")
 
 
 def normalized_tmdb_language(language: str) -> str:
@@ -65,10 +70,17 @@ def language_matches(normalized_language: str, markers: set[str]) -> bool:
 
 
 def has_indian_movie_hint(*values: str) -> bool:
-    text = normalize_text(" ".join(str(value or "") for value in values))
+    raw = " ".join(str(value or "") for value in values)
+    text = normalize_text(raw)
     if not text:
         return False
-    return any(normalize_text(marker) in text for marker in INDIAN_MOVIE_MARKERS)
+    if any(normalize_text(marker) in text for marker in INDIAN_MOVIE_MARKERS):
+        return True
+    lowered = raw.lower()
+    return any(
+        re.search(rf"(?<![a-z0-9]){word}(?![a-z0-9])", lowered)
+        for word in INDIAN_TWO_LETTER_MARKERS
+    )
 
 
 def user_movie_category_bucket(category: str, media_type: str, *hints: str) -> str:
@@ -302,11 +314,24 @@ def _normalize_tv_seasons(value: Any) -> list[dict[str, Any]]:
 
 def extract_tmdb_search_query(share_name: str) -> str:
     text = str(share_name or "")
-    title_pattern = r"([A-Za-z][A-Za-z0-9'&:]+(?:[ ._-][A-Za-z0-9'&:]+){1,}?)"
-    for marker in (r"(?=[ ._-]S\d{1,2}\b)", r"(?=[ ._-](?:19|20)\d{2}\b)"):
-        match = re.search(rf"{title_pattern}{marker}", text, re.I)
-        if match:
-            return re.sub(r"\s+", " ", re.sub(r"[^0-9A-Za-z]+", " ", match.group(1))).strip()
+    # Multi-word titles first: prefer consuming the full title up to the first
+    # season or release-year marker (e.g. "Cyberpunk.2077.2020" -> "Cyberpunk 2077").
+    multi_word_pattern = r"([A-Za-z][A-Za-z0-9'&:]+(?:[ ._-][A-Za-z0-9'&:]+){1,}?)"
+    # Single-word titles ("Dune.2021") are only matched when a marker directly
+    # follows, so a year that belongs to the title ("Cyberpunk.2077") is not
+    # mistaken for the release-year boundary.
+    single_word_pattern = r"([A-Za-z][A-Za-z0-9'&:]+)"
+    # SxxEyy has no word boundary between the episode number and the next token
+    # ("S01E01.1080p"), so the season marker must consume an optional episode.
+    markers = (
+        r"(?=[ ._-]S\d{1,2}(?:E\d{1,4})?\b)",
+        r"(?=[ ._-](?:19|20)\d{2}\b)",
+    )
+    for pattern in (multi_word_pattern, single_word_pattern):
+        for marker in markers:
+            match = re.search(rf"{pattern}{marker}", text, re.I)
+            if match:
+                return re.sub(r"\s+", " ", re.sub(r"[^0-9A-Za-z]+", " ", match.group(1))).strip()
     return extract_primary_chinese_title(text)
 
 
@@ -509,8 +534,15 @@ def normalize_tmdb_hint_name(value: str, tmdb_id: str, title: str = "") -> str:
 
 
 def extract_year_from_name(value: str) -> str:
-    match = re.search(r"(19|20)\d{2}", str(value or ""))
-    return match.group(0) if match else ""
+    text = str(value or "")
+    # Resolution dimensions like 1920x1080 / 3840×2160 contain 4-digit numbers
+    # that are not release years; drop them before scanning.
+    text = re.sub(r"\d{3,4}[xX×*]\d{3,4}", " ", text)
+    # Prefer the last bounded 19xx/20xx token: "Cyberpunk.2077.2020" is a 2020
+    # release whose title itself contains a year, and a trailing year in a
+    # release-group name is the release year.
+    matches = re.findall(r"(?<!\d)(?:19|20)\d{2}(?!\d)", text)
+    return matches[-1] if matches else ""
 
 
 def media_type_for_category(category: str) -> str:

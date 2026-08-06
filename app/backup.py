@@ -20,7 +20,11 @@ from .sqlite_utils import sqlite_connection, sqlite_quick_check
 LOG = logging.getLogger("cms-tg-ingest")
 BACKUP_STATE_KEY = "backup_last_result"
 BACKUP_RUN_DATE_KEY = "backup_last_run_date"
+BACKUP_RETRY_COUNT_KEY = "backup_same_day_retry_count"
 _PARTIAL_BACKUP_RETRY_SECONDS = 3600
+# A permanently broken source must not trigger a full re-backup every hour for
+# the rest of the day; after this many same-day retries the day is marked done.
+_MAX_DAILY_BACKUP_RETRIES = 4
 _BACKUP_NAME_RE = re.compile(r"^(?P<stem>.+)-(?P<timestamp>\d{8}T\d{6}Z)\.db$")
 _BACKUP_LOGICAL_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -53,22 +57,24 @@ def _iso_timestamp(value: float) -> str:
 
 
 def _retire_old_backups(destination: Path, stems: set[str], cutoff: float) -> None:
-    for stem in stems:
-        for path in destination.glob(f"{stem}-*.db"):
-            match = _BACKUP_NAME_RE.match(path.name)
-            if not match or match.group("stem") != stem:
-                continue
+    # Retire every backup older than the cutoff, including stems whose source
+    # no longer exists in the current run (a deleted/renamed source DB would
+    # otherwise leave its backups behind forever).
+    for path in destination.glob("*.db"):
+        match = _BACKUP_NAME_RE.match(path.name)
+        if not match:
+            continue
+        try:
+            created_at = datetime.strptime(match.group("timestamp"), "%Y%m%dT%H%M%SZ").replace(
+                tzinfo=timezone.utc
+            ).timestamp()
+        except ValueError:
+            continue
+        if created_at < cutoff:
             try:
-                created_at = datetime.strptime(match.group("timestamp"), "%Y%m%dT%H%M%SZ").replace(
-                    tzinfo=timezone.utc
-                ).timestamp()
-            except ValueError:
+                path.unlink()
+            except OSError:
                 continue
-            if created_at < cutoff:
-                try:
-                    path.unlink()
-                except OSError:
-                    continue
 
 
 def _normalize_sources(
@@ -276,6 +282,25 @@ class BackupScheduler:
         # not suppress the next scheduler tick until tomorrow.
         if result.status in {"succeeded", "skipped"}:
             self.store.set_runtime_state(BACKUP_RUN_DATE_KEY, run_date, updated_at=local_now.timestamp())
+        else:
+            # A permanently broken source must not force a full re-backup every
+            # hour for the rest of the day. Cap same-day retries, then mark the
+            # day done so the next scheduled run happens tomorrow.
+            retry_state = self.store.get_runtime_state(BACKUP_RETRY_COUNT_KEY)
+            retry_count = 0
+            if retry_state is not None:
+                try:
+                    retry_count = max(0, int(str(retry_state.get("value") or "") or 0))
+                except (TypeError, ValueError):
+                    retry_count = 0
+            retry_count += 1
+            self.store.set_runtime_state(
+                BACKUP_RETRY_COUNT_KEY,
+                str(retry_count),
+                updated_at=local_now.timestamp(),
+            )
+            if retry_count >= _MAX_DAILY_BACKUP_RETRIES:
+                self.store.set_runtime_state(BACKUP_RUN_DATE_KEY, run_date, updated_at=local_now.timestamp())
         return result
 
 

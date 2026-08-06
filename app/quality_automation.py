@@ -8,7 +8,7 @@ import time
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import Config, MoveConfig, is_relative_to, is_under_any_root, safe_resolve
