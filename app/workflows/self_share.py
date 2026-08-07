@@ -1255,6 +1255,9 @@ class BridgeSelfShareTaskWorkflow:
         return []
 
     def _hint_source_name(self, task, row: dict[str, Any]) -> str:
+        subscription_hint = str(task.metadata.get("tmdb_hint_source_name") or "").strip()
+        if subscription_hint and extract_tmdb_id_from_name(subscription_hint):
+            return subscription_hint
         candidates = [
             str(item.get("file_name") or "").strip()
             for item in self._received_item_candidates(task, row)

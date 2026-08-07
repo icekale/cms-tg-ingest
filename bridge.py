@@ -4754,6 +4754,35 @@ def run_forever(
                 subscription.tmdb_id,
                 lambda: tmdb_resolver.lookup(subscription.tmdb_id, "tv", subscription.title),
             )
+        task_id = getattr(item, "task_id", None)
+        if task_store is not None and task_id and subscription.tmdb_id:
+            try:
+                task = task_store.find_task(int(task_id))
+                if task is not None:
+                    hint_source = str(subscription.title or "").strip()
+                    if hint_source and extract_tmdb_id_from_name(hint_source) != str(subscription.tmdb_id):
+                        hint_source = f"{hint_source} {{tmdb-{subscription.tmdb_id}}}"
+                    task_store.record_event(
+                        int(task_id),
+                        task.current_stage,
+                        task.status,
+                        "订阅已补充 TMDB 提示",
+                        title=hint_source if extract_tmdb_id_from_name(str(task.title or "")) != str(subscription.tmdb_id) else None,
+                        metadata_patch={"tmdb_hint_source_name": hint_source} if hint_source else None,
+                        deduplicate=True,
+                    )
+                    submission_id = task.submission_id or task.metadata.get("submission_id")
+                    if submission_id not in (None, ""):
+                        row = store.find_by_id(int(submission_id))
+                        if row is not None and not extract_tmdb_id_from_name(str(row.get("title") or "")):
+                            store.upsert_submission(
+                                _ShareKey(str(row.get("share_code") or ""), str(row.get("receive_code") or "")),
+                                str(row.get("url") or ""),
+                                str(row.get("status") or ""),
+                                title=hint_source,
+                            )
+            except Exception:
+                LOG.warning("Failed to attach HDHive subscription TMDB hint task_id=%s", task_id, exc_info=True)
         caption, poster_url = build_hdhive_unlock_card(subscription, item, tmdb_details=details)
         if poster_url and hasattr(telegram, "send_photo"):
             telegram.send_photo(subscription.chat_id, poster_url, caption)

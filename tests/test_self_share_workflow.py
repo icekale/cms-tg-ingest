@@ -4773,6 +4773,23 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertEqual((dest / "jojo.strm").read_text(encoding="utf-8"), "http://cms/s/swslig43wul_1212_1.mkv")
 
 
+    def test_hint_source_name_prefers_subscription_tmdb_metadata(self):
+        workflow = bridge.BridgeSelfShareTaskWorkflow.__new__(bridge.BridgeSelfShareTaskWorkflow)
+        task = SimpleNamespace(
+            metadata={
+                "tmdb_hint_source_name": "权力的游戏前传：龙族 (2022) {tmdb-94997}",
+                "received_title": "Season 3（衣柜）",
+            },
+            title="Season 3（衣柜）",
+        )
+        row = {"title": "Season 3（衣柜）"}
+
+        source_name = workflow._hint_source_name(task, row)
+
+        self.assertEqual(source_name, "权力的游戏前传：龙族 (2022) {tmdb-94997}")
+        self.assertEqual(bridge.extract_tmdb_id_from_name(source_name), "94997")
+
+
 if __name__ == "__main__":
     unittest.main()
 
