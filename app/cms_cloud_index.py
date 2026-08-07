@@ -66,16 +66,12 @@ class CmsCloudDataIndex:
                     SELECT fid, name, pick_code, local_path
                     FROM cloud_data
                     WHERE action = 'STRM' AND status = 1 AND local_path LIKE ?
-                    ORDER BY fid
-                    LIMIT ?
                     """,
-                    (_MEDIA_LOCAL_PATH_PREFIX + "%", limit * 4),
+                    (_MEDIA_LOCAL_PATH_PREFIX + "%",),
                 ).fetchall()
         except (OSError, sqlite3.Error):
             return []
         for row in rows:
-            if len(candidates) >= limit:
-                break
             expected = self._expected_media_strm_path(row, host_root)
             if expected is None:
                 continue
@@ -89,6 +85,8 @@ class CmsCloudDataIndex:
                     "expected_path": str(expected),
                 }
             )
+            if len(candidates) >= limit:
+                break
         return candidates
 
     def repair_missing_media_strms(

@@ -23,7 +23,7 @@ Out of scope:
 ## Design
 
 1. `CmsCloudDataIndex.missing_media_strm_candidates(host_strm_root, limit)`:
-   - Query `SELECT fid, name, pick_code, local_path FROM cloud_data WHERE action='STRM' AND status=1 AND local_path LIKE '/media/%' ORDER BY fid LIMIT ?`.
+   - Query all `SELECT fid, name, pick_code, local_path FROM cloud_data WHERE action='STRM' AND status=1 AND local_path LIKE '/media/%'`, then collect missing files up to `limit` (per-cycle cap; subsequent cycles continue).
    - For each row, host path = `host_strm_root / local_path.removeprefix('/media')`, expected strm = dir / name-with-`.strm` suffix.
    - Return rows where the expected strm file is missing.
 2. `repair_missing_media_strms(index, host_strm_root, direct_domain, limit, dry_run=False)`:
