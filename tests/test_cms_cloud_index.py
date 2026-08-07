@@ -195,3 +195,96 @@ class CmsCloudDataIndexTests(unittest.TestCase):
 
             self.assertEqual(folder["direct_file_id"], "new-episode")
             self.assertEqual(folder["direct_relative_path"], "S03E03.strm")
+
+
+class MediaStrmRepairTests(unittest.TestCase):
+    def _db(self, root: str) -> Path:
+        path = Path(root) / "cms-online.db"
+        with closing(sqlite3.connect(path)) as conn:
+            conn.execute(
+                """
+                CREATE TABLE cloud_data (
+                    fid TEXT PRIMARY KEY,
+                    pid TEXT,
+                    name TEXT,
+                    pick_code TEXT,
+                    is_dir INTEGER NOT NULL,
+                    f_modify_time INTEGER,
+                    action TEXT NOT NULL DEFAULT '',
+                    status INTEGER NOT NULL DEFAULT 0,
+                    local_path TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            conn.executemany(
+                "INSERT INTO cloud_data (fid, pid, name, pick_code, is_dir, f_modify_time, action, status, local_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    ("fid-missing", "season", "龙族 (2022) - S03E06 - 第 6 集 - 2160p.mkv", "bimn8xuw1izk98sgx", 0, 0, "STRM", 1, "/media/转存/TV/Q-龙族-2022-[tmdb=94997]/Season 03"),
+                    ("fid-present", "season", "龙族 (2022) - S03E05 - 第 5 集 - 2160p.mkv", "akrrenvi7l7h4hfud", 0, 0, "STRM", 1, "/media/转存/TV/Q-龙族-2022-[tmdb=94997]/Season 03"),
+                    ("fid-disabled", "season", "龙族 (2022) - S03E04 - 第 4 集 - 2160p.mkv", "disabledpick", 0, 0, "STRM", 0, "/media/转存/TV/Q-龙族-2022-[tmdb=94997]/Season 03"),
+                ],
+            )
+            conn.commit()
+        return path
+
+    def test_missing_media_strm_candidates_only_reports_absent_status1_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._db(tmp)
+            host_root = Path(tmp) / "strm"
+            existing_dir = host_root / "转存" / "TV" / "Q-龙族-2022-[tmdb=94997]" / "Season 03"
+            existing_dir.mkdir(parents=True)
+            (existing_dir / "龙族 (2022) - S03E05 - 第 5 集 - 2160p.strm").write_text("x", encoding="utf-8")
+
+            index = CmsCloudDataIndex(db_path)
+            candidates = index.missing_media_strm_candidates(host_root, limit=50)
+
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0]["fid"], "fid-missing")
+            self.assertEqual(candidates[0]["pick_code"], "bimn8xuw1izk98sgx")
+            self.assertEqual(
+                Path(candidates[0]["expected_path"]).resolve(),
+                (existing_dir / "龙族 (2022) - S03E06 - 第 6 集 - 2160p.strm").resolve(),
+            )
+
+    def test_repair_missing_media_strms_writes_direct_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._db(tmp)
+            host_root = Path(tmp) / "strm"
+            existing_dir = host_root / "转存" / "TV" / "Q-龙族-2022-[tmdb=94997]" / "Season 03"
+            existing_dir.mkdir(parents=True)
+            (existing_dir / "龙族 (2022) - S03E05 - 第 5 集 - 2160p.strm").write_text("x", encoding="utf-8")
+            index = CmsCloudDataIndex(db_path)
+
+            repaired = index.repair_missing_media_strms(
+                host_root,
+                direct_domain="http://cms.example",
+                limit=50,
+            )
+
+            self.assertEqual(repaired, 1)
+            written = Path(tmp) / "strm" / "转存" / "TV" / "Q-龙族-2022-[tmdb=94997]" / "Season 03" / "龙族 (2022) - S03E06 - 第 6 集 - 2160p.strm"
+            self.assertTrue(written.is_file())
+            self.assertEqual(
+                written.read_text(encoding="utf-8"),
+                "http://cms.example/d/bimn8xuw1izk98sgx.mkv?/龙族 (2022) - S03E06 - 第 6 集 - 2160p.mkv",
+            )
+
+    def test_repair_dry_run_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._db(tmp)
+            host_root = Path(tmp) / "strm"
+            existing_dir = host_root / "转存" / "TV" / "Q-龙族-2022-[tmdb=94997]" / "Season 03"
+            existing_dir.mkdir(parents=True)
+            (existing_dir / "龙族 (2022) - S03E05 - 第 5 集 - 2160p.strm").write_text("x", encoding="utf-8")
+            index = CmsCloudDataIndex(db_path)
+
+            repaired = index.repair_missing_media_strms(
+                host_root,
+                direct_domain="http://cms.example",
+                limit=50,
+                dry_run=True,
+            )
+
+            self.assertEqual(repaired, 1)
+            written = Path(tmp) / "strm" / "转存" / "TV" / "Q-龙族-2022-[tmdb=94997]" / "Season 03" / "龙族 (2022) - S03E06 - 第 6 集 - 2160p.strm"
+            self.assertFalse(written.exists())

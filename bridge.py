@@ -2834,6 +2834,47 @@ def start_status_repair_loop(
     return thread
 
 
+def start_media_strm_repair_loop(
+    cms_state_db_path: str | Path,
+    host_strm_root: str | Path,
+    direct_domain: str = "",
+    interval_seconds: int = 21600,
+    limit: int = 200,
+    stop_event: threading.Event | None = None,
+) -> threading.Thread | None:
+    """Periodically regenerate missing media-library STRM files.
+
+    CMS cloud_data marks media files with action='STRM' and status=1, but the
+    local .strm can disappear while the database still lists it (incremental
+    delete events, manual cleanup). CMS then skips rebuilding it during
+    auto-organize (洗版 skip). This patrol rebuilds those files from the CMS
+    direct-link pick_code.
+    """
+    interval = max(60, int(interval_seconds))
+    limit = max(1, int(limit))
+    if interval <= 0:
+        return None
+    loop_stop_event = stop_event or threading.Event()
+    index = CmsCloudDataIndex(cms_state_db_path)
+
+    def loop() -> None:
+        while not loop_stop_event.wait(interval):
+            try:
+                repaired = index.repair_missing_media_strms(
+                    host_strm_root,
+                    direct_domain=direct_domain,
+                    limit=limit,
+                )
+                if repaired:
+                    LOG.info("Media STRM repair regenerated %s missing files", repaired)
+            except Exception:
+                LOG.debug("Media STRM repair loop failed", exc_info=True)
+
+    thread = threading.Thread(target=loop, name="media-strm-repair", daemon=True)
+    thread.start()
+    return thread
+
+
 def start_self_share_maintenance_loop(
     store: Any,
     cms: Any,
@@ -4699,6 +4740,18 @@ def run_forever(
             cleanup_client=p115 if self_share_config.cleanup_after_emby else None,
             interval_seconds=max(1, int(config.status_repair_interval_seconds)),
             limit=max(1, int(config.status_repair_limit)),
+        )
+    if config.media_strm_repair_enabled and Path(config.cms_state_db_path).is_file():
+        cms_index = CmsCloudDataIndex(config.cms_state_db_path)
+        strm_source_root = Path(config.strm_source_roots.split(",")[0].strip())
+        host_strm_root = strm_source_root.parent  # /mnt/user/Unraid/strm, the host root for /media
+        start_media_strm_repair_loop(
+            config.cms_state_db_path,
+            host_strm_root,
+            direct_domain=config.media_strm_direct_domain or cms_index.direct_302_domain(),
+            interval_seconds=max(60, int(config.media_strm_repair_interval_seconds)),
+            limit=max(1, int(config.media_strm_repair_limit)),
+            stop_event=stop_event,
         )
 
     def enqueue_hdhive_links(urls: list[str], chat_id: str) -> int | None:

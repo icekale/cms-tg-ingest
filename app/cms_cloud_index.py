@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from pathlib import Path
@@ -9,15 +10,128 @@ from pathlib import Path
 from app.media.classify import extract_tmdb_id_from_name
 
 from .sqlite_utils import sqlite_connection
+from app.config import safe_resolve
 
 
 _DIRECT_PICKCODE_RE = re.compile(r"/d/([A-Za-z0-9]+)(?:\.[^/?\s]+)?(?:[?\s/]|$)")
 _SEASON_EPISODE_RE = re.compile(r"s\d{1,3}e\d{1,3}", re.IGNORECASE)
 
+_MEDIA_LOCAL_PATH_PREFIX = "/media/"
+
+
+def _media_strm_name(name: str) -> str:
+    """Map a media file name to its expected .strm sibling name."""
+    value = str(name or "").strip()
+    if not value:
+        return ""
+    return f"{Path(value).stem}.strm"
+
 
 class CmsCloudDataIndex:
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
+
+    def direct_302_domain(self) -> str:
+        """Read CMS DIRECT_115_302_DOMAIN from cms_config.core.strm."""
+        if not self.db_path.is_file():
+            return ""
+        try:
+            with sqlite_connection(
+                f"{self.db_path.resolve().as_uri()}?mode=ro", uri=True, read_only=True, row_factory=sqlite3.Row
+            ) as conn:
+                row = conn.execute("SELECT config_json FROM cms_config WHERE key = 'core' LIMIT 1").fetchone()
+            if row is None:
+                return ""
+            config = json.loads(row["config_json"] or "{}")
+            return str(((config.get("strm") or {}).get("DIRECT_115_302_DOMAIN") or "")).strip()
+        except (OSError, sqlite3.Error, ValueError, TypeError):
+            return ""
+
+    def missing_media_strm_candidates(self, host_media_root: str | Path, limit: int = 200) -> list[dict[str, str]]:
+        """Return cloud_data STRM rows whose local .strm file is missing on the host.
+
+        Only action='STRM' AND status=1 rows under /media/ are considered.
+        """
+        limit = max(1, int(limit))
+        host_root = Path(host_media_root)
+        if not self.db_path.is_file():
+            return []
+        candidates: list[dict[str, str]] = []
+        try:
+            with sqlite_connection(
+                f"{self.db_path.resolve().as_uri()}?mode=ro", uri=True, read_only=True, row_factory=sqlite3.Row
+            ) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT fid, name, pick_code, local_path
+                    FROM cloud_data
+                    WHERE action = 'STRM' AND status = 1 AND local_path LIKE ?
+                    ORDER BY fid
+                    LIMIT ?
+                    """,
+                    (_MEDIA_LOCAL_PATH_PREFIX + "%", limit * 4),
+                ).fetchall()
+        except (OSError, sqlite3.Error):
+            return []
+        for row in rows:
+            if len(candidates) >= limit:
+                break
+            expected = self._expected_media_strm_path(row, host_root)
+            if expected is None:
+                continue
+            if expected.exists():
+                continue
+            candidates.append(
+                {
+                    "fid": str(row["fid"] or ""),
+                    "name": str(row["name"] or ""),
+                    "pick_code": str(row["pick_code"] or ""),
+                    "expected_path": str(expected),
+                }
+            )
+        return candidates
+
+    def repair_missing_media_strms(
+        self,
+        host_media_root: str | Path,
+        direct_domain: str = "",
+        limit: int = 200,
+        dry_run: bool = False,
+    ) -> int:
+        """Regenerate missing media-library .strm files from CMS direct links."""
+        domain = str(direct_domain or "").strip().rstrip("/")
+        if not domain or not self.db_path.is_file():
+            return 0
+        repaired = 0
+        for candidate in self.missing_media_strm_candidates(host_media_root, limit=limit):
+            pick_code = str(candidate.get("pick_code") or "").strip()
+            name = str(candidate.get("name") or "").strip()
+            if not pick_code or not name:
+                continue
+            content = f"{domain}/d/{pick_code}.mkv?/{name}"
+            expected = Path(candidate["expected_path"])
+            if dry_run:
+                repaired += 1
+                continue
+            try:
+                expected.parent.mkdir(parents=True, exist_ok=True)
+                expected.write_text(content, encoding="utf-8")
+                repaired += 1
+            except OSError:
+                continue
+        return repaired
+
+    @staticmethod
+    def _expected_media_strm_path(row: sqlite3.Row, host_root: Path) -> Path | None:
+        local_path = str(row["local_path"] or "").strip()
+        name = str(row["name"] or "").strip()
+        if not local_path.startswith(_MEDIA_LOCAL_PATH_PREFIX) or not name:
+            return None
+        strm_name = _media_strm_name(name)
+        if not strm_name:
+            return None
+        relative = local_path[len(_MEDIA_LOCAL_PATH_PREFIX):].strip("/")
+        return safe_resolve(host_root / relative / strm_name)
 
     def has_file_id(self, file_id: str) -> bool:
         file_id = str(file_id or "").strip()

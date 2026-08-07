@@ -144,6 +144,10 @@ class Config:
     status_repair_enabled: bool = True
     status_repair_interval_seconds: int = 300
     status_repair_limit: int = 50
+    media_strm_repair_enabled: bool = True
+    media_strm_repair_interval_seconds: int = 21600
+    media_strm_repair_limit: int = 200
+    media_strm_direct_domain: str = ""
     cms_parent_cid_category_map: str = ""
     self_share_organized_scan_parent_ids: str = ""
     cms_state_db_path: str = "/cms/cms-online.db"
@@ -283,6 +287,10 @@ class Config:
             status_repair_enabled=parse_bool_env(os.environ.get("STATUS_REPAIR_ENABLED"), True),
             status_repair_interval_seconds=int(os.environ.get("STATUS_REPAIR_INTERVAL_SECONDS", "300")),
             status_repair_limit=int(os.environ.get("STATUS_REPAIR_LIMIT", "50")),
+            media_strm_repair_enabled=parse_bool_env(os.environ.get("MEDIA_STRM_REPAIR_ENABLED"), True),
+            media_strm_repair_interval_seconds=int(os.environ.get("MEDIA_STRM_REPAIR_INTERVAL_SECONDS", "21600")),
+            media_strm_repair_limit=int(os.environ.get("MEDIA_STRM_REPAIR_LIMIT", "200")),
+            media_strm_direct_domain=os.environ.get("MEDIA_STRM_DIRECT_DOMAIN", "").strip(),
             cms_parent_cid_category_map=os.environ.get("CMS_PARENT_CID_CATEGORY_MAP", ""),
             self_share_organized_scan_parent_ids=os.environ.get("SELF_SHARE_ORGANIZED_SCAN_PARENT_IDS", ""),
             cms_state_db_path=os.environ.get("CMS_STATE_DB_PATH", "/cms/cms-online.db"),
