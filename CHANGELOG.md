@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.84 - 2026-08-07
+
+- 修复媒体库 STRM 缺失巡检漏检：原实现对 `cloud_data` 的原始查询加了 SQL `LIMIT`，按 fid 排序时可能跳过靠后的真实缺失文件；现改为全量查询后先做存在性检查，再按每轮上限截断修复，保证每一轮覆盖整个媒体库。
+
 ## 0.2.83 - 2026-08-07
 
 - 新增媒体库 STRM 缺失巡检：CMS `cloud_data` 标记 `action=STRM, status=1` 的媒体文件若本地 `.strm` 缺失（增量同步误删、人工清理等），CMS 自动整理会因洗版规则跳过重建（线上 龙族 S03E06）。现在按 `MEDIA_STRM_REPAIR_ENABLED`（默认开）、每 6 小时、最多 200 个，从 CMS `DIRECT_115_302_DOMAIN` + pick_code 自动重建缺失 strm。
