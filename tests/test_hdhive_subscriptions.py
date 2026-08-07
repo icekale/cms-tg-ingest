@@ -933,6 +933,34 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(current.status, "active")
 
 
+    def test_overlapping_episode_range_skips_covered_resource(self):
+        unlock_items = [
+            HdhiveUnlockItem("narrow", True, "https://115cdn.com/s/narrow?password=abcd", "", "", False),
+            HdhiveUnlockItem("broad", True, "https://115cdn.com/s/broad?password=abcd", "", "", False),
+        ]
+        directory, store, subscription, proxy, service, intake_calls = self.make_service(
+            [
+                resource("narrow", resolution="1080P", points=8, episode_key="s03e01-s03e05"),
+                resource("broad", resolution="1080P", points=8, episode_key="s03e01-s03e07"),
+            ],
+            unlock_items,
+        )
+        try:
+            result = service.check(subscription.id)
+            items = {item.resource_slug: item for item in store.list_items(subscription.id)}
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.enqueued, 1)
+        self.assertEqual(proxy.unlock_calls, [["broad"]])
+        self.assertEqual(items["narrow"].status, "filtered")
+        self.assertEqual(items["narrow"].skip_reason, "集数已被覆盖更完整的其他资源包含")
+        self.assertEqual(items["broad"].status, "enqueued")
+        self.assertEqual(intake_calls, [(["https://115cdn.com/s/broad?password=abcd"], "464100862")])
+
+if __name__ == "__main__":
+    unittest.main()
+
 class HdhiveSubscriptionSchedulerTests(unittest.TestCase):
     def test_scheduler_enqueues_one_best_episode_and_keeps_high_cost_episode_pending(self):
         directory = tempfile.TemporaryDirectory()
@@ -1052,7 +1080,3 @@ class HdhiveSubscriptionSchedulerTests(unittest.TestCase):
 
             self.assertEqual(snapshot["last_run_id"], run.run_id)
             self.assertEqual(snapshot["last_summary"], run.summary)
-
-
-if __name__ == "__main__":
-    unittest.main()

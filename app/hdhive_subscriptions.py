@@ -378,6 +378,24 @@ class HdhiveSubscriptionService:
                     item.id,
                     stale_after_seconds=_UNLOCK_STALE_AFTER_SECONDS,
                 )
+        group_parsed_sets: dict[str, set[EpisodeKey]] = {}
+        for group_key, group_candidates in grouped.items():
+            parsed_keys = parsed_by_resource.get(id(group_candidates[0]), ())
+            if parsed_keys:
+                group_parsed_sets[group_key] = set(parsed_keys)
+
+        def _covered_by_broader_group(group_key: str) -> bool:
+            own_keys = group_parsed_sets.get(group_key)
+            if not own_keys:
+                return False
+            return any(
+                other_key != group_key
+                and other_keys
+                and own_keys <= other_keys
+                and own_keys != other_keys
+                for other_key, other_keys in group_parsed_sets.items()
+            )
+
 
         persisted_items = self.store.list_items(subscription.id)
         enqueued_by_episode = {
@@ -470,6 +488,13 @@ class HdhiveSubscriptionService:
                 pending += 1
                 continue
             if any(item.status in {"unlocking", "unlocked"} for item in persisted_items):
+                skipped += 1
+                continue
+            if _covered_by_broader_group(key):
+                for item in group_items(key):
+                    if item.status != "enqueued" and not protects_unlock_outcome(item):
+                        self.store.mark_item_skipped(item.id, "filtered", "集数已被覆盖更完整的其他资源包含")
+                filtered_groups.add(key)
                 skipped += 1
                 continue
             if not parsed_keys or not any(episode_filter.matches(parsed) for parsed in parsed_keys):
