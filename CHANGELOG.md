@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.83 - 2026-08-07
+
+- 新增媒体库 STRM 缺失巡检：CMS `cloud_data` 标记 `action=STRM, status=1` 的媒体文件若本地 `.strm` 缺失（增量同步误删、人工清理等），CMS 自动整理会因洗版规则跳过重建（线上 龙族 S03E06）。现在按 `MEDIA_STRM_REPAIR_ENABLED`（默认开）、每 6 小时、最多 200 个，从 CMS `DIRECT_115_302_DOMAIN` + pick_code 自动重建缺失 strm。
+
 ## 0.2.82 - 2026-08-07
 
 - 修复 HDHive 订阅解锁任务无法识别剧集的问题：订阅解锁入队时把订阅标题（带 `{tmdb-<id>}`）写入任务与提交记录，`_hint_source_name` 优先使用该订阅提示；修复前像 `Season 3（衣柜）` 这类不包含剧名的分享在 organizing 阶段会一直等待 CMS 整理（线上 #372）。
