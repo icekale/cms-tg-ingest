@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
+import socket
 import sqlite3
 from collections import Counter
 from contextlib import closing
@@ -56,6 +58,45 @@ class MemoryFilesystem:
 
     def is_writable(self, path: Path) -> bool:
         return self.exists(path)
+
+
+class DockerLogReader(Protocol):
+    """Read recent container logs; returns "" on any failure."""
+
+    def read_logs(self, container: str, tail: int = 300) -> str: ...
+
+
+class RealDockerLogReader:
+    def __init__(self, socket_path: str = "/var/run/docker.sock", timeout: float = 5.0):
+        self.socket_path = str(socket_path or "").strip()
+        self.timeout = float(timeout or 5.0)
+
+    def read_logs(self, container: str, tail: int = 300) -> str:
+        if not self.socket_path or not str(container or "").strip():
+            return ""
+        try:
+            import urllib.parse
+
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(self.timeout)
+            try:
+                sock.connect(self.socket_path)
+                conn = http.client.HTTPConnection("localhost", timeout=self.timeout)
+                conn.sock = sock
+                path = f"/containers/{urllib.parse.quote(str(container), safe='')}/logs?stdout=1&stderr=1&tail={int(tail)}"
+                conn.request("GET", path)
+                response = conn.getresponse()
+                status = int(response.status or 0)
+                body = response.read()
+                conn.close()
+                if status != 200:
+                    return ""
+                return body.decode("utf-8", "replace")
+            finally:
+                sock.close()
+        except Exception:
+            return ""
+
 
 
 @dataclass(frozen=True)
@@ -351,7 +392,54 @@ def _check_hdhive_subscriptions(env: Mapping[str, str], filesystem: Filesystem) 
     return CheckItem("hdhive_subscriptions", True, message)
 
 
-def run_checks(env: Mapping[str, str] | None = None, filesystem: Filesystem | None = None) -> DoctorReport:
+CMS_STRM_GUARD_MARKER = "STRM-GUARD installed on MediaSync.delete_local_file"
+CMS_STRM_GUARD_CONTAINER_ENV = "CMS_GUARD_CONTAINER"
+CMS_STRM_GUARD_SOCKET_ENV = "CMS_GUARD_DOCKER_SOCKET"
+CMS_STRM_GUARD_MARKER_ENV = "CMS_GUARD_MARKER"
+
+
+def _check_cms_strm_guard(
+    env: Mapping[str, str],
+    log_reader: DockerLogReader | None = None,
+) -> CheckItem:
+    """Verify the CMS self-share STRM delete guard is installed.
+
+    The guard (scripts/cms-strm-guard/sitecustomize.py) prevents CMS's
+    incremental sync from deleting media-library STRM files that still point
+    to a live self-share. If the CMS container is updated and the module or
+    method name changes, the guard silently stops installing — this check
+    surfaces that so the误删 regression cannot come back unnoticed.
+    """
+    # Only meaningful in the shared-STRM workflow that relies on the guard.
+    if (_env_value(env, "WORKFLOW_MODE") or "direct") != "self_share_sync":
+        return CheckItem("cms_strm_guard", True, "guard only relevant for self_share_sync")
+
+    marker = _env_value(env, CMS_STRM_GUARD_MARKER_ENV) or CMS_STRM_GUARD_MARKER
+    container = _env_value(env, CMS_STRM_GUARD_CONTAINER_ENV) or "cloud-media-sync"
+    socket_path = _env_value(env, CMS_STRM_GUARD_SOCKET_ENV) or "/var/run/docker.sock"
+    reader = log_reader or RealDockerLogReader(socket_path=socket_path)
+
+    logs = reader.read_logs(container, tail=300)
+    if not logs:
+        return CheckItem(
+            "cms_strm_guard",
+            True,
+            "无法读取 CMS 容器日志（docker socket 不可用或容器不存在）；守卫状态未知",
+        )
+    if marker in logs:
+        return CheckItem("cms_strm_guard", True, "CMS STRM 删除守卫已安装")
+    return CheckItem(
+        "cms_strm_guard",
+        False,
+        "CMS 容器日志未找到 STRM 删除守卫标记；CMS 更新可能导致守卫静默失效，请检查 scripts/cms-strm-guard",
+    )
+
+
+def run_checks(
+    env: Mapping[str, str] | None = None,
+    filesystem: Filesystem | None = None,
+    log_reader: DockerLogReader | None = None,
+) -> DoctorReport:
     env = os.environ if env is None else env
     filesystem = RealFilesystem() if filesystem is None else filesystem
     return DoctorReport([
@@ -360,6 +448,7 @@ def run_checks(env: Mapping[str, str] | None = None, filesystem: Filesystem | No
         _check_runtime_safety(env),
         _check_filesystem(env, filesystem),
         _check_hdhive_subscriptions(env, filesystem),
+        _check_cms_strm_guard(env, log_reader=log_reader),
     ])
 
 

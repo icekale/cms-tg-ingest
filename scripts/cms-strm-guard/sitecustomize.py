@@ -49,9 +49,13 @@ def _install_guard(ms_cls) -> bool:
     if original is None or getattr(original, "_strm_guard", False):
         return False
 
-    def delete_local_file_guarded(self, item_db):
+    def delete_local_file_guarded(self, *args, **kwargs):
+        # 签名透传：不假设 CMS 的方法签名。若能在 args 里取到 item_db 且其
+        # local_path 是 /s/ 自有分享 strm，则跳过删除；否则原样调用原方法，
+        # 保证 CMS 更新后即使签名变化，删除流程也绝不因守卫崩溃。
         local_path = ""
         try:
+            item_db = args[0] if args else kwargs.get("item_db")
             local_path = str(getattr(item_db, "local_path", "") or "")
         except Exception:
             pass
@@ -66,7 +70,7 @@ def _install_guard(ms_cls) -> bool:
                 pass
             except Exception:
                 pass
-        return original(self, item_db)
+        return original(self, *args, **kwargs)
 
     delete_local_file_guarded._strm_guard = True
     setattr(ms_cls, "delete_local_file", delete_local_file_guarded)

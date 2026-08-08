@@ -506,5 +506,76 @@ class DoctorConfigTests(unittest.TestCase):
         self.assertNotIn("row=24", text)
 
 
+class FakeDockerLogReader:
+    def __init__(self, logs: str = ""):
+        self.logs = logs
+        self.calls: list[tuple[str, int]] = []
+
+    def read_logs(self, container: str, tail: int = 300) -> str:
+        self.calls.append((container, tail))
+        return self.logs
+
+
+class CmsStrmGuardCheckTests(unittest.TestCase):
+    def _env(self, **extra):
+        env = {
+            "TG_BOT_TOKEN": "123456:secret-token",
+            "TG_ALLOWED_CHAT_ID": "464100862",
+            "CMS_BASE_URL": "http://cms:9527",
+            "CMS_USERNAME": "user",
+            "CMS_PASSWORD": "secret-password",
+            "WORKFLOW_MODE": "self_share_sync",
+        }
+        env.update(extra)
+        return env
+
+    def test_guard_skipped_for_direct_workflow(self):
+        env = self._env(WORKFLOW_MODE="direct")
+        item = doctor.run_checks(env=env, filesystem=doctor.MemoryFilesystem(existing_paths=set())).items
+        guard = next(i for i in item if i.name == "cms_strm_guard")
+        self.assertTrue(guard.ok)
+        self.assertIn("only relevant for self_share_sync", guard.message)
+
+    def test_guard_ok_when_marker_found_in_logs(self):
+        reader = FakeDockerLogReader(
+            "2026-08-08 20:18:17 WARNING sitecustom STRM-GUARD installed on MediaSync.delete_local_file\n"
+        )
+        env = self._env(CMS_GUARD_CONTAINER="cloud-media-sync", CMS_GUARD_DOCKER_SOCKET="/var/run/docker.sock")
+        item = doctor.run_checks(
+            env=env,
+            filesystem=doctor.MemoryFilesystem(existing_paths=set()),
+            log_reader=reader,
+        ).items
+        guard = next(i for i in item if i.name == "cms_strm_guard")
+        self.assertTrue(guard.ok)
+        self.assertIn("已安装", guard.message)
+        self.assertEqual(reader.calls, [("cloud-media-sync", 300)])
+
+    def test_guard_fails_when_marker_missing(self):
+        reader = FakeDockerLogReader("some other logs without the marker\n")
+        env = self._env(CMS_GUARD_CONTAINER="cloud-media-sync")
+        item = doctor.run_checks(
+            env=env,
+            filesystem=doctor.MemoryFilesystem(existing_paths=set()),
+            log_reader=reader,
+        ).items
+        guard = next(i for i in item if i.name == "cms_strm_guard")
+        self.assertFalse(guard.ok)
+        self.assertIn("未找到", guard.message)
+        self.assertIn("静默失效", guard.message)
+
+    def test_guard_warns_when_docker_unavailable(self):
+        reader = FakeDockerLogReader("")  # empty logs => docker unavailable
+        env = self._env(CMS_GUARD_CONTAINER="cloud-media-sync")
+        item = doctor.run_checks(
+            env=env,
+            filesystem=doctor.MemoryFilesystem(existing_paths=set()),
+            log_reader=reader,
+        ).items
+        guard = next(i for i in item if i.name == "cms_strm_guard")
+        self.assertTrue(guard.ok)
+        self.assertIn("无法读取", guard.message)
+
+
 if __name__ == "__main__":
     unittest.main()

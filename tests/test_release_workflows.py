@@ -32,7 +32,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("GHCR", readme)
         self.assertIn("DOCKERHUB_USERNAME", readme)
         self.assertIn("DOCKERHUB_TOKEN", readme)
-        self.assertIn("git tag v0.2.85", readme)
+        self.assertIn("git tag v0.2.87", readme)
         self.assertIn(
             "docker pull icekale/cms-tg-ingest:0.2.48\n# 将 compose 的 image 改为 0.2.48",
             readme,

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.87 - 2026-08-08
+
+- **CMS STRM 删除守卫加固**（`scripts/cms-strm-guard/`）：`sitecustomize.py` 守卫方法改为 `*args/**kwargs` 签名透传，CMS 更新改变 `delete_local_file` 签名时守卫也不会使删除流程崩溃（找不到 `item_db` 则直通原方法）；新增 `verify.sh` 一键验证守卫安装状态（本机或 SSH，含容器重启后的延迟确认）。
+- **doctor 增加 `cms_strm_guard` 检查**：通过 docker socket 读 CMS 容器日志，确认 STRM 删除守卫标记存在；CMS 更新导致守卫静默失效时 doctor 报阻塞失败，避免误删回归悄悄回来。docker socket 不可用时降级为"状态未知"（非阻塞）；`CMS_GUARD_CONTAINER` / `CMS_GUARD_DOCKER_SOCKET` / `CMS_GUARD_MARKER` 可覆盖默认值。
+- 测试：1418 项全部通过（新增守卫检查 4 项）。
+
 ## 0.2.86 - 2026-08-08
 
 - **Web 管理台用户名密码登录**：设置 `WEB_USERNAME` + `WEB_PASSWORD` 后，访问管理台改走 `/login` 表单登录，签发 7 天有效的 HttpOnly SameSite=Strict 会话 Cookie（HMAC 签名，签名密钥进程启动随机生成、登出时轮换使全部旧会话失效）；`WEB_TOKEN` 与用户名密码互斥（同时配置拒绝启动）。未配置任何认证时绑定全网卡仍拒绝启动。原有 `WEB_TOKEN` 方式保持不变。
