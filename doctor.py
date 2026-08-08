@@ -63,7 +63,7 @@ class MemoryFilesystem:
 class DockerLogReader(Protocol):
     """Read recent container logs; returns "" on any failure."""
 
-    def read_logs(self, container: str, tail: int = 300) -> str: ...
+    def read_logs(self, container: str, tail: int = 100000) -> str: ...
 
 
 class RealDockerLogReader:
@@ -71,7 +71,9 @@ class RealDockerLogReader:
         self.socket_path = str(socket_path or "").strip()
         self.timeout = float(timeout or 5.0)
 
-    def read_logs(self, container: str, tail: int = 300) -> str:
+    def read_logs(self, container: str, tail: int = 100000) -> str:
+        # tail 必须足够大：守卫 marker 只在容器启动时打印一次，CMS 日志跨天
+        # 累积（约数千行/天），tail 太小会把 marker 挤出窗口造成假阳性。
         if not self.socket_path or not str(container or "").strip():
             return ""
         try:
@@ -421,7 +423,7 @@ def _check_cms_strm_guard(
     socket_path = _env_value(env, CMS_STRM_GUARD_SOCKET_ENV) or "/var/run/docker.sock"
     reader = log_reader or RealDockerLogReader(socket_path=socket_path)
 
-    logs = reader.read_logs(container, tail=300)
+    logs = reader.read_logs(container, tail=100000)
     if not logs:
         return CheckItem(
             "cms_strm_guard",

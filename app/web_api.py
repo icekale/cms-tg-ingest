@@ -348,7 +348,9 @@ class _UnixDockerLogReader:
         self.socket_path = str(socket_path or "").strip()
         self.timeout = float(timeout or 3.0)
 
-    def read_logs(self, container: str, tail: int = 300) -> str:
+    def read_logs(self, container: str, tail: int = 100000) -> str:
+        # tail 必须足够大：守卫 marker 只在容器启动时打印一次，CMS 日志跨天
+        # 累积（约数千行/天），tail 太小会把 marker 挤出窗口造成假阳性。
         if not self.socket_path or not str(container or "").strip():
             return ""
         sock = None
@@ -406,7 +408,7 @@ def check_cms_strm_guard(
         return dict(cache["value"])
 
     reader = log_reader or _UnixDockerLogReader(socket_path=docker_socket)
-    logs = reader.read_logs(container, tail=300)
+    logs = reader.read_logs(container, tail=100000)
     if not logs:
         result = {
             "ok": True,

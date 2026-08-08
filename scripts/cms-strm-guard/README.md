@@ -61,9 +61,12 @@ CMS 固定到基线版本（如 `0.4.9.1`）后，升级永远走 `update-cms.sh
 ```sh
 # 1. 查看 CMS 新版本（Docker Hub tags，或 Web UI 的 CMS 版本检测面板）
 # 2. 显式升级到新版本（自动：备份 compose → 改标签 → pull → 重建 → 验证守卫 → 失败自动回滚）
-./update-cms.sh /boot/config/plugins/compose.manager/projects/CMS 0.4.9.2
+#    Unraid 上守卫文件不在 compose 目录里，需用 CMS_GUARD_FILE 指定：
+CMS_GUARD_FILE=/mnt/user/appdata/cloud-media-sync/config/patches/sitecustomize.py \
+  ./update-cms.sh /boot/config/plugins/compose.manager/projects/CMS 0.4.9.2
 ```
 
+- `CMS_GUARD_FILE` 指向 `sitecustomize.py`（Unraid 上位于 `/mnt/user/appdata/cloud-media-sync/config/patches/`，与 compose 项目目录不同；不指定时脚本默认在 compose 目录下找，找不到会拒绝更新）。`update-cms.sh` 依赖同目录的 `verify.sh`，两个文件需一起部署。
 - 不传版本号 = 保持当前标签重装一遍（用于验证守卫部署正确）。
 - 守卫验证失败（CMS 结构变化）→ 自动回滚到旧版本并报错，绝不把守卫失效的 CMS 留在线上。
 - 若新版改了内部方法名：先更新 `sitecustomize.py` 的挂钩逻辑 → 重新部署到 `config/patches/` → 再跑 `update-cms.sh <目录> <新版本>`。

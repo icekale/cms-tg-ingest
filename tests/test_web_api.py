@@ -1582,7 +1582,7 @@ class CmsStrmGuardApiTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "installed")
         self.assertTrue(result["ok"])
-        self.assertEqual(reader.calls, [("cloud-media-sync", 300)])
+        self.assertEqual(reader.calls, [("cloud-media-sync", 100000)])
 
     def test_guard_missing_when_marker_absent(self):
         reader = FakeDockerLogReader("some other logs without the marker\n")

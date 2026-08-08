@@ -549,7 +549,7 @@ class CmsStrmGuardCheckTests(unittest.TestCase):
         guard = next(i for i in item if i.name == "cms_strm_guard")
         self.assertTrue(guard.ok)
         self.assertIn("已安装", guard.message)
-        self.assertEqual(reader.calls, [("cloud-media-sync", 300)])
+        self.assertEqual(reader.calls, [("cloud-media-sync", 100000)])
 
     def test_guard_fails_when_marker_missing(self):
         reader = FakeDockerLogReader("some other logs without the marker\n")

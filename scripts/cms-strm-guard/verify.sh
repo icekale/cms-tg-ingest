@@ -43,8 +43,9 @@ if run_on_host "docker logs $CONTAINER 2>&1 | grep -qF '$MARKER'"; then
 fi
 
 # 兜底：容器刚重启，守卫 worker 可能还在等模块加载（最多 10 分钟）
-echo "WARN: 日志中暂无守卫标记，等待 worker 轮询（最多 30 秒）..."
-if run_on_host "timeout 30 sh -c 'until docker logs $CONTAINER 2>&1 | grep -qF \"$MARKER\"; do sleep 2; done'"; then
+# 等待 90 秒覆盖 CMS 冷启动 + sitecustomize worker 安装窗口，避免边缘情况下误报。
+echo "WARN: 日志中暂无守卫标记，等待 worker 轮询（最多 90 秒）..."
+if run_on_host "timeout 90 sh -c 'until docker logs $CONTAINER 2>&1 | grep -qF \"$MARKER\"; do sleep 2; done'"; then
     echo "PASS: STRM 删除守卫已安装（延迟确认）"
     exit 0
 fi
