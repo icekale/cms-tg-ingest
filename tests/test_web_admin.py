@@ -2466,3 +2466,93 @@ class WebAdminTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WebLoginAuthTests(unittest.TestCase):
+    """Username/password session authentication for the admin UI."""
+
+    def _app(self, tmp, username="admin", password="secret"):
+        store = TaskStore(Path(tmp) / "tasks.db")
+        app = WebApp(store, web_username=username, web_password=password)
+        return app
+
+    def _session_cookie(self, app, username="admin", password="secret"):
+        status, headers, body = app.handle_request(
+            "POST",
+            "/login",
+            {"Content-Type": "application/x-www-form-urlencoded"},
+            f"username={username}&password={password}".encode("utf-8"),
+        )
+        self.assertEqual(status, 303)
+        set_cookie = next(value for key, value in headers.items() if key.lower() == "set-cookie")
+        self.assertIn("cms_web_session=", set_cookie)
+        return set_cookie.split(";", 1)[0]
+
+    def test_unauthenticated_request_redirects_to_login(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._app(tmp)
+            status, headers, _body = app.handle_request("GET", "/app/", {}, b"")
+            self.assertEqual(status, 303)
+            self.assertEqual(headers.get("Location"), "/login")
+
+    def test_login_with_wrong_credentials_does_not_issue_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._app(tmp)
+            status, headers, body = app.handle_request(
+                "POST",
+                "/login",
+                {"Content-Type": "application/x-www-form-urlencoded"},
+                b"username=admin&password=wrong",
+            )
+            self.assertEqual(status, 200)
+            self.assertNotIn("Set-Cookie", {k.lower(): v for k, v in headers.items()})
+            self.assertIn("用户名或密码错误", body.decode("utf-8"))
+
+    def test_login_grants_session_and_logout_revokes_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._app(tmp)
+            cookie = self._session_cookie(app)
+            # With a valid session the request is authorized and reaches the
+            # route handler; 404 is the expected "frontend dist missing" in a
+            # test environment (see test_default_mode_api_and_missing_frontend_are_safe).
+            status, _headers, _body = app.handle_request("GET", "/app/", {"Cookie": cookie}, b"")
+            self.assertEqual(status, 404)
+
+            logout_status, logout_headers, _logout_body = app.handle_request(
+                "POST", "/logout", {"Cookie": cookie}, b""
+            )
+            self.assertEqual(logout_status, 303)
+            clear_cookie = next(value for key, value in logout_headers.items() if key.lower() == "set-cookie")
+            self.assertIn("Max-Age=0", clear_cookie)
+
+            after_status, _headers, _body = app.handle_request("GET", "/app/", {"Cookie": cookie}, b"")
+            self.assertEqual(after_status, 303)
+
+    def test_session_cookie_is_signed_and_tampering_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._app(tmp)
+            cookie = self._session_cookie(app)
+            tampered = cookie[:-4] + ("0000" if not cookie.endswith("0000") else "1111")
+            status, _headers, _body = app.handle_request("GET", "/app/", {"Cookie": tampered}, b"")
+            self.assertEqual(status, 303)
+
+    def test_query_token_is_disabled_in_username_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = WebApp(TaskStore(Path(tmp) / "tasks.db"), web_username="admin", web_password="secret", web_token="should-not-matter")
+            status, _headers, _body = app.handle_request("GET", "/app/?token=should-not-matter", {}, b"")
+            self.assertEqual(status, 303)
+
+    def test_login_page_get_renders_form(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._app(tmp)
+            status, _headers, body = app.handle_request("GET", "/login", {}, b"")
+            self.assertEqual(status, 200)
+            self.assertIn("type=\"password\"", body.decode("utf-8"))
+
+    def test_loopback_without_auth_still_allows_anonymous_mode(self):
+        # Without username/password the legacy shared-token/anonymous path is
+        # unchanged (loopback binding is enforced at startup, not in WebApp).
+        with tempfile.TemporaryDirectory() as tmp:
+            app = WebApp(TaskStore(Path(tmp) / "tasks.db"), web_token="")
+            status, _headers, _body = app.handle_request("GET", "/app/", {}, b"")
+            self.assertEqual(status, 404)

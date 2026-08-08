@@ -497,14 +497,25 @@ def maybe_start_web_server(
 ):
     if not config.web_enabled:
         return None
-    if not config.web_token and str(config.web_host).strip() in {"0.0.0.0", "::", "*", ""}:
+    web_username = str(getattr(config, "web_username", "") or "").strip()
+    web_password = str(getattr(config, "web_password", "") or "")
+    username_auth = bool(web_username and web_password)
+    if username_auth and config.web_token:
         raise RuntimeError(
-            "WEB_ENABLED=true requires WEB_TOKEN when WEB_HOST binds all interfaces "
-            f"(got host={config.web_host!r}, token empty). Set WEB_TOKEN to a shared "
-            "secret, or bind WEB_HOST to 127.0.0.1, before exposing the admin UI."
+            "WEB_USERNAME/WEB_PASSWORD and WEB_TOKEN are mutually exclusive: "
+            "configure exactly one authentication method for the admin UI."
+        )
+    if not config.web_token and not username_auth and str(config.web_host).strip() in {"0.0.0.0", "::", "*", ""}:
+        raise RuntimeError(
+            "WEB_ENABLED=true requires WEB_TOKEN or WEB_USERNAME+WEB_PASSWORD when "
+            f"WEB_HOST binds all interfaces (got host={config.web_host!r}, no auth "
+            "configured). Set one, or bind WEB_HOST to 127.0.0.1, before exposing "
+            "the admin UI."
         )
     kwargs = {
         "web_token": config.web_token,
+        "web_username": web_username,
+        "web_password": web_password,
         "task_engine_enabled": config.task_engine_enabled,
         "max_retries": int(getattr(config, "task_max_retries", 3)),
         "frontend_dist_path": frontend_dist_path or getattr(config, "frontend_dist_path", "/app/frontend/dist"),
@@ -521,6 +532,20 @@ def maybe_start_web_server(
         kwargs["background_jobs"] = background_jobs
     if cms_version_checker is not None:
         kwargs["cms_version_checker"] = cms_version_checker
+    try:
+        starter_parameters = inspect.signature(starter).parameters
+        supports_username_auth = (
+            "web_username" in starter_parameters
+            and "web_password" in starter_parameters
+        ) or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in starter_parameters.values()
+        )
+    except (TypeError, ValueError):
+        supports_username_auth = True
+    if not supports_username_auth:
+        # Legacy starters only know the shared-token scheme.
+        kwargs.pop("web_username", None)
+        kwargs.pop("web_password", None)
     try:
         starter_parameters = inspect.signature(starter).parameters
         supports_self_share_config = "self_share_config" in starter_parameters or any(

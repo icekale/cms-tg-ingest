@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import errno
+import hashlib
+import hmac
 import html
+import secrets
 from hmac import compare_digest
 def _constant_time_equals(provided: object, expected: object) -> bool:
     """Constant-time string comparison that tolerates non-ASCII input.
@@ -78,6 +81,12 @@ SSE_MAX_CLIENTS = 8
 SSE_WRITE_TIMEOUT_SECONDS = 5.0
 LEGACY_LIFECYCLE_REASON = "旧版任务引擎模式不支持终止或删除任务"
 TASK_NOT_FOUND_MESSAGE = "任务不存在或已过期"
+
+# Username/password session authentication.
+_SESSION_COOKIE_NAME = "cms_web_session"
+_SESSION_TTL_SECONDS = 7 * 24 * 3600
+_LOGIN_PATH = "/login"
+_LOGOUT_PATH = "/logout"
 _LOG_STREAM_PATH = "/api/v1/logs/stream"
 _LOG_ANALYZE_PATH = "/api/v1/logs/analyze"
 _LOG_QUERY_KEYS = frozenset({"filter_type", "lines", "keyword", "logger", "token"})
@@ -1357,6 +1366,8 @@ class WebApp:
         self,
         store: TaskStore,
         web_token: str = "",
+        web_username: str = "",
+        web_password: str = "",
         submission_store: Any | None = None,
         task_engine_enabled: bool = True,
         quality_automation: QualityAutomation | None = None,
@@ -1371,6 +1382,12 @@ class WebApp:
     ):
         self.store = store
         self.web_token = web_token
+        self.web_username = str(web_username or "").strip()
+        self.web_password = str(web_password or "")
+        # HMAC key for session cookies, rotated per process start so an
+        # old cookie cannot be replayed after a restart.
+        self._session_key = secrets.token_hex(32)
+        self._username_authentication = bool(self.web_username and self.web_password)
         self.submission_store = submission_store
         self.task_engine_enabled = task_engine_enabled
         self.quality_automation = quality_automation
@@ -1413,7 +1430,42 @@ class WebApp:
         resolved = resolve_self_share_review_policy(self.store, self.self_share_config)
         return {"mode": resolved.mode, "seconds": resolved.seconds, "source": resolved.source}
 
+    def _session_token(self, now: float) -> str:
+        """Signed session value: <expires>:<username>:<hmac-sha256>."""
+        payload = f"{int(now + _SESSION_TTL_SECONDS)}:{self.web_username}"
+        signature = hmac.new(self._session_key.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+        return f"{payload}:{signature}"
+
+    def _session_valid(self, value: str) -> bool:
+        try:
+            expires_text, username, signature = str(value or "").rsplit(":", 2)
+        except ValueError:
+            return False
+        payload = f"{expires_text}:{username}"
+        expected = hmac.new(self._session_key.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not _constant_time_equals(signature, expected):
+            return False
+        if not _constant_time_equals(username, self.web_username):
+            return False
+        try:
+            expires = float(expires_text)
+        except (TypeError, ValueError):
+            return False
+        return time.time() < expires
+
     def _authorization_source(self, path: str, headers: dict[str, str]) -> str:
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self._header_value(headers, "Cookie"))
+        except CookieError:
+            cookie = SimpleCookie()
+        if self._username_authentication:
+            # Session-cookie authentication: only a valid signed session is
+            # accepted; query/header tokens are disabled in this mode.
+            session_cookie = cookie.get(_SESSION_COOKIE_NAME)
+            if session_cookie and self._session_valid(unquote(session_cookie.value)):
+                return "session"
+            return ""
         if not self.web_token:
             return "anonymous"
         try:
@@ -1424,11 +1476,6 @@ class WebApp:
             return "query"
         if _constant_time_equals(self._header_value(headers, "X-Web-Token"), self.web_token):
             return "header"
-        cookie = SimpleCookie()
-        try:
-            cookie.load(self._header_value(headers, "Cookie"))
-        except CookieError:
-            return ""
         if cookie.get("cms_web_token") and _constant_time_equals(
             unquote(cookie["cms_web_token"].value), self.web_token
         ):
@@ -1448,6 +1495,66 @@ class WebApp:
 
     def _web_token_cookie(self) -> str:
         return f"cms_web_token={quote(self.web_token, safe='')}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800"
+
+    def _session_cookie(self, now: float) -> str:
+        value = quote(self._session_token(now), safe="")
+        return (
+            f"{_SESSION_COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Strict; "
+            f"Max-Age={int(_SESSION_TTL_SECONDS)}"
+        )
+
+    @staticmethod
+    def _clear_session_cookie() -> str:
+        return f"{_SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+
+    def _login_page(self, error: str = "") -> str:
+        error_html = f'<p class="error">{html.escape(error)}</p>' if error else ""
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · cms-tg-ingest</title>
+<style>
+  body {{ font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f5f6f8; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }}
+  .card {{ background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,.08); padding: 32px 40px; width: 320px; }}
+  h1 {{ font-size: 18px; margin: 0 0 20px; color: #333; }}
+  label {{ display: block; font-size: 13px; color: #555; margin: 12px 0 4px; }}
+  input {{ width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid #d0d5dd; border-radius: 6px; font-size: 14px; }}
+  button {{ width: 100%; margin-top: 18px; padding: 10px; background: #2563eb; color: #fff; border: 0; border-radius: 6px; font-size: 14px; cursor: pointer; }}
+  .error {{ color: #b42318; font-size: 13px; margin: 12px 0 0; }}
+</style>
+</head>
+<body>
+<form class="card" method="post" action="{_LOGIN_PATH}">
+  <h1>cms-tg-ingest 管理台</h1>
+  <label for="username">用户名</label>
+  <input id="username" name="username" autocomplete="username" required autofocus>
+  <label for="password">密码</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required>
+  <button type="submit">登录</button>
+  {error_html}
+</form>
+</body>
+</html>
+"""
+
+    def _handle_login(self, body: bytes) -> tuple[int, dict[str, str], bytes]:
+        try:
+            values = {
+                key: items[0] if items else ""
+                for key, items in parse_qs(body.decode("utf-8"), keep_blank_values=True).items()
+            }
+        except UnicodeDecodeError:
+            return 400, {"Content-Type": "text/html; charset=utf-8"}, self._login_page("请求格式错误").encode("utf-8")
+        username = str(values.get("username") or "").strip()
+        password = str(values.get("password") or "")
+        if not (
+            _constant_time_equals(username, self.web_username)
+            and _constant_time_equals(password, self.web_password)
+        ):
+            return 200, {"Content-Type": "text/html; charset=utf-8"}, self._login_page("用户名或密码错误").encode("utf-8")
+        return 303, {"Location": "/app/", "Set-Cookie": self._session_cookie(time.time())}, b""
 
     def prepare_log_stream(
         self,
@@ -1544,33 +1651,61 @@ class WebApp:
             parsed = _parse_request_target(path)
         except (TypeError, ValueError):
             return 400, {"Content-Type": "text/plain; charset=utf-8"}, b"Bad Request"
+
+        # Username/password mode: login/logout are unauthenticated entry
+        # points; everything else requires a valid session cookie.
+        if self._username_authentication:
+            if method == "POST" and parsed.path == _LOGIN_PATH:
+                return self._handle_login(body)
+            if method == "GET" and parsed.path == _LOGIN_PATH:
+                return 200, {"Content-Type": "text/html; charset=utf-8"}, self._login_page().encode("utf-8")
+            if method == "POST" and parsed.path == _LOGOUT_PATH:
+                # Rotate the signing key so every previously issued session
+                # cookie is invalidated server-side (a stateless signature
+                # alone cannot distinguish "logged out" from "cookie copy").
+                self._session_key = secrets.token_hex(32)
+                return 303, {"Location": "/login", "Set-Cookie": self._clear_session_cookie()}, b""
+            if not self._authorized(parsed.path, headers):
+                return 303, {"Location": _LOGIN_PATH}, b""
+            return self._serve_remaining_routes(method, parsed.path, headers, body, {})
+
         authorization_source = self._authorization_source(path, headers)
         if not authorization_source:
             return 403, {"Content-Type": "text/plain; charset=utf-8"}, b"Forbidden"
         if method == "GET" and authorization_source == "query":
             return 303, {"Location": parsed.path or "/", "Set-Cookie": self._web_token_cookie()}, b""
         auth_headers = {"Set-Cookie": self._web_token_cookie()} if authorization_source in {"query", "header"} else {}
-        if parsed.path == "/app" or parsed.path == "/app/" or parsed.path.startswith("/app/"):
-            return self._serve_frontend(parsed.path, auth_headers)
-        if parsed.path.startswith("/api/v1/"):
-            return self._handle_api(method, parsed.path, headers, body, auth_headers)
-        if method == "GET" and parsed.path == "/":
+        return self._serve_remaining_routes(method, parsed.path, headers, body, auth_headers)
+
+    def _serve_remaining_routes(
+        self,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        body: bytes,
+        auth_headers: dict[str, str],
+    ) -> tuple[int, dict[str, str], bytes]:
+        if path == "/app" or path == "/app/" or path.startswith("/app/"):
+            return self._serve_frontend(path, auth_headers)
+        if path.startswith("/api/v1/"):
+            return self._handle_api(method, path, headers, body, auth_headers)
+        if method == "GET" and path == "/":
             return 302, {"Location": "/app/", **auth_headers}, b""
-        if method == "GET" and parsed.path == "/legacy":
+        if method == "GET" and path == "/legacy":
             page = render_task_list(self.store, task_engine_enabled=self.task_engine_enabled)
             return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, page.encode("utf-8")
-        if method == "GET" and parsed.path == "/quality":
+        if method == "GET" and path == "/quality":
             return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, render_quality_page(
                 self.store, self.quality_automation, self.max_retries, self.background_jobs
             ).encode("utf-8")
-        if method == "POST" and parsed.path in {
+        if method == "POST" and path in {
             "/quality/action/execute",
             "/quality/action/reprocess",
             "/quality/action/snooze",
             "/quality/action/ignore",
             "/quality/action/resume",
         }:
-            route_action = parsed.path.rsplit("/", 1)[-1]
+            route_action = path.rsplit("/", 1)[-1]
             try:
                 values = {key: items[0] if items else "" for key, items in parse_qs(body.decode("utf-8"), keep_blank_values=True).items()}
             except UnicodeDecodeError:
@@ -1579,20 +1714,20 @@ class WebApp:
             if status != 200:
                 return status, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, str(result.get("error") or "quality action rejected").encode("utf-8")
             return 303, {"Location": "/quality", **auth_headers}, b""
-        if method == "POST" and parsed.path == "/quality/fix":
+        if method == "POST" and path == "/quality/fix":
             fix_quality_issues(self.store, self.quality_automation)
             return 303, {"Location": "/quality", **auth_headers}, b""
-        if method == "POST" and parsed.path == "/quality/run":
+        if method == "POST" and path == "/quality/run":
             if self.quality_automation is None:
                 return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"quality automation unavailable"
             self._submit_background("quality:run", self.quality_automation.run_now, description="质量巡检")
             return 303, {"Location": "/quality", **auth_headers}, b""
-        if method == "POST" and parsed.path == "/quality/settings/reset":
+        if method == "POST" and path == "/quality/settings/reset":
             if self.quality_automation is None:
                 return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"quality automation unavailable"
             self.quality_automation.reset_settings()
             return 303, {"Location": "/quality", **auth_headers}, b""
-        if method == "POST" and parsed.path == "/quality/settings":
+        if method == "POST" and path == "/quality/settings":
             if self.quality_automation is None:
                 return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"quality automation unavailable"
             try:
@@ -1607,14 +1742,14 @@ class WebApp:
             except (UnicodeDecodeError, ValueError, TypeError) as exc:
                 return 400, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, str(exc).encode("utf-8")
             return 303, {"Location": "/quality", **auth_headers}, b""
-        if method == "GET" and parsed.path == "/health":
+        if method == "GET" and path == "/health":
             page = render_health_page(self.store, task_engine_enabled=self.task_engine_enabled)
             return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, page.encode("utf-8")
-        if method == "GET" and parsed.path == "/hdhive":
+        if method == "GET" and path == "/hdhive":
             page = render_hdhive_page(self.hdhive_service, self.hdhive_scheduler, self.background_jobs)
             status = 200 if self.hdhive_service is not None else 409
             return status, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, page.encode("utf-8")
-        if method == "POST" and parsed.path == "/hdhive/settings":
+        if method == "POST" and path == "/hdhive/settings":
             scheduler = self.hdhive_scheduler
             if scheduler is None:
                 return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"HDHive scheduler unavailable"
@@ -1628,14 +1763,14 @@ class WebApp:
             except (UnicodeDecodeError, ValueError, TypeError) as exc:
                 return 400, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, str(exc).encode("utf-8")
             return 303, {"Location": "/hdhive", **auth_headers}, b""
-        if method == "POST" and parsed.path == "/hdhive/run":
+        if method == "POST" and path == "/hdhive/run":
             scheduler = self.hdhive_scheduler
             if scheduler is None:
                 return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"HDHive scheduler unavailable"
             self._submit_background("hdhive:run", scheduler.run_now, description="检查全部 HDHive 订阅")
             return 303, {"Location": "/hdhive", **auth_headers}, b""
         if method == "POST":
-            hdhive_parts = [part for part in parsed.path.split("/") if part]
+            hdhive_parts = [part for part in path.split("/") if part]
             service = self.hdhive_service
             if len(hdhive_parts) == 4 and hdhive_parts[0] == "hdhive" and hdhive_parts[1] in {"subscription", "subscriptions"} and hdhive_parts[2].isdigit():
                 if service is None:
@@ -1672,11 +1807,11 @@ class WebApp:
                     description=f"确认 HDHive 资源 #{item_id}",
                 )
                 return 303, {"Location": "/hdhive", **auth_headers}, b""
-        if method == "POST" and parsed.path == "/history/clear":
+        if method == "POST" and path == "/history/clear":
             self.store.clear_finished_tasks()
             return 303, {"Location": "/", **auth_headers}, b""
-        if method == "GET" and parsed.path.startswith("/task/"):
-            task_id = parse_task_id_from_path(parsed.path)
+        if method == "GET" and path.startswith("/task/"):
+            task_id = parse_task_id_from_path(path)
             if task_id is None:
                 return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
             return 200, {"Content-Type": "text/html; charset=utf-8", **auth_headers}, render_task_detail(
@@ -1685,7 +1820,7 @@ class WebApp:
                 self.submission_store,
                 self.max_retries,
             ).encode("utf-8")
-        task_action = parse_task_action_path(parsed.path) if method == "POST" else None
+        task_action = parse_task_action_path(path) if method == "POST" else None
         if task_action is not None:
             task_id, action = task_action
             if action == "terminate" and not self.task_engine_enabled:
@@ -1698,7 +1833,7 @@ class WebApp:
             if task:
                 apply_task_action(self.store, task_id, action, max_retries=self.max_retries, actor="Web")
             return 303, {"Location": f"/task/{task_id}", **auth_headers}, b""
-        if parsed.path.startswith("/task/"):
+        if path.startswith("/task/"):
             return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"not found"
         return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"Not Found"
 
@@ -2252,6 +2387,8 @@ def start_web_server(
     host: str,
     port: int,
     web_token: str = "",
+    web_username: str = "",
+    web_password: str = "",
     submission_store: Any | None = None,
     task_engine_enabled: bool = True,
     quality_automation: QualityAutomation | None = None,
@@ -2267,6 +2404,8 @@ def start_web_server(
     app = WebApp(
         store,
         web_token=web_token,
+        web_username=web_username,
+        web_password=web_password,
         submission_store=submission_store,
         task_engine_enabled=task_engine_enabled,
         quality_automation=quality_automation,

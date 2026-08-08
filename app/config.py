@@ -180,6 +180,8 @@ class Config:
     web_host: str = "0.0.0.0"
     web_port: int = 8787
     web_token: str = ""
+    web_username: str = ""
+    web_password: str = ""
     task_worker_interval_seconds: int = 5
     task_max_retries: int = 3
     quality_auto_enabled: bool = False
@@ -323,6 +325,8 @@ class Config:
             web_host=os.environ.get("WEB_HOST", "0.0.0.0"),
             web_port=env_int("WEB_PORT", 8787),
             web_token=os.environ.get("WEB_TOKEN", ""),
+            web_username=os.environ.get("WEB_USERNAME", ""),
+            web_password=os.environ.get("WEB_PASSWORD", ""),
             task_worker_interval_seconds=env_int("TASK_WORKER_INTERVAL_SECONDS", 5),
             task_max_retries=normalize_task_max_retries(os.environ.get("TASK_MAX_RETRIES", "3")),
             quality_auto_enabled=parse_bool_env(os.environ.get("QUALITY_AUTO_ENABLED"), False),

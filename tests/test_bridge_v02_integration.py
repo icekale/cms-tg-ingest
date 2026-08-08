@@ -188,6 +188,40 @@ class BridgeV02IntegrationTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     bridge.maybe_start_web_server(cfg, task_store, starter=lambda *args, **kwargs: "server")
 
+    def test_maybe_start_web_server_accepts_username_password_auth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            env["WEB_TOKEN"] = ""
+            env["WEB_USERNAME"] = "admin"
+            env["WEB_PASSWORD"] = "secret"
+            with patch.dict(os.environ, env, clear=True):
+                cfg = bridge.Config.from_env()
+                task_store = bridge.create_task_store(cfg)
+                calls = []
+
+                def fake_start(store, host, port, **kwargs):
+                    calls.append(kwargs)
+                    return "server"
+
+                server = bridge.maybe_start_web_server(cfg, task_store, starter=fake_start)
+
+                self.assertEqual(server, "server")
+                self.assertEqual(calls[0]["web_username"], "admin")
+                self.assertEqual(calls[0]["web_password"], "secret")
+                self.assertEqual(calls[0]["web_token"], "")
+
+    def test_maybe_start_web_server_rejects_token_and_username_together(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            env["WEB_USERNAME"] = "admin"
+            env["WEB_PASSWORD"] = "secret"
+            with patch.dict(os.environ, env, clear=True):
+                cfg = bridge.Config.from_env()
+                task_store = bridge.create_task_store(cfg)
+
+                with self.assertRaises(RuntimeError):
+                    bridge.maybe_start_web_server(cfg, task_store, starter=lambda *args, **kwargs: "server")
+
     def test_maybe_start_web_server_passes_log_hub_only_to_supporting_starter(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = self.required_env(tmp)

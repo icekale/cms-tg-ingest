@@ -207,10 +207,17 @@ def _check_runtime_safety(env: Mapping[str, str]) -> CheckItem:
     warnings: list[str] = []
     if _env_bool(env, "WEB_ENABLED"):
         host = _env_value(env, "WEB_HOST") or "0.0.0.0"
-        if host in {"0.0.0.0", "::", "*"} and not _env_value(env, "WEB_TOKEN"):
-            problems.append("WEB is exposed on all interfaces without WEB_TOKEN; startup is refused")
-        elif not _env_value(env, "WEB_TOKEN"):
-            warnings.append("WEB_TOKEN is empty; only loopback-bound admin UI is allowed")
+        has_token = bool(_env_value(env, "WEB_TOKEN"))
+        has_username_auth = bool(_env_value(env, "WEB_USERNAME") and _env_value(env, "WEB_PASSWORD"))
+        if has_token and has_username_auth:
+            problems.append("WEB_TOKEN and WEB_USERNAME/WEB_PASSWORD are both set; they are mutually exclusive")
+        exposed = host in {"0.0.0.0", "::", "*"}
+        if exposed and not has_token and not has_username_auth:
+            problems.append("WEB is exposed on all interfaces without WEB_TOKEN or WEB_USERNAME/WEB_PASSWORD; startup is refused")
+        elif not has_token and not has_username_auth:
+            warnings.append("no admin auth configured; only loopback-bound admin UI is allowed")
+        elif has_username_auth and not has_token and not exposed:
+            warnings.append("WEB_USERNAME/WEB_PASSWORD session auth is active")
     if _env_value(env, "TASK_MAX_CONCURRENT"):
         warnings.append("TASK_MAX_CONCURRENT is unsupported; TaskRunner intentionally uses one worker")
     if problems:
