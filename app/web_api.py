@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import http.client
 import json
 import re
+import socket
 import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -334,7 +336,104 @@ def serialize_event(event: dict[str, Any]) -> dict[str, Any]:
     })
 
 
-def serialize_health(store: TaskStore, *, enabled: bool = True, now: float | None = None) -> dict[str, Any]:
+CMS_STRM_GUARD_MARKER = "STRM-GUARD installed on MediaSync.delete_local_file"
+
+
+class _UnixDockerLogReader:
+    """Read recent container logs through the Docker Engine API over a unix socket."""
+
+    def __init__(self, socket_path: str = "/var/run/docker.sock", timeout: float = 3.0):
+        self.socket_path = str(socket_path or "").strip()
+        self.timeout = float(timeout or 3.0)
+
+    def read_logs(self, container: str, tail: int = 300) -> str:
+        if not self.socket_path or not str(container or "").strip():
+            return ""
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(self.timeout)
+            sock.connect(self.socket_path)
+            conn = http.client.HTTPConnection("localhost", timeout=self.timeout)
+            conn.sock = sock
+            path = f"/containers/{quote(str(container), safe='')}/logs?stdout=1&stderr=1&tail={int(tail)}"
+            conn.request("GET", path)
+            response = conn.getresponse()
+            status = int(response.status or 0)
+            body = response.read()
+            conn.close()
+            if status != 200:
+                return ""
+            return body.decode("utf-8", "replace")
+        except Exception:
+            return ""
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+
+_cms_guard_cache: dict[str, Any] = {"at": 0.0, "value": None}
+
+
+def check_cms_strm_guard(
+    *,
+    workflow_mode: str = "",
+    container: str = "cloud-media-sync",
+    docker_socket: str = "/var/run/docker.sock",
+    marker: str = CMS_STRM_GUARD_MARKER,
+    log_reader: Any | None = None,
+    cache_seconds: float = 60.0,
+) -> dict[str, Any]:
+    """Return the CMS self-share STRM delete-guard status for the health API.
+
+    Never raises and never blocks the health endpoint: docker socket failures
+    degrade to ``status="unknown"`` and the result is cached in-process.
+    """
+    if (workflow_mode or "direct") != "self_share_sync":
+        return {
+            "ok": True,
+            "status": "not_applicable",
+            "message": "guard only relevant for self_share_sync",
+        }
+    now = time.time()
+    cache = _cms_guard_cache
+    if cache["value"] is not None and now - cache["at"] < max(0.0, float(cache_seconds or 0)):
+        return dict(cache["value"])
+
+    reader = log_reader or _UnixDockerLogReader(socket_path=docker_socket)
+    logs = reader.read_logs(container, tail=300)
+    if not logs:
+        result = {
+            "ok": True,
+            "status": "unknown",
+            "message": "无法读取 CMS 容器日志（docker socket 不可用或容器不存在）；守卫状态未知",
+        }
+    elif marker in logs:
+        result = {"ok": True, "status": "installed", "message": "CMS STRM 删除守卫已安装"}
+    else:
+        result = {
+            "ok": False,
+            "status": "missing",
+            "message": "CMS 容器日志未找到 STRM 删除守卫标记；CMS 更新可能导致守卫静默失效",
+        }
+    cache.update({"at": now, "value": result})
+    return dict(result)
+
+
+def _reset_cms_guard_cache() -> None:
+    _cms_guard_cache.update({"at": 0.0, "value": None})
+
+
+def serialize_health(
+    store: TaskStore,
+    *,
+    enabled: bool = True,
+    now: float | None = None,
+    cms_guard: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     current_time = time.time() if now is None else float(now)
     summary = build_task_health(store, enabled=enabled, now=current_time)
     backup = {"status": "never", "file_count": 0, "skipped_count": 0, "error": ""}
@@ -390,6 +489,7 @@ def serialize_health(store: TaskStore, *, enabled: bool = True, now: float | Non
             if summary.latest_lock_wait
             else None
         ),
+        "cms_strm_guard": cms_guard or None,
     }
 
 

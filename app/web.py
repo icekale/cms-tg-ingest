@@ -64,6 +64,8 @@ from .web_api import (
     api_quality_runs,
     api_cms_version,
     api_tasks,
+    check_cms_strm_guard,
+    CMS_STRM_GUARD_MARKER,
     quality_items,
     serialize_health,
     serialize_hdhive,
@@ -1379,6 +1381,9 @@ class WebApp:
         background_jobs: BackgroundJobCoordinator | None = None,
         log_hub: LogHub | None = None,
         cms_version_checker: Any | None = None,
+        cms_guard_container: str = "cloud-media-sync",
+        cms_guard_docker_socket: str = "",
+        cms_guard_marker: str = "",
     ):
         self.store = store
         self.web_token = web_token
@@ -1400,6 +1405,24 @@ class WebApp:
         self.background_jobs = background_jobs or BackgroundJobCoordinator()
         self.log_hub = log_hub
         self.cms_version_checker = cms_version_checker
+        self.cms_guard_container = str(cms_guard_container or "cloud-media-sync").strip()
+        self.cms_guard_docker_socket = str(cms_guard_docker_socket or "").strip()
+        self.cms_guard_marker = str(cms_guard_marker or "").strip()
+
+    def _cms_strm_guard(self) -> dict[str, Any] | None:
+        """Resolve CMS STRM guard status for the health payload (never raises)."""
+        workflow_mode = str(getattr(self.self_share_config, "workflow_mode", "") or "").strip()
+        if (workflow_mode or "direct") != "self_share_sync" and not self.cms_guard_marker:
+            return None
+        try:
+            return check_cms_strm_guard(
+                workflow_mode=workflow_mode,
+                container=self.cms_guard_container,
+                docker_socket=self.cms_guard_docker_socket or "/var/run/docker.sock",
+                marker=self.cms_guard_marker or CMS_STRM_GUARD_MARKER,
+            )
+        except Exception:
+            return {"ok": True, "status": "unknown", "message": "守卫状态检查异常"}
 
     def _submit_background(self, key: str, callable: Any, *, description: str) -> JobSubmission:
         return self.background_jobs.submit(key, callable, description=description)
@@ -2180,7 +2203,7 @@ class WebApp:
                     limit=20,
                     lifecycle_actions_enabled=self.task_engine_enabled,
                 ),
-                "health": serialize_health(self.store, enabled=self.task_engine_enabled),
+                "health": serialize_health(self.store, enabled=self.task_engine_enabled, cms_guard=self._cms_strm_guard()),
                 "strm_default_mode": self.store.get_default_strm_mode(),
                 "own_share_receive_code": self._own_share_receive_code_payload(),
             }
@@ -2232,7 +2255,9 @@ class WebApp:
             )
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/health":
-            status, response_headers, response_body = api_response(serialize_health(self.store, enabled=self.task_engine_enabled))
+            status, response_headers, response_body = api_response(
+                serialize_health(self.store, enabled=self.task_engine_enabled, cms_guard=self._cms_strm_guard())
+            )
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/quality":
             status, response_headers, response_body = api_response(
@@ -2400,6 +2425,9 @@ def start_web_server(
     background_jobs: BackgroundJobCoordinator | None = None,
     log_hub: LogHub | None = None,
     cms_version_checker: Any | None = None,
+    cms_guard_container: str = "cloud-media-sync",
+    cms_guard_docker_socket: str = "",
+    cms_guard_marker: str = "",
 ) -> ThreadingHTTPServer:
     app = WebApp(
         store,
@@ -2417,6 +2445,9 @@ def start_web_server(
         background_jobs=background_jobs,
         log_hub=log_hub,
         cms_version_checker=cms_version_checker,
+        cms_guard_container=cms_guard_container,
+        cms_guard_docker_socket=cms_guard_docker_socket,
+        cms_guard_marker=cms_guard_marker,
     )
     sse_capacity = BoundedSemaphore(max(1, int(SSE_MAX_CLIENTS)))
 

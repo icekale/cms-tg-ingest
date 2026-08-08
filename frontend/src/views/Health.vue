@@ -9,6 +9,8 @@ const message = useMessage()
 const health = ref(null)
 async function load() { try { health.value = await api.health() } catch (err) { message.error(err.message) } }
 onMounted(load)
+const guardTagType = (status) => ({ installed: 'success', missing: 'error', unknown: 'default', not_applicable: 'default' })[status] || 'default'
+const guardLabel = (status) => ({ installed: '已安装', missing: '未安装', unknown: '状态未知', not_applicable: '不适用' })[status] || status
 </script>
 
 <template>
@@ -25,6 +27,10 @@ onMounted(load)
         <span v-if="health.runner_active && health.runner_active_task_id">处理 #{{ health.runner_active_task_id }}（{{ health.runner_active_stage || '?' }}）</span>
         <span v-else-if="health.runner_last_claim_attempt_at">空闲</span>
         <span v-else>未启动</span>
+      </n-descriptions-item>
+      <n-descriptions-item v-if="health.cms_strm_guard" label="CMS STRM 守卫">
+        <n-tag :type="guardTagType(health.cms_strm_guard.status)">{{ guardLabel(health.cms_strm_guard.status) }}</n-tag>
+        <div class="subtle" style="margin-top: 4px">{{ health.cms_strm_guard.message }}</div>
       </n-descriptions-item>
     </n-descriptions>
     <div v-if="health.wait_details?.length" class="health-list"><h3>等待原因</h3><div v-for="detail in health.wait_details" :key="detail">{{ detail }}</div></div>
