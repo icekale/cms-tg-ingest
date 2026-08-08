@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.85 - 2026-08-08
+
+- 新增 CMS STRM 删除守卫（`scripts/cms-strm-guard/sitecustomize.py`）：CMS 增量同步消费 115 `delete_file` 生活事件时会删除本地对应文件，但它不感知媒体库 strm 已被自有分享 `/s/` 链接接管，导致仍有效的媒体库 strm 被误删（线上 龙族 S03E06 两次被删、Emby 报 `library.deleted`）。守卫以 sitecustomize 注入 CMS 容器，包裹 `MediaSync.delete_local_file`：删除 `.strm` 前读取内容，若指向自有分享链接则跳过删除；直链 `/d/`、普通文件的删除行为不变。安装方式见 `scripts/cms-strm-guard/README.md`（Unraid override 加 `PYTHONPATH=/cms/cms-api:/config/patches`）。
+- 审计修复（High）：HDHive 订阅 TMDB-hint 回填改用已定义的 `ShareKey`（原 `_ShareKey` NameError 被吞、提示从未生效）；直链存活探测不再污染 24h 冷却表（确认失效的才记录，避免把仍在播放的直链 STRM 当死链删掉）；115 `share_state` `"0"` 视为有效（与 p115.py 及自有分享流程一致，旧映射可能删掉仍有效分享的 STRM）；探测其他分享时用各 STRM 内嵌的接收码而非当前任务的码，让 `share_still_alive` 保护真正生效；Web 管理台未配置 `WEB_TOKEN` 时拒绝绑定全网卡启动（fail closed，doctor 报阻塞故障）；`serialize_task` 隔离脏 `strm_mode`，单个脏任务不再拖垮整个 task/overview/health API。
+- 审计修复（Medium）：`record_event` 不再静默改写已认领 RUNNING 任务的阶段/状态/时间戳，外部状态同步只追加事件、保留 worker CAS 状态，防止阶段重跑重放外部副作用；CMS `share_down` 扫描分页（带边界与同页守卫），旧任务不再卡在 organizing 无限期；备份同日重试计数成功时清零，早期失败计数不再把每日重试永久限制为一次；`cms_cloud_index` 拒绝 `local_path` 越界组件，媒体 STRM 修复不会写到媒体根目录之外；STRM 扫描/移动/指纹/清理路径用 `os.walk(followlinks=False)` 替代 `rglob`（符号链接环/逃逸不再越界递归或打崩阶段），`find_strm_source_dir` 与 `find_recent_library_strm_source_dir` 每个根只遍历一次（O(N²) → O(N)）。
+- 测试：1405 项全部通过，新增 claim CAS 持久化、strm 符号链接、路径穿越拒绝、`WEB_TOKEN` 启动拒绝、已认领任务事件守卫等回归用例。
+
 ## 0.2.84 - 2026-08-07
 
 - 修复媒体库 STRM 缺失巡检漏检：原实现对 `cloud_data` 的原始查询加了 SQL `LIMIT`，按 fid 排序时可能跳过靠后的真实缺失文件；现改为全量查询后先做存在性检查，再按每轮上限截断修复，保证每一轮覆盖整个媒体库。
