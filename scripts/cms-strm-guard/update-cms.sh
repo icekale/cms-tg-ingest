@@ -49,6 +49,27 @@ fi
 
 cd "$CMS_DIR"
 
+# 提取目标服务名（services: 下的第一个顶层服务键）
+SERVICE=$(awk '/^services:/{in_services=1; next} in_services && /^  [A-Za-z0-9_-]+:/{name=$1; sub(/:$/,"",name); print name; exit}' "$COMPOSE_FILE")
+SERVICE="${SERVICE:-cloud-media-sync}"
+echo "==> 目标服务: $SERVICE"
+
+# 仅在目标服务块内替换 image 行（多服务 compose 时不影响其它服务）
+set_image() {
+    local new_image="$1"
+    awk -v svc="$SERVICE" -v img="$new_image" '
+        /^services:/ { in_services=1; print; next }
+        in_services && /^[^ ]/ { in_services=0 }
+        in_services && /^  [A-Za-z0-9_-]+:/ {
+            name=$1; sub(/:$/, "", name)
+            in_target = (name == svc)
+            print; next
+        }
+        in_target && /^    image:/ { sub(/image:.*/, "image: " img) }
+        { print }
+    ' "$COMPOSE_FILE" > "$COMPOSE_FILE.tmp" && mv "$COMPOSE_FILE.tmp" "$COMPOSE_FILE"
+}
+
 # 记录当前 image 标签（回滚基线）
 CURRENT_IMAGE=$(grep -E '^[[:space:]]+image:[[:space:]]+' "$COMPOSE_FILE" | head -1 | sed -E 's/^[[:space:]]+image:[[:space:]]*//' | tr -d '"'"'"' ')
 if [ -z "$CURRENT_IMAGE" ]; then
@@ -69,8 +90,7 @@ if [ -n "$NEW_VERSION" ]; then
     else
         TARGET_IMAGE="$NEW_VERSION"
     fi
-    sed -i.bak "s|^\([[:space:]]*\)image:.*|\1image: $TARGET_IMAGE|" "$COMPOSE_FILE"
-    rm -f "$COMPOSE_FILE.bak"
+    set_image "$TARGET_IMAGE"
     echo "==> 切换 image 标签: $CURRENT_IMAGE -> $TARGET_IMAGE"
 else
     echo "==> 未指定新版本，保持当前标签（重装验证守卫）"
@@ -78,21 +98,20 @@ fi
 
 rollback() {
     echo "==> 回滚: 恢复 image 标签 $CURRENT_IMAGE"
-    sed -i.bak "s|^\([[:space:]]*\)image:.*|\1image: $CURRENT_IMAGE|" "$COMPOSE_FILE" 2>/dev/null || true
-    rm -f "$COMPOSE_FILE.bak"
-    docker compose up -d >/dev/null 2>&1 || echo "==> 注意: 回滚重建失败，请手动执行 docker compose up -d" >&2
+    set_image "$CURRENT_IMAGE" 2>/dev/null || true
+    docker compose up -d "$SERVICE" >/dev/null 2>&1 || echo "==> 注意: 回滚重建失败，请手动执行 docker compose up -d" >&2
 }
 
 # 拉取新镜像
 echo "==> 拉取镜像: $TARGET_IMAGE"
-if ! docker compose pull 2>&1; then
+if ! docker compose pull "$SERVICE" 2>&1; then
     rollback
     fail "拉取镜像失败，已回滚到 $CURRENT_IMAGE"
 fi
 
 # 重建容器
 echo "==> 重建容器"
-if ! docker compose up -d 2>&1; then
+if ! docker compose up -d "$SERVICE" 2>&1; then
     rollback
     fail "容器重建失败，已回滚到 $CURRENT_IMAGE"
 fi
