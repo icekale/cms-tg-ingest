@@ -1,12 +1,13 @@
 # Changelog
 
-## 0.2.86 - 未发布
+## 0.2.86 - 2026-08-08
 
+- **Web 管理台用户名密码登录**：设置 `WEB_USERNAME` + `WEB_PASSWORD` 后，访问管理台改走 `/login` 表单登录，签发 7 天有效的 HttpOnly SameSite=Strict 会话 Cookie（HMAC 签名，签名密钥进程启动随机生成、登出时轮换使全部旧会话失效）；`WEB_TOKEN` 与用户名密码互斥（同时配置拒绝启动）。未配置任何认证时绑定全网卡仍拒绝启动。原有 `WEB_TOKEN` 方式保持不变。
 - 审计修复（配置与安全）：`Config` 数字环境变量改用带变量名的可读报错（`env_int`，原裸 `int()` 报 `invalid literal`）；`parse_bool_env` 对拼写错误的布尔值告警而非静默当作 `False`；HDHive 订阅 `record_check`/`finish_run` 持久化的异常文本递归脱敏（原先绕过日志脱敏直接渲染到 Web 页面，可能泄漏带 token 的 URL）。
 - 审计修复（存储卫生）：`quality_auto_run:{date}` 运行记录键 7 天自动清理（原每日一行永久累积）；后台任务快照上限 512 条（逐出最旧已完成项）；115 GET 缓存键不再内嵌完整 Cookie、缓存条目上限 512（过期优先驱逐）。
 - 审计修复（并发）：HDHive 集数过滤挂起状态 `_HDHIVE_PENDING_FILTERS` 加专用锁（Telegram 轮询线程与订阅调度线程并发读写）；`set_invalid_probe_enabled` 与关闭时的巡检线程快照共用一把锁，防止并发 Web 请求重复启动巡检或与 shutdown 竞争。
 - 审计修复（Web/工具）：前端构建产物（Vite 内容哈希文件名）加 `immutable` 缓存头、SPA 入口 `no-cache`；doctor 审计以 `mode=ro` 只读打开 SQLite（不再产生 journal 或与运行中写锁竞争）；STRM 目录 mtime 无法 stat 时记录日志（原永久判"不稳定"且无提示）；质量描述 `or/and` 混合条件显式加括号防止误读。
-- 测试：1405 项全部通过。
+- 测试：1414 项全部通过。
 
 ## 0.2.85 - 2026-08-08
 
