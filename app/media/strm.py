@@ -134,7 +134,13 @@ def is_directory_stable(path: Path, stable_seconds: int) -> bool:
     if stable_seconds <= 0:
         return True
     mtime = newest_mtime(path)
-    return bool(mtime and time.time() - mtime >= stable_seconds)
+    if not mtime:
+        # newest_mtime returns 0.0 only when the tree cannot be stat'ed at
+        # all; stay conservative (never claim stable) but say why so a
+        # permanently skipped move is diagnosable.
+        LOG.debug("STRM directory mtime unavailable, treated as unstable: %s", path)
+        return False
+    return time.time() - mtime >= stable_seconds
 
 
 def directory_stability_metadata(path: Path, stable_seconds: int) -> dict[str, float]:

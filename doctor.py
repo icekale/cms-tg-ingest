@@ -65,6 +65,16 @@ class CheckItem:
     message: str
 
 
+def _read_only_connection(db_path: Path) -> sqlite3.Connection:
+    """Open a SQLite database read-only.
+
+    A read-only audit must not create a journal or contend with the running
+    process's write lock, so it opens with mode=ro instead of a plain rw
+    connection.
+    """
+    return sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+
+
 @dataclass(frozen=True)
 class DoctorReport:
     items: list[CheckItem]
@@ -93,8 +103,6 @@ class AuditIssue:
 
 def _env_value(env: Mapping[str, str], name: str) -> str:
     return str(env.get(name, "")).strip()
-
-
 def _env_bool(env: Mapping[str, str], name: str) -> bool:
     return _env_value(env, name).lower() in {"1", "true", "yes", "on", "enabled", "enable"}
 
@@ -273,7 +281,7 @@ def _hdhive_subscription_counts(db_path: Path) -> tuple[int, int, str]:
     if not db_path.exists():
         return 0, 0, "not-created"
     try:
-        with closing(sqlite3.connect(db_path)) as connection:
+        with closing(_read_only_connection(db_path)) as connection:
             tables = {
                 row[0]
                 for row in connection.execute(
@@ -381,7 +389,7 @@ def audit_submission_db(db_path: str | Path) -> list[AuditIssue]:
     if not db_path.exists():
         return [AuditIssue(0, "db_missing", f"database does not exist: {db_path}")]
     issues: list[AuditIssue] = []
-    with closing(sqlite3.connect(db_path)) as conn:
+    with closing(_read_only_connection(db_path)) as conn:
         conn.row_factory = sqlite3.Row
         table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'submissions'"

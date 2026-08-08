@@ -20,6 +20,22 @@ def _redact_persisted_error(value: str) -> str:
     return _redact_text(_URL_IN_ERROR_RE.sub("<redacted-url>", str(value or "")))
 
 
+def _redact_persisted_value(value: Any) -> Any:
+    """Recursively redact URLs/credentials inside values persisted to DB.
+
+    Log-side redaction is complete, but record_check / finish_run persist raw
+    exception text that later renders straight into the web page; an exception
+    message containing a tokenized URL would leak through that side channel.
+    """
+    if isinstance(value, str):
+        return _redact_persisted_error(value)
+    if isinstance(value, dict):
+        return {key: _redact_persisted_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_persisted_value(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True)
 class HdhiveSubscription:
     id: int
@@ -380,12 +396,13 @@ class HdhiveSubscriptionStore:
             if not isinstance(summary, dict):
                 raise TypeError("HDHive subscription summary must be a dictionary")
             summary_json = json.dumps(
-                summary,
+                _redact_persisted_value(summary),
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
                 allow_nan=False,
             )
+        redacted_error = _redact_persisted_error(error)
         with self._lock, self._connection() as connection:
             if summary_json is None:
                 connection.execute(
@@ -394,7 +411,7 @@ class HdhiveSubscriptionStore:
                     SET last_checked_at = ?, last_error = ?, updated_at = ?
                     WHERE id = ?
                     """,
-                    (float(checked_at if checked_at is not None else time.time()), str(error or ""), time.time(), int(subscription_id)),
+                    (float(checked_at if checked_at is not None else time.time()), redacted_error, time.time(), int(subscription_id)),
                 )
             else:
                 connection.execute(
@@ -894,7 +911,7 @@ class HdhiveSubscriptionStore:
                 """,
                 (
                     str(status),
-                    json.dumps(summary, ensure_ascii=False, sort_keys=True),
+                    json.dumps(_redact_persisted_value(summary), ensure_ascii=False, sort_keys=True),
                     float(finished_at if finished_at is not None else time.time()),
                     str(run_id),
                 ),

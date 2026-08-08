@@ -717,7 +717,10 @@ class QualityAutomation:
             elif match.rule_id in {"missing_destination", "missing_strm"} and safe:
                 actions.append("reprocess")
         reason = str(state.get("quality_rule_reason") or "").strip()
-        if not reason or reason == "manual_required" and match.rule_id != "repeated_failure":
+        # Parenthesized explicitly: fall back to the rule's reason when none is
+        # stored, or when the stored reason is the generic manual_required
+        # marker for anything but a repeated_failure rule.
+        if not reason or (reason == "manual_required" and match.rule_id != "repeated_failure"):
             reason = match.reason
         return {
             "rule_id": match.rule_id,

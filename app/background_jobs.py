@@ -89,6 +89,8 @@ def _redact_cookie_header(match: re.Match[str]) -> str:
 
 
 class BackgroundJobCoordinator:
+    _MAX_RETAINED_SNAPSHOTS = 512
+
     def __init__(self, max_workers: int = 1, max_in_flight: int = 8, state_store: Any | None = None):
         if max_workers < 1 or max_in_flight < 1:
             raise ValueError("max_workers and max_in_flight must be positive")
@@ -99,6 +101,21 @@ class BackgroundJobCoordinator:
         self._snapshots: dict[str, BackgroundJobSnapshot] = {}
         self._closed = False
         self._state_store = state_store
+
+    def _retain_snapshot(self, key: str, snapshot: BackgroundJobSnapshot) -> None:
+        self._snapshots[key] = snapshot
+        if len(self._snapshots) <= self._MAX_RETAINED_SNAPSHOTS:
+            return
+        # Oldest finished snapshot first; keep recent/re-running entries.
+        oldest_key = min(
+            self._snapshots,
+            key=lambda item: (
+                self._snapshots[item].status == "running",
+                self._snapshots[item].finished_at if self._snapshots[item].finished_at else self._snapshots[item].queued_at,
+                item,
+            ),
+        )
+        self._snapshots.pop(oldest_key, None)
 
     def submit(
         self,
@@ -124,7 +141,7 @@ class BackgroundJobCoordinator:
                 queued_at=time.time(),
             )
             self._active_keys.add(normalized_key)
-            self._snapshots[normalized_key] = snapshot
+            self._retain_snapshot(normalized_key, snapshot)
             self._persist(snapshot)
             try:
                 self._executor.submit(self._run, normalized_key, callable, on_complete)
@@ -183,7 +200,7 @@ class BackgroundJobCoordinator:
     def _replace_snapshot(self, key: str, **changes: Any) -> BackgroundJobSnapshot:
         with self._lock:
             snapshot = BackgroundJobSnapshot(**{**self._snapshots[key].payload(), **changes})
-            self._snapshots[key] = snapshot
+            self._retain_snapshot(key, snapshot)
             self._persist(snapshot)
             return snapshot
 

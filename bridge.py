@@ -231,6 +231,9 @@ _SERIES_UPDATE_LOCKS: weakref.WeakValueDictionary[tuple[str, str, str], threadin
     weakref.WeakValueDictionary()
 )
 LAST_TELEGRAM_TRANSIENT_ERROR_AT: str | None = None
+# HDHive 集数过滤的挂起状态：Telegram 轮询线程与 HDHive 订阅调度线程可能
+# 同时读写，用专用锁避免丢失更新或并发误吞。
+_HDHIVE_PENDING_FILTERS_LOCK = threading.Lock()
 _HDHIVE_PENDING_FILTERS: dict[str, int] = {}
 _HDHIVE_FILTER_PROMPT = "请发送集数过滤，例如 S01E01-S01E10,S02；发送“清除”恢复全部正常集。"
 ED2K_HELP_EXAMPLE = "ed2k://|file|Example.mkv|10|" + "0123456789ABCDEF" * 2 + "|/"
@@ -2285,7 +2288,8 @@ def handle_hdhive_subscription_callback(
         if action == "filter":
             if _owned_hdhive_subscription(service, target_id, chat_id) is None:
                 raise HdhiveSelectionError("订阅不存在或无权操作")
-            _HDHIVE_PENDING_FILTERS[str(chat_id)] = target_id
+            with _HDHIVE_PENDING_FILTERS_LOCK:
+                _HDHIVE_PENDING_FILTERS[str(chat_id)] = target_id
             safe_answer_callback_query(telegram, callback_id, "请发送集数过滤", show_alert=False)
             telegram.send_message(chat_id, _HDHIVE_FILTER_PROMPT)
             return True
@@ -2364,13 +2368,15 @@ def handle_hdhive_filter_input(
     if service is None:
         return False
     key = str(chat_id)
-    subscription_id = _HDHIVE_PENDING_FILTERS.get(key)
+    with _HDHIVE_PENDING_FILTERS_LOCK:
+        subscription_id = _HDHIVE_PENDING_FILTERS.get(key)
     if subscription_id is None:
         return False
     value = "" if str(text or "").strip().lower() in {"清除", "clear"} else str(text or "").strip()
     try:
         if _owned_hdhive_subscription(service, subscription_id, chat_id) is None:
-            _HDHIVE_PENDING_FILTERS.pop(key, None)
+            with _HDHIVE_PENDING_FILTERS_LOCK:
+                _HDHIVE_PENDING_FILTERS.pop(key, None)
             telegram.send_message(chat_id, "订阅不存在或无权操作，请重新打开订阅列表。")
             return True
         parse_episode_filter(value)
@@ -2381,7 +2387,8 @@ def handle_hdhive_filter_input(
     except Exception as exc:
         telegram.send_message(chat_id, f"集数过滤设置失败：{str(exc)[:160]}")
         return True
-    _HDHIVE_PENDING_FILTERS.pop(key, None)
+    with _HDHIVE_PENDING_FILTERS_LOCK:
+        _HDHIVE_PENDING_FILTERS.pop(key, None)
     text_value = "已清除集数过滤。" if not value else f"已设置集数过滤：{value}"
     view_text, keyboard = format_hdhive_subscription_view(service, scheduler, chat_id)
     telegram.send_message(chat_id, f"{text_value}\n\n{view_text}", reply_markup=keyboard)
@@ -4595,6 +4602,7 @@ def run_forever(
     probe_stop_events: list[threading.Event] = []
     probe_threads: list[threading.Thread] = []
     probe_holder: dict[str, Any] = {"stop_event": None, "thread": None}
+    probe_holder_lock = threading.Lock()
     if config.task_engine_enabled:
         direct_workflow = DirectTaskWorkflow(
             cms=cms,
@@ -4670,35 +4678,36 @@ def run_forever(
         def set_invalid_probe_enabled(quality_enabled: bool) -> None:
             if not config.self_share_invalid_cleanup_enabled:
                 return
-            if quality_enabled:
-                previous_stop = probe_holder.get("stop_event")
-                if isinstance(previous_stop, threading.Event):
-                    previous_stop.set()
-                previous_thread = probe_holder.get("thread")
-                if isinstance(previous_thread, threading.Thread) and previous_thread.is_alive():
-                    previous_thread.join(timeout=2)
-                probe_holder["stop_event"] = None
-                probe_holder["thread"] = None
-                return
-            if isinstance(probe_holder.get("stop_event"), threading.Event):
-                return
-            probe_stop = threading.Event()
-            probe_stop_events.append(probe_stop)
-            probe_holder["stop_event"] = probe_stop
-            probe_holder["thread"] = start_invalid_self_share_probe_loop(
-                store,
-                task_store,
-                p115,
-                emby,
-                telegram,
-                config.tg_allowed_chat_id,
-                move_config,
-                interval_seconds=config.self_share_invalid_check_interval_seconds,
-                limit=config.self_share_invalid_check_limit,
-                stop_event=probe_stop,
-            )
-            if isinstance(probe_holder["thread"], threading.Thread):
-                probe_threads.append(probe_holder["thread"])
+            with probe_holder_lock:
+                if quality_enabled:
+                    previous_stop = probe_holder.get("stop_event")
+                    if isinstance(previous_stop, threading.Event):
+                        previous_stop.set()
+                    previous_thread = probe_holder.get("thread")
+                    if isinstance(previous_thread, threading.Thread) and previous_thread.is_alive():
+                        previous_thread.join(timeout=2)
+                    probe_holder["stop_event"] = None
+                    probe_holder["thread"] = None
+                    return
+                if isinstance(probe_holder.get("stop_event"), threading.Event):
+                    return
+                probe_stop = threading.Event()
+                probe_stop_events.append(probe_stop)
+                probe_holder["stop_event"] = probe_stop
+                probe_holder["thread"] = start_invalid_self_share_probe_loop(
+                    store,
+                    task_store,
+                    p115,
+                    emby,
+                    telegram,
+                    config.tg_allowed_chat_id,
+                    move_config,
+                    interval_seconds=config.self_share_invalid_check_interval_seconds,
+                    limit=config.self_share_invalid_check_limit,
+                    stop_event=probe_stop,
+                )
+                if isinstance(probe_holder["thread"], threading.Thread):
+                    probe_threads.append(probe_holder["thread"])
 
         quality_automation = QualityAutomation(
             task_store,
@@ -4945,9 +4954,16 @@ def run_forever(
                 stop_event.wait(5)
     finally:
         stop_event.set()
-        for probe_stop in probe_stop_events:
+        # Snapshot the probe list under the same lock web threads use to
+        # start probes, so shutdown never races an in-flight append.
+        with probe_holder_lock:
+            probe_stop_snapshot = list(probe_stop_events)
+            probe_thread_snapshot = list(probe_threads)
+            probe_holder["stop_event"] = None
+            probe_holder["thread"] = None
+        for probe_stop in probe_stop_snapshot:
             probe_stop.set()
-        for probe_thread in probe_threads:
+        for probe_thread in probe_thread_snapshot:
             if isinstance(probe_thread, threading.Thread) and probe_thread.is_alive():
                 probe_thread.join(timeout=2)
         if task_runner is not None:

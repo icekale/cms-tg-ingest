@@ -23,7 +23,24 @@ DEFAULT_OWN_SHARE_RECEIVE_CODE = "1212"
 def parse_bool_env(value: str | None, default: bool = False) -> bool:
     if value is None or str(value).strip() == "":
         return default
-    return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled", "enable"}
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on", "enabled", "enable"}:
+        return True
+    if normalized in {"0", "false", "no", "off", "disabled", "disable"}:
+        return False
+    # A misspelled value silently behaving as False hides configuration
+    # errors; warn so the operator can fix the env file.
+    LOG.warning("Unknown boolean value %r treated as False", str(value))
+    return False
+
+
+def env_int(name: str, default: int) -> int:
+    """Parse an integer env var, raising a readable error on bad input."""
+    raw_value = os.environ.get(name, str(default))
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer, got {raw_value!r}") from exc
 
 
 def env_float(name: str, default: float) -> float:
@@ -222,11 +239,11 @@ class Config:
             cms_base_url=os.environ["CMS_BASE_URL"].rstrip("/"),
             cms_username=os.environ["CMS_USERNAME"],
             cms_password=os.environ["CMS_PASSWORD"],
-            poll_timeout=int(os.environ.get("TG_POLL_TIMEOUT", "30")),
-            http_timeout=int(os.environ.get("HTTP_TIMEOUT", "60")),
+            poll_timeout=env_int("TG_POLL_TIMEOUT", 30),
+            http_timeout=env_int("HTTP_TIMEOUT", 60),
             db_path=os.environ.get("DB_PATH", "/data/submissions.db"),
-            status_poll_seconds=int(os.environ.get("STATUS_POLL_SECONDS", "300")),
-            status_poll_interval=int(os.environ.get("STATUS_POLL_INTERVAL", "20")),
+            status_poll_seconds=env_int("STATUS_POLL_SECONDS", 300),
+            status_poll_interval=env_int("STATUS_POLL_INTERVAL", 20),
             emby_base_url=(os.environ.get("EMBY_BASE_URL") or os.environ.get("EMBY_HOST_PORT") or "").rstrip("/"),
             emby_api_key=os.environ.get("EMBY_API_KEY", ""),
             emby_user_id=os.environ.get("EMBY_USER_ID", ""),
@@ -235,7 +252,7 @@ class Config:
             strm_default_mode=strm_default_mode,
             frontend_dist_path=os.environ.get("FRONTEND_DIST_PATH", "/app/frontend/dist"),
             move_conflict_policy=os.environ.get("MOVE_CONFLICT_POLICY", "skip"),
-            strm_stable_seconds=int(os.environ.get("STRM_STABLE_SECONDS", "30")),
+            strm_stable_seconds=env_int("STRM_STABLE_SECONDS", 30),
             openai_classify_enabled=parse_bool_env(os.environ.get("OPENAI_CLASSIFY_ENABLED"), False),
             openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
             openai_base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
@@ -247,8 +264,8 @@ class Config:
             hdhive_enabled=parse_bool_env(os.environ.get("HDHIVE_ENABLED"), False),
             hdhive_proxy_base_url=os.environ.get("HDHIVE_PROXY_BASE_URL", "https://authx.771885.xyz").rstrip("/"),
             hdhive_token_config_path=os.environ.get("HDHIVE_TOKEN_CONFIG_PATH", "/config/cms-config/hdhive-openapi.json"),
-            hdhive_search_session_ttl_seconds=max(60, int(os.environ.get("HDHIVE_SEARCH_SESSION_TTL_SECONDS", "900"))),
-            hdhive_auto_unlock_max_points=max(0, int(os.environ.get("HDHIVE_AUTO_UNLOCK_MAX_POINTS", "20"))),
+            hdhive_search_session_ttl_seconds=max(60, env_int("HDHIVE_SEARCH_SESSION_TTL_SECONDS", 900)),
+            hdhive_auto_unlock_max_points=max(0, env_int("HDHIVE_AUTO_UNLOCK_MAX_POINTS", 20)),
             hdhive_subscription_auto_enabled=parse_bool_env(
                 os.environ.get("HDHIVE_SUBSCRIPTION_AUTO_ENABLED"), True
             ),
@@ -273,7 +290,7 @@ class Config:
             workflow_mode=workflow_mode,
             p115_cookie_path=os.environ.get("P115_COOKIE_PATH", "/config/115-cookies.txt"),
             p115_min_request_interval_seconds=env_float("P115_MIN_REQUEST_INTERVAL_SECONDS", 2.0),
-            p115_risk_cooldown_seconds=int(os.environ.get("P115_RISK_COOLDOWN_SECONDS", "900")),
+            p115_risk_cooldown_seconds=env_int("P115_RISK_COOLDOWN_SECONDS", 900),
             self_share_receive_cid=os.environ.get("SELF_SHARE_RECEIVE_CID", ""),
             self_share_strm_root=os.environ.get("SELF_SHARE_STRM_ROOT", "/mnt/user/Unraid/strm/share"),
             self_share_cms_local_path=os.environ.get("SELF_SHARE_CMS_LOCAL_PATH", "/media/share"),
@@ -281,21 +298,21 @@ class Config:
             self_share_own_share_password=os.environ.get("SELF_SHARE_OWN_SHARE_PASSWORD", ""),
             self_share_cleanup_after_emby=parse_bool_env(os.environ.get("SELF_SHARE_CLEANUP_AFTER_EMBY"), False),
             self_share_source_cleanup_parent_ids=os.environ.get("SELF_SHARE_SOURCE_CLEANUP_PARENT_IDS", ""),
-            self_share_auto_organize_retry_seconds=int(os.environ.get("SELF_SHARE_AUTO_ORGANIZE_RETRY_SECONDS", "15")),
-            self_share_cloud_poll_seconds=max(30, int(os.environ.get("SELF_SHARE_CLOUD_POLL_SECONDS", "30"))),
-            self_share_cloud_timeout_seconds=max(300, int(os.environ.get("SELF_SHARE_CLOUD_TIMEOUT_SECONDS", "86400"))),
+            self_share_auto_organize_retry_seconds=env_int("SELF_SHARE_AUTO_ORGANIZE_RETRY_SECONDS", 15),
+            self_share_cloud_poll_seconds=max(30, env_int("SELF_SHARE_CLOUD_POLL_SECONDS", 30)),
+            self_share_cloud_timeout_seconds=max(300, env_int("SELF_SHARE_CLOUD_TIMEOUT_SECONDS", 86400)),
             self_share_invalid_cleanup_enabled=parse_bool_env(os.environ.get("SELF_SHARE_INVALID_CLEANUP_ENABLED"), False),
-            self_share_invalid_check_interval_seconds=max(60, int(os.environ.get("SELF_SHARE_INVALID_CHECK_INTERVAL_SECONDS", "21600"))),
-            self_share_invalid_check_limit=max(1, int(os.environ.get("SELF_SHARE_INVALID_CHECK_LIMIT", "3"))),
+            self_share_invalid_check_interval_seconds=max(60, env_int("SELF_SHARE_INVALID_CHECK_INTERVAL_SECONDS", 21600)),
+            self_share_invalid_check_limit=max(1, env_int("SELF_SHARE_INVALID_CHECK_LIMIT", 3)),
             self_share_review_grace_seconds=self_share_review_grace_seconds,
             self_share_review_checkpoints_seconds=self_share_review_checkpoints_seconds,
             self_share_review_list_cache_seconds=positive_int_env("SELF_SHARE_REVIEW_LIST_CACHE_SECONDS", 300),
             status_repair_enabled=parse_bool_env(os.environ.get("STATUS_REPAIR_ENABLED"), True),
-            status_repair_interval_seconds=int(os.environ.get("STATUS_REPAIR_INTERVAL_SECONDS", "300")),
-            status_repair_limit=int(os.environ.get("STATUS_REPAIR_LIMIT", "50")),
+            status_repair_interval_seconds=env_int("STATUS_REPAIR_INTERVAL_SECONDS", 300),
+            status_repair_limit=env_int("STATUS_REPAIR_LIMIT", 50),
             media_strm_repair_enabled=parse_bool_env(os.environ.get("MEDIA_STRM_REPAIR_ENABLED"), True),
-            media_strm_repair_interval_seconds=int(os.environ.get("MEDIA_STRM_REPAIR_INTERVAL_SECONDS", "21600")),
-            media_strm_repair_limit=int(os.environ.get("MEDIA_STRM_REPAIR_LIMIT", "200")),
+            media_strm_repair_interval_seconds=env_int("MEDIA_STRM_REPAIR_INTERVAL_SECONDS", 21600),
+            media_strm_repair_limit=env_int("MEDIA_STRM_REPAIR_LIMIT", 200),
             media_strm_direct_domain=os.environ.get("MEDIA_STRM_DIRECT_DOMAIN", "").strip(),
             cms_parent_cid_category_map=os.environ.get("CMS_PARENT_CID_CATEGORY_MAP", ""),
             self_share_organized_scan_parent_ids=os.environ.get("SELF_SHARE_ORGANIZED_SCAN_PARENT_IDS", ""),
@@ -304,9 +321,9 @@ class Config:
             task_engine_enabled=parse_bool_env(os.environ.get("TASK_ENGINE_ENABLED"), False),
             web_enabled=parse_bool_env(os.environ.get("WEB_ENABLED"), False),
             web_host=os.environ.get("WEB_HOST", "0.0.0.0"),
-            web_port=int(os.environ.get("WEB_PORT", "8787")),
+            web_port=env_int("WEB_PORT", 8787),
             web_token=os.environ.get("WEB_TOKEN", ""),
-            task_worker_interval_seconds=int(os.environ.get("TASK_WORKER_INTERVAL_SECONDS", "5")),
+            task_worker_interval_seconds=env_int("TASK_WORKER_INTERVAL_SECONDS", 5),
             task_max_retries=normalize_task_max_retries(os.environ.get("TASK_MAX_RETRIES", "3")),
             quality_auto_enabled=parse_bool_env(os.environ.get("QUALITY_AUTO_ENABLED"), False),
             quality_auto_time=parse_quality_auto_time(os.environ.get("QUALITY_AUTO_TIME", "02:50")),

@@ -825,7 +825,20 @@ class TaskStore:
                 "INSERT INTO runtime_state (key, value, updated_at) VALUES (?, ?, ?)",
                 (state_key, str(run_date), timestamp),
             )
+            self._prune_quality_run_keys(conn, timestamp)
             return True
+
+    @staticmethod
+    def _prune_quality_run_keys(conn: sqlite3.Connection, now: float) -> None:
+        """Drop daily quality run claims older than a week.
+
+        Each daily run adds one permanent key; without pruning the runtime_state
+        table grows one row per day forever.
+        """
+        conn.execute(
+            "DELETE FROM runtime_state WHERE key LIKE 'quality_auto_run:%' AND updated_at < ?",
+            (now - 7 * 24 * 3600,),
+        )
 
     def claim_quality_run_execution(
         self,
@@ -888,6 +901,7 @@ class TaskStore:
                     """,
                     (date_key, str(run_date), timestamp),
                 )
+                self._prune_quality_run_keys(conn, timestamp)
 
             target_date = str(run_date) if run_date is not None else ""
             runtime_values = [

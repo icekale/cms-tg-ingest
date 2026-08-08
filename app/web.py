@@ -1715,7 +1715,16 @@ class WebApp:
         if not candidate.is_file():
             return 404, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"Frontend asset not found"
         content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-        return 200, {"Content-Type": f"{content_type}; charset=utf-8" if content_type.startswith("text/") or content_type in {"application/javascript", "application/json"} else content_type, **auth_headers}, candidate.read_bytes()
+        content_type_header = f"{content_type}; charset=utf-8" if content_type.startswith("text/") or content_type in {"application/javascript", "application/json"} else content_type
+        response_headers = {"Content-Type": content_type_header, **auth_headers}
+        if candidate.name != "index.html":
+            # Hashed assets (Vite emits content-hashed filenames) can be
+            # cached aggressively; the SPA entry must always be revalidated so
+            # a deploy is picked up promptly.
+            response_headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response_headers["Cache-Control"] = "no-cache"
+        return 200, response_headers, candidate.read_bytes()
 
     @staticmethod
     def _api_body(body: bytes, headers: dict[str, str]) -> dict[str, Any]:

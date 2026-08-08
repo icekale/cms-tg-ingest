@@ -429,6 +429,10 @@ def select_source_residue_115_files(
 
 
 class P115WebClient:
+    # Bound the GET result cache so a long read-heavy session cannot grow
+    # memory without limit between mutating requests (which clear the cache).
+    _MAX_GET_CACHE_ENTRIES = 512
+
     def __init__(
         self,
         cookie: str,
@@ -486,11 +490,15 @@ class P115WebClient:
             method = str(method or "GET").upper()
             cache_key = None
             if method == "GET" and use_cache and self.cache_ttl_seconds > 0:
+                # Headers are intentionally excluded from the cache key: they
+                # carry the full 115 Cookie, which must not live in every
+                # cache key (memory hygiene when cookies rotate). Callers use
+                # one client with one cookie; header differences would only
+                # split cache entries for the same endpoint.
                 cache_key = json.dumps(
                     {
                         "url": str(url),
                         "params": params or {},
-                        "headers": headers or {},
                     },
                     ensure_ascii=False,
                     sort_keys=True,
@@ -522,6 +530,21 @@ class P115WebClient:
                 raise
             if cache_key and isinstance(response, dict) and response.get("state") is not False:
                 self._get_cache[cache_key] = (float(self.clock()) + self.cache_ttl_seconds, deepcopy(response))
+                if len(self._get_cache) > self._MAX_GET_CACHE_ENTRIES:
+                    # Drop expired entries first; if still over the cap, evict
+                    # the oldest entry to keep memory bounded.
+                    for key in [
+                        key
+                        for key, (expires_at, _value) in self._get_cache.items()
+                        if float(self.clock()) >= expires_at
+                    ]:
+                        self._get_cache.pop(key, None)
+                    if len(self._get_cache) > self._MAX_GET_CACHE_ENTRIES:
+                        oldest_key = min(
+                            self._get_cache,
+                            key=lambda key: self._get_cache[key][0],
+                        )
+                        self._get_cache.pop(oldest_key, None)
             return response
 
     @staticmethod
