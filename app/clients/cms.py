@@ -11,6 +11,12 @@ from app.config import Config
 
 LOG = logging.getLogger("cms-tg-ingest")
 
+# Upper bound for paginated share_down scans. Each page is bounded (50/100
+# rows), and the loop stops early on a short page or a repeated first item,
+# so 20 pages keeps the legacy CMS-status polling cheap while covering
+# share histories far beyond the previous single-page window.
+_SHARE_DOWN_MAX_PAGES = 20
+
 
 class CmsSharePlaybackUnavailableError(RuntimeError):
     pass
@@ -130,29 +136,56 @@ class CmsClient:
             params={"keyword": keyword, "page": page, "page_size": page_size},
         )
 
-    def list_share_down(self, page_size: int = 20) -> list[dict]:
-        resp = self._authorized("/api/share_down/list", method="GET", params={"page": 1, "page_size": page_size})
+    def list_share_down(self, page: int = 1, page_size: int = 20) -> list[dict]:
+        resp = self._authorized(
+            "/api/share_down/list",
+            method="GET",
+            params={"page": max(1, int(page)), "page_size": max(1, int(page_size))},
+        )
         if resp.get("code") != 200:
             raise RuntimeError(resp.get("msg") or "CMS share_down list failed")
         return iter_items(resp.get("data"))
 
     def get_share_down_detail(self, task_id: str) -> dict:
         try:
-            for item in self.list_share_down(page_size=50):
-                item_id = item.get("id") or item.get("task_id") or item.get("taskId")
-                if str(item_id) == str(task_id):
-                    return item
+            previous_first_id: str | None = None
+            for page in range(1, _SHARE_DOWN_MAX_PAGES + 1):
+                page_items = self.list_share_down(page=page, page_size=50)
+                for item in page_items:
+                    item_id = item.get("id") or item.get("task_id") or item.get("taskId")
+                    if str(item_id) == str(task_id):
+                        return item
+                if len(page_items) < 50:
+                    break
+                first_id = str(
+                    page_items[0].get("id") or page_items[0].get("task_id") or page_items[0].get("taskId") or ""
+                )
+                # A CMS that ignores the page parameter returns the same first
+                # item on every page; stop instead of re-scanning identical pages.
+                if previous_first_id is not None and first_id == previous_first_id:
+                    break
+                previous_first_id = first_id
         except Exception as exc:
             LOG.debug("CMS status probe failed error=%s", exc)
         return {"status": "unknown"}
 
     def get_share_down_by_key(self, key: Any) -> dict:
-        matches = [
-            item
-            for item in self.list_share_down(page_size=100)
-            if str(item.get("share_id") or "").lower() == key.share_code
-            and str(item.get("share_pwd") or "") == key.receive_code
-        ]
+        matches: list[dict] = []
+        previous_first_key: str | None = None
+        for page in range(1, _SHARE_DOWN_MAX_PAGES + 1):
+            page_items = self.list_share_down(page=page, page_size=100)
+            matches.extend(
+                item
+                for item in page_items
+                if str(item.get("share_id") or "").lower() == key.share_code
+                and str(item.get("share_pwd") or "") == key.receive_code
+            )
+            if matches or len(page_items) < 100:
+                break
+            first_key = str(page_items[0].get("share_id") or "") if page_items else ""
+            if previous_first_key is not None and first_key == previous_first_key:
+                break
+            previous_first_key = first_key
         if not matches:
             return {}
         for item in matches:

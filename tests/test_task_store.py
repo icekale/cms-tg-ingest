@@ -322,6 +322,49 @@ class TaskStoreTests(unittest.TestCase):
             self.assertIsNone(stale)
             self.assertEqual(store.find_task(claimed.id).metadata["receive_target_cid"], "111")
 
+    def test_unguarded_event_does_not_rewrite_claimed_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("claimed-event", "", "https://115cdn.com/s/claimed-event")
+            store.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+            claimed = store.claim_next_runnable("worker-a", now=100)
+
+            before = store.find_task(claimed.id)
+            recorded = store.record_event(
+                claimed.id,
+                TaskStage.CMS_SUBMITTED,
+                TaskStatus.RUNNING,
+                "外部同步事件",
+                metadata_patch={"external_hint": "x"},
+            )
+
+            after = store.find_task(claimed.id)
+            # The event is traced...
+            self.assertIsNotNone(recorded)
+            self.assertEqual(len(store.list_events(claimed.id)), 2)
+            # ...but the claimed task fields a worker CAS depends on are intact.
+            self.assertEqual(after.current_stage, before.current_stage)
+            self.assertEqual(after.status, TaskStatus.RUNNING)
+            self.assertEqual(after.claimed_by, before.claimed_by)
+            self.assertEqual(after.claimed_at, before.claimed_at)
+            self.assertEqual(after.claim_token, before.claim_token)
+            self.assertEqual(after.updated_at, before.updated_at)
+            # The worker can still commit its stage result.
+            committed = store.complete_claimed_stage(
+                claimed.id,
+                expected_stage=before.current_stage,
+                expected_claimed_by=before.claimed_by,
+                expected_claimed_at=before.claimed_at,
+                expected_claim_token=before.claim_token,
+                expected_updated_at=before.updated_at,
+                success_message="阶段完成",
+                success_metadata={},
+                next_stage=None,
+                next_run_at=time.time(),
+            )
+            self.assertIsNotNone(committed)
+            self.assertEqual(committed.status, TaskStatus.SUCCEEDED)
+
     def test_quality_state_has_non_persisting_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

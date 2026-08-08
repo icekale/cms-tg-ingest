@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import time
 from dataclasses import asdict, dataclass, field, replace
@@ -37,7 +38,7 @@ from .task_runner import QUALITY_REPAIR_WAIT_SECONDS
 
 LOG = logging.getLogger("cms-tg-ingest")
 
-_STRM_SHARE_MARKER_RE = re.compile(r"/s/([A-Za-z0-9]+)_[A-Za-z0-9]*_")
+_STRM_SHARE_MARKER_RE = re.compile(r"/s/([A-Za-z0-9]+)_([A-Za-z0-9]*)_")
 
 
 @dataclass(frozen=True)
@@ -1023,14 +1024,20 @@ class QualityAutomation:
         return updated is not None
 
     @staticmethod
-    def _extract_strm_share_codes(text: str) -> tuple[str, ...]:
-        """All /s/{code}_{receive}_ share codes referenced by one strm file."""
-        codes: list[str] = []
+    def _extract_strm_share_codes(text: str) -> tuple[tuple[str, str], ...]:
+        """All /s/{code}_{receive}_ share references in one strm file.
+
+        Returns (share_code, receive_code) pairs so liveness probes use the
+        password the file actually embeds instead of falling back to the
+        current task's own receive code.
+        """
+        pairs: list[tuple[str, str]] = []
         for match in _STRM_SHARE_MARKER_RE.finditer(text):
             code = match.group(1)
-            if code and code not in codes:
-                codes.append(code)
-        return tuple(codes)
+            receive = match.group(2)
+            if code and (code, receive) not in pairs:
+                pairs.append((code, receive))
+        return tuple(pairs)
 
     _DEAD_DIRECT_PROBE_COOLDOWN_SECONDS = 24 * 60 * 60
 
@@ -1076,7 +1083,7 @@ class QualityAutomation:
         dead_map = self._dead_direct_paths(task)
         changed = False
         output: list[QualityIssue] = []
-        probed_paths: dict[str, float] = {}
+        dead_paths: dict[str, float] = {}
         for issue in issues:
             if issue.code != "direct_strm":
                 output.append(issue)
@@ -1107,17 +1114,19 @@ class QualityAutomation:
                 LOG.debug("Direct strm probe failed path=%s", path, exc_info=True)
                 alive = True  # unknown -> keep the plain direct_strm marker
             if alive:
-                probed_paths[path] = current_time
+                # A live direct link is NOT dead; do not record it in the
+                # confirmed-dead map, otherwise the 24h cooldown would re-tag
+                # the alive file as dead and allow its strm to be deleted.
                 output.append(issue)
             else:
                 changed = True
-                probed_paths[path] = current_time
+                dead_paths[path] = current_time
                 output.append(
                     QualityIssue("dead_direct_link", "直链 STRM 已确认失效", issue.detail, issue.task_id, issue.title)
                 )
-        if changed or probed_paths:
+        if changed:
             merged = dict(dead_map)
-            merged.update(probed_paths)
+            merged.update(dead_paths)
             try:
                 self.store.update_quality_state(
                     task.id,
@@ -1150,10 +1159,12 @@ class QualityAutomation:
         have_vio = str(state.get("have_vio_file") or "").strip().lower() in {"1", "true", "yes"}
         if have_vio:
             return "invalid"
-        if share_state in {"1", "true"}:
+        # 115 treats share_state "0"/"1"/"true" all as usable; only empty or
+        # other values mean unavailable (see P115WebClient.share_snap and
+        # workflows/self_share.py). Keeping "0" -> valid matches the rest of
+        # the codebase so an alive share is never deleted or marked invalid.
+        if share_state in {"0", "1", "true"}:
             return "valid"
-        if share_state in {"0", "false"}:
-            return "invalid"
         return "unknown"
 
     def stale_strm_candidates(
@@ -1184,7 +1195,7 @@ class QualityAutomation:
         share_states: dict[str, str] = {}
         checked_codes: list[str] = []
         try:
-            strm_files = sorted(iter_strm_files(dest, allowed_roots=self.allowed_roots))
+            strm_files = sorted(iter_strm_files(dest, allowed_roots=self.allowed_roots, skip_outside_links=True))
         except UnsafeMediaPathError:
             return []
         for path in strm_files:
@@ -1205,7 +1216,7 @@ class QualityAutomation:
                         }
                     )
                 continue
-            codes = [code for code in self._extract_strm_share_codes(text) if code and code != own_code]
+            codes = [code for code, _receive in self._extract_strm_share_codes(text) if code and code != own_code]
             if not codes:
                 continue
             dead = [code for code in codes if code not in live_codes]
@@ -1218,10 +1229,19 @@ class QualityAutomation:
                 "share_state": "unknown",
             }
             if check_shares:
+                # Probe each dead share with the receive code embedded in this
+                # strm file (its own password), not the current task's.
+                code_receive = {
+                    code: receive
+                    for code, receive in self._extract_strm_share_codes(text)
+                    if code and code != own_code
+                }
                 code = dead[0]
                 if code not in share_states:
                     if len(checked_codes) < self.MAX_SHARE_CHECKS:
-                        share_states[code] = self._share_alive_state(code, receive_code)
+                        share_states[code] = self._share_alive_state(
+                            code, code_receive.get(code) or receive_code
+                        )
                         checked_codes.append(code)
                     else:
                         share_states[code] = "unknown"
@@ -1284,7 +1304,7 @@ class QualityAutomation:
             if "/d/" in text and not is_dead_direct:
                 skipped.append({"path": str(path), "reason": "became_direct"})
                 continue
-            codes = [code for code in self._extract_strm_share_codes(text) if code and code != own_code]
+            codes = [code for code, _receive in self._extract_strm_share_codes(text) if code and code != own_code]
             if not is_dead_direct and (not codes or all(code in live_codes for code in codes)):
                 skipped.append({"path": str(path), "reason": "share_became_live"})
                 continue
@@ -1297,12 +1317,21 @@ class QualityAutomation:
                 and not is_dead_direct
                 and self.share_inspector is not None
             ):
+                # Probe each share with the receive code embedded in this strm
+                # file, not the current task's own receive code.
+                code_receive = {
+                    code: receive
+                    for code, receive in self._extract_strm_share_codes(text)
+                    if code and code != own_code
+                }
                 alive_code = None
                 for code in codes:
                     if code in live_codes:
                         continue
                     if code not in checked_states:
-                        checked_states[code] = self._share_alive_state(code, receive_code)
+                        checked_states[code] = self._share_alive_state(
+                            code, code_receive.get(code) or receive_code
+                        )
                     if checked_states[code] == "valid":
                         alive_code = code
                         break
@@ -1647,16 +1676,23 @@ class QualityAutomation:
         total_bytes = 0
         newest_mtime = 0.0
         try:
-            for child in destination.rglob("*.strm"):
-                if not child.is_file():
-                    continue
-                file_count += 1
-                try:
-                    stat = child.stat()
-                except OSError:
-                    continue
-                total_bytes += int(stat.st_size or 0)
-                newest_mtime = max(newest_mtime, float(stat.st_mtime or 0))
+            # os.walk(followlinks=False): a directory symlink must not pull in
+            # files from outside the destination when computing the fingerprint.
+            for base, _dirnames, filenames in os.walk(destination, followlinks=False):
+                base_path = Path(base)
+                for name in filenames:
+                    if not name.lower().endswith(".strm"):
+                        continue
+                    child = base_path / name
+                    if not child.is_file():
+                        continue
+                    file_count += 1
+                    try:
+                        stat = child.stat()
+                    except OSError:
+                        continue
+                    total_bytes += int(stat.st_size or 0)
+                    newest_mtime = max(newest_mtime, float(stat.st_mtime or 0))
         except OSError:
             return None
         return (file_count, total_bytes, newest_mtime)
@@ -2271,9 +2307,11 @@ class QualityAutomation:
         receive_code = str(metadata.get("own_share_receive_code") or "1212").strip() or "1212"
         marker = f"/s/{own_share_code}_{receive_code}_"
         strm_files = [
-            path
-            for path in destination.rglob("*")
-            if path.is_file() and path.suffix.lower() == ".strm"
+            base_path / name
+            for base, _dirnames, filenames in os.walk(destination, followlinks=False)
+            for base_path in [Path(base)]
+            for name in filenames
+            if name.lower().endswith(".strm") and (base_path / name).is_file()
         ]
         if not own_share_code or not strm_files:
             return QualityCleanupResult("blocked_cleanup", "share_strm_missing")

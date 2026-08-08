@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -823,18 +824,24 @@ class SourceShareTaskWorkflow(DirectTaskWorkflow):
             return None
         marker = self._share_marker(task)
         try:
-            strm_files = root.rglob("*.strm")
-            for path in strm_files:
-                try:
-                    content = path.read_text(encoding="utf-8", errors="replace").strip()
-                except OSError:
-                    continue
-                if marker not in content:
-                    continue
-                relative = path.relative_to(root)
-                source = safe_resolve(root / relative.parts[0])
-                if source.is_dir():
-                    return source
+            # os.walk(followlinks=False): a directory symlink in the strm root
+            # must not pull candidate files from outside the root.
+            for base, _dirnames, filenames in os.walk(root, followlinks=False):
+                base_path = Path(base)
+                for name in filenames:
+                    if not name.lower().endswith(".strm"):
+                        continue
+                    path = base_path / name
+                    try:
+                        content = path.read_text(encoding="utf-8", errors="replace").strip()
+                    except OSError:
+                        continue
+                    if marker not in content:
+                        continue
+                    relative = path.relative_to(root)
+                    source = safe_resolve(root / relative.parts[0])
+                    if source.is_dir():
+                        return source
         except OSError:
             return None
         return None

@@ -51,33 +51,80 @@ def category_for_self_share_row(row: dict[str, Any]) -> str:
     return final_category_for_move(row, parse_recognition_json(row))
 
 
-def iter_strm_files(path: Path, allowed_roots: Iterable[str | Path] | None = None):
+def iter_strm_files(
+    path: Path,
+    allowed_roots: Iterable[str | Path] | None = None,
+    *,
+    skip_outside_links: bool = False,
+):
     roots = tuple(safe_resolve(Path(root)) for root in allowed_roots) if allowed_roots is not None else None
     if roots is not None and not is_under_any_root(path, list(roots)):
         raise UnsafeMediaPathError(f"path outside allowed roots: {path}")
     try:
-        for child in path.rglob("*"):
-            if roots is not None and not is_under_any_root(child, list(roots)):
-                raise UnsafeMediaPathError(f"path outside allowed roots: {child}")
-            if child.is_file() and child.suffix.lower() == ".strm":
+        # os.walk(followlinks=False) never descends into directory symlinks,
+        # unlike Python 3.12 Path.rglob which follows them. A symlink loop or a
+        # link pointing outside the media root can no longer recurse out of the
+        # tree or blow up the stage that called us.
+        for root, _dirnames, filenames in os.walk(path, followlinks=False):
+            root_path = Path(root)
+            for name in filenames:
+                child = root_path / name
+                if child.suffix.lower() != ".strm":
+                    continue
+                if roots is not None:
+                    try:
+                        resolved = safe_resolve(child)
+                    except OSError:
+                        continue
+                    if not is_under_any_root(resolved, list(roots)):
+                        # A symlink whose target escapes the allowed roots:
+                        # quality inspection raises so it can report
+                        # unsafe_metadata; move/copy/cleanup callers pass
+                        # skip_outside_links=True so one stray link in a media
+                        # library does not crash the whole stage.
+                        if skip_outside_links:
+                            continue
+                        raise UnsafeMediaPathError(f"path outside allowed roots: {child}")
                 yield child
     except OSError:
         return
 
 
+def directories_with_strm(path: Path):
+    """Yield every directory under ``path`` that contains at least one .strm file.
+
+    Single os.walk, never follows directory symlinks. Replaces the previous
+    O(directory_count x subtree_size) pattern of rglob-ing the whole tree once
+    for the directory list and then re-walking per directory to test for .strm.
+    """
+    try:
+        for root, _dirnames, filenames in os.walk(path, followlinks=False):
+            if any(name.lower().endswith(".strm") for name in filenames):
+                yield Path(root)
+    except OSError:
+        return
+
+
 def has_strm_file(path: Path) -> bool:
-    return any(iter_strm_files(path))
+    return any(iter_strm_files(path, skip_outside_links=True))
 
 
 def newest_mtime(path: Path) -> float:
     newest = 0.0
     try:
         newest = path.stat().st_mtime
-        for child in path.rglob("*"):
+        for root, _dirnames, filenames in os.walk(path, followlinks=False):
+            root_path = Path(root)
             try:
-                newest = max(newest, child.stat().st_mtime)
+                newest = max(newest, root_path.stat().st_mtime)
             except OSError:
                 continue
+            for name in filenames:
+                child = root_path / name
+                try:
+                    newest = max(newest, child.stat().st_mtime)
+                except OSError:
+                    continue
     except OSError:
         return 0.0
     return newest
@@ -143,26 +190,20 @@ def find_strm_source_dir(config: MoveConfig, recognition: dict[str, Any], share_
         root = safe_resolve(root)
         if not root.exists():
             continue
-        try:
-            dirs = [p for p in root.rglob("*") if p.is_dir()]
-        except OSError:
-            continue
-        for path in dirs:
-            name_norm = normalize_text(path.name)
-            full_norm = normalize_text(str(path))
+        for dir_path in directories_with_strm(root):
+            name_norm = normalize_text(dir_path.name)
+            full_norm = normalize_text(str(dir_path))
             name_match = any(token in name_norm for token in tokens)
             full_match = any(token in full_norm for token in tokens)
             if not name_match and not full_match:
                 continue
-            if not has_strm_file(path):
-                continue
             score = 2 if name_match else 1
-            depth = -len(path.relative_to(root).parts)
+            depth = -len(dir_path.relative_to(root).parts)
             try:
-                mtime = path.stat().st_mtime
+                mtime = dir_path.stat().st_mtime
             except OSError:
                 mtime = 0
-            matches.append((score, depth, mtime, path))
+            matches.append((score, depth, mtime, dir_path))
     if not matches:
         return None
     matches.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
@@ -185,11 +226,23 @@ def find_recent_library_strm_source_dir(
         root = safe_resolve(root)
         if not root.exists():
             continue
+        # One walk per root collects both the directory list and the set of
+        # directories that contain .strm files, replacing the previous
+        # per-directory re-walk (has_strm_file) that made this O(N^2).
+        all_dirs: list[Path] = []
+        strm_dirs: set[Path] = set()
         try:
-            dirs = [p for p in root.rglob("*") if p.is_dir()]
+            for base, _dirnames, filenames in os.walk(root, followlinks=False):
+                base_path = Path(base)
+                if base_path != root:
+                    all_dirs.append(base_path)
+                if any(name.lower().endswith(".strm") for name in filenames):
+                    strm_dirs.add(base_path)
         except OSError:
             continue
-        for path in dirs:
+        if not strm_dirs:
+            continue
+        for path in all_dirs:
             try:
                 if path.stat().st_mtime < since:
                     continue
@@ -199,7 +252,10 @@ def find_recent_library_strm_source_dir(
             if not media:
                 continue
             media_root, category = media
-            if not has_strm_file(media_root):
+            if not any(
+                strm_dir == media_root or strm_dir.is_relative_to(media_root)
+                for strm_dir in strm_dirs
+            ):
                 continue
             mtime = newest_mtime(media_root)
             name_norm = normalize_text(str(media_root))
@@ -810,26 +866,31 @@ def merge_self_share_strm_folder(
         receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
         expected_marker = f"/s/{own_share_code}_{receive_code}_" if own_share_code else ""
         required_relative = relative
-        for child in source.rglob("*"):
-            if not child.is_file():
-                continue
-            child_relative = child.relative_to(source)
-            target = dest / child_relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if child.suffix.lower() == ".strm":
-                if target.is_file() and expected_marker and str(row.get("workflow_mode") or "") == "self_share_sync":
-                    if not validate_self_share_strm_file(target, expected_marker):
-                        try:
-                            if target.read_bytes() == child.read_bytes():
-                                continue
-                        except OSError:
-                            pass
-                temp_path = target.with_name(target.name + ".cms-ingest.tmp")
-                shutil.copy2(child, temp_path)
-                os.replace(temp_path, target)
-                temp_path = None
-            else:
-                shutil.copy2(child, target)
+        # os.walk(followlinks=False) so a directory symlink inside the source
+        # cannot pull files from outside the folder into the library or loop.
+        for base, _dirnames, filenames in os.walk(source, followlinks=False):
+            base_path = Path(base)
+            for name in filenames:
+                child = base_path / name
+                if not child.is_file():
+                    continue
+                child_relative = child.relative_to(source)
+                target = dest / child_relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if child.suffix.lower() == ".strm":
+                    if target.is_file() and expected_marker and str(row.get("workflow_mode") or "") == "self_share_sync":
+                        if not validate_self_share_strm_file(target, expected_marker):
+                            try:
+                                if target.read_bytes() == child.read_bytes():
+                                    continue
+                            except OSError:
+                                pass
+                    temp_path = target.with_name(target.name + ".cms-ingest.tmp")
+                    shutil.copy2(child, temp_path)
+                    os.replace(temp_path, target)
+                    temp_path = None
+                else:
+                    shutil.copy2(child, target)
         if required_relative is not None:
             required_target = safe_resolve(dest / required_relative)
             if not required_target.is_file():

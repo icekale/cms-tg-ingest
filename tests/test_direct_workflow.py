@@ -88,11 +88,11 @@ class EmbyFake:
 
 
 class DirectWorkflowTests(unittest.TestCase):
-    def _task(self, task_store, stage, submission_id=None, metadata=None, strm_mode="direct"):
+    def _task(self, task_store, stage, submission_id=None, metadata=None, strm_mode="direct", share_code="abc"):
         task = task_store.upsert_task(
-            "abc",
+            share_code,
             "1234",
-            "https://115cdn.com/s/abc?password=1234",
+            f"https://115cdn.com/s/{share_code}?password=1234",
             strm_mode=strm_mode,
         )
         task = task_store.record_event(
@@ -472,7 +472,7 @@ class DirectWorkflowTests(unittest.TestCase):
             )
             recognized = workflow.run_stage(self._task(tasks, TaskStage.RECOGNIZING, row["id"]))
             missing_row = self._row(submissions, share_code="missing")
-            missing = workflow.run_stage(self._task(tasks, TaskStage.RECOGNIZING, missing_row["id"]))
+            missing = workflow.run_stage(self._task(tasks, TaskStage.RECOGNIZING, missing_row["id"], share_code="missing"))
 
         self.assertEqual(recognized.outcome, StageOutcome.COMPLETE)
         self.assertEqual(recognized.metadata["direct_strm"], True)

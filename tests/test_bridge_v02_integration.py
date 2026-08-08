@@ -158,7 +158,7 @@ class BridgeV02IntegrationTests(unittest.TestCase):
 
                 self.assertIsNone(server)
 
-    def test_maybe_start_web_server_allows_enabled_web_without_token(self):
+    def test_maybe_start_web_server_allows_loopback_without_token(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = self.required_env(tmp)
             env["WEB_TOKEN"] = ""
@@ -175,6 +175,18 @@ class BridgeV02IntegrationTests(unittest.TestCase):
 
                 self.assertEqual(server, "server")
                 self.assertEqual(calls, [(task_store, "127.0.0.1", 8787, "", True)])
+
+    def test_maybe_start_web_server_refuses_public_bind_without_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            env["WEB_TOKEN"] = ""
+            env["WEB_HOST"] = "0.0.0.0"
+            with patch.dict(os.environ, env, clear=True):
+                cfg = bridge.Config.from_env()
+                task_store = bridge.create_task_store(cfg)
+
+                with self.assertRaises(RuntimeError):
+                    bridge.maybe_start_web_server(cfg, task_store, starter=lambda *args, **kwargs: "server")
 
     def test_maybe_start_web_server_passes_log_hub_only_to_supporting_starter(self):
         with tempfile.TemporaryDirectory() as tmp:

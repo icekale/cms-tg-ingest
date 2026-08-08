@@ -246,6 +246,50 @@ class MediaStrmRepairTests(unittest.TestCase):
                 (existing_dir / "龙族 (2022) - S03E06 - 第 6 集 - 2160p.strm").resolve(),
             )
 
+    def test_traversal_local_path_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cms-online.db"
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE cloud_data (
+                        fid TEXT PRIMARY KEY,
+                        pid TEXT,
+                        name TEXT,
+                        pick_code TEXT,
+                        is_dir INTEGER NOT NULL,
+                        f_modify_time INTEGER,
+                        action TEXT NOT NULL DEFAULT '',
+                        status INTEGER NOT NULL DEFAULT 0,
+                        local_path TEXT NOT NULL DEFAULT ''
+                    )
+                    """
+                )
+                conn.executemany(
+                    "INSERT INTO cloud_data (fid, pid, name, pick_code, is_dir, f_modify_time, action, status, local_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        ("fid-dotdot", "s", "A.mkv", "pick1", 0, 0, "STRM", 1, "/media/../../etc/escape"),
+                        ("fid-dot", "s", "B.mkv", "pick2", 0, 0, "STRM", 1, "/media/./nested/B"),
+                        ("fid-ok", "s", "C.mkv", "pick3", 0, 0, "STRM", 1, "/media/nested/C"),
+                    ],
+                )
+                conn.commit()
+            host_root = Path(tmp) / "strm"
+            (host_root / "nested").mkdir(parents=True)
+
+            index = CmsCloudDataIndex(db_path)
+            candidates = index.missing_media_strm_candidates(host_root, limit=50)
+            by_fid = {item["fid"]: item for item in candidates}
+
+            # "../.." and "." components escape or anchor outside the media
+            # root and must not be repaired into paths.
+            self.assertNotIn("fid-dotdot", by_fid)
+            self.assertNotIn("fid-dot", by_fid)
+            self.assertIn("fid-ok", by_fid)
+            self.assertTrue(
+                Path(by_fid["fid-ok"]["expected_path"]).resolve().is_relative_to(host_root.resolve())
+            )
+
     def test_repair_missing_media_strms_writes_direct_link(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._db(tmp)

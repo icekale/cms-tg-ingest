@@ -2340,6 +2340,34 @@ class TaskStore:
                     """,
                     (task_id, stage.value, status.value, message, error_type, error_detail, now),
                 )
+            has_any_expectation = any(
+                value is not None
+                for value in (
+                    expected_stage,
+                    expected_status,
+                    expected_claimed_by,
+                    expected_claimed_at,
+                    expected_claim_token,
+                    expected_updated_at,
+                )
+            )
+            # A task that a worker currently claims and runs must not have its
+            # stage/status/updated_at silently rewritten by an external status
+            # sync (legacy CMS polling, submission events, web backfill). Such
+            # a write invalidates the worker's claim CAS, the completed stage
+            # result is discarded, and the stage is re-run after the stale
+            # window — replaying external side effects (115 share creation,
+            # CMS submission). Record the event, but leave claimed task fields
+            # untouched. Callers with explicit expectations or clear_claim are
+            # intentionally not protected (they are authoritative transitions).
+            claim_protected = bool(
+                not clear_claim
+                and not has_any_expectation
+                and str(current["claimed_by"] or "") != ""
+                and str(current["status"] or "") == TaskStatus.RUNNING.value
+            )
+            if claim_protected:
+                return self._snapshot(current)
             updates = [
                 "current_stage = ?",
                 "status = ?",

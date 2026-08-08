@@ -289,6 +289,12 @@ def serialize_task(
         )
     else:
         available_actions = []
+    try:
+        strm_mode = effective_task_strm_mode(task)
+    except ValueError:
+        # A single task with an invalid persisted strm_mode must not 500 the
+        # whole task list / detail / health API surface.
+        strm_mode = "shared"
     return _safe_api_value({
         "id": task.id,
         "title": task.title or task.share_code,
@@ -296,7 +302,7 @@ def serialize_task(
         "source_type": task.source_type,
         "stage": _enum_value(task.current_stage),
         "status": _enum_value(task.status),
-        "strm_mode": effective_task_strm_mode(task),
+        "strm_mode": strm_mode,
         "category": task.category or task.metadata.get("category") or "",
         "tmdb_id": task.tmdb_id or task.metadata.get("tmdb_id") or "",
         "safe_url": _safe_url(task.url),

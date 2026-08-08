@@ -129,7 +129,18 @@ class CmsCloudDataIndex:
         if not strm_name:
             return None
         relative = local_path[len(_MEDIA_LOCAL_PATH_PREFIX):].strip("/")
-        return safe_resolve(host_root / relative / strm_name)
+        # Reject path traversal: a cloud_data row must stay under the media
+        # root. safe_resolve would otherwise let a "../.." local_path escape
+        # and write .strm files anywhere on the host.
+        parts = [part for part in relative.split("/") if part]
+        if any(part in {"..", "."} or "\\" in part or "\x00" in part for part in parts):
+            return None
+        expected = safe_resolve(host_root / Path(*parts) / strm_name)
+        try:
+            expected.relative_to(safe_resolve(host_root))
+        except ValueError:
+            return None
+        return expected
 
     def has_file_id(self, file_id: str) -> bool:
         file_id = str(file_id or "").strip()

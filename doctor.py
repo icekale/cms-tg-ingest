@@ -195,13 +195,21 @@ def _check_optional_env(env: Mapping[str, str]) -> CheckItem:
 
 
 def _check_runtime_safety(env: Mapping[str, str]) -> CheckItem:
+    problems: list[str] = []
     warnings: list[str] = []
     if _env_bool(env, "WEB_ENABLED"):
         host = _env_value(env, "WEB_HOST") or "0.0.0.0"
         if host in {"0.0.0.0", "::", "*"} and not _env_value(env, "WEB_TOKEN"):
-            warnings.append("WEB is exposed on all interfaces without WEB_TOKEN")
+            problems.append("WEB is exposed on all interfaces without WEB_TOKEN; startup is refused")
+        elif not _env_value(env, "WEB_TOKEN"):
+            warnings.append("WEB_TOKEN is empty; only loopback-bound admin UI is allowed")
     if _env_value(env, "TASK_MAX_CONCURRENT"):
         warnings.append("TASK_MAX_CONCURRENT is unsupported; TaskRunner intentionally uses one worker")
+    if problems:
+        message = "; ".join(problems)
+        if warnings:
+            message += "; WARNING " + "; ".join(warnings)
+        return CheckItem("runtime_safety", False, message)
     if warnings:
         return CheckItem("runtime_safety", True, "WARNING " + "; ".join(warnings))
     return CheckItem("runtime_safety", True, "runtime safety settings are explicit")

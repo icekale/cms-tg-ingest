@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import shutil
 import threading
 import time
@@ -2428,7 +2429,15 @@ class BridgeSelfShareTaskWorkflow:
                 )
             return StageResult.failed(issue, error_type="invalid_strm_source", metadata=metadata)
         if not task.metadata.get("share_playback_validated") and hasattr(self.cms, "probe_strm_url"):
-            strm_files = sorted(source.rglob("*.strm"))
+            # os.walk(followlinks=False) so a directory symlink cannot pull a
+            # playback URL from outside the source folder.
+            strm_files = sorted(
+                base_path / name
+                for base, _dirnames, filenames in os.walk(source, followlinks=False)
+                for base_path in [Path(base)]
+                for name in filenames
+                if name.lower().endswith(".strm")
+            )
             try:
                 strm_url = strm_files[0].read_text(encoding="utf-8", errors="replace").strip() if strm_files else ""
                 playback_ok = bool(strm_url and self.cms.probe_strm_url(strm_url))
@@ -2941,16 +2950,22 @@ class BridgeSelfShareTaskWorkflow:
         marker = f"/s/{own_share_code}_{receive_code}_"
         candidates: list[Path] = []
         if self.self_share_config.strm_root.exists():
-            for strm_path in self.self_share_config.strm_root.rglob("*.strm"):
-                candidate = safe_resolve(strm_path)
-                if not is_relative_to(candidate, trusted_root):
-                    continue
-                try:
-                    text = candidate.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    continue
-                if marker in text:
-                    candidates.append(candidate)
+            # os.walk(followlinks=False): symlink loops / links outside the
+            # trusted root must not expand the candidate scan.
+            for base, _dirnames, filenames in os.walk(self.self_share_config.strm_root, followlinks=False):
+                base_path = Path(base)
+                for name in filenames:
+                    if not name.lower().endswith(".strm"):
+                        continue
+                    candidate = safe_resolve(base_path / name)
+                    if not is_relative_to(candidate, trusted_root):
+                        continue
+                    try:
+                        text = candidate.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        continue
+                    if marker in text:
+                        candidates.append(candidate)
         if not candidates:
             return None
         source_file = max(candidates, key=lambda path: path.stat().st_mtime)

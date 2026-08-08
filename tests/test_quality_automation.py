@@ -1431,8 +1431,14 @@ class QualityStrmCleanupTests(unittest.TestCase):
             self.assertEqual(service.cleanup_stale_strm(1, ["/x.strm"], actor="tester")["status"], "disabled")
 
     def test_candidates_check_shares_tags_share_state(self):
+        # 115 treat share_state "0"/"1" as usable; only empty state or a risk
+        # flag means the share is truly invalid (see _share_alive_state).
         def fake_inspector(code, receive_code):
-            return {"share_state": "1" if code == "deadC" else "0", "have_vio_file": False}
+            if code == "deadC":
+                return {"share_state": "1", "have_vio_file": False}
+            if code == "goneX":
+                return {"share_state": "0", "have_vio_file": False}
+            return {"share_state": "", "have_vio_file": True}
 
         with tempfile.TemporaryDirectory() as tmp:
             service, library = self.make_service(tmp)
@@ -1440,13 +1446,15 @@ class QualityStrmCleanupTests(unittest.TestCase):
             dest = library / "episode"
             self.write_strm(dest, "dead.strm", "https://cms/s/deadC_1212_dead.mkv")
             self.write_strm(dest, "gone.strm", "https://cms/s/goneX_1212_gone.mkv")
+            self.write_strm(dest, "vio.strm", "https://cms/s/vioY_1212_vio.mkv")
             task = self.add_task(service.store, "episode", dest, own_share_code="ownA")
 
             candidates = service.stale_strm_candidates(task, check_shares=True)
             by_code = {item["share_code"]: item["share_state"] for item in candidates}
 
             self.assertEqual(by_code.get("deadC"), "valid")
-            self.assertEqual(by_code.get("goneX"), "invalid")
+            self.assertEqual(by_code.get("goneX"), "valid")
+            self.assertEqual(by_code.get("vioY"), "invalid")
             self.assertTrue(all(item.get("share_state") in {"valid", "invalid"} for item in candidates))
 
     def test_candidates_without_check_shares_are_unknown(self):

@@ -327,14 +327,33 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
     def _claim_task(self, share_code, receive_code, stage, metadata=None, submission_id=None):
         task = self.tasks.upsert_task(share_code, receive_code, f"https://115cdn.com/s/{share_code}?password={receive_code}")
         if metadata or submission_id is not None:
-            task = self.tasks.record_event(
-                task.id,
-                stage,
-                TaskStatus.RUNNING,
-                "metadata",
-                submission_id=submission_id,
-                metadata_patch=metadata,
-            )
+            if str(task.claimed_by or ""):
+                # The task was already claimed by an earlier stage run in this
+                # test. Persist the transition the way TaskRunner does (claim
+                # CAS); the store refuses unguarded writes to claimed tasks.
+                task = self.tasks.record_event(
+                    task.id,
+                    stage,
+                    TaskStatus.RUNNING,
+                    "metadata",
+                    submission_id=submission_id,
+                    metadata_patch=metadata,
+                    expected_stage=task.current_stage,
+                    expected_status=TaskStatus.RUNNING,
+                    expected_claimed_by=task.claimed_by,
+                    expected_claimed_at=task.claimed_at,
+                    expected_claim_token=task.claim_token,
+                    expected_updated_at=task.updated_at,
+                )
+            else:
+                task = self.tasks.record_event(
+                    task.id,
+                    stage,
+                    TaskStatus.RUNNING,
+                    "metadata",
+                    submission_id=submission_id,
+                    metadata_patch=metadata,
+                )
         self.tasks.enqueue_task(task.id, stage, next_run_at=1.0)
         claimed = self.tasks.claim_next_runnable("worker", now=1.0)
         self.assertIsNotNone(claimed)
@@ -594,6 +613,12 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 received.message,
                 metadata_patch=received.metadata,
                 submission_id=received.metadata["submission_id"],
+                expected_stage=received_task.current_stage,
+                expected_status=TaskStatus.RUNNING,
+                expected_claimed_by=received_task.claimed_by,
+                expected_claimed_at=received_task.claimed_at,
+                expected_claim_token=received_task.claim_token,
+                expected_updated_at=received_task.updated_at,
             )
             self.tasks.set_self_share_receive_cid_override("222")
             self.p115.folder = {
@@ -3022,6 +3047,12 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 before_first.message,
                 metadata_patch=before_first.metadata,
                 submission_id=row["id"],
+                expected_stage=task.current_stage,
+                expected_status=TaskStatus.RUNNING,
+                expected_claimed_by=task.claimed_by,
+                expected_claimed_at=task.claimed_at,
+                expected_claim_token=task.claim_token,
+                expected_updated_at=task.updated_at,
             )
             self.tasks.enqueue_task(task.id, TaskStage.CLEANED, next_run_at=105.0)
             task = self.tasks.claim_next_runnable("worker-1", now=105.0)
@@ -3034,6 +3065,12 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 after_first.message,
                 metadata_patch=after_first.metadata,
                 submission_id=row["id"],
+                expected_stage=task.current_stage,
+                expected_status=TaskStatus.RUNNING,
+                expected_claimed_by=task.claimed_by,
+                expected_claimed_at=task.claimed_at,
+                expected_claim_token=task.claim_token,
+                expected_updated_at=task.updated_at,
             )
             self.tasks.enqueue_task(task.id, TaskStage.CLEANED, next_run_at=110.0)
             task = self.tasks.claim_next_runnable("worker-2", now=110.0)

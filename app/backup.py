@@ -282,6 +282,11 @@ class BackupScheduler:
         # not suppress the next scheduler tick until tomorrow.
         if result.status in {"succeeded", "skipped"}:
             self.store.set_runtime_state(BACKUP_RUN_DATE_KEY, run_date, updated_at=local_now.timestamp())
+            # A success resets the same-day retry counter; otherwise a failure
+            # count accumulated on an earlier day would keep capping the daily
+            # retries at one forever.
+            if self.store.get_runtime_state(BACKUP_RETRY_COUNT_KEY) is not None:
+                self.store.delete_runtime_state(BACKUP_RETRY_COUNT_KEY)
         else:
             # A permanently broken source must not force a full re-backup every
             # hour for the rest of the day. Cap same-day retries, then mark the

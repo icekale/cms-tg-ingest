@@ -155,7 +155,7 @@ class DoctorConfigTests(unittest.TestCase):
         self.assertIn("active=1", text)
         self.assertIn("pending_confirmation=1", text)
 
-    def test_web_exposure_without_token_is_a_non_blocking_warning(self):
+    def test_web_exposure_without_token_is_a_blocking_failure(self):
         env = {
             "TG_BOT_TOKEN": "123456:secret-token",
             "TG_ALLOWED_CHAT_ID": "464100862",
@@ -173,11 +173,32 @@ class DoctorConfigTests(unittest.TestCase):
 
         report = doctor.run_checks(env=env, filesystem=doctor.MemoryFilesystem(existing_paths={"/data"}))
 
-        self.assertTrue(report.ok, report.to_text())
+        # WEB exposed on all interfaces without WEB_TOKEN is refused at startup,
+        # so doctor must report it as a blocking failure (not a warning).
+        self.assertFalse(report.ok, report.to_text())
         text = report.to_text()
         self.assertIn("WEB_TOKEN", text)
         self.assertIn("without WEB_TOKEN", text)
         self.assertIn("TASK_MAX_CONCURRENT", text)
+
+    def test_web_loopback_without_token_is_non_blocking(self):
+        env = {
+            "TG_BOT_TOKEN": "123456:secret-token",
+            "TG_ALLOWED_CHAT_ID": "464100862",
+            "CMS_BASE_URL": "http://cms:9527",
+            "CMS_USERNAME": "user",
+            "CMS_PASSWORD": "secret-password",
+            "DB_PATH": "/data/submissions.db",
+            "TASK_DB_PATH": "/data/tasks.db",
+            "STRM_SOURCE_ROOTS": "/data",
+            "WEB_ENABLED": "true",
+            "WEB_HOST": "127.0.0.1",
+            "WEB_TOKEN": "",
+        }
+
+        report = doctor.run_checks(env=env, filesystem=doctor.MemoryFilesystem(existing_paths={"/data"}))
+
+        self.assertTrue(report.ok, report.to_text())
 
     def test_backup_settings_require_valid_time_timezone_and_retention(self):
         env = {

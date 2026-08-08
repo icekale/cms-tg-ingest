@@ -493,6 +493,12 @@ def maybe_start_web_server(
 ):
     if not config.web_enabled:
         return None
+    if not config.web_token and str(config.web_host).strip() in {"0.0.0.0", "::", "*", ""}:
+        raise RuntimeError(
+            "WEB_ENABLED=true requires WEB_TOKEN when WEB_HOST binds all interfaces "
+            f"(got host={config.web_host!r}, token empty). Set WEB_TOKEN to a shared "
+            "secret, or bind WEB_HOST to 127.0.0.1, before exposing the admin UI."
+        )
     kwargs = {
         "web_token": config.web_token,
         "task_engine_enabled": config.task_engine_enabled,
@@ -4829,7 +4835,7 @@ def run_forever(
                         row = store.find_by_id(int(submission_id))
                         if row is not None and not extract_tmdb_id_from_name(str(row.get("title") or "")):
                             store.upsert_submission(
-                                _ShareKey(str(row.get("share_code") or ""), str(row.get("receive_code") or "")),
+                                ShareKey(str(row.get("share_code") or ""), str(row.get("receive_code") or "")),
                                 str(row.get("url") or ""),
                                 str(row.get("status") or ""),
                                 title=hint_source,
