@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.86 - 未发布
+
+- 审计修复（配置与安全）：`Config` 数字环境变量改用带变量名的可读报错（`env_int`，原裸 `int()` 报 `invalid literal`）；`parse_bool_env` 对拼写错误的布尔值告警而非静默当作 `False`；HDHive 订阅 `record_check`/`finish_run` 持久化的异常文本递归脱敏（原先绕过日志脱敏直接渲染到 Web 页面，可能泄漏带 token 的 URL）。
+- 审计修复（存储卫生）：`quality_auto_run:{date}` 运行记录键 7 天自动清理（原每日一行永久累积）；后台任务快照上限 512 条（逐出最旧已完成项）；115 GET 缓存键不再内嵌完整 Cookie、缓存条目上限 512（过期优先驱逐）。
+- 审计修复（并发）：HDHive 集数过滤挂起状态 `_HDHIVE_PENDING_FILTERS` 加专用锁（Telegram 轮询线程与订阅调度线程并发读写）；`set_invalid_probe_enabled` 与关闭时的巡检线程快照共用一把锁，防止并发 Web 请求重复启动巡检或与 shutdown 竞争。
+- 审计修复（Web/工具）：前端构建产物（Vite 内容哈希文件名）加 `immutable` 缓存头、SPA 入口 `no-cache`；doctor 审计以 `mode=ro` 只读打开 SQLite（不再产生 journal 或与运行中写锁竞争）；STRM 目录 mtime 无法 stat 时记录日志（原永久判"不稳定"且无提示）；质量描述 `or/and` 混合条件显式加括号防止误读。
+- 测试：1405 项全部通过。
+
 ## 0.2.85 - 2026-08-08
 
 - 新增 CMS STRM 删除守卫（`scripts/cms-strm-guard/sitecustomize.py`）：CMS 增量同步消费 115 `delete_file` 生活事件时会删除本地对应文件，但它不感知媒体库 strm 已被自有分享 `/s/` 链接接管，导致仍有效的媒体库 strm 被误删（线上 龙族 S03E06 两次被删、Emby 报 `library.deleted`）。守卫以 sitecustomize 注入 CMS 容器，包裹 `MediaSync.delete_local_file`：删除 `.strm` 前读取内容，若指向自有分享链接则跳过删除；直链 `/d/`、普通文件的删除行为不变。安装方式见 `scripts/cms-strm-guard/README.md`（Unraid override 加 `PYTHONPATH=/cms/cms-api:/config/patches`）。
