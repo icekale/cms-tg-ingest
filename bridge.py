@@ -521,6 +521,7 @@ def maybe_start_web_server(
         "frontend_dist_path": frontend_dist_path or getattr(config, "frontend_dist_path", "/app/frontend/dist"),
         "cms_guard_container": "cloud-media-sync",
         "cms_guard_docker_socket": str(getattr(config, "cms_update_docker_socket", "/var/run/docker.sock") or ""),
+        "cms_guard_workflow_mode": str(getattr(config, "workflow_mode", "direct") or ""),
     }
     if submission_store is not None:
         kwargs["submission_store"] = submission_store
@@ -615,6 +616,7 @@ def maybe_start_web_server(
     if not supports_cms_guard:
         kwargs.pop("cms_guard_container", None)
         kwargs.pop("cms_guard_docker_socket", None)
+        kwargs.pop("cms_guard_workflow_mode", None)
     server = starter(task_store, config.web_host, config.web_port, **kwargs)
     LOG.info("v0.2 web admin started host=%s port=%s", config.web_host, config.web_port)
     return server

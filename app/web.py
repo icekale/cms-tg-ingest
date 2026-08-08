@@ -1384,6 +1384,7 @@ class WebApp:
         cms_guard_container: str = "cloud-media-sync",
         cms_guard_docker_socket: str = "",
         cms_guard_marker: str = "",
+        cms_guard_workflow_mode: str = "",
     ):
         self.store = store
         self.web_token = web_token
@@ -1408,10 +1409,11 @@ class WebApp:
         self.cms_guard_container = str(cms_guard_container or "cloud-media-sync").strip()
         self.cms_guard_docker_socket = str(cms_guard_docker_socket or "").strip()
         self.cms_guard_marker = str(cms_guard_marker or "").strip()
+        self.cms_guard_workflow_mode = str(cms_guard_workflow_mode or "").strip()
 
     def _cms_strm_guard(self) -> dict[str, Any] | None:
         """Resolve CMS STRM guard status for the health payload (never raises)."""
-        workflow_mode = str(getattr(self.self_share_config, "workflow_mode", "") or "").strip()
+        workflow_mode = self.cms_guard_workflow_mode or str(getattr(self.self_share_config, "workflow_mode", "") or "").strip()
         if (workflow_mode or "direct") != "self_share_sync" and not self.cms_guard_marker:
             return None
         try:
@@ -2428,6 +2430,7 @@ def start_web_server(
     cms_guard_container: str = "cloud-media-sync",
     cms_guard_docker_socket: str = "",
     cms_guard_marker: str = "",
+    cms_guard_workflow_mode: str = "",
 ) -> ThreadingHTTPServer:
     app = WebApp(
         store,
@@ -2448,6 +2451,7 @@ def start_web_server(
         cms_guard_container=cms_guard_container,
         cms_guard_docker_socket=cms_guard_docker_socket,
         cms_guard_marker=cms_guard_marker,
+        cms_guard_workflow_mode=cms_guard_workflow_mode,
     )
     sse_capacity = BoundedSemaphore(max(1, int(SSE_MAX_CLIENTS)))
 
