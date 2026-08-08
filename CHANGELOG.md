@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.89 - 2026-08-09
+
+- **修复 CMS 守卫状态假阳性**：`doctor.py` 与 `web_api.py` 读 CMS 容器日志时 `tail` 从 300 提升到 100000。守卫 marker 只在容器启动时打印一次，而 CMS 日志跨天累积（数千行/天），`tail=300` 会在运行 1-2 天后把 marker 挤出窗口，导致 doctor healthcheck 与 Web UI 误报"守卫未安装"（容器 health 从 healthy 掉到 unhealthy）。
+- **修复 `update-cms.sh` 作用域与幂等**：脚本提取目标服务名，`pull`/`up`/回滚重建限定为该服务（未来 CMS compose 增加第二个服务时不会误操作）；`image:` 标签改用 awk 状态机仅在目标服务块内替换（其他服务不动）；修复 awk 吞掉 `services:` 行导致第二次调用（回滚路径）替换失效的问题。`verify.sh` 延迟确认从 30s 放宽到 90s，覆盖 CMS 冷启动 + 守卫安装窗口，避免健康升级被误回滚。
+- **CMS 更新流程**：新增 `scripts/cms-strm-guard/update-cms.sh`（备份 compose → 切标签 → pull → 重建 → 验证守卫 → 失败自动回滚）；CMS 固定基线版本后升级显式指定新版本；`sitecustomize.py` 找不到模块/方法时记 `STRM-GUARD NOT INSTALLED` 明确日志、方法改名时自动匹配 delete+local 候选。
+- 测试：1424 项全部通过。
+
 ## 0.2.88 - 2026-08-08
 
 - **Web 管理台显示 CMS STRM 守卫状态**：`/api/v1/health` 新增 `cms_strm_guard` 字段，通过 docker socket 读 CMS 容器日志确认 STRM 删除守卫是否安装（`installed`/`missing`/`unknown`/`not_applicable`），"本地健康"页新增"CMS STRM 守卫"标签——守卫失效时页面直接标红提示，CMS 更新后无需再手工跑 verify.sh 也能及时发现回归。进程内 60 秒缓存，docker socket 不可用时降级为"状态未知"，不阻塞健康端点。容器名/`docker.sock`/marker 可经 `CMS_GUARD_CONTAINER`/`CMS_GUARD_DOCKER_SOCKET`/`CMS_GUARD_MARKER` 覆盖，工作流模式由 `WORKFLOW_MODE` 决定是否启用检查（`self_share_sync` 才展示）。
