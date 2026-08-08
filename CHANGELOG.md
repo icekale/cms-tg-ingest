@@ -2,7 +2,7 @@
 
 ## 0.2.88 - 2026-08-08
 
-- **Web 管理台显示 CMS STRM 守卫状态**：`/api/v1/health` 新增 `cms_strm_guard` 字段，通过 docker socket 读 CMS 容器日志确认 STRM 删除守卫是否安装（`installed`/`missing`/`unknown`/`not_applicable`），"本地健康"页新增"CMS STRM 守卫"标签——守卫失效时页面直接标红提示，CMS 更新后无需再手工跑 verify.sh 也能及时发现回归。进程内 60 秒缓存，docker socket 不可用时降级为"状态未知"，不阻塞健康端点。容器名/`docker.sock`/marker 可经 `CMS_GUARD_CONTAINER`/`CMS_GUARD_DOCKER_SOCKET`/`CMS_GUARD_MARKER` 覆盖。
+- **Web 管理台显示 CMS STRM 守卫状态**：`/api/v1/health` 新增 `cms_strm_guard` 字段，通过 docker socket 读 CMS 容器日志确认 STRM 删除守卫是否安装（`installed`/`missing`/`unknown`/`not_applicable`），"本地健康"页新增"CMS STRM 守卫"标签——守卫失效时页面直接标红提示，CMS 更新后无需再手工跑 verify.sh 也能及时发现回归。进程内 60 秒缓存，docker socket 不可用时降级为"状态未知"，不阻塞健康端点。容器名/`docker.sock`/marker 可经 `CMS_GUARD_CONTAINER`/`CMS_GUARD_DOCKER_SOCKET`/`CMS_GUARD_MARKER` 覆盖，工作流模式由 `WORKFLOW_MODE` 决定是否启用检查（`self_share_sync` 才展示）。
 - 测试：1424 项全部通过（新增守卫 API 状态 6 项）。
 
 ## 0.2.87 - 2026-08-08
