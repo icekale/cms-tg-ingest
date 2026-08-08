@@ -392,6 +392,8 @@ def _check_hdhive_subscriptions(env: Mapping[str, str], filesystem: Filesystem) 
     return CheckItem("hdhive_subscriptions", True, message)
 
 
+# 注意：此 marker 与 sitecustomize.py / verify.sh / web_api.py 保持一致；
+# 若自定义 marker，需同步修改这 4 处。
 CMS_STRM_GUARD_MARKER = "STRM-GUARD installed on MediaSync.delete_local_file"
 CMS_STRM_GUARD_CONTAINER_ENV = "CMS_GUARD_CONTAINER"
 CMS_STRM_GUARD_SOCKET_ENV = "CMS_GUARD_DOCKER_SOCKET"

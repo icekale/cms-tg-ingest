@@ -336,6 +336,8 @@ def serialize_event(event: dict[str, Any]) -> dict[str, Any]:
     })
 
 
+# 注意：此 marker 与 sitecustomize.py / verify.sh / doctor.py 保持一致；
+# 若自定义 marker，需同步修改这 4 处。
 CMS_STRM_GUARD_MARKER = "STRM-GUARD installed on MediaSync.delete_local_file"
 
 

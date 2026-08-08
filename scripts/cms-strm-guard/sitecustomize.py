@@ -46,7 +46,27 @@ _SELF_SHARE_URL_RE = re.compile(r"/s/[A-Za-z0-9]+_[A-Za-z0-9]+_\d+")
 
 def _install_guard(ms_cls) -> bool:
     original = getattr(ms_cls, "delete_local_file", None)
-    if original is None or getattr(original, "_strm_guard", False):
+    if original is None:
+        # CMS 更新可能改了方法名；保守匹配"名字同时含 delete 和 local"的方法，
+        # 只 patch 一个，避免误伤其它删除路径。
+        candidates = [
+            name
+            for name in dir(ms_cls)
+            if "delete" in name.lower() and "local" in name.lower()
+        ]
+        if len(candidates) == 1:
+            original = getattr(ms_cls, candidates[0], None)
+            patched_name = candidates[0]
+        else:
+            logger.warning(
+                "STRM-GUARD NOT INSTALLED: MediaSync.delete_local_file 不存在，"
+                "候选=%s（CMS 结构可能已变，请更新本守卫）",
+                candidates,
+            )
+            return False
+    else:
+        patched_name = "delete_local_file"
+    if getattr(original, "_strm_guard", False):
         return False
 
     def delete_local_file_guarded(self, *args, **kwargs):
@@ -73,25 +93,41 @@ def _install_guard(ms_cls) -> bool:
         return original(self, *args, **kwargs)
 
     delete_local_file_guarded._strm_guard = True
-    setattr(ms_cls, "delete_local_file", delete_local_file_guarded)
-    logger.warning("STRM-GUARD installed on MediaSync.delete_local_file")
+    setattr(ms_cls, patched_name, delete_local_file_guarded)
+    # 保持标准 marker（verify.sh / doctor.py / web_api.py 均按此检测），
+    # 附加实际方法名便于排查。若想自定义 marker，需同步修改这 4 处。
+    logger.warning(
+        "STRM-GUARD installed on MediaSync.delete_local_file (patched=%s)", patched_name
+    )
     return True
 
 
 def _worker() -> None:
     # 冷启动时 app.core.media_sync 尚未加载；轮询 sys.modules 等待，不主动 import，
-    # 避免依赖链（telebot/urllib3 等）与启动时序问题。最多等 10 分钟。
+    # 避免依赖链（telebot/urllib3 等）与启动时序问题。最多等 10 分钟；超时前
+    # 找不到模块会记明确失败日志，让 verify.sh/doctor 能区分"已安装"和"尝试过但失败"。
     deadline = time.time() + 600
+    saw_module = False
     while time.time() < deadline:
         try:
             mod = sys.modules.get("app.core.media_sync")
             if mod is not None:
+                saw_module = True
                 ms_cls = getattr(mod, "MediaSync", None)
-                if ms_cls is not None and _install_guard(ms_cls):
+                if ms_cls is None:
+                    logger.warning("STRM-GUARD NOT INSTALLED: app.core.media_sync 无 MediaSync 类")
                     return
+                if _install_guard(ms_cls):
+                    return
+                return  # _install_guard 内部已记录失败原因
         except Exception:
             logger.exception("STRM-GUARD worker error")
         time.sleep(1.0)
+    if not saw_module:
+        logger.warning(
+            "STRM-GUARD NOT INSTALLED: 600s 内未加载 app.core.media_sync"
+            "（模块未导入或 CMS 结构已变），守卫未生效"
+        )
 
 
 try:

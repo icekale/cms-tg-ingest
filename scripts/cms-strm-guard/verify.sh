@@ -15,6 +15,8 @@
 set -euo pipefail
 
 CONTAINER="${CMS_CONTAINER:-cloud-media-sync}"
+# 注意：此 marker 与 sitecustomize.py / doctor.py / web_api.py 保持一致；
+# 若自定义 marker，需同步修改这 4 处。
 MARKER="STRM-GUARD installed on MediaSync.delete_local_file"
 SSH_TARGET="${1:-}"
 
