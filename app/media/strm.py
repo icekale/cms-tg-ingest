@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
-from app.config import MoveConfig, MovePlan, SelfShareConfig, is_relative_to, is_under_any_root, safe_resolve
+from app.config import DEFAULT_OWN_SHARE_RECEIVE_CODE, MoveConfig, MovePlan, SelfShareConfig, is_relative_to, is_under_any_root, safe_resolve
 from app.media.classify import (
     candidate_tokens,
     explicit_task_tmdb_id,
@@ -398,7 +398,7 @@ def validate_self_share_strm_source(source: Path, row: dict[str, Any]) -> str:
     own_share_code = str(row.get("own_share_code") or "").strip()
     if not own_share_code:
         return "等待自有分享码，暂不移动 STRM"
-    receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+    receive_code = str(row.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
     expected_marker = f"/s/{own_share_code}_{receive_code}_"
     matched_any = False
     first_issue = ""
@@ -481,7 +481,7 @@ def validate_self_share_strm_destination(
     own_share_code = str(row.get("own_share_code") or "").strip()
     if not own_share_code:
         return "等待自有分享码，暂不确认目标 STRM"
-    receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+    receive_code = str(row.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
     expected_marker = f"/s/{own_share_code}_{receive_code}_"
     if required_relative_path:
         relative = Path(required_relative_path)
@@ -704,7 +704,7 @@ def self_share_strm_relative_paths(path: Path, row: dict[str, Any]) -> set[Path]
     own_share_code = str(row.get("own_share_code") or "").strip()
     if not own_share_code or not path.exists() or not path.is_dir():
         return set()
-    receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+    receive_code = str(row.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
     marker = f"/s/{own_share_code}_{receive_code}_"
     relative_paths: set[Path] = set()
     for strm_path in iter_strm_files(path):
@@ -741,7 +741,7 @@ def validate_self_share_strm_merge(source: Path, destination: Path, row: dict[st
     own_share_code = str(row.get("own_share_code") or "").strip()
     if not own_share_code:
         return "等待自有分享码，暂不移动 STRM"
-    receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+    receive_code = str(row.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
     expected_marker = f"/s/{own_share_code}_{receive_code}_"
     source_has_expected = False
     for source_file in iter_strm_files(source):
@@ -863,7 +863,7 @@ def merge_self_share_strm_folder(
     temp_path: Path | None = None
     try:
         own_share_code = str(row.get("own_share_code") or "").strip()
-        receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+        receive_code = str(row.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
         expected_marker = f"/s/{own_share_code}_{receive_code}_" if own_share_code else ""
         required_relative = relative
         # os.walk(followlinks=False) so a directory symlink inside the source
@@ -1364,7 +1364,7 @@ def restore_missing_self_share_library_folder(
         return "move_failed", metadata
     if plan.status == "skipped" and plan.reason in MISSING_SELF_SHARE_SOURCE_REASONS:
         share_code = str(row.get("own_share_code") or "").strip()
-        receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+        receive_code = str(row.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
         if not share_code:
             return "skipped", metadata
         if _restore_sync_is_waiting(row):

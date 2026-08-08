@@ -4562,7 +4562,9 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
             self.assertEqual(calls[-1][0]["tmdb_id"], "45790")
             self.assertEqual(result.metadata["organized_folder"]["file_id"], "folder-id")
-            self.assertEqual(result.metadata["direct_strm_removed"], 0)
+            # The stale direct_strm_removed counter field was removed; the
+            # recovered stage must simply not claim anything was removed.
+            self.assertNotIn("direct_strm_removed", result.metadata)
             self.assertTrue((direct_dir / "Season 06" / "movie.strm").exists())
             self.assertEqual(recognition["tmdb_id"], "45790")
             self.assertEqual(stored["own_share_file_name"], folder_name)

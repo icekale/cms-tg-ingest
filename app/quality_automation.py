@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .config import Config, MoveConfig, is_relative_to, is_under_any_root, safe_resolve
+from .config import DEFAULT_OWN_SHARE_RECEIVE_CODE, Config, MoveConfig, is_relative_to, is_under_any_root, safe_resolve
 from .media.strm import UnsafeMediaPathError, iter_strm_files
 from .models import TaskSnapshot, TaskStage, TaskStatus
 from .quality import QualityIssue, ShareIdentityResolver, scan_task_quality
@@ -1188,7 +1188,7 @@ class QualityAutomation:
         if not is_under_any_root(dest, self.allowed_roots) or not dest.is_dir():
             return []
         own_code = str(task.metadata.get("own_share_code") or "").strip()
-        receive_code = str(task.metadata.get("own_share_receive_code") or "1212").strip() or "1212"
+        receive_code = str(task.metadata.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
         live_codes = self.store.list_live_share_codes()
         dead_direct = self._dead_direct_paths(task)
         candidates: list[dict[str, object]] = []
@@ -1278,7 +1278,7 @@ class QualityAutomation:
         candidates = {str(item["path"]) for item in self.stale_strm_candidates(task)}
         live_codes = self.store.list_live_share_codes()
         own_code = str(task.metadata.get("own_share_code") or "").strip()
-        receive_code = str(task.metadata.get("own_share_receive_code") or "1212").strip() or "1212"
+        receive_code = str(task.metadata.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
         dead_direct = self._dead_direct_paths(task)
         removed: list[dict[str, object]] = []
         skipped: list[dict[str, object]] = []
@@ -1487,8 +1487,8 @@ class QualityAutomation:
         own_pwd = str(
             task.metadata.get("own_share_receive_code")
             or row.get("own_share_receive_code")
-            or "1212"
-        ).strip() or "1212"
+            or DEFAULT_OWN_SHARE_RECEIVE_CODE
+        ).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
         if not own_code:
             return False
         if self._risk_controlled(task, now):
@@ -1704,7 +1704,7 @@ class QualityAutomation:
         except ValueError:
             mode = "shared"
         own_code = str(task.metadata.get("own_share_code") or "").strip()
-        receive_code = str(task.metadata.get("own_share_receive_code") or "1212").strip() or "1212"
+        receive_code = str(task.metadata.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
         return f"{self.SCAN_CACHE_PREFIX}{dest_path}|{mode}|{own_code}|{receive_code}"
 
     def _load_scan_cache(self, task: TaskSnapshot) -> dict[str, Any] | None:
@@ -1736,7 +1736,7 @@ class QualityAutomation:
         except ValueError:
             mode = "shared"
         own_code = str(task.metadata.get("own_share_code") or "").strip()
-        receive_code = str(task.metadata.get("own_share_receive_code") or "1212").strip() or "1212"
+        receive_code = str(task.metadata.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
         self.store.set_runtime_state(
             self._scan_cache_key(task),
             json.dumps(
@@ -2304,7 +2304,7 @@ class QualityAutomation:
         if not destination.is_dir():
             return QualityCleanupResult("blocked_cleanup", "destination_missing")
         own_share_code = str(metadata.get("own_share_code") or "").strip()
-        receive_code = str(metadata.get("own_share_receive_code") or "1212").strip() or "1212"
+        receive_code = str(metadata.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
         marker = f"/s/{own_share_code}_{receive_code}_"
         strm_files = [
             base_path / name

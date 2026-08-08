@@ -50,6 +50,7 @@ from app.logging_system import LogHub, configure_logging
 
 from app.config import (
     Config,
+    DEFAULT_OWN_SHARE_RECEIVE_CODE,
     MoveConfig,
     MovePlan,
     SelfShareConfig,
@@ -1331,7 +1332,7 @@ class SubmissionStore:
             share_code = str(row["own_share_code"] or "").strip()
             if not share_code:
                 continue
-            receive_code = str(row["own_share_receive_code"] or "1212").strip() or "1212"
+            receive_code = str(row["own_share_receive_code"] or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
             return share_code, receive_code
         return None
 

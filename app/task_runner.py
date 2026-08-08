@@ -78,6 +78,11 @@ def _without_defer_metadata(metadata: dict[str, object]) -> dict[str, object]:
 def _stage_timing_metadata(task: TaskSnapshot, finished_at: float) -> dict[str, float]:
     started_at = float(task.claimed_at or finished_at)
     next_run_at = float(task.next_run_at if task.next_run_at is not None else started_at)
+    if next_run_at <= 0:
+        # enqueue_task(next_run_at=0) means "run immediately"; a zero next run
+        # time must not be read as "scheduled at epoch" or the reported wait
+        # becomes tens of thousands of hours.
+        next_run_at = started_at
     return {
         "stage_started_at": started_at,
         "stage_finished_at": float(finished_at),
@@ -271,12 +276,6 @@ class TaskRunner:
         except Exception:
             LOG.debug("Failed to record TaskRunner heartbeat", exc_info=True)
 
-    def _run_heartbeat(self) -> None:
-        while not self._stop.is_set():
-            if self._thread is None or not self._thread.is_alive():
-                self._safe_runtime_state("task_runner", "error")
-                return
-            self._record_heartbeat()
     def _record_activity(self, now: float | None = None) -> None:
         """Persist a snapshot of what the runner is currently working on.
 

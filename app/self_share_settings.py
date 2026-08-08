@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.config import DEFAULT_OWN_SHARE_RECEIVE_CODE
+
 
 LOG = logging.getLogger("cms-tg-ingest")
 
@@ -134,4 +136,4 @@ def resolve_own_share_receive_code(store: Any, config: Any) -> OwnShareReceiveCo
     env_value = _valid_receive_code(getattr(config, "own_share_receive_code", ""))
     if env_value:
         return OwnShareReceiveCode(env_value, "env")
-    return OwnShareReceiveCode("1212", "default")
+    return OwnShareReceiveCode(DEFAULT_OWN_SHARE_RECEIVE_CODE, "default")

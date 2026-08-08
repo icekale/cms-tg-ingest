@@ -85,7 +85,16 @@ def docker_container_started_at(socket_path: str, container: str) -> str:
         conn = _UnixHTTPConnection(socket_path, timeout=15)
         conn.request("GET", f"/containers/{quote(container, safe='')}/json")
         response = conn.getresponse()
+        # Container inspect JSON can exceed 64KB when the container has many
+        # mounts/env entries; read to EOF so the started_at lookup does not
+        # silently fail on truncated JSON.
+        content_length = int(response.getheader("Content-Length") or 0)
         body = response.read(65536)
+        while content_length <= 0 or len(body) < content_length:
+            chunk = response.read(65536)
+            if not chunk:
+                break
+            body += chunk
         status = int(response.status or 0)
         conn.close()
         conn = None

@@ -13,6 +13,12 @@ from .strm_mode import normalize_strm_mode
 
 LOG = logging.getLogger("cms-tg-ingest")
 
+# Fallback receive code used when a share row has no persisted own-share
+# password. It mirrors the SELF_SHARE_OWN_SHARE_PASSWORD default in
+# .env.example; change it in one place instead of the many "or '1212'"
+# fallbacks across the codebase.
+DEFAULT_OWN_SHARE_RECEIVE_CODE = "1212"
+
 
 def parse_bool_env(value: str | None, default: bool = False) -> bool:
     if value is None or str(value).strip() == "":

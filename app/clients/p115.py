@@ -11,7 +11,7 @@ from typing import Any
 
 from app.clients.http import FormHttp, HttpRequestError, load_cookie_value
 from app.clients.p115_cipher import lixian_rsa_encrypt
-from app.config import default_library_roots
+from app.config import DEFAULT_OWN_SHARE_RECEIVE_CODE, default_library_roots
 from app.media.classify import candidate_tokens, extract_tmdb_id_from_name, extract_year_from_name, normalize_text
 
 LOG = logging.getLogger("cms-tg-ingest")
@@ -1433,7 +1433,7 @@ class P115WebClient:
         }
 
     def ensure_share_settings(self, share_code: str, receive_code: str) -> dict[str, str]:
-        actual_receive_code = str(receive_code or "1212").strip() or "1212"
+        actual_receive_code = str(receive_code or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
         update = self._request(
             "https://webapi.115.com/share/updateshare",
             method="POST",
@@ -1462,7 +1462,7 @@ class P115WebClient:
         created = self.create_share(file_id)
         settings = self.ensure_share_settings(
             created["share_code"],
-            preferred_receive_code or created.get("receive_code") or "1212",
+            preferred_receive_code or created.get("receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE,
         )
         return {**created, **settings}
 

@@ -30,12 +30,22 @@ class TmdbDetailCache:
                 value = json.loads(row[0])
             except (TypeError, ValueError):
                 value = {}
-            if isinstance(value, dict):
+            if isinstance(value, dict) and value:
                 return value
         try:
             value = fetcher()
         except Exception:
-            value = {}
+            # A transient TMDB failure must not be cached as a valid empty
+            # result; otherwise notifications would be missing titles/posters
+            # for the full TTL. Reuse the previous cache entry instead.
+            if row is not None:
+                try:
+                    previous = json.loads(row[0])
+                except (TypeError, ValueError):
+                    previous = {}
+                if isinstance(previous, dict) and previous:
+                    return previous
+            return {}
         if not isinstance(value, dict):
             value = {}
         with sqlite_connection(self.db_path) as connection:

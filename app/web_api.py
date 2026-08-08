@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 from .background_jobs import redact_background_text
+from .config import DEFAULT_OWN_SHARE_RECEIVE_CODE
 from .logging_system import LogFilter, redact_text
 from .media.strm import iter_strm_files
 from .models import TaskSnapshot, TaskStage, TaskStatus
@@ -184,7 +185,7 @@ def completion_drift_for_task(task: TaskSnapshot) -> dict[str, str] | None:
                 "recommendation": recommendation,
             }
         expected_code = str(task.metadata.get("own_share_code") or "").strip()
-        receive_code = str(task.metadata.get("own_share_receive_code") or "1212").strip() or "1212"
+        receive_code = str(task.metadata.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
         expected_marker = f"/s/{expected_code}_{receive_code}_" if expected_code else "/s/"
         has_unexpected = False
         for path in (first_file, *strm_files):

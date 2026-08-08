@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path, PureWindowsPath
 from typing import Iterable
 
+from .config import DEFAULT_OWN_SHARE_RECEIVE_CODE
 from .media.strm import UnsafeMediaPathError, iter_strm_files
 from .models import TaskSnapshot
 from .quality_rules import is_path_within_allowed_roots
@@ -48,7 +49,7 @@ def inspect_task_files(
     dest_path: str | Path,
     expected_mode: str = "shared",
     own_share_code: str = "",
-    own_share_receive_code: str = "1212",
+    own_share_receive_code: str = DEFAULT_OWN_SHARE_RECEIVE_CODE,
     allowed_roots: Iterable[str | Path] | None = None,
     _scan_cache: dict[Path, _StrmDirectoryScan] | None = None,
 ) -> list[QualityIssue]:
@@ -87,7 +88,7 @@ def inspect_task_files(
             _scan_cache[cache_key] = scan
     entries, base_issues = scan
     issues = list(base_issues)
-    receive_code = str(own_share_receive_code or "1212").strip() or "1212"
+    receive_code = str(own_share_receive_code or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
     expected_marker = f"/s/{own_share_code}_{receive_code}_" if own_share_code else "/s/"
     for path, text in entries:
         if "/d/" in text:
@@ -125,7 +126,7 @@ def scan_task_quality(
         if not dest_path:
             continue
         own_share_code = str(task.metadata.get("own_share_code") or "").strip()
-        own_share_receive_code = str(task.metadata.get("own_share_receive_code") or "1212").strip() or "1212"
+        own_share_receive_code = str(task.metadata.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
         if expected_mode == "shared" and callable(share_identity_resolver):
             identity_key = (dest_path, str(task.metadata.get("tmdb_id") or task.tmdb_id or "").strip())
             if identity_key not in identity_cache:

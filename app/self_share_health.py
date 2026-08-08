@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.clients.p115 import P115RiskControlError, P115ShareUnavailableError
-from app.config import is_relative_to, safe_resolve
+from app.config import DEFAULT_OWN_SHARE_RECEIVE_CODE, is_relative_to, safe_resolve
 from app.media.strm import validate_self_share_strm_destination
 from app.models import TaskStage, TaskStatus
 
@@ -71,12 +71,12 @@ def probe_invalid_self_shares(
             if states is not None and hasattr(p115, "inspect_share"):
                 p115.inspect_share(
                     share_code,
-                    str(row.get("own_share_receive_code") or "1212"),
+                    str(row.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE),
                 )
             elif hasattr(p115, "share_snap"):
                 p115.share_snap(
                     share_code,
-                    str(row.get("own_share_receive_code") or "1212"),
+                    str(row.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE),
                     cid="0",
                     limit=1,
                 )

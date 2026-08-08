@@ -27,7 +27,7 @@ from app.clients.p115 import (
     p115_item_id,
     p115_item_parent_id,
 )
-from app.config import MovePlan, SelfShareConfig, default_library_roots, is_relative_to, safe_resolve
+from app.config import DEFAULT_OWN_SHARE_RECEIVE_CODE, MovePlan, SelfShareConfig, default_library_roots, is_relative_to, safe_resolve
 from app.media.classify import (
     apply_tmdb_hint_resolution,
     apply_tmdb_search_resolution,
@@ -1563,7 +1563,6 @@ class BridgeSelfShareTaskWorkflow:
                 }
             )
         lookup_budget = 8
-        direct_strm_removed = 0
         direct_signal = None
         cloud_output_name = str(stage_metadata.get("cloud_output_name") or "").strip()
         if self.cms_cloud_index and cloud_output_name:
@@ -1695,7 +1694,6 @@ class BridgeSelfShareTaskWorkflow:
                 self.self_share_config.auto_organize_retry_seconds or 30,
                 {
                     "submission_id": int(row["id"]),
-                    "direct_strm_removed": direct_strm_removed,
                     "organized_scan_cursor": organized_scan_cursor or {},
                     **hint_metadata,
                 },
@@ -1729,7 +1727,6 @@ class BridgeSelfShareTaskWorkflow:
             {
                 "submission_id": int(row["id"]),
                 "organized_folder": folder,
-                "direct_strm_removed": direct_strm_removed,
                 "organized_scan_cursor": {},
                 **hint_metadata,
             },
@@ -2227,7 +2224,7 @@ class BridgeSelfShareTaskWorkflow:
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
         own_code = str(row.get("own_share_code") or "").strip()
-        own_pwd = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+        own_pwd = str(row.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
         if not own_code:
             return StageResult.failed("缺少自有分享码", error_type="own_share_missing")
         try:
@@ -2835,7 +2832,7 @@ class BridgeSelfShareTaskWorkflow:
             return "pending", metadata, f"等待 115 异步审核检查点（还需约 {remaining} 秒），源文件暂不清理", delay
 
         own_code = str(row.get("own_share_code") or "").strip()
-        own_pwd = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+        own_pwd = str(row.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
         try:
             status = self._read_share_review_state(own_code, own_pwd)
         except P115ShareUnavailableError as exc:
@@ -2933,7 +2930,7 @@ class BridgeSelfShareTaskWorkflow:
         _file_id, relative_path, _file_name, _parent_id = self._direct_file_share_details(task)
         folder_name = str(row.get("own_share_file_name") or "").strip()
         own_share_code = str(row.get("own_share_code") or "").strip()
-        receive_code = str(row.get("own_share_receive_code") or "1212").strip() or "1212"
+        receive_code = str(row.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
         if not relative_path or not folder_name or not own_share_code:
             return None
         trusted_root = safe_resolve(self.self_share_config.strm_root)
