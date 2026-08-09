@@ -154,6 +154,58 @@ class CmsCloudDataIndex:
         except (OSError, sqlite3.Error):
             return False
 
+    def folder_contains_cloud_output(self, folder: dict[str, Any], cloud_output_file_ids: list[str]) -> bool:
+        """Whether a resolved media folder actually contains this task's cloud output.
+
+        CMS renames and moves the downloaded file after the worker polls, so an
+        organizing search that raced ahead of CMS can resolve an unrelated
+        folder.  Anchor ownership to the task's own 115 file ids: the file row
+        keeps its fid across CMS moves, so a folder is owned by the task when
+        one of those ids sits inside it (either directly via
+        ``direct_file_id`` or as a descendant).  An empty id list or an
+        unavailable index returns True to keep legacy behaviour.
+        """
+        ids = [str(value).strip() for value in (cloud_output_file_ids or []) if str(value).strip()]
+        if not ids:
+            return True
+        folder_id = str((folder or {}).get("file_id") or "").strip()
+        if folder_id and str((folder or {}).get("direct_file_id") or "").strip() in ids:
+            return True
+        if not self.db_path.is_file():
+            return True
+        try:
+            with sqlite_connection(
+                f"{self.db_path.resolve().as_uri()}?mode=ro",
+                uri=True,
+                read_only=True,
+                row_factory=sqlite3.Row,
+            ) as conn:
+                for file_id in ids:
+                    row = conn.execute(
+                        "SELECT fid, pid, name, is_dir FROM cloud_data WHERE fid = ? LIMIT 1",
+                        (file_id,),
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    seen: set[str] = set()
+                    while row:
+                        fid = str(row["fid"] or "").strip()
+                        if not fid or fid in seen:
+                            break
+                        seen.add(fid)
+                        if fid == folder_id:
+                            return True
+                        parent_id = str(row["pid"] or "").strip()
+                        if not parent_id:
+                            break
+                        row = conn.execute(
+                            "SELECT fid, pid, name, is_dir FROM cloud_data WHERE fid = ? LIMIT 1",
+                            (parent_id,),
+                        ).fetchone()
+        except (OSError, sqlite3.Error):
+            return True
+        return False
+
     def folder_for_direct_strm(self, source: Path, tmdb_id: str) -> dict[str, str] | None:
         tmdb_id = str(tmdb_id or "").strip()
         if not tmdb_id or not self.db_path.is_file() or not source.is_dir():

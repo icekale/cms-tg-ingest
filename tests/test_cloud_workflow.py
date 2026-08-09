@@ -261,7 +261,7 @@ class PipelineEmby:
         return item.get("LibraryName")
 
 
-def make_workflow(p115, store, task_store=None, cms=None):
+def make_workflow(p115, store, task_store=None, cms=None, cms_cloud_index=None):
     config = SelfShareConfig(
         enabled=True,
         strm_root=Path(tempfile.gettempdir()) / "cms-tg-ingest-cloud-test",
@@ -284,6 +284,7 @@ def make_workflow(p115, store, task_store=None, cms=None):
         openai_classifier=None,
         tmdb_resolver=None,
         receive_cid=TARGET_CID,
+        cms_cloud_index=cms_cloud_index,
     )
 
 
@@ -1143,3 +1144,122 @@ class PostAutoOrganizeGuardTests(unittest.TestCase):
         self.assertIsNone(kwargs["emby"])
         self.assertGreaterEqual(kwargs["delay_seconds"], 15)
         self.assertLessEqual(kwargs["delay_seconds"], 60)
+
+    def _organizing_task(self, row):
+        return SimpleNamespace(
+            id=1,
+            share_code="swhou1y3nr6",
+            receive_code="u148",
+            url="https://115cdn.com/s/swhou1y3nr6?password=u148",
+            title="Example.mkv",
+            metadata={
+                "submission_id": row["id"],
+                "cloud_output_file_id": "cloud-file-1",
+                "cloud_output_items": [
+                    {
+                        "file_id": "cloud-file-1",
+                        "file_name": "Example.mkv",
+                        "is_folder": False,
+                        "parent_id": TARGET_CID,
+                    }
+                ],
+                "received_file_ids": ["cloud-file-1"],
+                "operation_generation": 0,
+                "update_requested_run": 0,
+            },
+        )
+
+    def _organizing_submission(self):
+        submissions = FakeSubmissionStore()
+        return submissions, submissions.upsert_submission(
+            bridge.ShareKey("swhou1y3nr6", "u148"),
+            "https://115cdn.com/s/swhou1y3nr6?password=u148",
+            "auto_organize_submitted",
+            title="Example.mkv",
+        )
+
+    def test_stage_organizing_waits_when_cloud_index_resolves_another_tasks_folder(self):
+        """A folder that does not contain this task's cloud output must not be
+        adopted; the stage defers instead of surfacing a false conflict."""
+        from app.workflows.self_share import BridgeSelfShareTaskWorkflow
+
+        class RejectingIndex:
+            def folder_contains_cloud_output(self, folder, cloud_output_file_ids):
+                return False
+
+        submissions, row = self._organizing_submission()
+        p115 = FakeCloudP115([])
+        workflow = make_workflow(p115, submissions, cms_cloud_index=RejectingIndex())
+        folder = {
+            "file_id": "other-folder",
+            "file_name": "L-雷霆特攻队-2025-[tmdb=986056]",
+            "parent_id": "movie-parent",
+            "direct_file_id": "other-file",
+        }
+
+        with patch.object(
+            workflow,
+            "_find_organized_folder",
+            return_value=(folder, {}, True, 0),
+        ):
+            result = workflow._stage_organizing(self._organizing_task(row))
+
+        self.assertEqual(result.outcome.value, "defer")
+        self.assertIn("等待 CMS 整理完成", result.message)
+        self.assertEqual(row.get("own_share_file_id"), None)
+
+    def test_stage_organizing_adopts_folder_containing_own_cloud_output(self):
+        from app.workflows.self_share import BridgeSelfShareTaskWorkflow
+
+        class AcceptingIndex:
+            def folder_contains_cloud_output(self, folder, cloud_output_file_ids):
+                return True
+
+        submissions, row = self._organizing_submission()
+        p115 = FakeCloudP115([])
+        workflow = make_workflow(p115, submissions, cms_cloud_index=AcceptingIndex())
+        folder = {
+            "file_id": "my-folder",
+            "file_name": "Y-宇宙巨人：希曼崛起-2026-[tmdb=454639]",
+            "parent_id": "movie-parent",
+            "direct_file_id": "cloud-file-1",
+        }
+
+        with patch.object(workflow, "_conflicting_folder_owner", return_value=None):
+            with patch.object(
+                workflow,
+                "_find_organized_folder",
+                return_value=(folder, {}, True, 0),
+            ):
+                result = workflow._stage_organizing(self._organizing_task(row))
+
+        self.assertEqual(result.outcome.value, "complete")
+        self.assertEqual(submissions.find_by_id(row["id"])["own_share_file_id"], "my-folder")
+
+    def test_stage_organizing_rejects_searched_folder_without_own_cloud_output(self):
+        """A p115-search hit (no direct_file_id) must still be verified against
+        the task's own cloud output file ids."""
+        from app.workflows.self_share import BridgeSelfShareTaskWorkflow
+
+        class RejectingIndex:
+            def folder_contains_cloud_output(self, folder, cloud_output_file_ids):
+                return False
+
+        submissions, row = self._organizing_submission()
+        p115 = FakeCloudP115([])
+        workflow = make_workflow(p115, submissions, cms_cloud_index=RejectingIndex())
+        folder = {
+            "file_id": "unrelated-folder",
+            "file_name": "G-攻壳机动队：崛起4-2014-[tmdb=279254]",
+            "parent_id": "movie-parent",
+        }
+
+        with patch.object(
+            workflow,
+            "_find_organized_folder",
+            return_value=(folder, {}, True, 0),
+        ):
+            result = workflow._stage_organizing(self._organizing_task(row))
+
+        self.assertEqual(result.outcome.value, "defer")
+        self.assertEqual(row.get("own_share_file_id"), None)

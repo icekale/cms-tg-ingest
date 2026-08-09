@@ -1475,6 +1475,20 @@ class BridgeSelfShareTaskWorkflow:
             self.store.update_category(int(row["id"]), str(enriched["category"]), "selected")
         return enriched, metadata, ""
 
+    def _cloud_output_file_ids(self, task) -> list[str]:
+        """115 file ids produced by this task's cloud download, if known."""
+        items = task.metadata.get("cloud_output_items")
+        if isinstance(items, list):
+            ids = [
+                str(item.get("file_id") or "").strip()
+                for item in items
+                if isinstance(item, dict) and str(item.get("file_id") or "").strip()
+            ]
+            if ids:
+                return ids
+        file_id = str(task.metadata.get("cloud_output_file_id") or "").strip()
+        return [file_id] if file_id else []
+
     def _stage_organizing(self, task):
         row = self._submission_row(task)
         if not row:
@@ -1506,12 +1520,14 @@ class BridgeSelfShareTaskWorkflow:
             if recognition.get("title"):
                 title = str(recognition.get("title") or title)
         folder = None
+        persisted_folder = None
         if row.get("own_share_file_id") and row.get("own_share_file_name"):
             folder = {
                 "file_id": row.get("own_share_file_id"),
                 "file_name": row.get("own_share_file_name"),
                 "parent_id": self._organized_parent_id(task, self._recognition_from_row(row)),
             }
+            persisted_folder = folder
         elif hint_normalized_now or workflow_phase not in {
             "auto_organize_submitted",
             "organized_found",
@@ -1688,6 +1704,18 @@ class BridgeSelfShareTaskWorkflow:
                         recognition,
                         str(recognition.get("category_status") or "tmdb_search_resolved"),
                     ) or row
+        if folder is not persisted_folder and self.cms_cloud_index:
+            cloud_output_file_ids = self._cloud_output_file_ids(task)
+            if cloud_output_file_ids and not self.cms_cloud_index.folder_contains_cloud_output(
+                folder,
+                cloud_output_file_ids,
+            ):
+                LOG.warning(
+                    "Rejecting organized folder that lacks this task's cloud output task_id=%s folder=%s",
+                    int(row["id"]),
+                    folder.get("file_name"),
+                )
+                folder = None
         if not folder:
             return StageResult.defer(
                 "等待 CMS 整理完成",

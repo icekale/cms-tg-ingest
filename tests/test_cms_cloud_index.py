@@ -146,6 +146,46 @@ class CmsCloudDataIndexTests(unittest.TestCase):
             self.assertTrue(index.has_file_id("series"))
             self.assertFalse(index.has_file_id("missing"))
 
+    def test_folder_contains_cloud_output_accepts_direct_file_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            index = CmsCloudDataIndex(self._db(tmp))
+            folder = {"file_id": "series", "direct_file_id": "episode"}
+
+            self.assertTrue(index.folder_contains_cloud_output(folder, ["episode"]))
+            self.assertTrue(index.folder_contains_cloud_output(folder, ["other", "episode"]))
+
+    def test_folder_contains_cloud_output_accepts_descendant_ancestor_climb(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            index = CmsCloudDataIndex(self._db(tmp))
+            folder = {"file_id": "series", "direct_file_id": ""}
+
+            self.assertTrue(index.folder_contains_cloud_output(folder, ["episode"]))
+
+    def test_folder_contains_cloud_output_rejects_folder_without_task_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._db(tmp)
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.executemany(
+                    "INSERT INTO cloud_data (fid, pid, name, pick_code, is_dir, f_modify_time) VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        ("other-episode", "other-series", "Other.Movie.2020.mkv", "otherpick", 0, 0),
+                        ("other-series", "tv-root", "O-其他电影-2020-[tmdb=99999]", "", 1, 0),
+                    ],
+                )
+                conn.commit()
+            index = CmsCloudDataIndex(db_path)
+
+            self.assertFalse(index.folder_contains_cloud_output({"file_id": "other-series", "direct_file_id": ""}, ["episode"]))
+            self.assertFalse(index.folder_contains_cloud_output({"file_id": "other-series", "direct_file_id": ""}, ["missing"]))
+
+    def test_folder_contains_cloud_output_accepts_empty_ids_and_unavailable_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            index = CmsCloudDataIndex(self._db(tmp))
+            broken = Path(tmp) / "missing.db"
+
+            self.assertTrue(index.folder_contains_cloud_output({"file_id": "series"}, []))
+            self.assertTrue(CmsCloudDataIndex(broken).folder_contains_cloud_output({"file_id": "series"}, ["episode"]))
+
     def test_resolves_media_root_from_cloud_output_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._db(tmp)
