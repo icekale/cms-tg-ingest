@@ -339,6 +339,7 @@ def serialize_event(event: dict[str, Any]) -> dict[str, Any]:
 # 注意：此 marker 与 sitecustomize.py / verify.sh / doctor.py 保持一致；
 # 若自定义 marker，需同步修改这 4 处。
 CMS_STRM_GUARD_MARKER = "STRM-GUARD installed on MediaSync.delete_local_file"
+CMS_DIRECT_STRM_GUARD_MARKER = "STRM-GUARD direct-strm-suppressor installed on"
 
 
 class _UnixDockerLogReader:
@@ -380,6 +381,7 @@ class _UnixDockerLogReader:
 
 
 _cms_guard_cache: dict[str, Any] = {"at": 0.0, "value": None}
+_cms_direct_guard_cache: dict[str, Any] = {"at": 0.0, "value": None}
 
 
 def check_cms_strm_guard(
@@ -427,8 +429,54 @@ def check_cms_strm_guard(
     return dict(result)
 
 
+def check_cms_direct_strm_guard(
+    *,
+    workflow_mode: str = "",
+    container: str = "cloud-media-sync",
+    docker_socket: str = "/var/run/docker.sock",
+    marker: str = CMS_DIRECT_STRM_GUARD_MARKER,
+    log_reader: Any | None = None,
+    cache_seconds: float = 60.0,
+) -> dict[str, Any]:
+    """Return the CMS direct-STRM suppression guard status for the health API.
+
+    Same semantics as ``check_cms_strm_guard`` but for the /d/ direct-STRM
+    suppression guard (media library only ever keeps /s/ self-share STRM).
+    """
+    if (workflow_mode or "direct") != "self_share_sync":
+        return {
+            "ok": True,
+            "status": "not_applicable",
+            "message": "guard only relevant for self_share_sync",
+        }
+    now = time.time()
+    cache = _cms_direct_guard_cache
+    if cache["value"] is not None and now - cache["at"] < max(0.0, float(cache_seconds or 0)):
+        return dict(cache["value"])
+
+    reader = log_reader or _UnixDockerLogReader(socket_path=docker_socket)
+    logs = reader.read_logs(container, tail=100000)
+    if not logs:
+        result = {
+            "ok": True,
+            "status": "unknown",
+            "message": "无法读取 CMS 容器日志（docker socket 不可用或容器不存在）；守卫状态未知",
+        }
+    elif marker in logs:
+        result = {"ok": True, "status": "installed", "message": "CMS 直链 STRM 拦截守卫已安装"}
+    else:
+        result = {
+            "ok": False,
+            "status": "missing",
+            "message": "CMS 容器日志未找到直链 STRM 拦截守卫标记；CMS 更新可能导致守卫静默失效",
+        }
+    cache.update({"at": now, "value": result})
+    return dict(result)
+
+
 def _reset_cms_guard_cache() -> None:
     _cms_guard_cache.update({"at": 0.0, "value": None})
+    _cms_direct_guard_cache.update({"at": 0.0, "value": None})
 
 
 def serialize_health(
@@ -437,6 +485,7 @@ def serialize_health(
     enabled: bool = True,
     now: float | None = None,
     cms_guard: dict[str, Any] | None = None,
+    cms_direct_guard: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     current_time = time.time() if now is None else float(now)
     summary = build_task_health(store, enabled=enabled, now=current_time)
@@ -494,6 +543,7 @@ def serialize_health(
             else None
         ),
         "cms_strm_guard": cms_guard or None,
+        "cms_direct_strm_guard": cms_direct_guard or None,
     }
 
 

@@ -533,12 +533,16 @@ class CmsStrmGuardCheckTests(unittest.TestCase):
         env = self._env(WORKFLOW_MODE="direct")
         item = doctor.run_checks(env=env, filesystem=doctor.MemoryFilesystem(existing_paths=set())).items
         guard = next(i for i in item if i.name == "cms_strm_guard")
+        direct_guard = next(i for i in item if i.name == "cms_direct_strm_guard")
         self.assertTrue(guard.ok)
         self.assertIn("only relevant for self_share_sync", guard.message)
+        self.assertTrue(direct_guard.ok)
+        self.assertIn("only relevant for self_share_sync", direct_guard.message)
 
     def test_guard_ok_when_marker_found_in_logs(self):
         reader = FakeDockerLogReader(
             "2026-08-08 20:18:17 WARNING sitecustom STRM-GUARD installed on MediaSync.delete_local_file\n"
+            "2026-08-08 20:18:17 WARNING sitecustom STRM-GUARD direct-strm-suppressor installed on app.core.media_sync.create_strm_file\n"
         )
         env = self._env(CMS_GUARD_CONTAINER="cloud-media-sync", CMS_GUARD_DOCKER_SOCKET="/var/run/docker.sock")
         item = doctor.run_checks(
@@ -547,8 +551,12 @@ class CmsStrmGuardCheckTests(unittest.TestCase):
             log_reader=reader,
         ).items
         guard = next(i for i in item if i.name == "cms_strm_guard")
+        direct_guard = next(i for i in item if i.name == "cms_direct_strm_guard")
         self.assertTrue(guard.ok)
         self.assertIn("已安装", guard.message)
+        self.assertTrue(direct_guard.ok)
+        self.assertIn("已安装", direct_guard.message)
+        # 两个守卫检查共享同一次日志读取，避免重复读 docker 日志。
         self.assertEqual(reader.calls, [("cloud-media-sync", 100000)])
 
     def test_guard_fails_when_marker_missing(self):
@@ -560,9 +568,14 @@ class CmsStrmGuardCheckTests(unittest.TestCase):
             log_reader=reader,
         ).items
         guard = next(i for i in item if i.name == "cms_strm_guard")
+        direct_guard = next(i for i in item if i.name == "cms_direct_strm_guard")
         self.assertFalse(guard.ok)
         self.assertIn("未找到", guard.message)
         self.assertIn("静默失效", guard.message)
+        self.assertFalse(direct_guard.ok)
+        self.assertIn("未找到", direct_guard.message)
+        self.assertIn("静默失效", direct_guard.message)
+        self.assertEqual(reader.calls, [("cloud-media-sync", 100000)])
 
     def test_guard_warns_when_docker_unavailable(self):
         reader = FakeDockerLogReader("")  # empty logs => docker unavailable
@@ -573,8 +586,27 @@ class CmsStrmGuardCheckTests(unittest.TestCase):
             log_reader=reader,
         ).items
         guard = next(i for i in item if i.name == "cms_strm_guard")
+        direct_guard = next(i for i in item if i.name == "cms_direct_strm_guard")
         self.assertTrue(guard.ok)
         self.assertIn("无法读取", guard.message)
+        self.assertTrue(direct_guard.ok)
+        self.assertIn("无法读取", direct_guard.message)
+
+    def test_direct_guard_ok_when_only_delete_marker_missing(self):
+        # 删除守卫标记缺失但直链拦截守卫标记存在：两者应独立判定。
+        reader = FakeDockerLogReader(
+            "2026-08-08 20:18:17 WARNING sitecustom STRM-GUARD direct-strm-suppressor installed on app.core.media_sync.create_strm_file\n"
+        )
+        env = self._env(CMS_GUARD_CONTAINER="cloud-media-sync")
+        item = doctor.run_checks(
+            env=env,
+            filesystem=doctor.MemoryFilesystem(existing_paths=set()),
+            log_reader=reader,
+        ).items
+        guard = next(i for i in item if i.name == "cms_strm_guard")
+        direct_guard = next(i for i in item if i.name == "cms_direct_strm_guard")
+        self.assertFalse(guard.ok)
+        self.assertTrue(direct_guard.ok)
 
 
 if __name__ == "__main__":

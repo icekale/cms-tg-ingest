@@ -397,14 +397,28 @@ def _check_hdhive_subscriptions(env: Mapping[str, str], filesystem: Filesystem) 
 # 注意：此 marker 与 sitecustomize.py / verify.sh / web_api.py 保持一致；
 # 若自定义 marker，需同步修改这 4 处。
 CMS_STRM_GUARD_MARKER = "STRM-GUARD installed on MediaSync.delete_local_file"
+CMS_DIRECT_STRM_GUARD_MARKER = "STRM-GUARD direct-strm-suppressor installed on"
 CMS_STRM_GUARD_CONTAINER_ENV = "CMS_GUARD_CONTAINER"
 CMS_STRM_GUARD_SOCKET_ENV = "CMS_GUARD_DOCKER_SOCKET"
 CMS_STRM_GUARD_MARKER_ENV = "CMS_GUARD_MARKER"
+CMS_DIRECT_STRM_GUARD_MARKER_ENV = "CMS_GUARD_DIRECT_MARKER"
+
+
+def _read_cms_guard_logs(
+    env: Mapping[str, str],
+    log_reader: DockerLogReader | None = None,
+) -> str:
+    """Read CMS container logs once and share across the two guard checks."""
+    container = _env_value(env, CMS_STRM_GUARD_CONTAINER_ENV) or "cloud-media-sync"
+    socket_path = _env_value(env, CMS_STRM_GUARD_SOCKET_ENV) or "/var/run/docker.sock"
+    reader = log_reader or RealDockerLogReader(socket_path=socket_path)
+    return reader.read_logs(container, tail=100000)
 
 
 def _check_cms_strm_guard(
     env: Mapping[str, str],
     log_reader: DockerLogReader | None = None,
+    logs: str | None = None,
 ) -> CheckItem:
     """Verify the CMS self-share STRM delete guard is installed.
 
@@ -419,11 +433,8 @@ def _check_cms_strm_guard(
         return CheckItem("cms_strm_guard", True, "guard only relevant for self_share_sync")
 
     marker = _env_value(env, CMS_STRM_GUARD_MARKER_ENV) or CMS_STRM_GUARD_MARKER
-    container = _env_value(env, CMS_STRM_GUARD_CONTAINER_ENV) or "cloud-media-sync"
-    socket_path = _env_value(env, CMS_STRM_GUARD_SOCKET_ENV) or "/var/run/docker.sock"
-    reader = log_reader or RealDockerLogReader(socket_path=socket_path)
-
-    logs = reader.read_logs(container, tail=100000)
+    if logs is None:
+        logs = _read_cms_guard_logs(env, log_reader)
     if not logs:
         return CheckItem(
             "cms_strm_guard",
@@ -439,6 +450,39 @@ def _check_cms_strm_guard(
     )
 
 
+def _check_cms_direct_strm_guard(
+    env: Mapping[str, str],
+    log_reader: DockerLogReader | None = None,
+    logs: str | None = None,
+) -> CheckItem:
+    """Verify the CMS direct-STRM suppression guard is installed.
+
+    The guard (scripts/cms-strm-guard/sitecustomize.py) removes media-library
+    .strm files that point to a direct link (/d/) right after CMS writes them,
+    so the library only ever contains self-share (/s/) STRM. Same install
+    detection as the delete guard: marker printed once at container startup.
+    """
+    if (_env_value(env, "WORKFLOW_MODE") or "direct") != "self_share_sync":
+        return CheckItem("cms_direct_strm_guard", True, "guard only relevant for self_share_sync")
+
+    marker = _env_value(env, CMS_DIRECT_STRM_GUARD_MARKER_ENV) or CMS_DIRECT_STRM_GUARD_MARKER
+    if logs is None:
+        logs = _read_cms_guard_logs(env, log_reader)
+    if not logs:
+        return CheckItem(
+            "cms_direct_strm_guard",
+            True,
+            "无法读取 CMS 容器日志（docker socket 不可用或容器不存在）；守卫状态未知",
+        )
+    if marker in logs:
+        return CheckItem("cms_direct_strm_guard", True, "CMS 直链 STRM 拦截守卫已安装")
+    return CheckItem(
+        "cms_direct_strm_guard",
+        False,
+        "CMS 容器日志未找到直链 STRM 拦截守卫标记；CMS 更新可能导致守卫静默失效，请检查 scripts/cms-strm-guard",
+    )
+
+
 def run_checks(
     env: Mapping[str, str] | None = None,
     filesystem: Filesystem | None = None,
@@ -446,13 +490,17 @@ def run_checks(
 ) -> DoctorReport:
     env = os.environ if env is None else env
     filesystem = RealFilesystem() if filesystem is None else filesystem
+    workflow_mode = _env_value(env, "WORKFLOW_MODE") or "direct"
+    # 两个守卫检查共享同一次日志读取，避免重复读 docker 日志。
+    logs = _read_cms_guard_logs(env, log_reader) if workflow_mode == "self_share_sync" else None
     return DoctorReport([
         _check_required_env(env),
         _check_optional_env(env),
         _check_runtime_safety(env),
         _check_filesystem(env, filesystem),
         _check_hdhive_subscriptions(env, filesystem),
-        _check_cms_strm_guard(env, log_reader=log_reader),
+        _check_cms_strm_guard(env, log_reader=log_reader, logs=logs),
+        _check_cms_direct_strm_guard(env, log_reader=log_reader, logs=logs),
     ])
 
 

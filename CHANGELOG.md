@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.91 - 2026-08-09
+
+- **CMS 直链 STRM 拦截守卫**（`scripts/cms-strm-guard/sitecustomize.py`）：媒体库不再出现"先入库直链 strm（`/d/`）、再用共享 strm（`/s/`）替换删除"的中间态。CMS 的 `auto_organize` 会把云文件先落地为媒体库 `/d/` 直链 strm，随后才被 `/s/` 共享 strm 接管——本守卫在 CMS 容器内 monkey patch `MediaSync` 的 strm 写入方法，采用"先写后删"：原方法照常写（不破坏 CMS 状态机），随即校验内容，若指向 `/d/` 直链且路径落在媒体库根目录（`STRM_GUARD_LIBRARY_ROOTS`，默认 `/mnt/user/Unraid/strm/转存`）则立即删除并记日志。与既有删除守卫同模式（幂等安装、惰性轮询、全程 try/except、方法名变化时保守发现 + `STRM-GUARD NOT INSTALLED` 明确日志），CMS 升级走 `update-cms.sh` 时自动验证。
+- **验证闭环同步**：`verify.sh` 同时检查删除守卫 + 直链拦截守卫两个 marker；`doctor.py` 新增 `cms_direct_strm_guard` 检查（与 `cms_strm_guard` 共享一次 docker 日志读取）；Web `/api/v1/health` 新增 `cms_direct_strm_guard` 字段，"本地健康"页新增"CMS 直链拦截守卫"标签，失效即标红。marker 可经 `CMS_GUARD_DIRECT_MARKER` 覆盖。
+- **建议关闭直链修复循环**：`MEDIA_STRM_REPAIR_ENABLED` 默认注释改为 `false`（`.env.example`）——修复循环会在共享 strm 缺失时用 `/d/` 直链写回媒体库，与直链拦截守卫目标冲突；缺失的 strm 交由现有巡检/重跑机制处理。
+- **部署**：CMS 容器 `docker-compose.override.yml` 增加 `STRM_GUARD_LIBRARY_ROOTS` 环境变量；直链拦截守卫直接挂钩模块级 `create_strm_file(file_path, content)`（2026-08 版 CMS 实测：所有 strm 文件都经此函数写出，build_direct / save_file / save_video / sync_file_to_local 均调用它），CMS 升级后若此函数被移除会记 `STRM-GUARD NOT INSTALLED` 明确日志。
+- 测试：1434 项全部通过（新增直链守卫 doctor 1 项、web_api 6 项）。
+
 ## 0.2.90 - 2026-08-09
 
 - **Telegram 长轮询自适应超时**：部分网络环境（代理/NAT 中间设备）会在 getUpdates 长轮询的空闲窗口掐断连接（`SSL: UNEXPECTED_EOF_WHILE_READING`），导致消息/回调间歇性丢失——HDHive 搜索这类多步交互（搜索→候选→资源→解锁）任一步回调丢失即中断。现在 `TelegramClient` 连续遇到瞬时错误时自动把有效轮询超时降半（30→15→10→5 秒，下限 5s），让连接在设备掐断前返回；连续干净成功后逐步回升。建议配合 `TG_POLL_TIMEOUT=10` 使用。

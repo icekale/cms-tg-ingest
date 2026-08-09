@@ -65,7 +65,9 @@ from .web_api import (
     api_cms_version,
     api_tasks,
     check_cms_strm_guard,
+    check_cms_direct_strm_guard,
     CMS_STRM_GUARD_MARKER,
+    CMS_DIRECT_STRM_GUARD_MARKER,
     quality_items,
     serialize_health,
     serialize_hdhive,
@@ -1385,6 +1387,7 @@ class WebApp:
         cms_guard_docker_socket: str = "",
         cms_guard_marker: str = "",
         cms_guard_workflow_mode: str = "",
+        cms_direct_guard_marker: str = "",
     ):
         self.store = store
         self.web_token = web_token
@@ -1410,6 +1413,7 @@ class WebApp:
         self.cms_guard_docker_socket = str(cms_guard_docker_socket or "").strip()
         self.cms_guard_marker = str(cms_guard_marker or "").strip()
         self.cms_guard_workflow_mode = str(cms_guard_workflow_mode or "").strip()
+        self.cms_direct_guard_marker = str(cms_direct_guard_marker or "").strip()
 
     def _cms_strm_guard(self) -> dict[str, Any] | None:
         """Resolve CMS STRM guard status for the health payload (never raises)."""
@@ -1422,6 +1426,21 @@ class WebApp:
                 container=self.cms_guard_container,
                 docker_socket=self.cms_guard_docker_socket or "/var/run/docker.sock",
                 marker=self.cms_guard_marker or CMS_STRM_GUARD_MARKER,
+            )
+        except Exception:
+            return {"ok": True, "status": "unknown", "message": "守卫状态检查异常"}
+
+    def _cms_direct_strm_guard(self) -> dict[str, Any] | None:
+        """Resolve CMS direct-STRM suppression guard status (never raises)."""
+        workflow_mode = self.cms_guard_workflow_mode or str(getattr(self.self_share_config, "workflow_mode", "") or "").strip()
+        if (workflow_mode or "direct") != "self_share_sync" and not self.cms_direct_guard_marker:
+            return None
+        try:
+            return check_cms_direct_strm_guard(
+                workflow_mode=workflow_mode,
+                container=self.cms_guard_container,
+                docker_socket=self.cms_guard_docker_socket or "/var/run/docker.sock",
+                marker=self.cms_direct_guard_marker or CMS_DIRECT_STRM_GUARD_MARKER,
             )
         except Exception:
             return {"ok": True, "status": "unknown", "message": "守卫状态检查异常"}
@@ -2205,7 +2224,12 @@ class WebApp:
                     limit=20,
                     lifecycle_actions_enabled=self.task_engine_enabled,
                 ),
-                "health": serialize_health(self.store, enabled=self.task_engine_enabled, cms_guard=self._cms_strm_guard()),
+                "health": serialize_health(
+                    self.store,
+                    enabled=self.task_engine_enabled,
+                    cms_guard=self._cms_strm_guard(),
+                    cms_direct_guard=self._cms_direct_strm_guard(),
+                ),
                 "strm_default_mode": self.store.get_default_strm_mode(),
                 "own_share_receive_code": self._own_share_receive_code_payload(),
             }
@@ -2258,7 +2282,12 @@ class WebApp:
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/health":
             status, response_headers, response_body = api_response(
-                serialize_health(self.store, enabled=self.task_engine_enabled, cms_guard=self._cms_strm_guard())
+                serialize_health(
+                    self.store,
+                    enabled=self.task_engine_enabled,
+                    cms_guard=self._cms_strm_guard(),
+                    cms_direct_guard=self._cms_direct_strm_guard(),
+                )
             )
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/quality":

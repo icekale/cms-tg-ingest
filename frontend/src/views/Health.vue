@@ -32,6 +32,10 @@ const guardLabel = (status) => ({ installed: '已安装', missing: '未安装', 
         <n-tag :type="guardTagType(health.cms_strm_guard.status)">{{ guardLabel(health.cms_strm_guard.status) }}</n-tag>
         <div class="subtle" style="margin-top: 4px">{{ health.cms_strm_guard.message }}</div>
       </n-descriptions-item>
+      <n-descriptions-item v-if="health.cms_direct_strm_guard" label="CMS 直链拦截守卫">
+        <n-tag :type="guardTagType(health.cms_direct_strm_guard.status)">{{ guardLabel(health.cms_direct_strm_guard.status) }}</n-tag>
+        <div class="subtle" style="margin-top: 4px">{{ health.cms_direct_strm_guard.message }}</div>
+      </n-descriptions-item>
     </n-descriptions>
     <div v-if="health.wait_details?.length" class="health-list"><h3>等待原因</h3><div v-for="detail in health.wait_details" :key="detail">{{ detail }}</div></div>
     <div v-if="health.latest_problem" class="health-list"><h3>最近问题</h3><RouterLink :to="`/tasks/${health.latest_problem.id}`">#{{ health.latest_problem.id }} {{ displayTaskTitle(health.latest_problem) }}</RouterLink><div>{{ health.latest_problem.error?.summary || health.latest_problem.why_slow || '' }}</div></div>
