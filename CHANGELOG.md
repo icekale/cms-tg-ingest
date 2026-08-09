@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.92 - 2026-08-09
+
+- **修复云下载任务整理竞态卡死**（任务 375 现场复现）：CMS 整理完成前 organizing 阶段可能通过"近期更新"回退窗口选中**其他任务**刚被 CMS 移入媒体库的目录；在无 TMDB 标识时该目录会被 `_conflicting_folder_owner` 误判为"已被其他 TMDB 任务占用"→ `needs_action` 终态永久卡死（runner 不 claim、重试按钮被引擎禁止）。现在 `_stage_organizing` 采纳目录前用 `CmsCloudDataIndex.folder_contains_cloud_output` 校验"该目录确实包含本任务自己的云输出文件"（CMS 移动/改名不改变 115 fid，沿 `cloud_data.pid` 向上验证归属）；非自有目录一律拒绝并落入现有「等待 CMS 整理完成」defer，CMS 整理完成后下一轮即命中自有目录。持久化的自有目录跳过校验，不改 `_conflicting_folder_owner` 真实冲突语义。
+- 测试：1441 项全部通过（新增目录归属校验 4 项 + organizing 归属守卫 3 项）。
+
 ## 0.2.91 - 2026-08-09
 
 - **CMS 直链 STRM 拦截守卫**（`scripts/cms-strm-guard/sitecustomize.py`）：媒体库不再出现"先入库直链 strm（`/d/`）、再用共享 strm（`/s/`）替换删除"的中间态。CMS 的 `auto_organize` 会把云文件先落地为媒体库 `/d/` 直链 strm，随后才被 `/s/` 共享 strm 接管——本守卫在 CMS 容器内 monkey patch `MediaSync` 的 strm 写入方法，采用"先写后删"：原方法照常写（不破坏 CMS 状态机），随即校验内容，若指向 `/d/` 直链且路径落在媒体库根目录（`STRM_GUARD_LIBRARY_ROOTS`，默认 `/mnt/user/Unraid/strm/转存`）则立即删除并记日志。与既有删除守卫同模式（幂等安装、惰性轮询、全程 try/except、方法名变化时保守发现 + `STRM-GUARD NOT INSTALLED` 明确日志），CMS 升级走 `update-cms.sh` 时自动验证。
