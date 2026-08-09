@@ -1806,6 +1806,13 @@ class TelegramClient:
     def __init__(self, token: str, http: HttpJson | None = None, timeout: int = 60):
         self.base_url = f"https://api.telegram.org/bot{token}"
         self.http = http or HttpJson(timeout)
+        # Adaptive long-poll timeout: some middleboxes (proxy / NAT / GFW-style
+        # devices) drop the getUpdates connection during a long idle window
+        # (SSL: UNEXPECTED_EOF_WHILE_READING). Each consecutive transient
+        # failure halves the effective poll timeout (30 -> 15 -> 10 -> 5) so the
+        # connection returns before the device kills it; consecutive successes
+        # step the timeout back up toward the configured value.
+        self._consecutive_transient = 0
 
     @staticmethod
     def _is_transient_telegram_error(exc: Exception) -> bool:
@@ -1828,13 +1835,21 @@ class TelegramClient:
     def _is_transient_get_updates_error(exc: Exception) -> bool:
         return TelegramClient._is_transient_telegram_error(exc)
 
+    def _effective_poll_timeout(self, timeout: int) -> int:
+        if self._consecutive_transient <= 0:
+            return max(1, int(timeout))
+        # halve per consecutive failure, floor at 5s
+        return max(5, int(timeout) // (2 ** min(2, self._consecutive_transient)))
+
     def get_updates(self, offset: int | None, timeout: int) -> list[dict]:
         global LAST_TELEGRAM_TRANSIENT_ERROR_AT
-        params = {"timeout": timeout, "allowed_updates": json.dumps(["message", "callback_query"])}
+        effective_timeout = self._effective_poll_timeout(timeout)
+        params = {"timeout": effective_timeout, "allowed_updates": json.dumps(["message", "callback_query"])}
         if offset is not None:
             params["offset"] = offset
         url = self.base_url + "/getUpdates?" + urllib.parse.urlencode(params)
         last_error: Exception | None = None
+        saw_transient = False
         for attempt in range(2):
             try:
                 resp = self.http.request(url)
@@ -1843,14 +1858,25 @@ class TelegramClient:
                 last_error = exc
                 if attempt == 1 or not self._is_transient_get_updates_error(exc):
                     raise
+                saw_transient = True
                 LAST_TELEGRAM_TRANSIENT_ERROR_AT = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-                LOG.warning("Telegram getUpdates transient error, retrying once: %s", exc)
+                self._consecutive_transient += 1
+                LOG.warning(
+                    "Telegram getUpdates transient error, retrying once (adaptive timeout=%s): %s",
+                    effective_timeout,
+                    exc,
+                )
                 time.sleep(1)
         else:
             assert last_error is not None
             raise last_error
         if not resp.get("ok"):
             raise RuntimeError(resp.get("description") or "Telegram getUpdates failed")
+        # A clean success (no transient this round) decays the counter so the
+        # timeout can grow back; a round that recovered via retry keeps the
+        # counter where it is because the middlebox just proved it still drops.
+        if not saw_transient and self._consecutive_transient:
+            self._consecutive_transient = max(0, self._consecutive_transient - 1)
         return resp.get("result") or []
 
     def healthcheck(self) -> bool:

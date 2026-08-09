@@ -83,6 +83,51 @@ class TelegramClientTests(unittest.TestCase):
         self.assertNotIn("SECRET", str(raised.exception))
         self.assertIn("bot<redacted>", str(raised.exception))
 
+    def test_get_updates_halves_timeout_after_transient_eof(self):
+        eof = RuntimeError(
+            "Cannot reach https://api.telegram.org/botsecret/getUpdates: "
+            "UNEXPECTED_EOF_WHILE_READING EOF occurred"
+        )
+        # each call: attempt0 EOF (bumps counter), attempt1 success
+        http = SequenceHttp([eof, {"ok": True, "result": []}, eof, {"ok": True, "result": []}])
+
+        with patch("bridge.time.sleep"):
+            client = TelegramClient("secret", http=http)
+            client.get_updates(offset=None, timeout=30)
+            client.get_updates(offset=None, timeout=30)
+
+        # counter: 1 after first call, 2 after second -> second call polls at 15
+        self.assertEqual(client._consecutive_transient, 2)
+        urls = [url for url, _kwargs in http.calls]
+        self.assertTrue(any("timeout=30" in url for url in urls))
+        self.assertTrue(any("timeout=15" in url for url in urls))
+
+    def test_get_updates_timeout_recovers_after_success(self):
+        eof = RuntimeError(
+            "Cannot reach https://api.telegram.org/botsecret/getUpdates: "
+            "UNEXPECTED_EOF_WHILE_READING EOF occurred"
+        )
+        http = SequenceHttp([eof, {"ok": True, "result": []}, {"ok": True, "result": []}])
+
+        with patch("bridge.time.sleep"):
+            client = TelegramClient("secret", http=http)
+            client.get_updates(offset=None, timeout=30)
+            client.get_updates(offset=None, timeout=30)
+
+        # counter decays back to 0 after consecutive success
+        self.assertEqual(client._consecutive_transient, 0)
+        urls = [url for url, _kwargs in http.calls]
+        self.assertTrue(any("timeout=30" in url for url in urls))
+
+    def test_get_updates_success_without_transient_keeps_configured_timeout(self):
+        http = SequenceHttp([{"ok": True, "result": []}])
+
+        client = TelegramClient("secret", http=http)
+        client.get_updates(offset=None, timeout=30)
+
+        self.assertEqual(client._consecutive_transient, 0)
+        self.assertTrue(any("timeout=30" in url for url, _kwargs in http.calls))
+
 
 if __name__ == "__main__":
     unittest.main()

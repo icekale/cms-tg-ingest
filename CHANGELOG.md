@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.90 - 2026-08-09
+
+- **Telegram 长轮询自适应超时**：部分网络环境（代理/NAT 中间设备）会在 getUpdates 长轮询的空闲窗口掐断连接（`SSL: UNEXPECTED_EOF_WHILE_READING`），导致消息/回调间歇性丢失——HDHive 搜索这类多步交互（搜索→候选→资源→解锁）任一步回调丢失即中断。现在 `TelegramClient` 连续遇到瞬时错误时自动把有效轮询超时降半（30→15→10→5 秒，下限 5s），让连接在设备掐断前返回；连续干净成功后逐步回升。建议配合 `TG_POLL_TIMEOUT=10` 使用。
+- 测试：1427 项全部通过（新增自适应超时 3 项）。
+
 ## 0.2.89 - 2026-08-09
 
 - **修复 CMS 守卫状态假阳性**：`doctor.py` 与 `web_api.py` 读 CMS 容器日志时 `tail` 从 300 提升到 100000。守卫 marker 只在容器启动时打印一次，而 CMS 日志跨天累积（数千行/天），`tail=300` 会在运行 1-2 天后把 marker 挤出窗口，导致 doctor healthcheck 与 Web UI 误报"守卫未安装"（容器 health 从 healthy 掉到 unhealthy）。
