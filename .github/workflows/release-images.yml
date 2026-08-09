@@ -22,7 +22,14 @@ jobs:
 
       - uses: docker/setup-qemu-action@v3
 
+      # Docker Hub 镜像层拉取在 GitHub 托管 runner 上偶发长时间卡住（~18 分钟无进展）。
+      # 通过 buildkitd registry mirror 走国内加速器拉取 docker.io 基础镜像；
+      # 仅影响 CI 构建拉取，不改 Dockerfile、不影响本地构建。
       - uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["docker.m.daocloud.io", "docker.1ms.run", "docker.1panel.live"]
 
       - name: GHCR metadata
         id: meta-ghcr
