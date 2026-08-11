@@ -494,6 +494,7 @@ def maybe_start_web_server(
     background_jobs: BackgroundJobCoordinator | None = None,
     log_hub: LogHub | None = None,
     cms_version_checker: Any | None = None,
+    tmdb_resolver: Any | None = None,
 ):
     if not config.web_enabled:
         return None
@@ -535,6 +536,8 @@ def maybe_start_web_server(
         kwargs["background_jobs"] = background_jobs
     if cms_version_checker is not None:
         kwargs["cms_version_checker"] = cms_version_checker
+    if tmdb_resolver is not None:
+        kwargs["tmdb_resolver"] = tmdb_resolver
     try:
         starter_parameters = inspect.signature(starter).parameters
         supports_username_auth = (
@@ -633,6 +636,7 @@ def call_maybe_start_web_server(
     background_jobs: BackgroundJobCoordinator | None = None,
     log_hub: LogHub | None = None,
     cms_version_checker: Any | None = None,
+    tmdb_resolver: Any | None = None,
 ):
     try:
         parameters = inspect.signature(maybe_start_web_server).parameters
@@ -661,7 +665,7 @@ def call_maybe_start_web_server(
     supports_background_jobs = supports_keyword("background_jobs")
     supports_log_hub = supports_keyword("log_hub")
     supports_cms_version_checker = supports_keyword("cms_version_checker")
-    if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler or supports_frontend_dist_path or supports_max_retries or supports_background_jobs or supports_log_hub or supports_cms_version_checker:
+    if supports_submission_store or supports_quality_automation or supports_hdhive_service or supports_hdhive_scheduler or supports_frontend_dist_path or supports_max_retries or supports_background_jobs or supports_log_hub or supports_cms_version_checker or supports_keyword("tmdb_resolver"):
         kwargs = {}
         if supports_submission_store:
             kwargs["submission_store"] = submission_store
@@ -679,6 +683,8 @@ def call_maybe_start_web_server(
             kwargs["log_hub"] = log_hub
         if supports_cms_version_checker:
             kwargs["cms_version_checker"] = cms_version_checker
+        if supports_keyword("tmdb_resolver"):
+            kwargs["tmdb_resolver"] = tmdb_resolver
         return maybe_start_web_server(config, task_store, **kwargs)
     return maybe_start_web_server(config, task_store)
 
@@ -4976,6 +4982,7 @@ def run_forever(
         hdhive_service=hdhive_subscription_service,
         hdhive_scheduler=hdhive_subscription_scheduler,
         cms_version_checker=cms_version_checker,
+        tmdb_resolver=tmdb_resolver,
         frontend_dist_path=getattr(config, "frontend_dist_path", "/app/frontend/dist"),
         background_jobs=background_jobs,
         log_hub=log_hub,

@@ -592,6 +592,69 @@ def media_type_for_category(category: str) -> str:
     return ""
 
 
+def enrich_task_media_metadata(
+    store: Any,
+    tasks: list[dict[str, Any]],
+    resolver: Any | None,
+    *,
+    max_enrich: int = 12,
+) -> list[dict[str, Any]]:
+    """Backfill poster/rating/year metadata for succeeded tasks that lack it.
+
+    Tasks created before the media wall existed carry a tmdb_id in their
+    metadata but no TMDB media fields, so the wall falls back to text cards.
+    This lazily fills the gap on read: only tasks without poster_path are
+    touched, the result is persisted to the task metadata (so a later refresh
+    is a no-op), and at most `max_enrich` tasks are resolved per call to bound
+    TMDB API usage. Tasks without a resolvable tmdb_id/type are left as-is.
+    """
+    if not tasks or not resolver or not getattr(resolver, "enabled", False):
+        return tasks
+    to_enrich: list[dict[str, Any]] = []
+    for task in tasks:
+        metadata = task.get("metadata") or {}
+        if metadata.get("poster_path") or not metadata.get("tmdb_id"):
+            continue
+        media_type = str(metadata.get("type") or "").strip().lower()
+        if media_type not in {"movie", "tv"}:
+            media_type = media_type_for_category(str(metadata.get("category") or ""))
+        if not media_type:
+            continue
+        to_enrich.append(task)
+    enriched: set[int] = set()
+    for task in to_enrich[:max_enrich]:
+        task_id = task.get("id")
+        metadata = task.get("metadata") or {}
+        tmdb_id = str(metadata.get("tmdb_id") or "").strip()
+        media_type = str(metadata.get("type") or "").strip().lower()
+        if media_type not in {"movie", "tv"}:
+            media_type = media_type_for_category(str(metadata.get("category") or ""))
+        if not tmdb_id or media_type not in {"movie", "tv"}:
+            continue
+        try:
+            item = resolver.lookup(tmdb_id, media_type, str(metadata.get("title") or "")[:80])
+        except Exception:  # noqa: BLE001 - enrichment must never break the overview
+            LOG.debug("media metadata enrichment failed task=%s", task_id, exc_info=True)
+            continue
+        if not item or not item.get("ok"):
+            continue
+        patch = {
+            "poster_path": str(item.get("poster_path") or ""),
+            "overview": str(item.get("overview") or ""),
+            "genres": item.get("genres") if isinstance(item.get("genres"), list) else [],
+            "vote_average": item.get("vote_average"),
+            "release_date": str(item.get("release_date") or ""),
+        }
+        try:
+            store.patch_metadata(int(task_id), patch)
+        except Exception:  # noqa: BLE001 - persistence failure must not break the overview
+            LOG.debug("media metadata enrichment persist failed task=%s", task_id, exc_info=True)
+            continue
+        metadata.update(patch)
+        enriched.add(int(task_id))
+    return tasks
+
+
 def extract_primary_chinese_title(value: str) -> str:
     text = str(value or "").strip()
     text = re.sub(r"^[A-Za-z]-", "", text)

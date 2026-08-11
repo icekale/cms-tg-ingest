@@ -735,19 +735,23 @@ def api_tasks(
     now: float | None = None,
     lifecycle_actions_enabled: bool = True,
     max_retries: int = 3,
+    media_enricher: Any | None = None,
 ) -> dict[str, Any]:
     tasks = store.list_recent_tasks(limit=max(1, min(int(limit), 500)))
+    serialized = [
+        serialize_task(
+            task,
+            now=now,
+            lifecycle_actions_enabled=lifecycle_actions_enabled,
+            max_retries=max_retries,
+        )
+        for task in tasks
+    ]
+    if media_enricher is not None:
+        serialized = media_enricher(store, serialized)
     return {
-        "items": [
-            serialize_task(
-                task,
-                now=now,
-                lifecycle_actions_enabled=lifecycle_actions_enabled,
-                max_retries=max_retries,
-            )
-            for task in tasks
-        ],
-        "count": len(tasks),
+        "items": serialized,
+        "count": len(serialized),
     }
 
 

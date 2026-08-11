@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.95 - 2026-08-11
+
+- **修复媒体墙历史任务封面空白**：v0.2.93 之前入库的任务 metadata 只有 `tmdb_id`/`category`，没有 `poster_path`/`vote_average` 等 TMDB 媒体字段，媒体墙全部降级为文字卡。新增 `enrich_task_media_metadata` 按需补齐：Web 读取任务列表时，对有 `tmdb_id` 但缺海报的成功任务，用 TMDB resolver 拉取详情写回 metadata 并持久化（补过不再补，每次最多补齐 12 个限制 TMDB 用量，lookup/持久化失败静默跳过不影响 overview）。`api_tasks` 新增 `media_enricher` 参数，bridge 把 `tmdb_resolver` 经 `maybe_start_web_server` → `start_web_server` → `WebApp` 接线；无 TMDB key 或 resolver 不可用时整体跳过。
+- 测试：后端 1453 项全部通过（新增补齐函数 4 项 + api_tasks 集成 2 项）。
+
 ## 0.2.94 - 2026-08-11
 
 - **修复 CMS 远程版本检测失败**：`fetch_remote_latest_tag` 用 `quote(repo, safe='')` 构造 Docker Hub tags API URL，repo 中的 `/` 被转义成 `%2F`，Docker Hub 返回 400（图片 pull API 需要 `%2F`，但 tags API 的路径语义不同），导致设置页「立即检查」`remote_version` 恒为空、永远检测不到 CMS 新版。改用 `safe='/'` 保留路径分隔符。新增回归测试捕获请求 URL（断言不含 `%2F`）。

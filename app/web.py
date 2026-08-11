@@ -33,6 +33,7 @@ from . import __version__
 from .background_jobs import BackgroundJobCoordinator, JobSubmission, redact_background_text
 from .config import SelfShareConfig
 from .logging_system import LogFilter, LogHub, parse_log_filter
+from .media.classify import enrich_task_media_metadata
 from .models import TaskStage, TaskStatus
 from .quality import QualityIssue, format_task_quality_report, scan_task_quality
 from .quality_automation import QualityAutomation
@@ -1421,6 +1422,7 @@ class WebApp:
         cms_guard_marker: str = "",
         cms_guard_workflow_mode: str = "",
         cms_direct_guard_marker: str = "",
+        media_enricher: Any | None = None,
     ):
         self.store = store
         self.web_token = web_token
@@ -1442,6 +1444,7 @@ class WebApp:
         self.background_jobs = background_jobs or BackgroundJobCoordinator()
         self.log_hub = log_hub
         self.cms_version_checker = cms_version_checker
+        self.media_enricher = media_enricher
         self.cms_guard_container = str(cms_guard_container or "cloud-media-sync").strip()
         self.cms_guard_docker_socket = str(cms_guard_docker_socket or "").strip()
         self.cms_guard_marker = str(cms_guard_marker or "").strip()
@@ -2260,6 +2263,7 @@ class WebApp:
                     self.store,
                     limit=20,
                     lifecycle_actions_enabled=self.task_engine_enabled,
+                    media_enricher=self.media_enricher,
                 ),
                 "health": serialize_health(
                     self.store,
@@ -2298,6 +2302,7 @@ class WebApp:
                     self.store,
                     lifecycle_actions_enabled=self.task_engine_enabled,
                     max_retries=self.max_retries,
+                    media_enricher=self.media_enricher,
                 )
             )
             return status, {**response_headers, **auth_headers}, response_body
@@ -2497,6 +2502,7 @@ def start_web_server(
     cms_guard_docker_socket: str = "",
     cms_guard_marker: str = "",
     cms_guard_workflow_mode: str = "",
+    tmdb_resolver: Any | None = None,
 ) -> ThreadingHTTPServer:
     app = WebApp(
         store,
@@ -2518,6 +2524,12 @@ def start_web_server(
         cms_guard_docker_socket=cms_guard_docker_socket,
         cms_guard_marker=cms_guard_marker,
         cms_guard_workflow_mode=cms_guard_workflow_mode,
+        media_enricher=(
+            (lambda store, tasks: enrich_task_media_metadata(store, tasks, tmdb_resolver))
+            if tmdb_resolver is not None
+            and getattr(tmdb_resolver, "enabled", False)
+            else None
+        ),
     )
     sse_capacity = BoundedSemaphore(max(1, int(SSE_MAX_CLIENTS)))
 

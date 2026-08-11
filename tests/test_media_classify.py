@@ -80,3 +80,132 @@ class ExtractYearFromNameTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EnrichTaskMediaMetadataTest(unittest.TestCase):
+    def _store(self, tmp):
+        from pathlib import Path
+
+        from app.task_store import TaskStore
+
+        return TaskStore(Path(tmp) / "tasks.db")
+
+    def test_backfills_poster_and_persists_for_succeeded_task(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from app.models import TaskStage, TaskStatus
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            task = store.upsert_task("backfill", "", "https://115cdn.com/s/backfill")
+            store.patch_metadata(task.id, {
+                "tmdb_id": "10974",
+                "type": "movie",
+                "category": "欧美电影",
+                "title": "龙兄虎弟",
+            })
+            store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+
+            class FakeResolver:
+                enabled = True
+
+                def lookup(self, tmdb_id, media_type, name):
+                    return {
+                        "ok": True,
+                        "poster_path": "/i9zrfkod6qM3CWvNUmllJ104K7g.jpg",
+                        "overview": "简介",
+                        "genres": ["冒险", "动作", "喜剧"],
+                        "vote_average": 7.0,
+                        "release_date": "1986-08-16",
+                    }
+
+            serialized = [{
+                "id": task.id,
+                "status": "succeeded",
+                "metadata": dict(store.find_task(task.id).metadata),
+            }]
+            from app.media.classify import enrich_task_media_metadata
+
+            result = enrich_task_media_metadata(store, serialized, FakeResolver())
+
+            self.assertEqual(result[0]["metadata"]["poster_path"], "/i9zrfkod6qM3CWvNUmllJ104K7g.jpg")
+            self.assertEqual(result[0]["metadata"]["vote_average"], 7.0)
+            # persisted so a later refresh is a no-op
+            persisted = store.find_task(task.id).metadata
+            self.assertEqual(persisted["poster_path"], "/i9zrfkod6qM3CWvNUmllJ104K7g.jpg")
+            self.assertEqual(persisted["release_date"], "1986-08-16")
+
+    def test_skips_tasks_with_poster_or_no_tmdb_id(self):
+        import tempfile
+
+        from app.media.classify import enrich_task_media_metadata
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            task = store.upsert_task("skip", "", "https://115cdn.com/s/skip")
+            store.patch_metadata(task.id, {"poster_path": "/have.jpg", "tmdb_id": "1", "type": "movie"})
+            task2 = store.upsert_task("notmdb", "", "https://115cdn.com/s/notmdb")
+            store.patch_metadata(task2.id, {"category": "欧美电影", "type": "movie"})
+
+            class BoomResolver:
+                enabled = True
+
+                def lookup(self, *args):
+                    raise AssertionError("should not be called")
+
+            serialized = [
+                {"id": task.id, "metadata": dict(store.find_task(task.id).metadata)},
+                {"id": task2.id, "metadata": dict(store.find_task(task2.id).metadata)},
+            ]
+            enrich_task_media_metadata(store, serialized, BoomResolver())
+            # resolver never called -> no exception proves skip
+
+    def test_limits_enrichment_per_call(self):
+        import tempfile
+
+        from app.media.classify import enrich_task_media_metadata
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            for idx in range(5):
+                task = store.upsert_task(f"lim{idx}", "", f"https://115cdn.com/s/lim{idx}")
+                store.patch_metadata(task.id, {"tmdb_id": str(100 + idx), "type": "movie"})
+            calls = []
+
+            class CountingResolver:
+                enabled = True
+
+                def lookup(self, tmdb_id, media_type, name):
+                    calls.append(tmdb_id)
+                    return {"ok": True, "poster_path": "/p.jpg", "genres": [], "vote_average": None, "release_date": ""}
+
+            tasks = store.list_recent_tasks(limit=10)
+            serialized = [{"id": t.id, "metadata": dict(t.metadata)} for t in tasks]
+            enrich_task_media_metadata(store, serialized, CountingResolver(), max_enrich=2)
+            self.assertEqual(len(calls), 2)
+
+    def test_failed_lookup_does_not_crash(self):
+        import tempfile
+
+        from app.media.classify import enrich_task_media_metadata
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            task = store.upsert_task("fail", "", "https://115cdn.com/s/fail")
+            store.patch_metadata(task.id, {"tmdb_id": "999999", "type": "movie"})
+
+            class FailResolver:
+                enabled = True
+
+                def lookup(self, *args):
+                    raise RuntimeError("tmdb down")
+
+            serialized = [{"id": task.id, "metadata": dict(store.find_task(task.id).metadata)}]
+            result = enrich_task_media_metadata(store, serialized, FailResolver())
+            self.assertEqual(result[0]["metadata"].get("poster_path", ""), "")
+
+
+if __name__ == "__main__":
+    unittest.main()

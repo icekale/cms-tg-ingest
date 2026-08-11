@@ -1698,3 +1698,78 @@ class CmsDirectStrmGuardApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ApiTasksMediaEnricherTests(unittest.TestCase):
+    def test_overview_api_enriches_media_metadata(self):
+        import tempfile
+        from pathlib import Path
+
+        from app.task_store import TaskStore
+        from app.web import WebApp
+        from app.web_api import api_tasks
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("enrich", "", "https://115cdn.com/s/enrich")
+            store.patch_metadata(task.id, {"tmdb_id": "10974", "type": "movie", "title": "龙兄虎弟"})
+
+            calls = []
+
+            def fake_resolver_lookup(tmdb_id, media_type, name):
+                calls.append((tmdb_id, media_type))
+                return {
+                    "ok": True,
+                    "poster_path": "/i9zrfkod6qM3CWvNUmllJ104K7g.jpg",
+                    "genres": ["冒险"],
+                    "vote_average": 7.0,
+                    "release_date": "1986-08-16",
+                }
+
+            class FakeResolver:
+                enabled = True
+
+                def lookup(self, *args):
+                    return fake_resolver_lookup(*args)
+
+            from app.media.classify import enrich_task_media_metadata
+
+            enricher = lambda store, tasks: enrich_task_media_metadata(store, tasks, FakeResolver())
+            payload = api_tasks(store, media_enricher=enricher)
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(payload["items"][0]["metadata"]["poster_path"], "/i9zrfkod6qM3CWvNUmllJ104K7g.jpg")
+
+            # second call is a no-op (already persisted)
+            payload2 = api_tasks(store, media_enricher=enricher)
+            self.assertEqual(len(calls), 1)
+
+    def test_webapp_overview_enriches_through_resolver(self):
+        import tempfile
+        from pathlib import Path
+
+        from app.task_store import TaskStore
+        from app.web import WebApp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("web", "", "https://115cdn.com/s/web")
+            store.patch_metadata(task.id, {"tmdb_id": "10974", "type": "movie", "title": "龙兄虎弟"})
+
+            from app.media.classify import enrich_task_media_metadata
+
+            class FakeResolver:
+                enabled = True
+
+                def lookup(self, tmdb_id, media_type, name):
+                    return {"ok": True, "poster_path": "/p.jpg", "genres": [], "vote_average": 7.0, "release_date": "1986-08-16"}
+
+            app = WebApp(store, media_enricher=lambda store, tasks: enrich_task_media_metadata(store, tasks, FakeResolver()))
+            status, headers, body = app.handle_request("GET", "/api/v1/overview", {}, b"")
+            self.assertEqual(status, 200)
+            payload = json.loads(body)
+            item = next(i for i in payload["tasks"]["items"] if i["id"] == task.id)
+            self.assertEqual(item["metadata"]["poster_path"], "/p.jpg")
+
+
+if __name__ == "__main__":
+    unittest.main()
