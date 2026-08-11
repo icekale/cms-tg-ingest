@@ -42,7 +42,6 @@ class ReleaseWorkflowTests(unittest.TestCase):
         overview = (ROOT / "docs/dockerhub-overview.md").read_text(encoding="utf-8")
 
         for term in (
-            "image: icekale/cms-tg-ingest:0.2.72",
             "env_file:",
             "./data:/data",
             "115-cookies.txt:/config/115-cookies.txt:ro",
@@ -51,6 +50,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "healthcheck:",
         ):
             self.assertIn(term, overview)
+        self.assertRegex(overview, r"image: icekale/cms-tg-ingest:[0-9][^ ]*")
 
     def test_dockerhub_description_can_sync_without_rebuilding_images(self):
         workflow = (ROOT / ".github/workflows/sync-dockerhub-description.yml").read_text(encoding="utf-8")

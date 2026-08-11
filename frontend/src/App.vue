@@ -24,9 +24,9 @@ const brandLogoUrl = `${import.meta.env.BASE_URL}brand/logo-mark.svg`
 const { mode, isDark, toggle } = useTheme()
 const menuOptions = [
   { label: '运行概览', key: '/overview' },
+  { label: 'Emby 看板', key: '/emby-board' },
   { label: '当前任务', key: '/tasks' },
   { label: '质量巡检', key: '/quality' },
-  { label: 'Emby 看板', key: '/emby-board' },
   { label: '本地健康', key: '/health' },
   { label: 'HDHive 订阅', key: '/hdhive' },
   { label: '实时日志', key: '/logs' },

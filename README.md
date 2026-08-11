@@ -22,6 +22,9 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 - **HDHive 搜索与解锁**：复用 CMS 已授权的单个 HDHive 账号，按 TMDB 匹配影片/剧集、筛选网盘、单条或批量解锁。
 - **HDHive 剧集订阅**：用 `/订阅 <HDHive剧集链接>` 创建订阅，按计划检查新集，费用未知或较高时等待确认。
 - **Web 运维台**：查看队列、阶段耗时、健康状态、质量巡检和 HDHive 订阅。
+- **Emby 看板**：独立媒体仪表盘——数据概览（电影/剧集/集数/媒体库数）、我的媒体库（各库代表海报 + 数量）、最近入库海报流，点击直达 Emby 详情/播放。Emby API Key 只在服务端使用，不外泄到浏览器。
+- **暗色模式**：Web 管理台跟随系统深浅色，顶栏可手动切换并记住选择；登录页同步适配。
+- **CMS 版本远程检测**：Web 设置页「立即检查」对比本地 CMS 版本与 Docker Hub 最新 tag，发现新版直接提示（配合 `CMS_UPDATE_IMAGE` 配置）。
 - **质量人工队列**：Web 和 Telegram 展示规则、风险、尝试次数和脱敏证据；支持确认后执行、重跑、暂缓、忽略和恢复评估。
 - **Vue 管理台**：访问根路径 `/` 默认进入 `/app/`；旧 Python 页面和 POST 路由继续保留，旧版概览可从 `/legacy` 回退访问。
 
@@ -33,7 +36,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.2.99`。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.3.0`。
 4. 拉取固定版本并启动：
 
 ```sh
@@ -117,13 +120,27 @@ BACKUP_RETENTION_DAYS=14
 WEB_ENABLED=true
 WEB_HOST=0.0.0.0
 WEB_PORT=8787
+# Web 认证（推荐用户名密码，与 WEB_TOKEN 二选一）
+WEB_USERNAME=admin
+WEB_PASSWORD=change-me
 WEB_TOKEN=
 
 EMBY_BASE_URL=http://192.168.1.10:8096
 EMBY_API_KEY=你的 Emby API Key
+EMBY_USER_ID=你的 Emby 用户 ID（可选，留空自动取第一个用户）
 ```
 
 敏感信息只放在 `.env` 或挂载文件中，不要提交到 GitHub、Docker Hub、截图或 issue。
+
+可选但推荐（增强 Web 体验）：
+
+```env
+# 媒体墙海报/评分（Overview 与 Emby 看板降级兜底、历史任务海报补齐）
+TMDB_API_KEY=你的 TMDB v3 API Key
+# CMS 版本远程检测（Web 设置「立即检查」对比 Docker Hub 最新 tag）
+CMS_VERSION_CHECK_ENABLED=true
+CMS_UPDATE_IMAGE=imaliang/cloud-media-sync:latest
+```
 
 待整理目录也可以在新版 Web UI 的“设置”中查看和修改。Web 保存值写入 TaskStore，优先于 `SELF_SHARE_RECEIVE_CID`，重启后仍保留；点击“使用环境配置”可清除 Web 覆盖并恢复 `.env` 值。该设置同时用于 115 转存和云下载目标目录。
 
@@ -308,6 +325,19 @@ TASK_MAX_RETRIES=3
 
 如需回滚，设置 `TASK_ENGINE_ENABLED=false` 并重启；旧 SubmissionStore + 轮询路径是兼容回滚路径，不提供 TaskRunner 的同等清理顺序保证。
 
+### Web 管理台页面
+
+- **运行概览** `/app/overview`：统计卡（活跃任务 / 需处理 / 锁等待 / 默认 STRM）+ 当前队列，三秒判断系统是否正常。
+- **Emby 看板** `/app/emby-board`：数据概览（电影 / 剧集 / 总集数 / 媒体库数）、我的媒体库（各库代表海报 + 数量）、最近入库海报流；点击海报跳 Emby 详情/播放。需要 `EMBY_BASE_URL` + `EMBY_API_KEY`；Emby 不可达时页面显示空态引导，不影响其它页面。
+- **当前任务** `/app/tasks`：任务列表（阶段 / 状态 / STRM 模式 / 为什么慢），支持终止与删除。
+- **质量巡检** `/app/quality`：本地巡检、修复入队、历史与设置。
+- **本地健康** `/app/health`：Runner 心跳、CMS STRM 守卫、直链拦截守卫状态。
+- **HDHive 订阅** `/app/hdhive`：订阅管理与解锁记录。
+- **实时日志** `/app/logs`：SSE 流式日志，支持级别/关键字过滤。
+- **设置** `/app/settings`：STRM 模式、分享审核观察、访问码、待整理目录、CMS 版本检测。
+
+所有页面支持**暗色模式**：默认跟随系统，顶栏太阳/月亮按钮手动切换并记住选择。
+
 ## 质量巡检
 
 首次部署建议保持关闭，手动完成一次完整入库测试后再开启：
@@ -474,7 +504,7 @@ git push origin v0.2.90
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.2.99
+docker pull icekale/cms-tg-ingest:0.3.0
 docker pull icekale/cms-tg-ingest:latest
 ```
 

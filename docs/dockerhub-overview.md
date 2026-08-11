@@ -19,13 +19,16 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 - 支持 Emby 刷新、入库确认和媒体库名称反馈。
 - 支持 HDHive 搜索、网盘筛选、单条/批量解锁和剧集订阅。
 - 质量巡检支持 Web/Telegram 人工队列，展示规则、风险、尝试次数和脱敏证据，并支持确认后执行、重跑、暂缓、忽略和恢复评估。
+- **Emby 看板**：数据概览（电影/剧集/集数/媒体库数）、我的媒体库（各库代表海报 + 数量）、最近入库海报流，点击直达 Emby 详情/播放；Emby API Key 只在服务端使用。
+- **暗色模式**：Web 管理台跟随系统深浅色，顶栏可手动切换并记住选择；登录页同步适配。
+- **CMS 版本远程检测**：设置页「立即检查」对比本地 CMS 与 Docker Hub 最新 tag，发现新版直接提示。
 
 ## 5 分钟部署
 
 固定版本镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.2.99
+docker pull icekale/cms-tg-ingest:0.3.0
 ```
 
 ### 完整 Docker Compose
@@ -35,7 +38,7 @@ docker pull icekale/cms-tg-ingest:0.2.99
 ```yaml
 services:
   cms-tg-ingest:
-    image: icekale/cms-tg-ingest:0.2.72
+    image: icekale/cms-tg-ingest:0.3.0
     container_name: cms-tg-ingest
     restart: unless-stopped
     env_file:
@@ -52,6 +55,8 @@ services:
       - /mnt/user/appdata/cloud-media-sync/config/cms-online.db:/cms/cms-online.db:ro
       # CMS 配置目录，用于读取并跟随 OAuth 刷新后的 HDHive 授权文件。
       - /mnt/user/appdata/cloud-media-sync/config:/config/cms-config:ro
+      # Docker Socket（CMS 守卫检查与镜像拉取需要，可去掉以增强隔离）。
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     healthcheck:
       test: ["CMD", "python", "/app/doctor.py", "--quiet"]
       interval: 5m
@@ -76,6 +81,9 @@ STRM_LIBRARY_MAP=华语电影=/mnt/user/Unraid/strm/转存/Movie/电影/华语�
 STRM_DEFAULT_MODE=shared
 TASK_ENGINE_ENABLED=true
 WEB_ENABLED=true
+# Web 认证（推荐用户名密码，与 WEB_TOKEN 二选一）
+WEB_USERNAME=admin
+WEB_PASSWORD=change-me
 WEB_TOKEN=
 BACKUP_ENABLED=true
 BACKUP_TIME=03:30
@@ -84,6 +92,9 @@ BACKUP_DIR=/data/backups
 BACKUP_RETENTION_DAYS=14
 EMBY_BASE_URL=http://192.168.1.10:8096
 EMBY_API_KEY=你的Emby_API_Key
+EMBY_USER_ID=你的Emby用户ID（可选）
+# 可选：媒体墙海报/评分与历史任务海报补齐
+TMDB_API_KEY=你的TMDB v3 API Key
 ```
 
 `TG_BOT_TOKEN` 和密码只放在 `.env`，不要写进 Compose、Dockerfile 或公开 issue。`TG_ALLOWED_CHAT_ID` 用于限制只有指定 Telegram 用户可以操作 Bot。
@@ -113,7 +124,7 @@ docker compose logs -f cms-tg-ingest
 - 日志页支持级别、关键字和来源（logger）过滤；慢客户端丢行时页面会提示并自动重连。
 - AI 分析接口：`GET /api/v1/logs/analyze` 返回结构化摘要（错误/告警统计、重复模式、修复提示与最近条目），供外部 AI 分析和调用管理 API 修复。
 - CMS 版本检测：`CMS_VERSION_CHECK_ENABLED=true` 后定时探测 CMS 版本，新版本出现时 Telegram 通知并标记 `update_ready`；`CMS_UPDATE_IMAGE` + `CMS_AUTO_PULL_ENABLED=true` 可自动拉取镜像，容器切换在宿主机执行 `scripts/update-cms-container.sh`。
-- Web 设置页新增“CMS 版本更新”配置（开关、频率、镜像、容器、Socket、自动拉取），保存后优先于 `.env`。
+- Web 设置页新增“CMS 版本更新”配置（开关、频率、镜像、容器、Socket、自动拉取），保存后优先于 `.env`。「立即检查」会对比本地 CMS 版本与 Docker Hub 最新 tag（`CMS_UPDATE_IMAGE` 需填完整镜像名如 `imaliang/cloud-media-sync:latest`），发现新版直接提示。
 
 首次部署检查：
 
@@ -215,7 +226,7 @@ docker compose up -d --no-build
 - 已部署可访问的 CMS，并准备好 115 Cookie、待整理目录和 STRM/媒体库映射。
 - Telegram Bot 通过 `TG_ALLOWED_CHAT_ID` 限制使用者。
 - Emby 确认需要 `EMBY_BASE_URL` 和 `EMBY_API_KEY`。
-- Web 管理台在局域网使用时可以留空 `WEB_TOKEN` 直接访问；如果通过公网、反向代理或不可信网络暴露，必须设置随机 `WEB_TOKEN`。
+- Web 管理台支持两种认证：推荐 `WEB_USERNAME` + `WEB_PASSWORD`（登录页签发 7 天会话 Cookie）；也可以设置随机 `WEB_TOKEN` 用共享令牌。局域网内可以留空直接访问，通过公网/反向代理暴露时**必须**启用其中一种。
 - 本项目不提供媒体资源，也不绕过 115、CMS、HDHive 或 Emby 的权限机制。
 - 不要公开 `.env`、115 Cookie、Telegram Token、Emby API Key 或 HDHive OAuth 文件。
 
