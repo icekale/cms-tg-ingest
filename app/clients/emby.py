@@ -143,6 +143,10 @@ class EmbyClient:
                         "Limit": "1",
                         "SortBy": "DateCreated",
                         "SortOrder": "Descending",
+                        # Only pick a representative item that actually has a
+                        # poster; the newest entry may be a scrape-less record
+                        # whose /Images/Primary returns 404 (broken cover).
+                        "Images": "true",
                     },
                 )
                 items = _response_items(resp)
