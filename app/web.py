@@ -1599,21 +1599,117 @@ class WebApp:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>登录 · cms-tg-ingest</title>
 <style>
-  :root {{ color-scheme: light; --bg: #f5f6f8; --surface: #fff; --text: #333; --muted: #555; --border: #d0d5dd; --primary: #2563eb; --danger: #b42318; }}
-  @media (prefers-color-scheme: dark) {{
-    :root {{ color-scheme: dark; --bg: #10121a; --surface: #171a24; --text: #e6e8f0; --muted: #b8c0d0; --border: #343a4e; --primary: #8b93ff; --danger: #f26d82; }}
+  :root {{
+    color-scheme: light;
+    --bg: #f5f6fb;
+    --surface: #ffffff;
+    --text: #1f2937;
+    --text-strong: #141829;
+    --muted: #6b7280;
+    --border: #d7dae6;
+    --primary: #4c5fd5;
+    --primary-hover: #3e4ec4;
+    --primary-invert: #ffffff;
+    --danger: #c0392b;
+    --glow: rgba(76, 95, 213, 0.10);
   }}
-  body {{ font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }}
-  .card {{ background: var(--surface); border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,.08); padding: 32px 40px; width: 320px; }}
-  h1 {{ font-size: 18px; margin: 0 0 20px; color: var(--text); }}
-  label {{ display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }}
-  input {{ width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; background: var(--surface); color: var(--text); }}
-  button {{ width: 100%; margin-top: 18px; padding: 10px; background: var(--primary); color: #fff; border: 0; border-radius: 6px; font-size: 14px; cursor: pointer; }}
-  .error {{ color: var(--danger); font-size: 13px; margin: 12px 0 0; }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{
+      color-scheme: dark;
+      --bg: #10121a;
+      --surface: #171a24;
+      --text: #e6e8f0;
+      --text-strong: #f4f5fa;
+      --muted: #9aa3b5;
+      --border: #343a4e;
+      --primary: #8b93ff;
+      --primary-hover: #a5abff;
+      --primary-invert: #0e0f1a;
+      --danger: #f26d82;
+      --glow: rgba(139, 147, 255, 0.10);
+    }}
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    background-image: radial-gradient(1100px 560px at 50% -12%, var(--glow), transparent 70%);
+    color: var(--text);
+  }}
+  .card {{
+    width: 340px;
+    padding: 36px 36px 30px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: 0 1px 2px rgba(20, 24, 41, 0.04), 0 8px 24px rgba(20, 24, 41, 0.06);
+  }}
+  .brand {{ display: flex; flex-direction: column; align-items: center; gap: 10px; margin-bottom: 26px; }}
+  .brand-logo {{ width: 44px; height: 44px; }}
+  .brand-title {{ font-size: 19px; font-weight: 700; color: var(--text-strong); letter-spacing: -0.01em; }}
+  .brand-sub {{ font-size: 12px; color: var(--muted); }}
+  h1 {{ display: none; }}
+  label {{ display: block; font-size: 13px; color: var(--muted); margin: 14px 0 5px; }}
+  input {{
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 14px;
+    background: var(--surface);
+    color: var(--text);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }}
+  input:focus {{
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
+  }}
+  button {{
+    width: 100%;
+    margin-top: 22px;
+    padding: 11px 12px;
+    border: 0;
+    border-radius: 8px;
+    background: var(--primary);
+    color: var(--primary-invert);
+    font-size: 14px;
+    font-weight: 650;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+  }}
+  button:hover {{ background: var(--primary-hover); }}
+  button:focus-visible {{ outline: 2px solid var(--primary); outline-offset: 2px; }}
+  .error {{
+    margin: 14px 0 0;
+    padding: 9px 12px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+    color: var(--danger);
+    font-size: 13px;
+  }}
+  @media (prefers-reduced-motion: reduce) {{
+    input, button {{ transition: none; }}
+  }}
 </style>
 </head>
 <body>
 <form class="card" method="post" action="{_LOGIN_PATH}">
+  <div class="brand">
+    <svg class="brand-logo" viewBox="0 0 64 64" role="img" aria-label="媒体仓" xmlns="http://www.w3.org/2000/svg">
+      <rect x="4" y="4" width="56" height="56" rx="16" fill="#1D4ED8"/>
+      <rect x="16" y="17" width="32" height="30" rx="7" fill="none" stroke="#FFFFFF" stroke-width="4"/>
+      <path d="M16 26h32M25 17v9M39 17v9" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round"/>
+      <path d="M27 32.5 40 38 27 43.5Z" fill="#FFFFFF"/>
+    </svg>
+    <span class="brand-title">入库助手</span>
+    <span class="brand-sub">cms-tg-ingest 管理台 · 115 · CMS · Emby 工作流</span>
+  </div>
   <h1>cms-tg-ingest 管理台</h1>
   <label for="username">用户名</label>
   <input id="username" name="username" autocomplete="username" required autofocus>
