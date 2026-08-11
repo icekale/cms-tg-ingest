@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.97 - 2026-08-11
+
+- **修复 Emby 看板 `emby_not_configured`**：v0.2.96 中 `call_maybe_start_web_server` 检测的参数名是 `emby_client`，但 `maybe_start_web_server` 实际参数名是 `emby`，导致 Emby 客户端从未被透传到 WebApp，看板恒返回 `not_configured`。改为 `supports_keyword("emby")` + `kwargs["emby"] = emby`；`maybe_start_web_server` 内部再转 `emby_client` 传给 `start_web_server` → `WebApp`。已用 fake starter 断言两条透传路径均携带 Emby 客户端。
+- 测试：后端 1457 项、前端 27 项全部通过。
+
 ## 0.2.96 - 2026-08-11
 
 - **新增 Emby 看板**（独立菜单页，参考 TgtoDrive 看板形态）：数据概览（电影/剧集/总集数/媒体库数）、我的媒体库（各库代表海报 + 数量徽标）、最近入库（海报流，点击跳 Emby Web 详情）。后端新增 `GET /api/v1/emby/dashboard` 聚合端点：复用容器内 `EMBY_API_KEY`（**key 不出容器**，海报 URL 由服务端拼成浏览器可直接加载的完整地址），`/Items/Counts` 统计 + `/Library` 媒体库 + `recent_items` 最近入库，60 秒进程内缓存（「刷新」按钮经 `X-Emby-Dashboard-Refresh` 头绕过）。Emby 未配置 → `available:false` 空态引导；Counts 失败 → `emby_unreachable`；单库失败静默跳过。`bridge.py` 将 `emby` 客户端经 `maybe_start_web_server` → `start_web_server` → `WebApp` 注入。

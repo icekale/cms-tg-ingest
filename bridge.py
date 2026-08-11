@@ -689,8 +689,8 @@ def call_maybe_start_web_server(
             kwargs["cms_version_checker"] = cms_version_checker
         if supports_keyword("tmdb_resolver"):
             kwargs["tmdb_resolver"] = tmdb_resolver
-        if supports_keyword("emby_client"):
-            kwargs["emby_client"] = emby
+        if supports_keyword("emby"):
+            kwargs["emby"] = emby
         return maybe_start_web_server(config, task_store, **kwargs)
     return maybe_start_web_server(config, task_store)
 
