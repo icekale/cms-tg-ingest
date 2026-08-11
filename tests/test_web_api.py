@@ -1834,6 +1834,43 @@ class ApiTasksMediaEnricherTests(unittest.TestCase):
             self.assertEqual(item["metadata"]["poster_path"], "/p.jpg")
 
 
+class HealthRouteGuardFieldsTests(unittest.TestCase):
+    """/api/v1/health 与 /api/v1/overview 都必须透传三个 CMS 守卫字段。
+
+    回归：v0.3.7 曾只把 cms_os_guard 加进 overview 路由、漏掉 health 路由，
+    导致 Health.vue（走 /api/v1/health）看不到 os 级删除兜底守卫状态。
+    """
+
+    def _make_app(self, tmp: str) -> WebApp:
+        store = TaskStore(Path(tmp) / "tasks.db")
+        app = WebApp(store)
+        installed = {"ok": True, "status": "installed", "message": "installed"}
+        app._cms_strm_guard = lambda: installed
+        app._cms_direct_strm_guard = lambda: installed
+        app._cms_os_strm_guard = lambda: installed
+        return app
+
+    def test_health_route_includes_all_three_guard_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._make_app(tmp)
+            status, _headers, body = app.handle_request("GET", "/api/v1/health", {}, b"")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["cms_strm_guard"]["status"], "installed")
+        self.assertEqual(payload["cms_direct_strm_guard"]["status"], "installed")
+        self.assertEqual(payload["cms_os_strm_guard"]["status"], "installed")
+
+    def test_overview_route_includes_all_three_guard_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._make_app(tmp)
+            status, _headers, body = app.handle_request("GET", "/api/v1/overview", {}, b"")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["health"]["cms_strm_guard"]["status"], "installed")
+        self.assertEqual(payload["health"]["cms_direct_strm_guard"]["status"], "installed")
+        self.assertEqual(payload["health"]["cms_os_strm_guard"]["status"], "installed")
+
+
 if __name__ == "__main__":
     unittest.main()
 

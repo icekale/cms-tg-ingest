@@ -2448,6 +2448,7 @@ class WebApp:
                     enabled=self.task_engine_enabled,
                     cms_guard=self._cms_strm_guard(),
                     cms_direct_guard=self._cms_direct_strm_guard(),
+                    cms_os_guard=self._cms_os_strm_guard(),
                 )
             )
             return status, {**response_headers, **auth_headers}, response_body

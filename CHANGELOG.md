@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.8 - 2026-08-11
+
+- **修复 /api/v1/health 未透传 os 级守卫字段**：v0.3.7 只把 `cms_os_guard` 加进了 `/api/v1/overview` 路由，`/api/v1/health`（Health.vue 实际调用的端点）漏了，导致 Web 健康页看不到「CMS 删除兜底守卫」。补上路由透传 + 路由级回归测试（health 与 overview 都断言三个守卫字段）。
+- 测试：后端 1472 项全部通过（新增路由级守卫透传 2 项）。
+
 ## 0.3.7 - 2026-08-11
 
 - **修复 CMS STRM 守卫被旁路导致二次误删**：龙族 S03E03 转存库 `/s/` strm 再次被 CMS 增量同步误删（2026-08-11 18:40，任务 372 转存源删除事件延迟消费）。根因：方法级守卫只挂钩 `MediaSync.delete_local_file`，但 CMS 增量同步消费 115 `delete_file` 生活事件的本地删除不走该方法，守卫从未输出过 skip 日志 = 系统性旁路。
