@@ -74,16 +74,16 @@ function ratingText(item) {
       </div>
 
       <n-card title="我的媒体库" class="section-card">
-        <div v-if="data.libraries?.length" class="media-wall">
+        <div v-if="data.libraries?.length" class="media-grid--library">
           <a
             v-for="lib in data.libraries"
             :key="lib.name"
-            class="media-card"
+            class="media-card media-card--library"
             :href="data.emby_base || undefined"
             target="_blank"
             rel="noopener"
           >
-            <div class="media-poster">
+            <div class="media-poster media-poster--library">
               <img
                 v-if="lib.poster_url && !posterFailed.has('lib:' + lib.name)"
                 :src="lib.poster_url"

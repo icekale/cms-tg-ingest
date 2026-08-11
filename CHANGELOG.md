@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0 - 2026-08-11
+
+- **Emby 看板媒体库改横版横幅卡片**：媒体库根图是横向品牌横幅（实测 800×450 = 16:9），之前套用电影/剧集竖版 2:3 海报框不适合。媒体库卡片改为 16:9 横版海报框 + 两排 grid 铺开（1280 宽每排 4 个，8 库正好 4+4 一眼看全），最近入库仍保持竖版横向流。
+
 ## 0.3.9 - 2026-08-11
 
 - **修复 os 级守卫被 `dir_fd` 旁路致三删（哑舍 2025）**：任务 #378 提交后 CMS `auto_tidy` 消费哑舍转存源删除事件，rmtree 删除 `转存/TVCN/Y-哑舍`（2026-08-11 21:00，守卫零日志）。根因：Python 3.12 的 `shutil.rmtree` 删目录内文件走 `os.unlink(entry.name, dir_fd=fd)`——target 只是相对文件名，旧守卫按进程 cwd `open()` 解析失败 → 判定"非 self-share"放行。修复：`_strm_is_self_share` 支持 `dir_fd`，用 `os.open(name, O_RDONLY, dir_fd=fd)` 以目标目录为基准读内容；`os.remove`/`os.unlink` 包装器把 `kwargs["dir_fd"]` 传入。目录级误删由 `self_share_health` 巡检兜底恢复。
