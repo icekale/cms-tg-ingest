@@ -2483,7 +2483,10 @@ class WebApp:
                     status=409,
                 )
                 return status, {**response_headers, **auth_headers}, response_body
-            payload = self.cms_version_checker.pull()
+            self.cms_version_checker.pull()
+            # Re-serialize through api_cms_version so the upgrade_hint (built
+            # from the persisted update_available state) is included.
+            payload = api_cms_version(self.cms_version_checker)
             status, response_headers, response_body = api_response(payload)
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/settings/cms-version":

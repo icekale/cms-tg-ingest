@@ -1873,3 +1873,50 @@ class EmbyDashboardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CmsPullRouteTests(unittest.TestCase):
+    def test_pull_route_returns_upgrade_hint_via_api_serializer(self):
+        import tempfile
+        from pathlib import Path
+
+        from app.task_store import TaskStore
+        from app.web import WebApp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            class FakeChecker:
+                def __init__(self):
+                    self.pulled = False
+                    self.calls = 0
+
+                def status(self):
+                    return {
+                        "enabled": True,
+                        "current_version": "0.4.9.1",
+                        "remote_version": "0.4.9.2",
+                        "update_available": True,
+                        "pull_result": "pulled" if self.pulled else "",
+                        "message": "镜像已拉取" if self.pulled else "",
+                    }
+
+                def check(self):
+                    self.calls += 1
+                    return self.status()
+
+                def pull(self):
+                    self.pulled = True
+                    return self.status()
+
+            app = WebApp(store, cms_version_checker=FakeChecker())
+            status, headers, body = app.handle_request("POST", "/api/v1/cms/version/pull", {}, b"")
+            self.assertEqual(status, 200)
+            payload = json.loads(body)
+            self.assertEqual(payload["pull_result"], "pulled")
+            self.assertIn("update-cms.sh", payload["upgrade_hint"])
+            self.assertIn("0.4.9.2", payload["upgrade_hint"])
+
+
+if __name__ == "__main__":
+    unittest.main()

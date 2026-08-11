@@ -593,3 +593,8 @@
 - Optional OpenAI-compatible classification fallback.
 - Offline `doctor.py` diagnostics.
 - Docker Compose example and CI workflow.
+
+## 0.3.5 - 2026-08-11
+
+- **修复设置页升级指引内容为空**：`POST /api/v1/cms/version/pull` 直接返回 `checker.pull()` 的原始 dict，缺少 `upgrade_hint` 字段（该字段由 `api_cms_version` 基于持久化状态注入），页面指引块出现但内容空白。pull 路由改为拉取后重新经 `api_cms_version` 序列化，`upgrade_hint` 正确返回。
+- 测试：后端 1463 项、前端 28 项全部通过（新增 pull 路由注入 1 项）。
