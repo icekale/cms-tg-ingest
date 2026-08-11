@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.9 - 2026-08-11
+
+- **修复 os 级守卫被 `dir_fd` 旁路致三删（哑舍 2025）**：任务 #378 提交后 CMS `auto_tidy` 消费哑舍转存源删除事件，rmtree 删除 `转存/TVCN/Y-哑舍`（2026-08-11 21:00，守卫零日志）。根因：Python 3.12 的 `shutil.rmtree` 删目录内文件走 `os.unlink(entry.name, dir_fd=fd)`——target 只是相对文件名，旧守卫按进程 cwd `open()` 解析失败 → 判定"非 self-share"放行。修复：`_strm_is_self_share` 支持 `dir_fd`，用 `os.open(name, O_RDONLY, dir_fd=fd)` 以目标目录为基准读内容；`os.remove`/`os.unlink` 包装器把 `kwargs["dir_fd"]` 传入。目录级误删由 `self_share_health` 巡检兜底恢复。
+- 测试：新增 `tests/test_sitecustomize.py` 守卫单测 4 项（真实 `shutil.rmtree` + 模拟 `os.unlink(dir_fd=fd)`；self-share 拦截 / 直链与普通文件照常删除）。后端 1476 项全部通过。
+
 ## 0.3.8 - 2026-08-11
 
 - **修复 /api/v1/health 未透传 os 级守卫字段**：v0.3.7 只把 `cms_os_guard` 加进了 `/api/v1/overview` 路由，`/api/v1/health`（Health.vue 实际调用的端点）漏了，导致 Web 健康页看不到「CMS 删除兜底守卫」。补上路由透传 + 路由级回归测试（health 与 overview 都断言三个守卫字段）。

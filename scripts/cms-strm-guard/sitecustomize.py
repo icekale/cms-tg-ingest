@@ -19,7 +19,9 @@ cms-tg-ingest 在共享 STRM 模式下，任务完成后会删除 115 转存源�
       /s/ 转存 strm 仍被误删且无 skip 日志，说明存在旁路删除路径。
    b) os 级兜底（os.remove / os.unlink）：进程内一切文件删除的最终咽喉。
       在 sitecustomize 导入期（早于 CMS 其余模块）同步挂钩，任何删除路径
-      （含增量同步、shutil.rmtree 内部调用）删 .strm 前都校验内容，/s/ 则跳过。
+      （含增量同步、shutil.rmtree 内部调用）删 .strm 前都校验内容，/s/ 则
+      跳过。注意 rmtree 自 Python 3.12 用 os.unlink(name, dir_fd=fd) 删
+      目录内文件（相对名 + dir_fd），守卫按 dir_fd 基准读内容，否则被旁路。
 2. 直链拦截守卫（模块级 create_strm_file(file_path, content)）：所有 strm 文件
    都由该函数写出（build_direct / save_file / save_video / sync_file_to_local
    均调用它）。先原样调用原函数（不破坏 CMS 状态机），再校验 content 与落盘路径：
@@ -98,8 +100,16 @@ def _library_roots() -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
-def _strm_is_self_share(path) -> bool:
-    """目标路径是 .strm 且内容指向 /s/ 自有分享链接。"""
+def _strm_is_self_share(path, dir_fd=None) -> bool:
+    """目标路径是 .strm 且内容指向 /s/ 自有分享链接。
+
+    dir_fd 支持：shutil.rmtree（Python 3.12 起）删除目录内文件时走
+    os.unlink(entry.name, dir_fd=topfd)，target 只是相对文件名，普通
+    open() 按进程 cwd 解析必然找不到文件 → 守卫误判"非 self-share"放行
+    （2026-08-11 线上：哑舍转存库被 CMS 增量同步 rmtree 误删，守卫零日志）。
+    带 dir_fd 时改用 os.open(name, O_RDONLY, dir_fd=fd) 以该目录为基准
+    读内容，无需把 fd 还原成路径，跨平台（Linux/macOS 均支持 dir_fd）。
+    """
     try:
         text_path = os.fspath(path)
     except Exception:
@@ -112,8 +122,13 @@ def _strm_is_self_share(path) -> bool:
     if not str(text_path).lower().endswith(".strm"):
         return False
     try:
-        with open(text_path, "r", encoding="utf-8", errors="replace") as fh:
-            head = fh.read(512)
+        if dir_fd is not None:
+            fd = os.open(text_path, os.O_RDONLY, dir_fd=int(dir_fd))
+            with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as fh:
+                head = fh.read(512)
+        else:
+            with open(text_path, "r", encoding="utf-8", errors="replace") as fh:
+                head = fh.read(512)
         return bool(_SELF_SHARE_URL_RE.search(head))
     except OSError:
         return False
@@ -172,6 +187,11 @@ def _install_os_delete_guard() -> bool:
     案例：/s/ 转存 strm 被误删且无 skip 日志）。os.remove/os.unlink 是最终
     咽喉，sitecustomize 导入期同步挂钩后，CMS 其余模块的 os.remove() 与
     'from os import remove' 绑定都会拿到被包装的版本，覆盖一切删除路径。
+
+    dir_fd 盲区（2026-08-11 哑舍误删根因）：Python 3.12 的 shutil.rmtree
+    删目录内文件走 os.unlink(entry.name, dir_fd=topfd)，target 只是相对
+    文件名，旧守卫 open() 按 cwd 解析失败 → 判定非 self-share 放行。
+    现在 dir_fd 随 kwargs 传入 _strm_is_self_share，以该目录为基准读内容。
     """
     global _orig_os_unlink, _orig_os_remove
     if _orig_os_unlink is not None or _orig_os_remove is not None:
@@ -180,13 +200,16 @@ def _install_os_delete_guard() -> bool:
     _orig_os_remove = os.remove
 
     def unlink_guarded(target, *args, **kwargs):
-        if _strm_is_self_share(target):
+        # shutil.rmtree（3.12 起）用 os.unlink(name, dir_fd=fd) 删目录内文件，
+        # target 只是相对文件名；把 dir_fd 传给守卫以该目录为基准读内容，
+        # 否则相对名 open 不到 → 守卫被旁路（2026-08-11 哑舍误删根因）。
+        if _strm_is_self_share(target, dir_fd=kwargs.get("dir_fd")):
             logger.warning("STRM-GUARD os.unlink skip delete self-share STRM: %s", target)
             return None
         return _orig_os_unlink(target, *args, **kwargs)
 
     def remove_guarded(target, *args, **kwargs):
-        if _strm_is_self_share(target):
+        if _strm_is_self_share(target, dir_fd=kwargs.get("dir_fd")):
             logger.warning("STRM-GUARD os.remove skip delete self-share STRM: %s", target)
             return None
         return _orig_os_remove(target, *args, **kwargs)
