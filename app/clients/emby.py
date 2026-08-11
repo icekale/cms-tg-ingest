@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -100,12 +101,35 @@ class EmbyClient:
         )
         return _response_items(resp)
 
+    def item_has_poster(self, item_id: str) -> bool:
+        """Whether /Images/Primary actually returns an image for this item.
+
+        Emby metadata can claim an image that is missing on disk (ImageTags
+        present but the image endpoint 404s), so existence checks must hit the
+        image endpoint itself rather than trust metadata.
+        """
+        item_id = str(item_id or "").strip()
+        if not item_id or not self.enabled:
+            return False
+        url = (
+            f"{self.base_url}/emby/Items/{urllib.parse.quote(item_id, safe='')}/Images/Primary"
+            f"?maxHeight=100"
+        )
+        request = urllib.request.Request(url, headers={"X-Emby-Token": self.api_key}, method="HEAD")
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return int(response.status or 0) == 200
+        except Exception:  # noqa: BLE001 - a missing poster must not break the board
+            return False
+
     def library_summary(self) -> list[dict[str, Any]]:
         """Dashboard summary per library: name, item count, representative item id.
 
-        Libraries are keyed by name (multiple virtual paths share one library);
-        the newest item in each library provides the representative poster.
-        Failures on one library are swallowed so the dashboard never breaks.
+        Libraries are keyed by name (multiple virtual paths share one library).
+        The representative item is the newest entry whose poster actually
+        loads: the newest entry overall may be a scrape-less record whose
+        /Images/Primary 404s. Failures on one library are swallowed so the
+        dashboard never breaks.
         """
         user_id = self.get_user_id()
         quoted_user_id = urllib.parse.quote(user_id, safe="")
@@ -140,18 +164,21 @@ class EmbyClient:
                     f"/Users/{quoted_user_id}/Items",
                     {
                         "ParentId": item_id,
-                        "Limit": "1",
+                        "Limit": "5",
                         "SortBy": "DateCreated",
                         "SortOrder": "Descending",
-                        # Only pick a representative item that actually has a
-                        # poster; the newest entry may be a scrape-less record
-                        # whose /Images/Primary returns 404 (broken cover).
-                        "Images": "true",
+                        # Recursive + media types skip virtual-folder subfolders
+                        # (e.g. a library whose newest entries are folder items)
+                        # so the representative is an actual Movie/Series.
+                        "Recursive": "true",
+                        "IncludeItemTypes": "Movie,Series",
                     },
                 )
-                items = _response_items(resp)
-                if items:
-                    representative_id = str(items[0].get("Id") or "")
+                for candidate in _response_items(resp):
+                    candidate_id = str(candidate.get("Id") or "")
+                    if candidate_id and self.item_has_poster(candidate_id):
+                        representative_id = candidate_id
+                        break
             except Exception:  # noqa: BLE001 - one library must not break the board
                 representative_id = ""
             results.append({"name": info["name"], "count": count, "item_id": representative_id})

@@ -1789,6 +1789,7 @@ class EmbyDashboardTests(unittest.TestCase):
         ]
         client._library_roots = None
         client.http = None
+        client.item_has_poster = lambda item_id: True
         return client
 
     def test_dashboard_aggregates_counts_libraries_and_recent(self):
@@ -1803,10 +1804,10 @@ class EmbyDashboardTests(unittest.TestCase):
                 return {"MovieCount": 100, "SeriesCount": 20, "EpisodeCount": 5000}
             if path == "/Items":
                 return {"TotalRecordCount": 42}
-            if path == "/Users/user1/Items" and params.get("IncludeItemTypes"):
-                return {"Items": [{"Id": "recent1", "Name": "龙族", "Type": "Series", "ProductionYear": 2022, "CommunityRating": 8.2, "Genres": ["剧情", "奇幻"]}]}
+            if path == "/Users/user1/Items" and params.get("ParentId"):
+                return {"Items": [{"Id": "lib1-new", "Name": "代表"}]}
             if path == "/Users/user1/Items":
-                return {"Items": [{"Id": "lib1-new"}]}
+                return {"Items": [{"Id": "recent1", "Name": "龙族", "Type": "Series", "ProductionYear": 2022, "CommunityRating": 8.2, "Genres": ["剧情", "奇幻"]}]}
             return {}
         emby._get = fake_get
 
