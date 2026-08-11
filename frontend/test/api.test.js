@@ -131,3 +131,22 @@ test('emby dashboard request targets the endpoint with optional refresh header',
     globalThis.fetch = originalFetch
   }
 })
+
+test('cms version pull posts to the pull endpoint', async () => {
+  const originalFetch = globalThis.fetch
+  let requestedPath = ''
+  let requestedMethod = ''
+  globalThis.fetch = async (url, options) => {
+    requestedPath = url
+    requestedMethod = options.method
+    return { ok: true, status: 200, json: async () => ({ pull_result: 'pulled' }) }
+  }
+
+  try {
+    await api.cmsVersionPull()
+    assert.equal(requestedPath, '/api/v1/cms/version/pull')
+    assert.equal(requestedMethod, 'POST')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})

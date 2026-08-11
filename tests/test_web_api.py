@@ -1822,7 +1822,9 @@ class EmbyDashboardTests(unittest.TestCase):
         lib = next(lib for lib in payload["libraries"] if lib["name"] == "Strm欧美电影")
         self.assertEqual(lib["count"], 42)
         self.assertIn("apiKey=secret-key", lib["poster_url"])
-        self.assertIn("/Items/lib1-new/Images/Primary", lib["poster_url"])
+        # Library cover art prefers the virtual-folder root item (lib2), not a
+        # Movie/Series poster from inside the library.
+        self.assertIn("/Items/lib2/Images/Primary", lib["poster_url"])
         self.assertIn("recent", payload)
         self.assertEqual(len(payload["recent"]), 1)
         recent = payload["recent"][0]

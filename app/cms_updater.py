@@ -340,6 +340,29 @@ class CmsVersionChecker:
         )
         return payload
 
+    def pull(self) -> dict[str, Any]:
+        """Pull the configured CMS image through the docker socket.
+
+        Container switching stays on the host (update-cms.sh) so the
+        guard-verify + auto-rollback loop is never bypassed; this only makes
+        the image available locally so the host upgrade is fast and offline.
+        """
+        settings = self._effective()
+        pull_result = ""
+        if settings["image"] and settings["docker_socket"]:
+            pull_result = docker_pull_image(settings["docker_socket"], settings["image"])
+        state = self.status()
+        state["pull_result"] = pull_result
+        if pull_result == "pulled":
+            state["message"] = "镜像已拉取，请在宿主机执行升级脚本完成容器切换"
+        else:
+            state["message"] = f"镜像拉取失败：{pull_result}"
+        self.store.set_runtime_state(
+            CMS_VERSION_STATE_KEY,
+            json.dumps(state, ensure_ascii=False, sort_keys=True),
+        )
+        return state
+
 
 def start_cms_version_check_loop(
     checker: CmsVersionChecker,

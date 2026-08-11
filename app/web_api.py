@@ -965,11 +965,35 @@ def api_quality_runs(
     return {"items": items, "trend": trend}
 
 
+def build_cms_upgrade_hint(remote_version: str, container: str = "cms-tg-ingest") -> str:
+    """Host-side upgrade commands for the settings page.
+
+    Container switching runs on the host via update-cms.sh (guard verify +
+    auto rollback); the script lives inside the deploy container and is copied
+    out once. Paths are the Unraid defaults and may be edited by the user.
+    """
+    remote_version = str(remote_version or "").strip()
+    if not remote_version:
+        return ""
+    return (
+        f"# 1) 一次性：把升级脚本从 {container} 容器拷到宿主机（已拷过可跳过）\n"
+        f"docker cp {container}:/app/scripts/cms-strm-guard/ /mnt/user/appdata/cms-tg-ingest/scripts/\n"
+        "# 2) 升级 CMS 容器（含守卫验证 + 失败自动回滚），目录按实际调整\n"
+        f"/mnt/user/appdata/cms-tg-ingest/scripts/cms-strm-guard/update-cms.sh "
+        f"/boot/config/plugins/compose.manager/projects/CMS {remote_version}"
+    )
+
+
 def api_cms_version(checker: Any | None = None) -> dict[str, Any]:
     if checker is None or not callable(getattr(checker, "status", None)):
         return {"enabled": False, "current_version": "", "update_ready": False}
     payload = checker.status()
-    return _safe_api_value(payload)
+    payload = _safe_api_value(payload)
+    if payload.get("update_available"):
+        payload["upgrade_hint"] = build_cms_upgrade_hint(str(payload.get("remote_version") or ""))
+    else:
+        payload["upgrade_hint"] = ""
+    return payload
 
 
 def emby_image_url(base_url: str, item_id: str, *, max_height: int, api_key: str) -> str:

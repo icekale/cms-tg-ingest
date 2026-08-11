@@ -280,6 +280,21 @@ body {
 .media-skeleton-line.short { width: 62%; }
 @keyframes media-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
 
+/* ---------- CMS 升级指引 ---------- */
+.upgrade-hint { margin-top: 14px; }
+.upgrade-hint-title { margin-bottom: 6px; color: var(--muted-strong); font-size: 13px; font-weight: 600; }
+.upgrade-hint-cmd {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text-strong);
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* ---------- Responsive ---------- */
 @media (max-width: 860px) {
   .content-wrap { padding: 18px; }

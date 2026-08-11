@@ -2474,6 +2474,18 @@ class WebApp:
             payload = self.cms_version_checker.check()
             status, response_headers, response_body = api_response(payload)
             return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path == "/api/v1/cms/version/pull":
+            if self.cms_version_checker is None or not callable(
+                getattr(self.cms_version_checker, "pull", None)
+            ):
+                status, response_headers, response_body = api_response(
+                    {"error": "cms_version_check_disabled"},
+                    status=409,
+                )
+                return status, {**response_headers, **auth_headers}, response_body
+            payload = self.cms_version_checker.pull()
+            status, response_headers, response_body = api_response(payload)
+            return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/settings/cms-version":
             status, response_headers, response_body = api_response(
                 api_cms_version(self.cms_version_checker)

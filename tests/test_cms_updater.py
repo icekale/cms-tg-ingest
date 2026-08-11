@@ -435,3 +435,93 @@ class CmsVersionClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CmsUpdaterPullTests(unittest.TestCase):
+    def test_pull_calls_docker_pull_and_marks_state(self):
+        import tempfile
+        from pathlib import Path
+
+        from app.task_store import TaskStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            checker = CmsVersionChecker(
+                store,
+                FakeCms("0.4.9.1"),
+                enabled=True,
+                image="imaliang/cloud-media-sync:latest",
+                docker_socket="/tmp/fake.sock",
+            )
+            checker.check()
+
+            with patch("app.cms_updater.docker_pull_image", return_value="pulled") as pull:
+                payload = checker.pull()
+
+            pull.assert_called_once()
+            self.assertEqual(payload["pull_result"], "pulled")
+            self.assertIn("镜像已拉取", payload["message"])
+
+    def test_pull_failure_reports_result(self):
+        import tempfile
+        from pathlib import Path
+
+        from app.task_store import TaskStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            checker = CmsVersionChecker(
+                store,
+                FakeCms("0.4.9.1"),
+                enabled=True,
+                image="imaliang/cloud-media-sync:latest",
+                docker_socket="/tmp/fake.sock",
+            )
+            checker.check()
+
+            with patch("app.cms_updater.docker_pull_image", return_value="pull error: connect refused"):
+                payload = checker.pull()
+
+            self.assertEqual(payload["pull_result"], "pull error: connect refused")
+            self.assertIn("镜像拉取失败", payload["message"])
+
+
+class CmsUpgradeHintTests(unittest.TestCase):
+    def test_hint_builds_host_commands_with_script_copy(self):
+        from app.web_api import build_cms_upgrade_hint
+
+        hint = build_cms_upgrade_hint("0.4.9.2")
+        self.assertIn("docker cp cms-tg-ingest:/app/scripts/cms-strm-guard/", hint)
+        self.assertIn("update-cms.sh", hint)
+        self.assertIn("0.4.9.2", hint)
+        self.assertIn("/boot/config/plugins/compose.manager/projects/CMS", hint)
+
+    def test_hint_empty_without_version(self):
+        from app.web_api import build_cms_upgrade_hint
+
+        self.assertEqual(build_cms_upgrade_hint(""), "")
+
+    def test_api_cms_version_includes_hint_when_update_available(self):
+        import tempfile
+        from pathlib import Path
+
+        from app.task_store import TaskStore
+        from app.web_api import api_cms_version
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            checker = CmsVersionChecker(
+                store,
+                FakeCms("0.4.9.1"),
+                enabled=True,
+                image="imaliang/cloud-media-sync:latest",
+                remote_lookup=lambda image: "0.4.9.2",
+            )
+            checker.check()
+            payload = api_cms_version(checker)
+            self.assertTrue(payload["update_available"])
+            self.assertIn("update-cms.sh", payload["upgrade_hint"])
+
+
+if __name__ == "__main__":
+    unittest.main()

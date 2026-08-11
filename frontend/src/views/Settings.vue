@@ -129,6 +129,19 @@ async function checkCmsVersion() {
   } catch (err) { message.error(err.message) } finally { cmsSaving.value = false }
 }
 
+async function pullCmsImage() {
+  cmsSaving.value = true
+  try {
+    cms.value = await api.cmsVersionPull()
+    cms.value.interval_minutes = Math.round(cms.value.interval_seconds / 60)
+    if (cms.value.pull_result === 'pulled') {
+      message.success('镜像已拉取，请在宿主机执行升级脚本完成容器切换')
+    } else {
+      message.error(`镜像拉取失败：${cms.value.pull_result || '未知错误'}`)
+    }
+  } catch (err) { message.error(err.message) } finally { cmsSaving.value = false }
+}
+
 onMounted(load)
 </script>
 
@@ -180,14 +193,19 @@ onMounted(load)
       <n-space align="center"><n-text depth="3">Docker Socket</n-text><n-input v-model:value="cms.docker_socket" placeholder="/var/run/docker.sock" style="width: 260px" /></n-space>
       <n-space align="center"><n-text depth="3">自动拉取镜像</n-text><n-switch v-model:value="cms.auto_pull" /></n-space>
       <n-text depth="3">当前版本：{{ cms.current_version || '未知' }}；远程最新：{{ cms.remote_version || '未知' }}；上次检测：{{ cms.last_seen_version || '-' }}</n-text>
-      <n-text depth="3" v-if="cms.update_available">发现远程新版本 {{ cms.remote_version }}（当前 {{ cms.current_version }}），可执行宿主机更新脚本升级。</n-text>
+      <n-text depth="3" v-if="cms.update_available">发现远程新版本 {{ cms.remote_version }}（当前 {{ cms.current_version }}）。「拉取镜像」把新镜像下载到本机，容器切换仍需在宿主机执行升级脚本（含守卫验证 + 失败自动回滚）。</n-text>
       <n-text depth="3" v-else-if="cms.remote_version">当前已是远程最新版本。</n-text>
       <n-text depth="3" v-else>{{ cms.message || '未运行检测' }}</n-text>
       <n-space>
         <n-button type="primary" :loading="cmsSaving" @click="saveCmsVersion">保存</n-button>
         <n-button secondary @click="checkCmsVersion">立即检查</n-button>
+        <n-button v-if="cms.update_available" secondary :loading="cmsSaving" @click="pullCmsImage">拉取镜像</n-button>
         <n-button secondary @click="resetCmsVersion">恢复环境默认</n-button>
       </n-space>
+      <div v-if="cms.pull_result === 'pulled'" class="upgrade-hint">
+        <div class="upgrade-hint-title">升级指引（在宿主机执行）</div>
+        <pre class="upgrade-hint-cmd">{{ cms.upgrade_hint || '' }}</pre>
+      </div>
     </n-space>
   </n-card>
 </template>
