@@ -26,6 +26,7 @@ const menuOptions = [
   { label: '运行概览', key: '/overview' },
   { label: '当前任务', key: '/tasks' },
   { label: '质量巡检', key: '/quality' },
+  { label: 'Emby 看板', key: '/emby-board' },
   { label: '本地健康', key: '/health' },
   { label: 'HDHive 订阅', key: '/hdhive' },
   { label: '实时日志', key: '/logs' },

@@ -1773,3 +1773,100 @@ class ApiTasksMediaEnricherTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EmbyDashboardTests(unittest.TestCase):
+    def _make_emby(self):
+        from app.clients.emby import EmbyClient
+
+        client = EmbyClient.__new__(EmbyClient)
+        client.base_url = "http://emby:8096"
+        client.api_key = "secret-key"
+        client.user_id = "user1"
+        client._library_entries_cache = [
+            {"name": "Strm外国电视", "path": "/mnt/strm/TV", "item_id": "lib1"},
+            {"name": "Strm欧美电影", "path": "/mnt/strm/Movie", "item_id": "lib2"},
+        ]
+        client._library_roots = None
+        client.http = None
+        return client
+
+    def test_dashboard_aggregates_counts_libraries_and_recent(self):
+        from app.web_api import api_emby_dashboard, _reset_emby_dashboard_cache
+
+        _reset_emby_dashboard_cache()
+        emby = self._make_emby()
+
+        def fake_get(path, params=None):
+            params = params or {}
+            if path == "/Items/Counts":
+                return {"MovieCount": 100, "SeriesCount": 20, "EpisodeCount": 5000}
+            if path == "/Items":
+                return {"TotalRecordCount": 42}
+            if path == "/Users/user1/Items" and params.get("IncludeItemTypes"):
+                return {"Items": [{"Id": "recent1", "Name": "龙族", "Type": "Series", "ProductionYear": 2022, "CommunityRating": 8.2, "Genres": ["剧情", "奇幻"]}]}
+            if path == "/Users/user1/Items":
+                return {"Items": [{"Id": "lib1-new"}]}
+            return {}
+        emby._get = fake_get
+
+        payload = api_emby_dashboard(emby)
+
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload["emby_base"], "http://emby:8096")
+        self.assertEqual(payload["stats"], {"movie_count": 100, "series_count": 20, "episode_count": 5000, "library_count": 2})
+        self.assertEqual(len(payload["libraries"]), 2)
+        names = [lib["name"] for lib in payload["libraries"]]
+        self.assertEqual(names, sorted(names))
+        lib = next(lib for lib in payload["libraries"] if lib["name"] == "Strm欧美电影")
+        self.assertEqual(lib["count"], 42)
+        self.assertIn("apiKey=secret-key", lib["poster_url"])
+        self.assertIn("/Items/lib1-new/Images/Primary", lib["poster_url"])
+        self.assertIn("recent", payload)
+        self.assertEqual(len(payload["recent"]), 1)
+        recent = payload["recent"][0]
+        self.assertEqual(recent["id"], "recent1")
+        self.assertEqual(recent["name"], "龙族")
+        self.assertEqual(recent["year"], 2022)
+        self.assertEqual(recent["rating"], 8.2)
+        self.assertEqual(recent["genres"], ["剧情", "奇幻"])
+        self.assertIn("/Items/recent1/Images/Primary?maxHeight=420", recent["poster_url"])
+
+    def test_dashboard_not_configured_and_caching(self):
+        from app.web_api import api_emby_dashboard, _reset_emby_dashboard_cache
+
+        _reset_emby_dashboard_cache()
+        self.assertEqual(api_emby_dashboard(None)["reason"], "emby_not_configured")
+
+        emby = self._make_emby()
+        emby.api_key = ""
+        self.assertEqual(api_emby_dashboard(emby)["reason"], "emby_not_configured")
+
+        emby.api_key = "secret-key"
+        calls = []
+        emby._get = lambda path, params=None: calls.append(path) or {"MovieCount": 1, "SeriesCount": 1, "EpisodeCount": 1, "TotalRecordCount": 0, "Items": []}
+        payload = api_emby_dashboard(emby)
+        self.assertTrue(payload["available"])
+        first_calls = len(calls)
+        payload2 = api_emby_dashboard(emby)  # cached -> no new emby calls
+        self.assertTrue(payload2["available"])
+        self.assertEqual(len(calls), first_calls)
+
+    def test_dashboard_emby_error_degrades_to_unreachable(self):
+        from app.web_api import api_emby_dashboard, _reset_emby_dashboard_cache
+
+        _reset_emby_dashboard_cache()
+        emby = self._make_emby()
+        emby._get = lambda path, params=None: (_ for _ in ()).throw(RuntimeError("emby down"))
+        payload = api_emby_dashboard(emby)
+        self.assertEqual(payload["reason"], "emby_unreachable")
+
+    def test_emby_image_url_never_leaks_key_to_path(self):
+        from app.web_api import emby_image_url
+
+        url = emby_image_url("http://emby:8096", "id-1", max_height=280, api_key="k/secret")
+        self.assertEqual(url, "http://emby:8096/emby/Items/id-1/Images/Primary?maxHeight=280&apiKey=k%2Fsecret")
+
+
+if __name__ == "__main__":
+    unittest.main()

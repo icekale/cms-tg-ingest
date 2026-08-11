@@ -970,3 +970,105 @@ def api_cms_version(checker: Any | None = None) -> dict[str, Any]:
         return {"enabled": False, "current_version": "", "update_ready": False}
     payload = checker.status()
     return _safe_api_value(payload)
+
+
+def emby_image_url(base_url: str, item_id: str, *, max_height: int, api_key: str) -> str:
+    """Build a browser-loadable Emby poster URL.
+
+    The api key is only ever interpolated here on the server side; the
+    frontend receives a complete, directly loadable image URL.
+    """
+    base_url = str(base_url or "").rstrip("/")
+    item_id = str(item_id or "").strip()
+    if not base_url or not item_id:
+        return ""
+    return (
+        f"{base_url}/emby/Items/{quote(item_id, safe='')}/Images/Primary"
+        f"?maxHeight={int(max_height)}&apiKey={quote(str(api_key or ''), safe='')}"
+    )
+
+
+_emby_dashboard_cache: dict[str, Any] = {"at": 0.0, "value": None}
+_EMBY_DASHBOARD_CACHE_SECONDS = 60.0
+
+
+def _reset_emby_dashboard_cache() -> None:
+    _emby_dashboard_cache.update({"at": 0.0, "value": None})
+
+
+def api_emby_dashboard(emby: Any | None, *, refresh: bool = False) -> dict[str, Any]:
+    """Aggregate Emby stats, library summaries and recent items for the board."""
+    if emby is None or not getattr(emby, "enabled", False):
+        return {"available": False, "reason": "emby_not_configured"}
+    now = time.monotonic()
+    cached = _emby_dashboard_cache.get("value")
+    if not refresh and cached is not None and now - float(_emby_dashboard_cache.get("at") or 0) < _EMBY_DASHBOARD_CACHE_SECONDS:
+        return cached
+    try:
+        payload = _build_emby_dashboard(emby)
+    except Exception as exc:  # noqa: BLE001 - an Emby outage must not 500 the board
+        _reset_emby_dashboard_cache()
+        return {"available": False, "reason": "emby_unreachable", "error": _safe_error(str(exc))}
+    _emby_dashboard_cache.update({"at": now, "value": payload})
+    return payload
+
+
+def _build_emby_dashboard(emby: Any) -> dict[str, Any]:
+    base_url = str(getattr(emby, "base_url", "") or "").rstrip("/")
+    api_key = str(getattr(emby, "api_key", "") or "")
+    # Counts is the liveness signal: if it fails the Emby server is treated as
+    # unreachable and the whole board degrades. Library/recent failures below
+    # are per-item and swallowed individually.
+    counts = emby._get("/Items/Counts")
+    stats: dict[str, Any] = {"movie_count": 0, "series_count": 0, "episode_count": 0, "library_count": 0}
+    if isinstance(counts, dict):
+        stats = {
+            "movie_count": int(counts.get("MovieCount") or 0),
+            "series_count": int(counts.get("SeriesCount") or 0),
+            "episode_count": int(counts.get("EpisodeCount") or 0),
+            "library_count": 0,
+        }
+
+    libraries: list[dict[str, Any]] = []
+    try:
+        for info in emby.library_summary():
+            item_id = str(info.get("item_id") or "")
+            libraries.append(
+                {
+                    "name": str(info.get("name") or ""),
+                    "count": int(info.get("count") or 0),
+                    "poster_url": emby_image_url(base_url, item_id, max_height=280, api_key=api_key) if item_id else "",
+                }
+            )
+        stats["library_count"] = len(libraries)
+    except Exception:  # noqa: BLE001 - library listing is best-effort
+        pass
+
+    recent: list[dict[str, Any]] = []
+    try:
+        for item in emby.recent_items(20, include_item_types="Movie,Series"):
+            item_id = str(item.get("Id") or item.get("ItemId") or "").strip()
+            if not item_id:
+                continue
+            genres = [str(value) for value in (item.get("Genres") or []) if value]
+            recent.append(
+                {
+                    "id": item_id,
+                    "name": str(item.get("Name") or item.get("SeriesName") or ""),
+                    "type": str(item.get("Type") or ""),
+                    "year": int(item.get("ProductionYear") or 0) or None,
+                    "rating": float(item.get("CommunityRating") or 0) or None,
+                    "genres": genres[:3],
+                    "poster_url": emby_image_url(base_url, item_id, max_height=420, api_key=api_key),
+                }
+            )
+    except Exception:  # noqa: BLE001 - recent items are best-effort
+        pass
+
+    return {
+        "available": True,
+        "emby_base": base_url,
+        "stats": stats,
+        "libraries": libraries,
+        "recent": recent,
+    }

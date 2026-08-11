@@ -495,6 +495,7 @@ def maybe_start_web_server(
     log_hub: LogHub | None = None,
     cms_version_checker: Any | None = None,
     tmdb_resolver: Any | None = None,
+    emby: EmbyClient | None = None,
 ):
     if not config.web_enabled:
         return None
@@ -538,6 +539,8 @@ def maybe_start_web_server(
         kwargs["cms_version_checker"] = cms_version_checker
     if tmdb_resolver is not None:
         kwargs["tmdb_resolver"] = tmdb_resolver
+    if emby is not None:
+        kwargs["emby_client"] = emby
     try:
         starter_parameters = inspect.signature(starter).parameters
         supports_username_auth = (
@@ -637,6 +640,7 @@ def call_maybe_start_web_server(
     log_hub: LogHub | None = None,
     cms_version_checker: Any | None = None,
     tmdb_resolver: Any | None = None,
+    emby: EmbyClient | None = None,
 ):
     try:
         parameters = inspect.signature(maybe_start_web_server).parameters
@@ -685,6 +689,8 @@ def call_maybe_start_web_server(
             kwargs["cms_version_checker"] = cms_version_checker
         if supports_keyword("tmdb_resolver"):
             kwargs["tmdb_resolver"] = tmdb_resolver
+        if supports_keyword("emby_client"):
+            kwargs["emby_client"] = emby
         return maybe_start_web_server(config, task_store, **kwargs)
     return maybe_start_web_server(config, task_store)
 
@@ -4983,6 +4989,7 @@ def run_forever(
         hdhive_scheduler=hdhive_subscription_scheduler,
         cms_version_checker=cms_version_checker,
         tmdb_resolver=tmdb_resolver,
+        emby=emby,
         frontend_dist_path=getattr(config, "frontend_dist_path", "/app/frontend/dist"),
         background_jobs=background_jobs,
         log_hub=log_hub,

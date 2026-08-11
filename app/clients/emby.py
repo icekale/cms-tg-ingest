@@ -82,20 +82,77 @@ class EmbyClient:
             raise RuntimeError("Cannot determine Emby user id")
         return self.user_id
 
-    def recent_items(self, limit: int = 20) -> list[dict]:
+    def recent_items(self, limit: int = 20, include_item_types: str | None = None) -> list[dict]:
         user_id = self.get_user_id()
         quoted_user_id = urllib.parse.quote(user_id, safe="")
+        params: dict[str, Any] = {
+            "Recursive": "true",
+            "Limit": str(limit),
+            "Fields": "Path,ProviderIds,DateCreated,MediaSources,ParentId,Overview",
+            "SortBy": "DateCreated",
+            "SortOrder": "Descending",
+        }
+        if include_item_types:
+            params["IncludeItemTypes"] = include_item_types
         resp = self._get(
             f"/Users/{quoted_user_id}/Items",
-            {
-                "Recursive": "true",
-                "Limit": str(limit),
-                "Fields": "Path,ProviderIds,DateCreated,MediaSources,ParentId,Overview",
-                "SortBy": "DateCreated",
-                "SortOrder": "Descending",
-            },
+            params,
         )
         return _response_items(resp)
+
+    def library_summary(self) -> list[dict[str, Any]]:
+        """Dashboard summary per library: name, item count, representative item id.
+
+        Libraries are keyed by name (multiple virtual paths share one library);
+        the newest item in each library provides the representative poster.
+        Failures on one library are swallowed so the dashboard never breaks.
+        """
+        user_id = self.get_user_id()
+        quoted_user_id = urllib.parse.quote(user_id, safe="")
+        by_name: dict[str, dict[str, Any]] = {}
+        for entry in self._library_entries():
+            name = str(entry.get("name") or "").strip()
+            if not name:
+                continue
+            existing = by_name.get(name)
+            if existing is None:
+                by_name[name] = {"name": name, "count": 0, "item_id": ""}
+                existing = by_name[name]
+            item_id = str(entry.get("item_id") or "").strip()
+            if not existing["item_id"] and item_id:
+                existing["item_id"] = item_id
+        results: list[dict[str, Any]] = []
+        for info in by_name.values():
+            item_id = info["item_id"]
+            if not item_id:
+                results.append({"name": info["name"], "count": 0, "item_id": ""})
+                continue
+            count = 0
+            representative_id = ""
+            try:
+                resp = self._get("/Items", {"ParentId": item_id, "Recursive": "true", "Limit": "0"})
+                if isinstance(resp, dict):
+                    count = int(resp.get("TotalRecordCount") or 0)
+            except Exception:  # noqa: BLE001 - one library must not break the board
+                count = 0
+            try:
+                resp = self._get(
+                    f"/Users/{quoted_user_id}/Items",
+                    {
+                        "ParentId": item_id,
+                        "Limit": "1",
+                        "SortBy": "DateCreated",
+                        "SortOrder": "Descending",
+                    },
+                )
+                items = _response_items(resp)
+                if items:
+                    representative_id = str(items[0].get("Id") or "")
+            except Exception:  # noqa: BLE001 - one library must not break the board
+                representative_id = ""
+            results.append({"name": info["name"], "count": count, "item_id": representative_id})
+        results.sort(key=lambda item: str(item.get("name") or ""))
+        return results
 
     def find_item_by_tmdb(self, tmdb_id: str) -> dict | None:
         tmdb_id = str(tmdb_id or "").strip()

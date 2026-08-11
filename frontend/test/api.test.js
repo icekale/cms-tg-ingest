@@ -112,3 +112,22 @@ test('non-login redirects are not treated as unauthenticated', async () => {
     globalThis.fetch = originalFetch
   }
 })
+
+test('emby dashboard request targets the endpoint with optional refresh header', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options })
+    return { ok: true, status: 200, json: async () => ({ available: true, stats: {}, libraries: [], recent: [] }) }
+  }
+
+  try {
+    await api.embyDashboard()
+    await api.embyDashboard(true)
+    assert.equal(calls[0].url, '/api/v1/emby/dashboard')
+    assert.equal(calls[0].options.headers['X-Emby-Dashboard-Refresh'], undefined)
+    assert.equal(calls[1].options.headers['X-Emby-Dashboard-Refresh'], '1')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})

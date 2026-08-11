@@ -6,7 +6,7 @@ Overview 首页的「最近入库」媒体墙已经上线（v0.2.95，历史任�
 
 现有基础设施：
 
-- `app/clients/emby.py` 已有 `EmbyClient`：`recent_items()`、媒体库条目、按 tmdb 查找、刷新等能力，配置来自 `EMBY_BASE_URL`/`EMBY_API_KEY`（Unraid .env 已配，指向 `http://192.168.5.28:9096`）。
+- `app/clients/emby.py` 已有 `EmbyClient`：`recent_items()`、媒体库条目、按 tmdb 查找、刷新等能力，配置来自 `EMBY_BASE_URL`/`EMBY_API_KEY`（Unraid .env 已配，指向 `http://<emby-host>:8096`）。
 - Emby API 能力已实测：`/Items/Counts` 返回 `MovieCount=1089 / SeriesCount=365 / EpisodeCount=16419`；`/Users` 返回用户 `icekale`；**PlaybackReporting 插件未安装（404）**，播放统计类数据不可得。
 - 前端已有设计 token（`styles.css` 亮/暗两套 CSS 变量）、`api.js`、侧栏 `App.vue`、骨架屏与降级约定。
 
@@ -41,7 +41,7 @@ EmbyBoard.vue ──GET /api/v1/emby/dashboard──▶ web.py ─▶ EmbyClient
 ```json
 {
   "available": true,
-  "emby_base": "http://192.168.5.28:9096",
+  "emby_base": "http://<emby-host>:8096",
   "stats": {
     "movie_count": 1089,
     "series_count": 365,
@@ -52,7 +52,7 @@ EmbyBoard.vue ──GET /api/v1/emby/dashboard──▶ web.py ─▶ EmbyClient
     {
       "name": "Strm欧美电影",
       "count": 456,
-      "poster_url": "http://192.168.5.28:9096/emby/Items/<id>/Images/Primary?maxHeight=280&apiKey=..."
+      "poster_url": "http://<emby-host>:8096/emby/Items/<id>/Images/Primary?maxHeight=280&apiKey=..."
     }
   ],
   "recent": [
@@ -63,7 +63,7 @@ EmbyBoard.vue ──GET /api/v1/emby/dashboard──▶ web.py ─▶ EmbyClient
       "year": 2022,
       "rating": 8.2,
       "genres": ["剧情", "奇幻"],
-      "poster_url": "http://192.168.5.28:9096/emby/Items/<id>/Images/Primary?maxHeight=420&apiKey=..."
+      "poster_url": "http://<emby-host>:8096/emby/Items/<id>/Images/Primary?maxHeight=420&apiKey=..."
     }
   ]
 }

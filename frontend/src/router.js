@@ -8,6 +8,7 @@ export default createRouter({
     { path: '/tasks', component: () => import('./views/Tasks.vue') },
     { path: '/tasks/:id', component: () => import('./views/TaskDetail.vue') },
     { path: '/quality', component: () => import('./views/Quality.vue') },
+    { path: '/emby-board', component: () => import('./views/EmbyBoard.vue') },
     { path: '/health', component: () => import('./views/Health.vue') },
     { path: '/hdhive', component: () => import('./views/Hdhive.vue') },
     { path: '/logs', component: () => import('./views/Logs.vue') },

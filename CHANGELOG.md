@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.96 - 2026-08-11
+
+- **新增 Emby 看板**（独立菜单页，参考 TgtoDrive 看板形态）：数据概览（电影/剧集/总集数/媒体库数）、我的媒体库（各库代表海报 + 数量徽标）、最近入库（海报流，点击跳 Emby Web 详情）。后端新增 `GET /api/v1/emby/dashboard` 聚合端点：复用容器内 `EMBY_API_KEY`（**key 不出容器**，海报 URL 由服务端拼成浏览器可直接加载的完整地址），`/Items/Counts` 统计 + `/Library` 媒体库 + `recent_items` 最近入库，60 秒进程内缓存（「刷新」按钮经 `X-Emby-Dashboard-Refresh` 头绕过）。Emby 未配置 → `available:false` 空态引导；Counts 失败 → `emby_unreachable`；单库失败静默跳过。`bridge.py` 将 `emby` 客户端经 `maybe_start_web_server` → `start_web_server` → `WebApp` 注入。
+- 测试：后端 1457 项、前端 27 项全部通过（新增 dashboard 4 项 + 前端 api 1 项）。
+
 ## 0.2.95 - 2026-08-11
 
 - **修复媒体墙历史任务封面空白**：v0.2.93 之前入库的任务 metadata 只有 `tmdb_id`/`category`，没有 `poster_path`/`vote_average` 等 TMDB 媒体字段，媒体墙全部降级为文字卡。新增 `enrich_task_media_metadata` 按需补齐：Web 读取任务列表时，对有 `tmdb_id` 但缺海报的成功任务，用 TMDB resolver 拉取详情写回 metadata 并持久化（补过不再补，每次最多补齐 12 个限制 TMDB 用量，lookup/持久化失败静默跳过不影响 overview）。`api_tasks` 新增 `media_enricher` 参数，bridge 把 `tmdb_resolver` 经 `maybe_start_web_server` → `start_web_server` → `WebApp` 接线；无 TMDB key 或 resolver 不可用时整体跳过。

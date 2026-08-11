@@ -65,6 +65,7 @@ from .web_api import (
     api_quality_runs,
     api_cms_version,
     api_tasks,
+    api_emby_dashboard,
     check_cms_strm_guard,
     check_cms_direct_strm_guard,
     CMS_STRM_GUARD_MARKER,
@@ -1423,6 +1424,7 @@ class WebApp:
         cms_guard_workflow_mode: str = "",
         cms_direct_guard_marker: str = "",
         media_enricher: Any | None = None,
+        emby_client: Any | None = None,
     ):
         self.store = store
         self.web_token = web_token
@@ -1445,6 +1447,7 @@ class WebApp:
         self.log_hub = log_hub
         self.cms_version_checker = cms_version_checker
         self.media_enricher = media_enricher
+        self.emby_client = emby_client
         self.cms_guard_container = str(cms_guard_container or "cloud-media-sync").strip()
         self.cms_guard_docker_socket = str(cms_guard_docker_socket or "").strip()
         self.cms_guard_marker = str(cms_guard_marker or "").strip()
@@ -2332,6 +2335,14 @@ class WebApp:
                 )
             )
             return status, {**response_headers, **auth_headers}, response_body
+        if method == "GET" and path == "/api/v1/emby/dashboard":
+            # Refresh is requested via header: _serve_remaining_routes receives
+            # a query-stripped path, so a ?refresh=1 query would never match.
+            refresh = str(headers.get("X-Emby-Dashboard-Refresh") or "").strip() == "1"
+            status, response_headers, response_body = api_response(
+                api_emby_dashboard(self.emby_client, refresh=refresh)
+            )
+            return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/quality":
             status, response_headers, response_body = api_response(
                 api_quality(self.store, quality_automation=self.quality_automation, background_jobs=self.background_jobs)
@@ -2503,6 +2514,7 @@ def start_web_server(
     cms_guard_marker: str = "",
     cms_guard_workflow_mode: str = "",
     tmdb_resolver: Any | None = None,
+    emby_client: Any | None = None,
 ) -> ThreadingHTTPServer:
     app = WebApp(
         store,
@@ -2530,6 +2542,7 @@ def start_web_server(
             and getattr(tmdb_resolver, "enabled", False)
             else None
         ),
+        emby_client=emby_client,
     )
     sse_capacity = BoundedSemaphore(max(1, int(SSE_MAX_CLIENTS)))
 
