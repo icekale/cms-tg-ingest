@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.98 - 2026-08-11
+
+- **修复 Emby 看板两个前端问题**：统计卡空白（`NStatistic` 未从 naive-ui 导入导致渲染为空元素）；媒体库/最近入库海报加载失败时破图（`@error` 未绑定，缺失 `posterFailed` 降级机制）。现统计卡正常显示四项数据，海报失败自动降级为文字卡（与 Overview 媒体墙一致的降级约定）。
+- 测试：前端 27 项全部通过。
+
 ## 0.2.97 - 2026-08-11
 
 - **修复 Emby 看板 `emby_not_configured`**：v0.2.96 中 `call_maybe_start_web_server` 检测的参数名是 `emby_client`，但 `maybe_start_web_server` 实际参数名是 `emby`，导致 Emby 客户端从未被透传到 WebApp，看板恒返回 `not_configured`。改为 `supports_keyword("emby")` + `kwargs["emby"] = emby`；`maybe_start_web_server` 内部再转 `emby_client` 传给 `start_web_server` → `WebApp`。已用 fake starter 断言两条透传路径均携带 Emby 客户端。

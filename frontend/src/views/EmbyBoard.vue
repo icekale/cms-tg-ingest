@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, ref } from 'vue'
-import { NButton, NCard, NSpace, useMessage } from 'naive-ui'
+import { NButton, NCard, NStatistic, NSpace, useMessage } from 'naive-ui'
 import { api } from '../api'
 
 const message = useMessage()
@@ -29,6 +29,10 @@ const statCards = [
   { key: 'library_count', label: '媒体库' },
 ]
 
+const posterFailed = ref(new Set())
+function markPosterFailed(key) {
+  posterFailed.value = new Set(posterFailed.value).add(key)
+}
 function detailUrl(item) {
   if (!data.value?.emby_base || !item?.id) return ''
   return `${data.value.emby_base}/web/#/details?id=${item.id}`
@@ -81,10 +85,11 @@ function ratingText(item) {
           >
             <div class="media-poster">
               <img
-                v-if="lib.poster_url"
+                v-if="lib.poster_url && !posterFailed.has('lib:' + lib.name)"
                 :src="lib.poster_url"
                 alt=""
                 loading="lazy"
+                @error="markPosterFailed('lib:' + lib.name)"
               >
               <div v-else class="media-poster-fallback">{{ (lib.name || '?').slice(0, 2) }}</div>
             </div>
@@ -107,10 +112,11 @@ function ratingText(item) {
           >
             <div class="media-poster">
               <img
-                v-if="item.poster_url"
+                v-if="item.poster_url && !posterFailed.has('item:' + item.id)"
                 :src="item.poster_url"
                 alt=""
                 loading="lazy"
+                @error="markPosterFailed('item:' + item.id)"
               >
               <div v-else class="media-poster-fallback">{{ (item.name || '?').slice(0, 2) }}</div>
               <span v-if="ratingText(item)" class="media-score">{{ ratingText(item) }}</span>
