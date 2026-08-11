@@ -47,8 +47,11 @@ def fetch_remote_latest_tag(image: str, timeout: float = 10.0) -> str:
     if not repo:
         return ""
     try:
+        # The repo slash is a path separator in the tags API URL; quote it with
+        # safe='/' (escaping to %2F makes Docker Hub answer 400, unlike the
+        # image pull API which expects %2F in the query string).
         url = (
-            f"https://hub.docker.com/v2/repositories/{quote(repo, safe='')}"
+            f"https://hub.docker.com/v2/repositories/{quote(repo, safe='/')}"
             f"/tags?page_size=25&ordering=last_updated"
         )
         request = urllib.request.Request(

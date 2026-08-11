@@ -354,6 +354,46 @@ class CmsUpdaterTests(unittest.TestCase):
         self.assertEqual(fetch_remote_latest_tag(""), "")
         self.assertEqual(fetch_remote_latest_tag("nginx"), "")
 
+    def test_fetch_remote_latest_tag_builds_slash_preserving_url(self):
+        # Regression: the repo slash is a path separator and must NOT be
+        # escaped to %2F (Docker Hub answers 400 on an escaped repo path).
+        captured = {}
+
+        class FakeResponse:
+            def __init__(self):
+                self.payload = json.dumps(
+                    {"results": [{"name": "latest"}, {"name": "0.4.9.2"}]}
+                ).encode()
+
+            def read(self, _size=None):
+                return self.payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        class FakeUrlOpen:
+            def __init__(self, request, timeout=0):
+                captured["url"] = request.full_url
+                captured["headers"] = dict(request.headers.items())
+
+            def __enter__(self):
+                return FakeResponse()
+
+            def __exit__(self, *args):
+                return False
+
+        with patch("app.cms_updater.urllib.request.urlopen", FakeUrlOpen):
+            result = fetch_remote_latest_tag("imaliang/cloud-media-sync:0.4.9.1")
+
+        self.assertEqual(result, "0.4.9.2")
+        self.assertIn("/repositories/imaliang/cloud-media-sync/tags", captured["url"])
+        self.assertNotIn("%2F", captured["url"])
+        self.assertIn("page_size=25", captured["url"])
+        self.assertIn("ordering=last_updated", captured["url"])
+
 
 class CmsVersionClientTests(unittest.TestCase):
     def test_login_ignores_version_when_login_fails(self):

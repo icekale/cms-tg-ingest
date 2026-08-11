@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.94 - 2026-08-11
+
+- **修复 CMS 远程版本检测失败**：`fetch_remote_latest_tag` 用 `quote(repo, safe='')` 构造 Docker Hub tags API URL，repo 中的 `/` 被转义成 `%2F`，Docker Hub 返回 400（图片 pull API 需要 `%2F`，但 tags API 的路径语义不同），导致设置页「立即检查」`remote_version` 恒为空、永远检测不到 CMS 新版。改用 `safe='/'` 保留路径分隔符。新增回归测试捕获请求 URL（断言不含 `%2F`）。
+- 测试：后端 1447 项全部通过（新增 URL 构造回归 1 项）。
+
 ## 0.2.93 - 2026-08-11
 
 - **全站暗色模式**：Vue 管理台默认跟随系统，顶栏新增太阳/月亮切换按钮（`system/light/dark` 三态，选择持久化到 localStorage `cms-theme`，`[data-theme]` 驱动；首帧内联脚本避免暗色用户闪白）。naive-ui 亮暗两套 `themeOverrides`；`styles.css` 全量重构为 CSS 变量（亮/暗两套 token），日志控制台保持常暗终端风。SSR 旧页面（`/legacy` `/health` `/hdhive` 等）与登录页通过 `prefers-color-scheme` 跟随系统，无需手动切换。
