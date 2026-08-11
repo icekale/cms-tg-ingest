@@ -126,10 +126,11 @@ class EmbyClient:
         """Dashboard summary per library: name, item count, representative item id.
 
         Libraries are keyed by name (multiple virtual paths share one library).
-        The representative item is the newest entry whose poster actually
-        loads: the newest entry overall may be a scrape-less record whose
-        /Images/Primary 404s. Failures on one library are swallowed so the
-        dashboard never breaks.
+        The representative image prefers the library's own cover art (the
+        virtual-folder root item, PrimaryImageItemId); only when that is
+        missing does it fall back to the newest Movie/Series inside the library
+        whose poster actually loads. Failures on one library are swallowed so
+        the dashboard never breaks.
         """
         user_id = self.get_user_id()
         quoted_user_id = urllib.parse.quote(user_id, safe="")
@@ -159,28 +160,32 @@ class EmbyClient:
                     count = int(resp.get("TotalRecordCount") or 0)
             except Exception:  # noqa: BLE001 - one library must not break the board
                 count = 0
-            try:
-                resp = self._get(
-                    f"/Users/{quoted_user_id}/Items",
-                    {
-                        "ParentId": item_id,
-                        "Limit": "5",
-                        "SortBy": "DateCreated",
-                        "SortOrder": "Descending",
-                        # Recursive + media types skip virtual-folder subfolders
-                        # (e.g. a library whose newest entries are folder items)
-                        # so the representative is an actual Movie/Series.
-                        "Recursive": "true",
-                        "IncludeItemTypes": "Movie,Series",
-                    },
-                )
-                for candidate in _response_items(resp):
-                    candidate_id = str(candidate.get("Id") or "")
-                    if candidate_id and self.item_has_poster(candidate_id):
-                        representative_id = candidate_id
-                        break
-            except Exception:  # noqa: BLE001 - one library must not break the board
-                representative_id = ""
+            # The library's own cover art (virtual-folder root item) is the
+            # "Emby 媒体库封面", distinct from any Movie/Series poster inside.
+            if item_id and self.item_has_poster(item_id):
+                representative_id = item_id
+            if not representative_id:
+                try:
+                    resp = self._get(
+                        f"/Users/{quoted_user_id}/Items",
+                        {
+                            "ParentId": item_id,
+                            "Limit": "5",
+                            "SortBy": "DateCreated",
+                            "SortOrder": "Descending",
+                            # Recursive + media types skip virtual-folder
+                            # subfolders so candidates are actual Movie/Series.
+                            "Recursive": "true",
+                            "IncludeItemTypes": "Movie,Series",
+                        },
+                    )
+                    for candidate in _response_items(resp):
+                        candidate_id = str(candidate.get("Id") or "")
+                        if candidate_id and self.item_has_poster(candidate_id):
+                            representative_id = candidate_id
+                            break
+                except Exception:  # noqa: BLE001 - one library must not break the board
+                    representative_id = ""
             results.append({"name": info["name"], "count": count, "item_id": representative_id})
         results.sort(key=lambda item: str(item.get("name") or ""))
         return results

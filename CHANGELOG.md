@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.4 - 2026-08-11
+
+- **补发 Emby 媒体库封面修复**（v0.3.3 遗漏 `app/clients/emby.py`，线上未生效）：媒体库代表图优先取库根条目的封面（`PrimaryImageItemId` 的 `/Images/Primary`，即 Emby 媒体库自己的品牌横幅图），无封面才回退库内最新可加载条目。
+
 ## 0.3.3 - 2026-08-11
 
 - **修复 Emby 媒体库封面**：之前用库内最新电影的海报（需真实校验才可用），现优先取 Emby 库根条目的封面（`PrimaryImageItemId` 的 `/Images/Primary`，即 Emby 媒体库自己的品牌横幅图），无封面才回退库内条目。
