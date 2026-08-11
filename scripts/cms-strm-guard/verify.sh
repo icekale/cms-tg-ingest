@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# verify.sh — 检查 CMS 容器的 STRM 守卫（删除守卫 + 直链拦截守卫）是否安装并生效。
+# verify.sh — 检查 CMS 容器的 STRM 守卫（删除守卫 + 直链拦截守卫 + os 级删除兜底）是否安装并生效。
 #
 # 用法：
 #   ./verify.sh                          # 本机 docker（Unraid 上直接跑）
 #   ./verify.sh <ssh-host>               # 通过 SSH 检查（如 root@<unraid-ip>）
 #
 # 输出：
-#   同时找到删除守卫与直链拦截守卫标记 → 通过
+#   同时找到删除守卫、直链拦截守卫与 os 级删除兜底标记 → 通过
 #   任一缺失 → 失败（CMS 可能更新过、模块/方法名变化，守卫静默失效）
 #
 # 守卫失效时请检查 sitecustomize.py 里的 _SELF_SHARE_URL_RE、
-# _DIRECT_STRM_WRITER 和 _install_guard 的模块/方法名是否与当前 CMS 版本一致。
+# _DIRECT_STRM_WRITER、_OS_STRM_GUARD_MARKER 和 _install_guard 的
+# 模块/方法名是否与当前 CMS 版本一致。
 
 set -euo pipefail
 
@@ -19,6 +20,7 @@ CONTAINER="${CMS_CONTAINER:-cloud-media-sync}"
 # 若自定义 marker，需同步修改这 4 处。
 MARKER_DELETE="STRM-GUARD installed on MediaSync.delete_local_file"
 MARKER_DIRECT="STRM-GUARD direct-strm-suppressor installed on"
+MARKER_OS="STRM-GUARD os-level delete-protect installed on"
 SSH_TARGET="${1:-}"
 
 run_on_host() {
@@ -53,21 +55,27 @@ check_markers() {
         echo "  [MISS] 直链拦截守卫标记缺失: $MARKER_DIRECT"
         ok=1
     fi
+    if printf '%s' "$logs" | grep -qF "$MARKER_OS"; then
+        echo "  [OK] os 级删除兜底守卫已安装"
+    else
+        echo "  [MISS] os 级删除兜底守卫标记缺失: $MARKER_OS"
+        ok=1
+    fi
     return $ok
 }
 
 if check_markers; then
     echo "PASS: STRM 守卫全部安装"
-    run_on_host "docker logs $CONTAINER 2>&1 | grep -F 'STRM-GUARD installed' | tail -2"
+    run_on_host "docker logs $CONTAINER 2>&1 | grep -F 'STRM-GUARD' | tail -3"
     exit 0
 fi
 
 # 兜底：容器刚重启，守卫 worker 可能还在等模块加载（最多 10 分钟）
 # 等待 90 秒覆盖 CMS 冷启动 + sitecustomize worker 安装窗口，避免边缘情况下误报。
 echo "WARN: 日志中暂无守卫标记，等待 worker 轮询（最多 90 秒）..."
-if run_on_host "timeout 90 sh -c 'until docker logs $CONTAINER 2>&1 | grep -qF \"$MARKER_DELETE\" && docker logs $CONTAINER 2>&1 | grep -qF \"$MARKER_DIRECT\"; do sleep 2; done'"; then
+if run_on_host "timeout 90 sh -c 'until docker logs $CONTAINER 2>&1 | grep -qF \"$MARKER_DELETE\" && docker logs $CONTAINER 2>&1 | grep -qF \"$MARKER_DIRECT\" && docker logs $CONTAINER 2>&1 | grep -qF \"$MARKER_OS\"; do sleep 2; done'"; then
     echo "PASS: STRM 守卫全部安装（延迟确认）"
-    run_on_host "docker logs $CONTAINER 2>&1 | grep -F 'STRM-GUARD installed' | tail -2"
+    run_on_host "docker logs $CONTAINER 2>&1 | grep -F 'STRM-GUARD' | tail -3"
     exit 0
 fi
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.7 - 2026-08-11
+
+- **修复 CMS STRM 守卫被旁路导致二次误删**：龙族 S03E03 转存库 `/s/` strm 再次被 CMS 增量同步误删（2026-08-11 18:40，任务 372 转存源删除事件延迟消费）。根因：方法级守卫只挂钩 `MediaSync.delete_local_file`，但 CMS 增量同步消费 115 `delete_file` 生活事件的本地删除不走该方法，守卫从未输出过 skip 日志 = 系统性旁路。
+- **新增 os 级删除兜底守卫**：sitecustomize.py 在导入期同步包装 `os.remove`/`os.unlink`（进程内一切文件删除的最终咽喉，含增量同步旁路与 `shutil.rmtree` 内部调用），删除 `.strm` 前读内容，指向 `/s/` 自有分享则跳过；方法级守卫改用宽松参数提取（兼容 item_db 对象/dict 行/裸路径）。新 marker `STRM-GUARD os-level delete-protect installed on` 独立检测，verify.sh / doctor.py（`cms_os_strm_guard`）/ Web 健康页同步。
+- 线上已部署并实测：CMS 重启后 3 个守卫 marker 全齐、容器内实弹验证 self-share strm 存活；转存库 S03E03 已从 share 目录拷回。
+- 测试：后端 1470 项全部通过（新增 os 守卫单测 4 项、doctor/web_api 同步 6 处）。
+
 ## 0.3.6 - 2026-08-11
 
 - **修复升级后仍误报有新版**：CMS 上报版本带 `v` 前缀与 ` - PRO` 后缀（如 `v0.4.9.2 - PRO`），Docker Hub tag 是纯数字（`0.4.9.2`），字符串比较永不相等 → `update_available` 恒 true。新增 `_version_core()` 提取数字核心比较，升级到同核心即判定无更新。

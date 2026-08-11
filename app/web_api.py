@@ -340,6 +340,7 @@ def serialize_event(event: dict[str, Any]) -> dict[str, Any]:
 # 若自定义 marker，需同步修改这 4 处。
 CMS_STRM_GUARD_MARKER = "STRM-GUARD installed on MediaSync.delete_local_file"
 CMS_DIRECT_STRM_GUARD_MARKER = "STRM-GUARD direct-strm-suppressor installed on"
+CMS_OS_STRM_GUARD_MARKER = "STRM-GUARD os-level delete-protect installed on"
 
 
 class _UnixDockerLogReader:
@@ -382,6 +383,7 @@ class _UnixDockerLogReader:
 
 _cms_guard_cache: dict[str, Any] = {"at": 0.0, "value": None}
 _cms_direct_guard_cache: dict[str, Any] = {"at": 0.0, "value": None}
+_cms_os_guard_cache: dict[str, Any] = {"at": 0.0, "value": None}
 
 
 def check_cms_strm_guard(
@@ -474,9 +476,56 @@ def check_cms_direct_strm_guard(
     return dict(result)
 
 
+def check_cms_os_strm_guard(
+    *,
+    workflow_mode: str = "",
+    container: str = "cloud-media-sync",
+    docker_socket: str = "/var/run/docker.sock",
+    marker: str = CMS_OS_STRM_GUARD_MARKER,
+    log_reader: Any | None = None,
+    cache_seconds: float = 60.0,
+) -> dict[str, Any]:
+    """Return the CMS os-level STRM delete-protect guard status for the health API.
+
+    os.remove/os.unlink 兜底守卫是方法级守卫的补充：CMS 增量同步（消费 115
+    delete_file 生活事件）的本地删除未必经过 MediaSync.delete_local_file，
+    os 级钩子覆盖一切删除路径。缺失即方法级守卫可能仍被旁路。
+    """
+    if (workflow_mode or "direct") != "self_share_sync":
+        return {
+            "ok": True,
+            "status": "not_applicable",
+            "message": "guard only relevant for self_share_sync",
+        }
+    now = time.time()
+    cache = _cms_os_guard_cache
+    if cache["value"] is not None and now - cache["at"] < max(0.0, float(cache_seconds or 0)):
+        return dict(cache["value"])
+
+    reader = log_reader or _UnixDockerLogReader(socket_path=docker_socket)
+    logs = reader.read_logs(container, tail=100000)
+    if not logs:
+        result = {
+            "ok": True,
+            "status": "unknown",
+            "message": "无法读取 CMS 容器日志（docker socket 不可用或容器不存在）；守卫状态未知",
+        }
+    elif marker in logs:
+        result = {"ok": True, "status": "installed", "message": "CMS STRM 删除兜底守卫已安装"}
+    else:
+        result = {
+            "ok": False,
+            "status": "missing",
+            "message": "CMS 容器日志未找到 STRM 删除兜底守卫标记；CMS 更新可能导致守卫静默失效",
+        }
+    cache.update({"at": now, "value": result})
+    return dict(result)
+
+
 def _reset_cms_guard_cache() -> None:
     _cms_guard_cache.update({"at": 0.0, "value": None})
     _cms_direct_guard_cache.update({"at": 0.0, "value": None})
+    _cms_os_guard_cache.update({"at": 0.0, "value": None})
 
 
 def serialize_health(
@@ -486,6 +535,7 @@ def serialize_health(
     now: float | None = None,
     cms_guard: dict[str, Any] | None = None,
     cms_direct_guard: dict[str, Any] | None = None,
+    cms_os_guard: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     current_time = time.time() if now is None else float(now)
     summary = build_task_health(store, enabled=enabled, now=current_time)
@@ -544,6 +594,7 @@ def serialize_health(
         ),
         "cms_strm_guard": cms_guard or None,
         "cms_direct_strm_guard": cms_direct_guard or None,
+        "cms_os_strm_guard": cms_os_guard or None,
     }
 
 

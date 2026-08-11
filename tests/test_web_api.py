@@ -1621,6 +1621,7 @@ class CmsStrmGuardApiTests(unittest.TestCase):
             payload = serialize_health(store, enabled=True, now=100.0)
         self.assertIsNone(payload["cms_strm_guard"])
         self.assertIsNone(payload["cms_direct_strm_guard"])
+        self.assertIsNone(payload["cms_os_strm_guard"])
 
 
 class CmsDirectStrmGuardApiTests(unittest.TestCase):
@@ -1694,6 +1695,68 @@ class CmsDirectStrmGuardApiTests(unittest.TestCase):
             docker_socket="/var/run/docker.sock",
         )
         self.assertEqual(result["status"], "installed")
+
+
+class CmsOsStrmGuardApiTests(unittest.TestCase):
+    def setUp(self):
+        from app.web_api import _reset_cms_guard_cache
+
+        _reset_cms_guard_cache()
+
+    def _check(self, reader, **kwargs):
+        from app.web_api import check_cms_os_strm_guard
+
+        return check_cms_os_strm_guard(log_reader=reader, cache_seconds=0, **kwargs)
+
+    def test_guard_not_applicable_outside_self_share_sync(self):
+        result = self._check(FakeDockerLogReader(), workflow_mode="direct")
+        self.assertEqual(result["status"], "not_applicable")
+        self.assertTrue(result["ok"])
+
+    def test_guard_installed_when_marker_found(self):
+        reader = FakeDockerLogReader(
+            "2026-08-08 20:18:17 WARNING sitecustom STRM-GUARD os-level delete-protect installed on os.remove/os.unlink\n"
+        )
+        result = self._check(
+            reader,
+            workflow_mode="self_share_sync",
+            container="cloud-media-sync",
+            docker_socket="/var/run/docker.sock",
+        )
+        self.assertEqual(result["status"], "installed")
+        self.assertTrue(result["ok"])
+        self.assertEqual(reader.calls, [("cloud-media-sync", 100000)])
+
+    def test_guard_missing_when_marker_absent(self):
+        reader = FakeDockerLogReader("some other logs without the marker\n")
+        result = self._check(
+            reader,
+            workflow_mode="self_share_sync",
+            container="cloud-media-sync",
+            docker_socket="/var/run/docker.sock",
+        )
+        self.assertEqual(result["status"], "missing")
+        self.assertFalse(result["ok"])
+        self.assertIn("未找到", result["message"])
+
+    def test_guard_unknown_when_docker_unavailable(self):
+        reader = FakeDockerLogReader("")
+        result = self._check(
+            reader,
+            workflow_mode="self_share_sync",
+            container="cloud-media-sync",
+            docker_socket="/var/run/docker.sock",
+        )
+        self.assertEqual(result["status"], "unknown")
+        self.assertTrue(result["ok"])
+        self.assertIn("无法读取", result["message"])
+
+    def test_serialize_health_passes_through_os_guard(self):
+        guard = {"ok": True, "status": "installed", "message": "CMS STRM 删除兜底守卫已安装"}
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            payload = serialize_health(store, enabled=True, now=100.0, cms_os_guard=guard)
+        self.assertEqual(payload["cms_os_strm_guard"], guard)
 
 
 if __name__ == "__main__":
