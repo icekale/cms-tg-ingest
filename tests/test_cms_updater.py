@@ -525,3 +525,38 @@ class CmsUpgradeHintTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VersionCoreTests(unittest.TestCase):
+    def test_compares_numeric_core_of_mixed_version_strings(self):
+        from app.cms_updater import _version_core
+
+        self.assertEqual(_version_core("v0.4.9.2 - PRO"), "0.4.9.2")
+        self.assertEqual(_version_core("0.4.9.2"), "0.4.9.2")
+        self.assertEqual(_version_core(""), "")
+        self.assertEqual(_version_core("abc"), "abc")
+
+    def test_update_available_clears_after_upgrade_to_same_core(self):
+        import tempfile
+        from pathlib import Path
+
+        from app.task_store import TaskStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            # CMS reports a suffixed version, Docker Hub tag is plain.
+            checker = CmsVersionChecker(
+                store,
+                FakeCms("v0.4.9.2 - PRO"),
+                enabled=True,
+                image="imaliang/cloud-media-sync:latest",
+                remote_lookup=lambda image: "0.4.9.2",
+            )
+            payload = checker.check()
+            self.assertEqual(payload["current_version"], "v0.4.9.2 - PRO")
+            self.assertEqual(payload["remote_version"], "0.4.9.2")
+            self.assertFalse(payload["update_available"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import socket
 import time
 import urllib.request
@@ -14,6 +15,17 @@ from urllib.parse import quote
 
 LOG = logging.getLogger("cms-tg-ingest")
 CMS_VERSION_STATE_KEY = "cms_version_state"
+
+
+def _version_core(value: str) -> str:
+    """Extract the numeric version core from an arbitrary version string.
+
+    CMS reports versions like ``v0.4.9.2 - PRO`` while the Docker Hub tag is a
+    plain ``0.4.9.2``; a raw string comparison would never consider them equal
+    and would keep reporting an update after the container was upgraded.
+    """
+    match = re.search(r"\d+(?:\.\d+)+", str(value or ""))
+    return match.group(0) if match else str(value or "").strip()
 
 
 def _split_image(image: str) -> tuple[str, str]:
@@ -298,7 +310,9 @@ class CmsVersionChecker:
         try:
             if settings["image"]:
                 remote_version = str(self._remote_lookup(settings["image"]) or "").strip()
-                if remote_version and remote_version != version:
+                # Compare the numeric core: CMS reports "v0.4.9.2 - PRO" while
+                # the tag is "0.4.9.2"; raw comparison would never converge.
+                if remote_version and _version_core(remote_version) != _version_core(version):
                     update_available = True
         except Exception:  # noqa: BLE001 - remote lookup must never break the loop
             LOG.debug("CMS remote version check failed", exc_info=True)

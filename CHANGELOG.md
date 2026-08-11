@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.6 - 2026-08-11
+
+- **修复升级后仍误报有新版**：CMS 上报版本带 `v` 前缀与 ` - PRO` 后缀（如 `v0.4.9.2 - PRO`），Docker Hub tag 是纯数字（`0.4.9.2`），字符串比较永不相等 → `update_available` 恒 true。新增 `_version_core()` 提取数字核心比较，升级到同核心即判定无更新。
+- **CMS 已升级到 0.4.9.2**：宿主机执行 `update-cms.sh`（带 `CMS_GUARD_FILE=/mnt/user/appdata/cloud-media-sync/config/patches/sitecustomize.py`），守卫验证 PASS + 自动回滚闭环正常；守卫状态 ok:true。
+- 测试：后端 1465 项全部通过（新增版本核心比较 2 项）。
+
 ## 0.3.4 - 2026-08-11
 
 - **补发 Emby 媒体库封面修复**（v0.3.3 遗漏 `app/clients/emby.py`，线上未生效）：媒体库代表图优先取库根条目的封面（`PrimaryImageItemId` 的 `/Images/Primary`，即 Emby 媒体库自己的品牌横幅图），无封面才回退库内最新可加载条目。
