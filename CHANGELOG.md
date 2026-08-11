@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.93 - 2026-08-11
+
+- **全站暗色模式**：Vue 管理台默认跟随系统，顶栏新增太阳/月亮切换按钮（`system/light/dark` 三态，选择持久化到 localStorage `cms-theme`，`[data-theme]` 驱动；首帧内联脚本避免暗色用户闪白）。naive-ui 亮暗两套 `themeOverrides`；`styles.css` 全量重构为 CSS 变量（亮/暗两套 token），日志控制台保持常暗终端风。SSR 旧页面（`/legacy` `/health` `/hdhive` 等）与登录页通过 `prefers-color-scheme` 跟随系统，无需手动切换。
+- **首页「最近入库」媒体墙**：运行概览顶部从纯文字列表升级为横向海报墙——TMDB 海报、评分徽标、年份、剧集信息、类型/格式标签、任务状态点，点击直达任务详情。海报加载失败自动降级文字卡、无海报元数据直接文字卡、加载中骨架屏。数据链路：`classify.py` 的 `_normalize_details` 新增 `vote_average`/`release_date` 透传，`apply_tmdb_hint/search_resolution` 把 `poster_path`/`genres`/`overview`/`vote_average`/`release_date` 写入任务 metadata（`_safe_metadata` 透传前端）。历史任务无这些字段会降级为文字卡，新入库任务完整展示。
+- **主题色微调**：品牌蓝向现代蓝紫调校准（亮色 primary `#4C5FD5`、暗色 `#8B93FF`，暗色主按钮文字 `#0e0f1a` 保证 WCAG 对比度）；所有颜色过对比度校验（body ≥4.5:1）。
+- **修复未登录显示空数据**：`/app/` 下未登录请求被后端 303 到 `/login`，`fetch` 跟随重定向后 status 仍为 200，前端把登录页 HTML 当 JSON 解析得到空数据。现在 `api.js` 检测 `response.redirected && url.endsWith('/login')` → 整页跳转登录页（token 模式的 303 重定向回原路径不受影响）。
+- **CMS 版本远程检测**：`CmsVersionChecker` 原来只读运行中容器的当前版本（`cms.get_version()`），从不查询远程，CMS 发布新版后本地版本不变永远"检测不到"。新增 `fetch_remote_latest_tag()` 查询 Docker Hub tags API（跳过 `latest` 取最新 tag，仅支持 `owner/name:tag` 格式，registry 前缀/摘要引用跳过），`check()` 新增 `remote_version`/`update_available` 字段——只提示、不自动 pull、不翻转 `update_ready` 既有语义。设置页「立即检查」与状态行展示「当前版本/远程最新」，检测结果区分本地变化 / 远程有新 / 已最新。需要 `CMS_VERSION_CHECK_ENABLED=true` + `CMS_UPDATE_IMAGE=imaliang/cloud-media-sync:latest`。
+- 测试：后端 1446 项、前端 26 项全部通过（新增 CMS 远程检测 5 项 + `_split_image` 6 项、api 登录跳转 2 项、useTheme 5 项）。
+
 ## 0.2.92 - 2026-08-09
 
 - **修复云下载任务整理竞态卡死**（任务 375 现场复现）：CMS 整理完成前 organizing 阶段可能通过"近期更新"回退窗口选中**其他任务**刚被 CMS 移入媒体库的目录；在无 TMDB 标识时该目录会被 `_conflicting_folder_owner` 误判为"已被其他 TMDB 任务占用"→ `needs_action` 终态永久卡死（runner 不 claim、重试按钮被引擎禁止）。现在 `_stage_organizing` 采纳目录前用 `CmsCloudDataIndex.folder_contains_cloud_output` 校验"该目录确实包含本任务自己的云输出文件"（CMS 移动/改名不改变 115 fid，沿 `cloud_data.pid` 向上验证归属）；非自有目录一律拒绝并落入现有「等待 CMS 整理完成」defer，CMS 整理完成后下一轮即命中自有目录。持久化的自有目录跳过校验，不改 `_conflicting_folder_owner` 真实冲突语义。

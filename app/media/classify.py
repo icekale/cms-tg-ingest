@@ -250,6 +250,8 @@ class TmdbApiResolver:
         title = str(data.get("title") or data.get("name") or data.get("original_title") or data.get("original_name") or "")
         language = str(data.get("original_language") or "")
         category = infer_region_category(media_type, title, language, countries, genres)
+        vote_average = _normalized_float(data.get("vote_average"))
+        release_date = str(data.get("release_date") or data.get("first_air_date") or "")
         result = {
             "ok": True,
             "title": title,
@@ -261,6 +263,8 @@ class TmdbApiResolver:
             "poster_path": str(data.get("poster_path") or ""),
             "backdrop_path": str(data.get("backdrop_path") or ""),
             "overview": str(data.get("overview") or ""),
+            "vote_average": vote_average,
+            "release_date": release_date,
             "category": category,
             "source": "tmdb_api",
         }
@@ -287,6 +291,18 @@ def _normalized_int(value: Any) -> int | None:
     if isinstance(value, float) and not value.is_integer():
         return None
     if number < 0:
+        return None
+    return number
+
+
+def _normalized_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number < 0 or number > 10:
         return None
     return number
 
@@ -438,6 +454,12 @@ def apply_tmdb_hint_resolution(
             "category_status": "tmdb_resolved",
             "openai_source": str(best.get("source") or "tmdb_web"),
             "tmdb_source": str(best.get("source") or "tmdb_web"),
+            "poster_path": str(best.get("poster_path") or ""),
+            "backdrop_path": str(best.get("backdrop_path") or ""),
+            "overview": str(best.get("overview") or ""),
+            "genres": best.get("genres") if isinstance(best.get("genres"), list) else [],
+            "vote_average": best.get("vote_average"),
+            "release_date": str(best.get("release_date") or ""),
         }
     )
     return enriched, False
@@ -482,6 +504,12 @@ def apply_tmdb_search_resolution(
             "tmdb_id": str(item.get("tmdb_id") or ""),
             "category_status": "tmdb_search_resolved",
             "openai_source": str(item.get("source") or "tmdb_search"),
+            "poster_path": str(item.get("poster_path") or ""),
+            "backdrop_path": str(item.get("backdrop_path") or ""),
+            "overview": str(item.get("overview") or ""),
+            "genres": item.get("genres") if isinstance(item.get("genres"), list) else [],
+            "vote_average": item.get("vote_average"),
+            "release_date": str(item.get("release_date") or ""),
         }
     )
     return enriched, False

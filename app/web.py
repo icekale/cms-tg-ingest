@@ -258,6 +258,7 @@ def _page(title: str, body: str, *, active: str = "") -> str:
   --surface-muted: #f8f9fa;
   --border: #d7dadd;
   --border-soft: #e7e9eb;
+  --border-hover: #aeb3b8;
   --text: #202124;
   --muted: #6a6f75;
   --muted-strong: #4f555b;
@@ -265,12 +266,44 @@ def _page(title: str, body: str, *, active: str = "") -> str:
   --primary-dark: #174b7a;
   --success-bg: #e8f4ec;
   --success-text: #24643b;
+  --success-border: #b9d8c3;
   --warning-bg: #fff4d6;
   --warning-text: #805d10;
+  --warning-border: #e1cf9d;
   --danger-bg: #fbe9e9;
   --danger-text: #9b2c2c;
+  --danger-border: #e2b8b8;
   --info-bg: #e8f1f8;
   --info-text: #245b85;
+  --code-bg: #eef2f7;
+}}
+@media (prefers-color-scheme: dark) {{
+  :root {{
+    color-scheme: dark;
+    --bg: #10121a;
+    --surface: #171a24;
+    --surface-muted: #1d2130;
+    --border: #343a4e;
+    --border-soft: #262b3a;
+    --border-hover: #4a5268;
+    --text: #e6e8f0;
+    --muted: #9aa3b5;
+    --muted-strong: #b8c0d0;
+    --primary: #8b93ff;
+    --primary-dark: #a5abff;
+    --success-bg: #143324;
+    --success-text: #4bc47e;
+    --success-border: #2d5a3e;
+    --warning-bg: #33290f;
+    --warning-text: #e0a93c;
+    --warning-border: #6d5526;
+    --danger-bg: #3a1a24;
+    --danger-text: #f26d82;
+    --danger-border: #7a3a4a;
+    --info-bg: #16263a;
+    --info-text: #6fa8f0;
+    --code-bg: #1d2130;
+  }}
 }}
 * {{ box-sizing: border-box; letter-spacing: 0; }}
 body {{
@@ -340,8 +373,8 @@ p {{ margin: 0; }}
 .summary-grid, .detail-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
 .breadcrumb {{ margin-bottom: 6px; color: var(--muted); font-size: 13px; }}
 .incident-strip {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }}
-.incident-strip[data-status="failed"] {{ border-color: #e2b8b8; background: #fffafa; }}
-.incident-strip[data-status="needs_action"], .incident-strip[data-status="attention"] {{ border-color: #e1cf9d; background: #fffbef; }}
+.incident-strip[data-status="failed"] {{ border-color: var(--danger-border); background: var(--danger-bg); }}
+.incident-strip[data-status="needs_action"], .incident-strip[data-status="attention"] {{ border-color: var(--warning-border); background: var(--warning-bg); }}
 .incident-strip.is-neutral {{ border-color: var(--border); background: var(--surface); }}
 .incident-copy {{ min-width: 0; }}
 .incident-strip > .actions {{ flex-shrink: 0; max-width: 50%; }}
@@ -360,7 +393,7 @@ p {{ margin: 0; }}
 .diagnostic-details {{ margin-top: 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }}
 .diagnostic-details > summary {{ padding: 12px 14px; cursor: pointer; font-weight: 650; }}
 .details-content {{ padding: 0 14px 14px; }}
-.danger-zone {{ margin-top: 20px; border: 1px solid #e2b8b8; border-radius: 6px; background: #fffafa; }}
+.danger-zone {{ margin-top: 20px; border: 1px solid var(--danger-border); border-radius: 6px; background: var(--danger-bg); }}
 .danger-zone > summary {{ padding: 12px 14px; color: var(--danger-text); cursor: pointer; font-weight: 650; }}
 .danger-zone .details-content {{ color: var(--muted-strong); }}
 .danger-zone .actions {{ margin-top: 12px; }}
@@ -376,8 +409,8 @@ p {{ margin: 0; }}
 .quality-row-action {{ display: grid; justify-items: end; gap: 6px; }}
 .quality-total {{ color: var(--muted); font-size: 13px; }}
 .health-status {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px; border: 1px solid var(--border); border-radius: 6px; }}
-.health-status.is-healthy, .empty-state.is-healthy {{ border-color: #b9d8c3; background: var(--success-bg); color: var(--success-text); }}
-.health-status.is-warning {{ border-color: #e1cf9d; background: var(--warning-bg); color: var(--warning-text); }}
+.health-status.is-healthy, .empty-state.is-healthy {{ border-color: var(--success-border); background: var(--success-bg); color: var(--success-text); }}
+.health-status.is-warning {{ border-color: var(--warning-border); background: var(--warning-bg); color: var(--warning-text); }}
 .health-status p {{ margin-top: 3px; }}
 .health-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }}
 .health-item {{ min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }}
@@ -388,16 +421,16 @@ p {{ margin: 0; }}
 .actions {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
 .actions form {{ display: inline-block; margin: 0; }}
 .button, button {{ display: inline-flex; align-items: center; justify-content: center; max-width: 100%; min-height: 36px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; font-weight: 650; white-space: normal; overflow-wrap: anywhere; text-align: center; cursor: pointer; }}
-.button:hover, button:hover {{ border-color: #aeb3b8; text-decoration: none; }}
+.button:hover, button:hover {{ border-color: var(--border-hover); text-decoration: none; }}
 .button-primary {{ border-color: var(--primary); background: var(--primary); color: white; }}
 .button-secondary {{ border-color: var(--border); background: var(--surface); color: var(--text); }}
-.button-danger {{ border-color: #d7a6a6; background: var(--danger-bg); color: var(--danger-text); }}
+.button-danger {{ border-color: var(--danger-border); background: var(--danger-bg); color: var(--danger-text); }}
 :focus-visible {{ outline: 3px solid var(--primary-dark); outline-offset: 2px; }}
 .table-wrap {{ overflow-x: auto; }}
 table {{ border-collapse: collapse; width: 100%; min-width: 760px; }}
 th, td {{ border-bottom: 1px solid var(--border-soft); padding: 11px 10px; text-align: left; vertical-align: top; }}
 th {{ color: var(--muted); font-size: 12px; font-weight: 700; }}
-code {{ background: #eef2f7; padding: 2px 5px; border-radius: 6px; }}
+code {{ background: var(--code-bg); padding: 2px 5px; border-radius: 6px; }}
 .diagnostic {{ margin: 0; padding: 16px; border: 1px solid #30363d; border-radius: 6px; background: #202428; color: #f1f3f4; overflow: auto; font-size: 13px; line-height: 1.6; }}
 .detail-item {{ background: var(--surface-muted); border: 1px solid var(--border-soft); border-radius: 6px; padding: 12px; }}
 .detail-label {{ color: var(--muted); font-size: 12px; margin-bottom: 4px; }}
@@ -1560,13 +1593,17 @@ class WebApp:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>登录 · cms-tg-ingest</title>
 <style>
-  body {{ font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f5f6f8; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }}
-  .card {{ background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,.08); padding: 32px 40px; width: 320px; }}
-  h1 {{ font-size: 18px; margin: 0 0 20px; color: #333; }}
-  label {{ display: block; font-size: 13px; color: #555; margin: 12px 0 4px; }}
-  input {{ width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid #d0d5dd; border-radius: 6px; font-size: 14px; }}
-  button {{ width: 100%; margin-top: 18px; padding: 10px; background: #2563eb; color: #fff; border: 0; border-radius: 6px; font-size: 14px; cursor: pointer; }}
-  .error {{ color: #b42318; font-size: 13px; margin: 12px 0 0; }}
+  :root {{ color-scheme: light; --bg: #f5f6f8; --surface: #fff; --text: #333; --muted: #555; --border: #d0d5dd; --primary: #2563eb; --danger: #b42318; }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{ color-scheme: dark; --bg: #10121a; --surface: #171a24; --text: #e6e8f0; --muted: #b8c0d0; --border: #343a4e; --primary: #8b93ff; --danger: #f26d82; }}
+  }}
+  body {{ font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }}
+  .card {{ background: var(--surface); border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,.08); padding: 32px 40px; width: 320px; }}
+  h1 {{ font-size: 18px; margin: 0 0 20px; color: var(--text); }}
+  label {{ display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }}
+  input {{ width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; background: var(--surface); color: var(--text); }}
+  button {{ width: 100%; margin-top: 18px; padding: 10px; background: var(--primary); color: #fff; border: 0; border-radius: 6px; font-size: 14px; cursor: pointer; }}
+  .error {{ color: var(--danger); font-size: 13px; margin: 12px 0 0; }}
 </style>
 </head>
 <body>

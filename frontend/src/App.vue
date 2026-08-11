@@ -9,15 +9,19 @@ import {
   NLayoutSider,
   NMenu,
   NMessageProvider,
+  darkTheme,
 } from 'naive-ui'
 import { RouterView, useRoute, useRouter } from 'vue-router'
 import { api } from './api'
+import { useTheme } from './useTheme'
+import { darkThemeOverrides, lightThemeOverrides } from './themeOverrides'
 
 const route = useRoute()
 const router = useRouter()
 const collapsed = ref(false)
 const program = ref({ app_name: 'cms-tg-ingest', version: '' })
 const brandLogoUrl = `${import.meta.env.BASE_URL}brand/logo-mark.svg`
+const { mode, isDark, toggle } = useTheme()
 const menuOptions = [
   { label: '运行概览', key: '/overview' },
   { label: '当前任务', key: '/tasks' },
@@ -28,6 +32,12 @@ const menuOptions = [
   { label: '设置', key: '/settings' },
 ]
 const activeKey = computed(() => route.path.startsWith('/tasks/') ? '/tasks' : route.path)
+const themeTitle = computed(() => {
+  if (mode.value === 'system') {
+    return isDark.value ? '跟随系统（暗色）· 点击切换为亮色' : '跟随系统（亮色）· 点击切换为暗色'
+  }
+  return isDark.value ? '暗色 · 点击恢复跟随系统' : '亮色 · 点击恢复跟随系统'
+})
 function navigate(key) { router.push(key) }
 onMounted(async () => {
   try { program.value = await api.settings() } catch (_) { /* Footer stays useful while the API is unavailable. */ }
@@ -35,12 +45,18 @@ onMounted(async () => {
 </script>
 
 <template>
-  <n-config-provider>
+  <n-config-provider :theme="isDark ? darkTheme : null" :theme-overrides="isDark ? darkThemeOverrides : lightThemeOverrides">
     <n-message-provider>
       <n-layout class="admin-shell">
       <n-layout-header bordered class="top-header">
         <div class="brand"><img class="brand-logo" :src="brandLogoUrl" alt="" width="38" height="38" /><span>入库助手</span></div>
-        <div class="header-note">115 · CMS · Emby 工作流</div>
+        <div class="header-actions">
+          <div class="header-note">115 · CMS · Emby 工作流</div>
+          <button type="button" class="theme-toggle" :title="themeTitle" :aria-label="themeTitle" @click="toggle">
+            <svg v-if="isDark" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>
+            <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" /></svg>
+          </button>
+        </div>
       </n-layout-header>
       <n-layout has-sider>
         <n-layout-sider bordered collapse-mode="width" :collapsed-width="64" :width="220" :collapsed="collapsed" show-trigger @collapse="collapsed = true" @expand="collapsed = false">

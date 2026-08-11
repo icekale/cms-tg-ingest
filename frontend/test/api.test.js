@@ -75,3 +75,40 @@ test('cms version settings save posts overrides', async () => {
     globalThis.fetch = originalFetch
   }
 })
+
+test('unauthorized redirect to the login page rejects instead of parsing HTML as JSON', async () => {
+  const originalFetch = globalThis.fetch
+  // 未登录时后端 303 到 /login，fetch 跟随后 status 是 200、json() 返回 {}，
+  // 之前会导致页面显示空数据而不是跳登录页。
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    redirected: true,
+    url: 'http://localhost:5173/login',
+    json: async () => ({}),
+  })
+
+  try {
+    await assert.rejects(api.overview(), { message: '未登录，请先登录' })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('non-login redirects are not treated as unauthenticated', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    redirected: true,
+    url: 'http://localhost:5173/api/v1/overview/',
+    json: async () => ({ tasks: { items: [] } }),
+  })
+
+  try {
+    const payload = await api.overview()
+    assert.deepEqual(payload, { tasks: { items: [] } })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})

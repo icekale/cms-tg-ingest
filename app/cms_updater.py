@@ -6,6 +6,7 @@ import json
 import logging
 import socket
 import time
+import urllib.request
 from http.client import HTTPConnection
 from typing import Any, Callable
 from urllib.parse import quote
@@ -13,6 +14,57 @@ from urllib.parse import quote
 
 LOG = logging.getLogger("cms-tg-ingest")
 CMS_VERSION_STATE_KEY = "cms_version_state"
+
+
+def _split_image(image: str) -> tuple[str, str]:
+    """Split an image ref into (repo, tag). Returns ("", "") for non-Docker-Hub refs.
+
+    Only plain Docker Hub images (``owner/name:tag``) support the remote tag
+    lookup; digests, registry-prefixed refs, and bare names return empty.
+    """
+    image = str(image or "").strip()
+    if not image or "@" in image or "/" not in image:
+        return "", ""
+    repo, _, tag = image.rpartition(":")
+    if "/" not in repo or not tag or ":" in repo:
+        return "", ""
+    # Registry-prefixed refs (ghcr.io/..., host:port/...) are not Docker Hub
+    # images; the hub.docker.com tag API cannot resolve them.
+    namespace = repo.split("/", 1)[0]
+    if "." in namespace or ":" in namespace:
+        return "", ""
+    return repo, tag
+
+
+def fetch_remote_latest_tag(image: str, timeout: float = 10.0) -> str:
+    """Return the most recently updated non-'latest' tag for a Docker Hub image.
+
+    Uses the public Docker Hub tags API (no credentials). Returns "" when the
+    image is not a Docker Hub ref, the repo is unknown, or the lookup fails, so
+    a remote check never breaks the existing local version detection.
+    """
+    repo, _ = _split_image(image)
+    if not repo:
+        return ""
+    try:
+        url = (
+            f"https://hub.docker.com/v2/repositories/{quote(repo, safe='')}"
+            f"/tags?page_size=25&ordering=last_updated"
+        )
+        request = urllib.request.Request(
+            url,
+            headers={"Accept": "application/json", "User-Agent": "cms-tg-ingest"},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+        for item in payload.get("results") or []:
+            name = str(item.get("name") or "").strip()
+            if name and name != "latest":
+                return name
+        return ""
+    except Exception:  # noqa: BLE001 - remote lookup must never break the loop
+        LOG.debug("CMS remote tag lookup failed image=%s", image, exc_info=True)
+        return ""
 
 
 class _UnixHTTPConnection(HTTPConnection):
@@ -125,9 +177,11 @@ class CmsVersionChecker:
         container: str = "cms",
         docker_socket: str = "/var/run/docker.sock",
         auto_pull: bool = False,
+        remote_lookup: Callable[[str], str] | None = None,
     ) -> None:
         self.store = store
         self.cms = cms
+        self._remote_lookup = remote_lookup or fetch_remote_latest_tag
         self._defaults = {
             "enabled": bool(enabled),
             "interval_seconds": max(300, int(interval_seconds)),
@@ -215,6 +269,8 @@ class CmsVersionChecker:
         payload.setdefault("last_container_started_at", "")
         payload.setdefault("pull_result", "")
         payload.setdefault("message", "")
+        payload.setdefault("remote_version", "")
+        payload.setdefault("update_available", False)
         return payload
 
     def check(self, *, notify: Callable[[str, str], None] | None = None) -> dict[str, Any]:
@@ -231,6 +287,18 @@ class CmsVersionChecker:
         started_at = docker_container_started_at(settings["docker_socket"], settings["container"])
         last_started_at = str(state.get("last_container_started_at") or "")
         container_restarted = bool(started_at and last_started_at and started_at != last_started_at)
+        # Remote (Docker Hub) latest tag is the "new version available" signal
+        # the local running version can never see. It is advisory: display and
+        # message only, never auto-pull or flip update_ready.
+        remote_version = ""
+        update_available = False
+        try:
+            if settings["image"]:
+                remote_version = str(self._remote_lookup(settings["image"]) or "").strip()
+                if remote_version and remote_version != version:
+                    update_available = True
+        except Exception:  # noqa: BLE001 - remote lookup must never break the loop
+            LOG.debug("CMS remote version check failed", exc_info=True)
         payload = {
             "current_version": version,
             "last_seen_version": version,
@@ -246,6 +314,8 @@ class CmsVersionChecker:
             "interval_seconds": settings["interval_seconds"],
             "docker_socket": settings["docker_socket"],
             "auto_pull": settings["auto_pull"],
+            "remote_version": remote_version,
+            "update_available": update_available,
         }
         if changed:
             pull_result = ""
@@ -259,6 +329,8 @@ class CmsVersionChecker:
                     notify(version, pull_result)
                 except Exception:
                     LOG.debug("CMS version notify failed", exc_info=True)
+        elif update_available:
+            payload["message"] = f"发现远程新版本 {remote_version}（当前 {version}），可执行更新脚本升级"
         self.store.set_runtime_state(
             CMS_VERSION_STATE_KEY,
             json.dumps(payload, ensure_ascii=False, sort_keys=True),

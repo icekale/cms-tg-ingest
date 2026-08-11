@@ -3,6 +3,15 @@ async function request(path, options = {}) {
     headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}) },
     ...options,
   })
+  // 未登录时后端把请求 303 重定向到 SSR 登录页；fetch 跟随重定向后 status
+  // 仍是 200，但最终 URL 已指向 /login。此时整页跳到登录页，而不是把登录页
+  // HTML 当成 JSON 解析后显示空数据。
+  if (response.redirected && response.url.endsWith('/login')) {
+    if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+      window.location.assign('/login')
+    }
+    throw new Error('未登录，请先登录')
+  }
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(payload.reason || payload.message || payload.error || `请求失败 (${response.status})`)
   return payload

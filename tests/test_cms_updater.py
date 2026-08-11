@@ -4,7 +4,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from app.cms_updater import CmsVersionChecker, docker_container_started_at, docker_pull_image
+from app.cms_updater import (
+    CmsVersionChecker,
+    _split_image,
+    docker_container_started_at,
+    docker_pull_image,
+    fetch_remote_latest_tag,
+)
 from app.clients.cms import CmsClient
 from app.task_store import TaskStore
 from app.web_api import api_cms_version
@@ -282,6 +288,71 @@ class CmsUpdaterTests(unittest.TestCase):
             self.assertEqual(checker.effective_interval(), 86400)
             checker.reset_settings()
             self.assertFalse(checker._effective()["enabled"])
+
+    def test_remote_lookup_reports_update_available_without_flipping_update_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(tmp)
+            checker = CmsVersionChecker(
+                store,
+                FakeCms("0.4.9.1"),
+                enabled=True,
+                image="imaliang/cloud-media-sync:latest",
+                remote_lookup=lambda image: "0.4.9.2",
+            )
+            checker.check()  # establish baseline, remote == current
+
+            payload = checker.check()
+
+            self.assertEqual(payload["remote_version"], "0.4.9.2")
+            self.assertTrue(payload["update_available"])
+            self.assertFalse(payload["update_ready"])  # local running version unchanged
+            self.assertIn("远程新版本 0.4.9.2", payload["message"])
+
+    def test_remote_lookup_up_to_date_sets_no_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(tmp)
+            checker = CmsVersionChecker(
+                store,
+                FakeCms("0.4.9.2"),
+                enabled=True,
+                image="imaliang/cloud-media-sync:latest",
+                remote_lookup=lambda image: "0.4.9.2",
+            )
+
+            payload = checker.check()
+
+            self.assertEqual(payload["remote_version"], "0.4.9.2")
+            self.assertFalse(payload["update_available"])
+            self.assertFalse(payload["update_ready"])
+
+    def test_remote_lookup_failure_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(tmp)
+            checker = CmsVersionChecker(
+                store,
+                FakeCms("1.0.0"),
+                enabled=True,
+                image="imaliang/cloud-media-sync:latest",
+                remote_lookup=lambda image: (_ for _ in ()).throw(RuntimeError("network down")),
+            )
+
+            payload = checker.check()
+
+            self.assertEqual(payload["remote_version"], "")
+            self.assertFalse(payload["update_available"])
+
+    def test_split_image_accepts_only_docker_hub_refs(self):
+        self.assertEqual(_split_image("imaliang/cloud-media-sync:latest"), ("imaliang/cloud-media-sync", "latest"))
+        self.assertEqual(_split_image("icekale/cms-tg-ingest:0.2.92"), ("icekale/cms-tg-ingest", "0.2.92"))
+        self.assertEqual(_split_image(""), ("", ""))
+        self.assertEqual(_split_image("nginx"), ("", ""))
+        self.assertEqual(_split_image("nginx:1.25"), ("", ""))
+        self.assertEqual(_split_image("ghcr.io/owner/app:v1"), ("", ""))
+        self.assertEqual(_split_image("repo/app@sha256:abcd"), ("", ""))
+
+    def test_fetch_remote_latest_tag_skips_latest(self):
+        self.assertEqual(fetch_remote_latest_tag(""), "")
+        self.assertEqual(fetch_remote_latest_tag("nginx"), "")
 
 
 class CmsVersionClientTests(unittest.TestCase):
