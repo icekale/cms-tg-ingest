@@ -14,6 +14,12 @@ const reviewMode = ref('env')
 const savingReview = ref(false)
 const cms = ref(null)
 const cmsSaving = ref(false)
+const embyBaseUrl = ref('')
+const embyApiKey = ref('')
+const tmdbApiKey = ref('')
+const tmdbBearerToken = ref('')
+const savingEmby = ref(false)
+const savingTmdb = ref(false)
 
 async function load() {
   loading.value = true
@@ -82,6 +88,58 @@ async function saveReviewMode(value) {
     reviewMode.value = result.self_share_review.mode
     message.success('分享审核观察设置已保存')
   } catch (err) { message.error(err.message) } finally { savingReview.value = false }
+}
+
+async function saveEmbyCredentials() {
+  const payload = {}
+  if (embyBaseUrl.value.trim()) payload.base_url = embyBaseUrl.value.trim()
+  if (embyApiKey.value.trim()) payload.api_key = embyApiKey.value.trim()
+  if (!payload.base_url && !payload.api_key) {
+    message.error('请至少填写 Emby 地址或 API Key 一项')
+    return
+  }
+  savingEmby.value = true
+  try {
+    const result = await api.setEmbyCredentials(payload)
+    settings.value.emby_credentials = result.emby_credentials
+    embyBaseUrl.value = ''
+    embyApiKey.value = ''
+    message.success('Emby 凭据已保存并立即生效')
+  } catch (err) { message.error(err.message) } finally { savingEmby.value = false }
+}
+
+async function clearEmbyCredentials() {
+  try {
+    const result = await api.clearEmbyCredentials()
+    settings.value.emby_credentials = result.emby_credentials
+    message.success('已恢复环境配置中的 Emby 凭据')
+  } catch (err) { message.error(err.message) }
+}
+
+async function saveTmdbCredentials() {
+  const payload = {}
+  if (tmdbApiKey.value.trim()) payload.api_key = tmdbApiKey.value.trim()
+  if (tmdbBearerToken.value.trim()) payload.bearer_token = tmdbBearerToken.value.trim()
+  if (!payload.api_key && !payload.bearer_token) {
+    message.error('请至少填写 TMDB API Key 或 Bearer Token 一项')
+    return
+  }
+  savingTmdb.value = true
+  try {
+    const result = await api.setTmdbCredentials(payload)
+    settings.value.tmdb_credentials = result.tmdb_credentials
+    tmdbApiKey.value = ''
+    tmdbBearerToken.value = ''
+    message.success('TMDB 凭据已保存并立即生效')
+  } catch (err) { message.error(err.message) } finally { savingTmdb.value = false }
+}
+
+async function clearTmdbCredentials() {
+  try {
+    const result = await api.clearTmdbCredentials()
+    settings.value.tmdb_credentials = result.tmdb_credentials
+    message.success('已恢复环境配置中的 TMDB 凭据')
+  } catch (err) { message.error(err.message) }
 }
 
 async function saveCmsVersion() {
@@ -182,6 +240,40 @@ onMounted(load)
         <n-button secondary @click="clearReceiveCid">使用环境配置</n-button>
       </n-space>
       <n-text depth="3">用于 115 转存和云下载的目标目录。Web 保存值写入 TaskStore，重启后仍保留。</n-text>
+    </n-space>
+  </n-card>
+  <n-card v-if="settings" title="Emby 凭据" class="section-card">
+    <n-space vertical :size="12">
+      <n-text depth="3">
+        当前：{{ settings.emby_credentials?.base_url || '未配置' }} · API Key {{ settings.emby_credentials?.api_key || '未配置' }}
+        （来源：{{ settings.emby_credentials?.source || 'unset' }}）
+      </n-text>
+      <n-space>
+        <n-input v-model:value="embyBaseUrl" placeholder="Emby 地址，如 http://192.168.5.28:9096" style="width: 300px" />
+        <n-input v-model:value="embyApiKey" type="password" show-password-on="click" placeholder="Emby API Key" style="width: 240px" />
+      </n-space>
+      <n-space>
+        <n-button type="primary" :loading="savingEmby" :disabled="!embyBaseUrl && !embyApiKey" @click="saveEmbyCredentials">保存</n-button>
+        <n-button secondary @click="clearEmbyCredentials">恢复环境配置</n-button>
+      </n-space>
+      <n-text depth="3">保存后立即生效（Emby 看板、入库确认与刷新）；只填一项时仅更新该项。留空保存不会覆盖已有值。</n-text>
+    </n-space>
+  </n-card>
+  <n-card v-if="settings" title="TMDB 凭据" class="section-card">
+    <n-space vertical :size="12">
+      <n-text depth="3">
+        当前：API Key {{ settings.tmdb_credentials?.api_key || '未配置' }} · Bearer {{ settings.tmdb_credentials?.bearer_token || '未配置' }}
+        （来源：{{ settings.tmdb_credentials?.source || 'unset' }}）
+      </n-text>
+      <n-space>
+        <n-input v-model:value="tmdbApiKey" type="password" show-password-on="click" placeholder="TMDB API Key（v3）" style="width: 240px" />
+        <n-input v-model:value="tmdbBearerToken" type="password" show-password-on="click" placeholder="TMDB Bearer Token（可选）" style="width: 300px" />
+      </n-space>
+      <n-space>
+        <n-button type="primary" :loading="savingTmdb" :disabled="!tmdbApiKey && !tmdbBearerToken" @click="saveTmdbCredentials">保存</n-button>
+        <n-button secondary @click="clearTmdbCredentials">恢复环境配置</n-button>
+      </n-space>
+      <n-text depth="3">用于媒体元数据刮削（海报、评分、简介）。保存后立即生效；留空保存不会覆盖已有值。</n-text>
     </n-space>
   </n-card>
   <n-card v-if="cms" title="CMS 版本更新" class="section-card">

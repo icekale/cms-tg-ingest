@@ -1110,6 +1110,119 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("审核观察", json.loads(body)["error"])
 
+    def test_emby_credentials_api_save_clear_and_hot_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            client = SimpleNamespace(base_url="http://env:8096", api_key="env-key-0000")
+            app = WebApp(store, emby_client=client)
+
+            initial_status, _headers, initial_body = app.handle_request("GET", "/api/v1/settings", {}, b"")
+            save_status, _headers, save_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/emby-credentials",
+                {"Content-Type": "application/json"},
+                b'{"base_url":"http://web:8096","api_key":"web-key-0000000"}',
+            )
+            saved_payload = json.loads(save_body)["emby_credentials"]
+            self.assertEqual(client.base_url, "http://web:8096")
+            self.assertEqual(client.api_key, "web-key-0000000")
+
+            clear_status, _headers, clear_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/emby-credentials",
+                {"Content-Type": "application/json"},
+                b'{"clear":true}',
+            )
+
+        initial = json.loads(initial_body)["emby_credentials"]
+        cleared = json.loads(clear_body)["emby_credentials"]
+        self.assertEqual(initial_status, 200)
+        self.assertEqual(initial["source"], "env")
+        self.assertEqual(initial["base_url"], "http://env:8096")
+        self.assertEqual(initial["api_key"], "env-****0000")
+        self.assertEqual(save_status, 200)
+        self.assertEqual(saved_payload["source"], "web")
+        self.assertEqual(saved_payload["base_url"], "http://web:8096")
+        self.assertEqual(saved_payload["api_key"], "web-****0000")
+        self.assertEqual(clear_status, 200)
+        self.assertEqual(cleared["source"], "env")
+        self.assertEqual(client.base_url, "http://env:8096")
+        self.assertEqual(client.api_key, "env-key-0000")
+
+    def test_emby_credentials_api_rejects_invalid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = WebApp(TaskStore(Path(tmp) / "tasks.db"))
+
+            status, _headers, body = app.handle_request(
+                "POST",
+                "/api/v1/settings/emby-credentials",
+                {"Content-Type": "application/json"},
+                b'{"base_url":"not-a-url","api_key":""}',
+            )
+            short_status, _headers, short_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/emby-credentials",
+                {"Content-Type": "application/json"},
+                b'{"api_key":"short"}',
+            )
+
+        self.assertEqual(status, 400)
+        self.assertIn("http", json.loads(body)["error"])
+        self.assertEqual(short_status, 400)
+        self.assertIn("长度不足", json.loads(short_body)["error"])
+
+    def test_tmdb_credentials_api_save_clear_and_hot_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            resolver = SimpleNamespace(api_key="env-tmdb-key-0000000000", bearer_token="")
+            app = WebApp(store, tmdb_resolver=resolver)
+
+            initial_status, _headers, initial_body = app.handle_request("GET", "/api/v1/settings", {}, b"")
+            save_status, _headers, save_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/tmdb-credentials",
+                {"Content-Type": "application/json"},
+                b'{"api_key":"web-tmdb-0000","bearer_token":"web-bearer-0000"}',
+            )
+            saved_payload = json.loads(save_body)["tmdb_credentials"]
+            self.assertEqual(resolver.api_key, "web-tmdb-0000")
+            self.assertEqual(resolver.bearer_token, "web-bearer-0000")
+
+            clear_status, _headers, clear_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/tmdb-credentials",
+                {"Content-Type": "application/json"},
+                b'{"clear":true}',
+            )
+
+        initial = json.loads(initial_body)["tmdb_credentials"]
+        cleared = json.loads(clear_body)["tmdb_credentials"]
+        self.assertEqual(initial_status, 200)
+        self.assertEqual(initial["source"], "env")
+        self.assertEqual(initial["api_key"], "env-****0000")
+        self.assertEqual(save_status, 200)
+        self.assertEqual(saved_payload["source"], "web")
+        self.assertEqual(saved_payload["api_key"], "web-****0000")
+        self.assertEqual(saved_payload["bearer_token"], "web-****0000")
+        self.assertEqual(clear_status, 200)
+        self.assertEqual(cleared["source"], "env")
+        self.assertEqual(resolver.api_key, "env-tmdb-key-0000000000")
+        self.assertEqual(resolver.bearer_token, "")
+
+    def test_tmdb_credentials_api_rejects_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = WebApp(TaskStore(Path(tmp) / "tasks.db"))
+
+            status, _headers, body = app.handle_request(
+                "POST",
+                "/api/v1/settings/tmdb-credentials",
+                {"Content-Type": "application/json"},
+                b'{"api_key":"","bearer_token":""}',
+            )
+
+        self.assertEqual(status, 400)
+        self.assertIn("至少", json.loads(body)["error"])
+
     def test_own_share_receive_code_api_masks_reads_and_supports_clear(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

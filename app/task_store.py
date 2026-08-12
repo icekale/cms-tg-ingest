@@ -21,6 +21,10 @@ STRM_DEFAULT_MODE_KEY = "strm_default_mode"
 OWN_SHARE_RECEIVE_CODE_KEY = "own_share_receive_code_override"
 SELF_SHARE_RECEIVE_CID_KEY = "self_share_receive_cid_override"
 SELF_SHARE_REVIEW_MODE_KEY = "self_share_review_mode_override"
+EMBY_BASE_URL_OVERRIDE_KEY = "emby_base_url_override"
+EMBY_API_KEY_OVERRIDE_KEY = "emby_api_key_override"
+TMDB_API_KEY_OVERRIDE_KEY = "tmdb_api_key_override"
+TMDB_BEARER_TOKEN_OVERRIDE_KEY = "tmdb_bearer_token_override"
 TERMINATION_REQUESTED_AT_KEY = "termination_requested_at"
 TERMINATION_REQUESTED_BY_KEY = "termination_requested_by"
 _TERMINATION_METADATA_DELETE_KEYS = (
@@ -741,6 +745,76 @@ class TaskStore:
 
     def clear_self_share_review_mode_override(self) -> None:
         self.delete_runtime_state(SELF_SHARE_REVIEW_MODE_KEY)
+
+    def get_emby_base_url_override(self) -> str | None:
+        state = self.get_runtime_state(EMBY_BASE_URL_OVERRIDE_KEY)
+        if state is None:
+            return None
+        value = str(state["value"] or "").strip()
+        return value or None
+
+    def set_emby_base_url_override(self, base_url: str) -> str:
+        value = str(base_url or "").strip().rstrip("/")
+        if not value:
+            raise ValueError("Emby 地址不能为空")
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("Emby 地址必须以 http:// 或 https:// 开头")
+        self.set_runtime_state(EMBY_BASE_URL_OVERRIDE_KEY, value)
+        return value
+
+    def clear_emby_base_url_override(self) -> None:
+        self.delete_runtime_state(EMBY_BASE_URL_OVERRIDE_KEY)
+
+    def get_emby_api_key_override(self) -> str | None:
+        state = self.get_runtime_state(EMBY_API_KEY_OVERRIDE_KEY)
+        if state is None:
+            return None
+        value = str(state["value"] or "").strip()
+        return value or None
+
+    def set_emby_api_key_override(self, api_key: str) -> str:
+        value = str(api_key or "").strip()
+        if not value:
+            raise ValueError("Emby API Key 不能为空")
+        if len(value) < 8:
+            raise ValueError("Emby API Key 长度不足（至少 8 位）")
+        self.set_runtime_state(EMBY_API_KEY_OVERRIDE_KEY, value)
+        return value
+
+    def clear_emby_api_key_override(self) -> None:
+        self.delete_runtime_state(EMBY_API_KEY_OVERRIDE_KEY)
+
+    def get_tmdb_api_key_override(self) -> str | None:
+        state = self.get_runtime_state(TMDB_API_KEY_OVERRIDE_KEY)
+        if state is None:
+            return None
+        value = str(state["value"] or "").strip()
+        return value or None
+
+    def set_tmdb_api_key_override(self, api_key: str) -> str:
+        value = str(api_key or "").strip()
+        if not value:
+            raise ValueError("TMDB API Key 不能为空")
+        self.set_runtime_state(TMDB_API_KEY_OVERRIDE_KEY, value)
+        return value
+
+    def clear_tmdb_api_key_override(self) -> None:
+        self.delete_runtime_state(TMDB_API_KEY_OVERRIDE_KEY)
+
+    def get_tmdb_bearer_token_override(self) -> str | None:
+        state = self.get_runtime_state(TMDB_BEARER_TOKEN_OVERRIDE_KEY)
+        if state is None:
+            return None
+        value = str(state["value"] or "").strip()
+        return value or None
+
+    def set_tmdb_bearer_token_override(self, token: str) -> str:
+        value = str(token or "").strip()
+        self.set_runtime_state(TMDB_BEARER_TOKEN_OVERRIDE_KEY, value)
+        return value
+
+    def clear_tmdb_bearer_token_override(self) -> None:
+        self.delete_runtime_state(TMDB_BEARER_TOKEN_OVERRIDE_KEY)
 
     def get_cms_version_overrides(self) -> dict[str, Any]:
         state = self.get_runtime_state("cms_version_overrides")

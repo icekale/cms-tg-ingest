@@ -56,6 +56,7 @@ from .self_share_settings import (
     resolve_self_share_receive_cid,
     resolve_self_share_review_policy,
 )
+from .integration_credentials import resolve_emby_credentials, resolve_tmdb_credentials
 from .strm_mode import STRM_MODE_LABELS
 from .web_api import (
     api_response,
@@ -1428,6 +1429,7 @@ class WebApp:
         cms_os_guard_marker: str = "",
         media_enricher: Any | None = None,
         emby_client: Any | None = None,
+        tmdb_resolver: Any | None = None,
     ):
         self.store = store
         self.web_token = web_token
@@ -1451,6 +1453,13 @@ class WebApp:
         self.cms_version_checker = cms_version_checker
         self.media_enricher = media_enricher
         self.emby_client = emby_client
+        self.tmdb_resolver = tmdb_resolver
+        # 环境快照：凭据「恢复环境配置」时把客户端实例还原成 .env 原始值。
+        # 保存凭据会热更新实例，不清除时会覆盖 env 值，故在此先记录。
+        self._env_emby_base_url = str(getattr(emby_client, "base_url", "") or "")
+        self._env_emby_api_key = str(getattr(emby_client, "api_key", "") or "")
+        self._env_tmdb_api_key = str(getattr(tmdb_resolver, "api_key", "") or "")
+        self._env_tmdb_bearer_token = str(getattr(tmdb_resolver, "bearer_token", "") or "")
         self.cms_guard_container = str(cms_guard_container or "cloud-media-sync").strip()
         self.cms_guard_docker_socket = str(cms_guard_docker_socket or "").strip()
         self.cms_guard_marker = str(cms_guard_marker or "").strip()
@@ -1531,6 +1540,14 @@ class WebApp:
     def _self_share_review_payload(self) -> dict[str, Any]:
         resolved = resolve_self_share_review_policy(self.store, self.self_share_config)
         return {"mode": resolved.mode, "seconds": resolved.seconds, "source": resolved.source}
+
+    def _emby_credentials_payload(self) -> dict[str, Any]:
+        resolved = resolve_emby_credentials(self.store, self.emby_client)
+        return resolved.masked_payload()
+
+    def _tmdb_credentials_payload(self) -> dict[str, Any]:
+        resolved = resolve_tmdb_credentials(self.store, self.tmdb_resolver)
+        return resolved.masked_payload()
 
     def _session_token(self, now: float) -> str:
         """Signed session value: <expires>:<username>:<hmac-sha256>."""
@@ -2412,6 +2429,8 @@ class WebApp:
                     {"value": "off", "label": "关闭观察"},
                     {"value": "env", "label": "使用环境配置"},
                 ],
+                "emby_credentials": self._emby_credentials_payload(),
+                "tmdb_credentials": self._tmdb_credentials_payload(),
             }
             status, response_headers, response_body = api_response(payload)
             return status, {**response_headers, **auth_headers}, response_body
@@ -2596,6 +2615,70 @@ class WebApp:
                 {"self_share_review": self._self_share_review_payload()}
             )
             return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path == "/api/v1/settings/emby-credentials":
+            try:
+                values = self._api_body(body, headers)
+                clear = values.get("clear") is True or str(values.get("clear") or "").lower() in {"1", "true", "yes"}
+                if clear:
+                    self.store.clear_emby_base_url_override()
+                    self.store.clear_emby_api_key_override()
+                    if self.emby_client is not None:
+                        self.emby_client.base_url = self._env_emby_base_url
+                        self.emby_client.api_key = self._env_emby_api_key
+                else:
+                    base_url = str(values.get("base_url") or "").strip()
+                    api_key = str(values.get("api_key") or "").strip()
+                    if not base_url and not api_key:
+                        raise ValueError("请提供 Emby 地址或 API Key 至少一项")
+                    if base_url:
+                        self.store.set_emby_base_url_override(base_url)
+                    if api_key:
+                        self.store.set_emby_api_key_override(api_key)
+                    if self.emby_client is not None:
+                        resolved = resolve_emby_credentials(self.store, self.emby_client)
+                        if resolved.base_url:
+                            self.emby_client.base_url = resolved.base_url
+                        if resolved.api_key:
+                            self.emby_client.api_key = resolved.api_key
+            except (UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+                status, response_headers, response_body = api_response({"error": str(exc)}, status=400)
+                return status, {**response_headers, **auth_headers}, response_body
+            status, response_headers, response_body = api_response(
+                {"emby_credentials": self._emby_credentials_payload()}
+            )
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path == "/api/v1/settings/tmdb-credentials":
+            try:
+                values = self._api_body(body, headers)
+                clear = values.get("clear") is True or str(values.get("clear") or "").lower() in {"1", "true", "yes"}
+                if clear:
+                    self.store.clear_tmdb_api_key_override()
+                    self.store.clear_tmdb_bearer_token_override()
+                    if self.tmdb_resolver is not None:
+                        self.tmdb_resolver.api_key = self._env_tmdb_api_key
+                        self.tmdb_resolver.bearer_token = self._env_tmdb_bearer_token
+                else:
+                    api_key = str(values.get("api_key") or "").strip()
+                    bearer_token = str(values.get("bearer_token") or "").strip()
+                    if not api_key and not bearer_token:
+                        raise ValueError("请提供 TMDB API Key 或 Bearer Token 至少一项")
+                    if api_key:
+                        self.store.set_tmdb_api_key_override(api_key)
+                    if bearer_token:
+                        self.store.set_tmdb_bearer_token_override(bearer_token)
+                    if self.tmdb_resolver is not None:
+                        resolved = resolve_tmdb_credentials(self.store, self.tmdb_resolver)
+                        if resolved.api_key:
+                            self.tmdb_resolver.api_key = resolved.api_key
+                        if resolved.bearer_token:
+                            self.tmdb_resolver.bearer_token = resolved.bearer_token
+            except (UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+                status, response_headers, response_body = api_response({"error": str(exc)}, status=400)
+                return status, {**response_headers, **auth_headers}, response_body
+            status, response_headers, response_body = api_response(
+                {"tmdb_credentials": self._tmdb_credentials_payload()}
+            )
+            return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path.startswith("/api/v1/tasks/") and path.endswith("/strm-mode"):
             raw_id = path.removeprefix("/api/v1/tasks/").removesuffix("/strm-mode")
             try:
@@ -2675,6 +2758,7 @@ def start_web_server(
             else None
         ),
         emby_client=emby_client,
+        tmdb_resolver=tmdb_resolver,
     )
     sse_capacity = BoundedSemaphore(max(1, int(SSE_MAX_CLIENTS)))
 
