@@ -241,6 +241,16 @@ def truncate_text(text: str, limit: int) -> str:
     return f"{text[:head_len]}...{text[-tail_len:]}"
 
 
+def truncate_end(text: str, limit: int) -> str:
+    value = str(text or "")
+    width = max(1, int(limit))
+    if len(value) <= width:
+        return value
+    if width == 1:
+        return "…"
+    return value[: width - 1] + "…"
+
+
 def format_taskstore_status(tasks: list[Any]) -> str:
     if not tasks:
         return ""

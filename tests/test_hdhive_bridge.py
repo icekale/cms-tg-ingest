@@ -14,6 +14,7 @@ from app.telegram_ui import (
     format_hdhive_subscriptions,
     hdhive_candidate_keyboard,
     hdhive_resource_keyboard,
+    truncate_end,
 )
 
 
@@ -570,6 +571,13 @@ class HdhiveBridgeTests(unittest.TestCase):
 
         self.assertEqual(workflow.sessions.get(session_id).selected_indexes, [0])
         self.assertTrue(telegram.answers[-1][2])
+
+    def test_truncate_end_keeps_the_readable_prefix(self):
+        self.assertEqual(truncate_end("abcdefghij", 8), "abcdefg…")
+        self.assertEqual(truncate_end("短名", 8), "短名")
+
+    def test_truncate_end_fits_a_single_ellipsis_when_limit_is_one(self):
+        self.assertEqual(truncate_end("abc", 1), "…")
 
 
 if __name__ == "__main__":
