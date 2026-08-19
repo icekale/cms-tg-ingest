@@ -2289,7 +2289,16 @@ def format_hdhive_resources(workflow: HdhiveWorkflow, session_id: str) -> tuple[
         raise HdhiveSelectionError("HDHive 操作会话已过期，请重新搜索")
     visible_indexes = workflow.visible_resource_indexes(session_id)
     selectable = set(workflow.selectable_resource_indexes(session_id))
-    lines = [f"HDHive 资源：{session.media_type} / TMDB {session.tmdb_id}", ""]
+    selected = next(
+        (
+            item
+            for item in session.candidates
+            if item.get("media_type") == session.media_type
+            and str(item.get("tmdb_id") or "") == str(session.tmdb_id)
+        ),
+        {"media_type": session.media_type, "tmdb_id": session.tmdb_id},
+    )
+    lines = [f"HDHive 资源：{format_hdhive_candidate_label(selected)}", ""]
     if not visible_indexes:
         lines.append("当前网盘筛选没有资源。")
     for index in visible_indexes:

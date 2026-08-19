@@ -662,6 +662,32 @@ class HdhiveBridgeTests(unittest.TestCase):
         ]
         self.assertEqual(labels, ["1. 搏击俱乐部", "2. 攻壳机动队 SAC_2045"])
 
+    def test_resource_header_uses_selected_candidate_title(self):
+        workflow = HdhiveWorkflow(object(), FakeProxy(), HdhiveSessionStore())
+        session_id = workflow.sessions.begin("464100862", "攻壳")
+        workflow.set_candidates(
+            session_id,
+            [
+                {
+                    "media_type": "tv",
+                    "tmdb_id": "80986",
+                    "title": "攻壳机动队 SAC_2045",
+                    "year": "2020",
+                }
+            ],
+        )
+        workflow.load_resources(session_id, "tv", "80986")
+        text, _keyboard = bridge.format_hdhive_resources(workflow, session_id)
+        self.assertTrue(text.startswith("HDHive 资源：攻壳机动队 SAC_2045 (2020) · 剧集 · TMDB 80986"))
+        self.assertNotIn("tv / TMDB", text)
+
+    def test_resource_header_falls_back_when_candidate_is_missing(self):
+        workflow = HdhiveWorkflow(object(), FakeProxy(), HdhiveSessionStore())
+        session_id = workflow.sessions.begin("464100862", "Example")
+        workflow.load_resources(session_id, "movie", "550")
+        text, _keyboard = bridge.format_hdhive_resources(workflow, session_id)
+        self.assertTrue(text.startswith("HDHive 资源：未命名 (年份未知) · 电影 · TMDB 550"))
+
 
 if __name__ == "__main__":
     unittest.main()
