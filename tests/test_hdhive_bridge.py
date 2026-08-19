@@ -621,6 +621,47 @@ class HdhiveBridgeTests(unittest.TestCase):
             "未命名 (年份未知) · 电影 · TMDB 550",
         )
 
+    def test_search_query_lists_full_titles_and_name_only_buttons(self):
+        telegram = FakeTelegram()
+        cms = SimpleNamespace(
+            search_movie=lambda keyword, page=1, page_size=8: {
+                "code": 200,
+                "data": {"results": [{"id": 550, "title": "搏击俱乐部", "release_date": "1999-10-15"}]},
+            },
+            search_tv=lambda keyword, page=1, page_size=8: {
+                "code": 200,
+                "data": {"results": [{"id": 80986, "name": "攻壳机动队 SAC_2045", "first_air_date": "2020-04-23"}]},
+            },
+        )
+        workflow = HdhiveWorkflow(cms, FakeProxy(), HdhiveSessionStore())
+        allowed = "464100862"
+        update = {
+            "message": {
+                "chat": {"id": allowed},
+                "from": {"id": allowed},
+                "text": "/搜索",
+            }
+        }
+        bridge.handle_update(
+            update, object(), telegram, allowed, object(), poll_status=False, hdhive_workflow=workflow
+        )
+        update["message"]["text"] = "攻壳"
+        bridge.handle_update(
+            update, object(), telegram, allowed, object(), poll_status=False, hdhive_workflow=workflow
+        )
+        text = telegram.messages[-1][1]
+        keyboard = telegram.messages[-1][2]
+        self.assertIn("1. 搏击俱乐部 (1999) · 电影 · TMDB 550", text)
+        self.assertIn("2. 攻壳机动队 SAC_2045 (2020) · 剧集 · TMDB 80986", text)
+        self.assertNotIn("[电影]", text)
+        self.assertNotIn("TMDB:", text)
+        labels = [
+            row[0]["text"]
+            for row in keyboard["inline_keyboard"]
+            if row[0]["callback_data"].startswith("hive:candidate:")
+        ]
+        self.assertEqual(labels, ["1. 搏击俱乐部", "2. 攻壳机动队 SAC_2045"])
+
 
 if __name__ == "__main__":
     unittest.main()

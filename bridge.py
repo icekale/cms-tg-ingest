@@ -173,6 +173,7 @@ from app.telegram_ui import (
     format_taskstore_history,
     format_taskstore_status,
     format_quality_manual_report,
+    format_hdhive_candidate_label,
     hdhive_candidate_keyboard,
     hdhive_confirmation_keyboard,
     hdhive_resource_keyboard,
@@ -4367,9 +4368,7 @@ def handle_update(
                 hdhive_workflow.set_candidates(pending.session_id, candidates)
                 lines = ["请选择要查询的 TMDB 媒体："]
                 for index, candidate in enumerate(candidates, 1):
-                    media_type = "电影" if candidate["media_type"] == "movie" else "剧集"
-                    year = candidate.get("year") or "年份未知"
-                    lines.append(f"{index}. {candidate['title']} ({year}) [{media_type}] TMDB:{candidate['tmdb_id']}")
+                    lines.append(f"{index}. {format_hdhive_candidate_label(candidate)}")
                 telegram.send_message(
                     chat_id,
                     "\n".join(lines),
