@@ -488,15 +488,36 @@ class HdhiveBridgeTests(unittest.TestCase):
                 {"media_type": "tv", "title": "剧集", "year": "2026"},
             ],
         )
+        rows = keyboard["inline_keyboard"]
+        self.assertEqual(rows[0][0]["text"], "1. 电影")
+        self.assertEqual(rows[1][0]["text"], "2. 剧集")
+        self.assertEqual(rows[1][1]["text"], "订阅此剧")
+        self.assertEqual(rows[-1][0]["text"], "取消搜索")
         callbacks = [
             button["callback_data"]
-            for row in keyboard["inline_keyboard"]
+            for row in rows
             for button in row
             if "callback_data" in button
         ]
-
         self.assertNotIn("hive:subscribe:session:0", callbacks)
         self.assertIn("hive:subscribe:session:1", callbacks)
+        self.assertNotIn("2026", rows[0][0]["text"])
+        self.assertNotIn("[电影]", rows[0][0]["text"])
+        self.assertNotIn("[剧集]", rows[1][0]["text"])
+
+    def test_candidate_keyboard_uses_untitled_fallback(self):
+        keyboard = hdhive_candidate_keyboard("session", [{"media_type": "movie", "title": "", "year": "2026"}])
+        self.assertEqual(keyboard["inline_keyboard"][0][0]["text"], "1. 未命名")
+
+    def test_candidate_keyboard_truncates_long_titles_at_the_end(self):
+        title = "龙" * 80
+        keyboard = hdhive_candidate_keyboard("session", [{"media_type": "movie", "title": title, "year": "2026"}])
+        label = keyboard["inline_keyboard"][0][0]["text"]
+        self.assertTrue(label.startswith("1. 龙"))
+        self.assertTrue(label.endswith("…"))
+        self.assertEqual(len(label), 64)
+        self.assertNotIn("2026", label)
+        self.assertNotIn("...", label)
 
     def test_unlock_callback_enqueues_only_successful_115_links(self):
         proxy = FakeProxy()

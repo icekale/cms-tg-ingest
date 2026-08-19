@@ -299,10 +299,9 @@ def task_action_keyboard(tasks: list[Any], limit: int = 5, max_retries: int = 3)
 def hdhive_candidate_keyboard(session_id: str, candidates: list[dict[str, str]]) -> dict[str, Any]:
     buttons = []
     for index, candidate in enumerate(candidates[:12]):
-        title = truncate_text(candidate.get("title") or "未命名", 34)
-        year = candidate.get("year") or "年未知"
-        media_type = "电影" if candidate.get("media_type") == "movie" else "剧集"
-        row = [{"text": f"{index + 1}. {title} ({year}) [{media_type}]", "callback_data": f"hive:candidate:{session_id}:{index}"}]
+        title = str(candidate.get("title") or "未命名").strip() or "未命名"
+        label = truncate_end(f"{index + 1}. {title}", 64)
+        row = [{"text": label, "callback_data": f"hive:candidate:{session_id}:{index}"}]
         if candidate.get("media_type") == "tv":
             row.append({"text": "订阅此剧", "callback_data": f"hive:subscribe:{session_id}:{index}"})
         buttons.append(row)
