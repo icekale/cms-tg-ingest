@@ -557,6 +557,26 @@ class HdhiveSubscriptionStore:
     def mark_item_pending(self, item_id: int, error: str = "") -> HdhiveSubscriptionItem:
         return self._update_item(item_id, status="pending_confirmation", last_error=error)
 
+    def reset_orphan_enqueued(self, item_id: int) -> HdhiveSubscriptionItem | None:
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE hdhive_subscription_items
+                SET status = 'discovered', last_error = '', skip_reason = '', updated_at = ?
+                WHERE id = ? AND status = 'enqueued'
+                  AND (task_id IS NULL OR task_id = 0)
+                  AND unlocked_url = ''
+                """,
+                (time.time(), int(item_id)),
+            )
+            row = connection.execute(
+                "SELECT * FROM hdhive_subscription_items WHERE id = ?",
+                (int(item_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        return HdhiveSubscriptionItem.from_row(row)
+
     def mark_item_skipped(self, item_id: int, status: str, reason: str) -> HdhiveSubscriptionItem:
         status = str(status).strip().lower()
         if status not in {"filtered", "emby_exists", "unparsed"}:

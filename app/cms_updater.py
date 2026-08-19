@@ -9,6 +9,7 @@ import socket
 import time
 import urllib.request
 from http.client import HTTPConnection
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote
 
@@ -180,6 +181,219 @@ def docker_container_started_at(socket_path: str, container: str) -> str:
         return ""
 
 
+def image_for_version(image: str, version: str) -> str:
+    version = str(version or "").strip()
+    repo, _tag = _split_image(image)
+    if repo and version:
+        return f"{repo}:{version}"
+    if version and "/" in version:
+        return version
+    if version:
+        return f"imaliang/cloud-media-sync:{version}"
+    return str(image or "").strip()
+
+
+def _docker_api(
+    socket_path: str,
+    method: str,
+    path: str,
+    *,
+    body: bytes | None = None,
+    timeout: float = 30.0,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, bytes]:
+    socket_path = str(socket_path or "").strip()
+    if not socket_path:
+        return 0, b"no docker socket"
+    conn = None
+    try:
+        conn = _UnixHTTPConnection(socket_path, timeout=timeout)
+        header_list = list((headers or {}).items())
+        if body is not None and not any(key.lower() == "content-type" for key, _ in header_list):
+            header_list.append(("Content-Type", "application/json"))
+        conn.request(method, path, body=body, headers=dict(header_list))
+        response = conn.getresponse()
+        content_length = int(response.getheader("Content-Length") or 0)
+        payload = response.read(65536)
+        while content_length <= 0 or len(payload) < content_length:
+            chunk = response.read(65536)
+            if not chunk:
+                break
+            payload += chunk
+        status = int(response.status or 0)
+        conn.close()
+        return status, payload
+    except Exception as exc:  # noqa: BLE001 - upgrade must never crash the loop
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return 0, str(exc).encode("utf-8", "replace")
+
+
+def _docker_ok(status: int) -> bool:
+    return status in {200, 201, 204, 304}
+
+
+def docker_inspect_container(socket_path: str, container: str) -> dict[str, Any] | None:
+    container = str(container or "").strip()
+    if not container:
+        return None
+    status, body = _docker_api(socket_path, "GET", f"/containers/{quote(container, safe='')}/json")
+    if status != 200:
+        return None
+    try:
+        payload = json.loads(body.decode("utf-8", "replace"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def docker_rename_container(socket_path: str, container: str, new_name: str) -> str:
+    status, body = _docker_api(
+        socket_path,
+        "POST",
+        f"/containers/{quote(container, safe='')}/rename?name={quote(new_name, safe='')}",
+    )
+    return "" if _docker_ok(status) else f"rename failed status={status} {body[:160]!r}"
+
+
+def docker_stop_container(socket_path: str, container: str) -> str:
+    status, body = _docker_api(
+        socket_path,
+        "POST",
+        f"/containers/{quote(container, safe='')}/stop?t=20",
+        timeout=40,
+    )
+    return "" if _docker_ok(status) else f"stop failed status={status} {body[:160]!r}"
+
+
+def docker_start_container(socket_path: str, container: str) -> str:
+    status, body = _docker_api(socket_path, "POST", f"/containers/{quote(container, safe='')}/start")
+    return "" if _docker_ok(status) else f"start failed status={status} {body[:160]!r}"
+
+
+def docker_remove_container(socket_path: str, container: str) -> str:
+    status, body = _docker_api(
+        socket_path,
+        "DELETE",
+        f"/containers/{quote(container, safe='')}?force=1",
+    )
+    return "" if _docker_ok(status) else f"remove failed status={status} {body[:160]!r}"
+
+
+def docker_create_container(
+    socket_path: str,
+    name: str,
+    inspect: dict[str, Any],
+    image: str,
+) -> str:
+    config = dict(inspect.get("Config") or {})
+    config["Image"] = str(image)
+    networks = (inspect.get("NetworkSettings") or {}).get("Networks") or {}
+    endpoints = {}
+    for name, conf in networks.items():
+        if not isinstance(conf, dict):
+            continue
+        entry = {}
+        if conf.get("Aliases"):
+            entry["Aliases"] = conf.get("Aliases")
+        endpoints[str(name)] = entry
+    body = {
+        **config,
+        "HostConfig": inspect.get("HostConfig") or {},
+        "NetworkingConfig": {"EndpointsConfig": endpoints},
+    }
+    status, payload = _docker_api(
+        socket_path,
+        "POST",
+        f"/containers/create?name={quote(name, safe='')}",
+        body=json.dumps(body).encode("utf-8"),
+        timeout=60,
+    )
+    return "" if _docker_ok(status) else f"create failed status={status} {payload[:200]!r}"
+
+
+def docker_wait_running(socket_path: str, container: str, timeout: float = 60) -> bool:
+    deadline = time.time() + max(1.0, float(timeout))
+    while time.time() < deadline:
+        inspect = docker_inspect_container(socket_path, container)
+        if inspect and bool((inspect.get("State") or {}).get("Running")):
+            return True
+        time.sleep(2)
+    return False
+
+
+def verify_cms_guards(
+    *,
+    container: str,
+    docker_socket: str,
+    workflow_mode: str = "self_share_sync",
+    timeout: float = 90,
+) -> tuple[bool, str]:
+    from app.web_api import (
+        _reset_cms_guard_cache,
+        check_cms_direct_strm_guard,
+        check_cms_os_strm_guard,
+        check_cms_strm_guard,
+    )
+
+    deadline = time.time() + max(1.0, float(timeout))
+    last = "守卫未就绪"
+    while time.time() < deadline:
+        _reset_cms_guard_cache()
+        results = [
+            check_cms_strm_guard(
+                workflow_mode=workflow_mode, container=container, docker_socket=docker_socket, cache_seconds=0
+            ),
+            check_cms_direct_strm_guard(
+                workflow_mode=workflow_mode, container=container, docker_socket=docker_socket, cache_seconds=0
+            ),
+            check_cms_os_strm_guard(
+                workflow_mode=workflow_mode, container=container, docker_socket=docker_socket, cache_seconds=0
+            ),
+        ]
+        failures = []
+        for result in results:
+            status = str(result.get("status") or "")
+            if status == "not_applicable":
+                continue
+            if status == "unknown" or not result.get("ok") or status != "installed":
+                failures.append(str(result.get("message") or status or "守卫失败"))
+        if not failures:
+            return True, ""
+        last = failures[0]
+        time.sleep(2)
+    return False, last
+
+
+def patch_compose_image(compose_dir: str, new_image: str) -> str:
+    directory = str(compose_dir or "").strip()
+    if not directory:
+        return "compose 未配置，Unraid 下次 Apply 可能仍是旧标签"
+    path = Path(directory) / "docker-compose.yml"
+    if not path.is_file():
+        return "compose 未挂载，Unraid 下次 Apply 可能仍是旧标签"
+    try:
+        text = path.read_text(encoding="utf-8")
+        updated, count = re.subn(r"^(\s*image:\s*)\S+", rf"\g<1>{new_image}", text, count=1, flags=re.M)
+        if count != 1:
+            return "compose 中未找到 image 行"
+        path.write_text(updated, encoding="utf-8")
+    except OSError as exc:
+        return f"compose 未更新：{exc}"
+    return ""
+
+
+def _rollback_upgrade(socket_path: str, container: str, old_name: str, *, remove_new: bool) -> None:
+    if remove_new:
+        docker_stop_container(socket_path, container)
+        docker_remove_container(socket_path, container)
+    docker_rename_container(socket_path, old_name, container)
+    docker_start_container(socket_path, container)
+
+
 class CmsVersionChecker:
     def __init__(
         self,
@@ -192,10 +406,13 @@ class CmsVersionChecker:
         container: str = "cms",
         docker_socket: str = "/var/run/docker.sock",
         auto_pull: bool = False,
+        compose_dir: str = "/boot/config/plugins/compose.manager/projects/CMS",
+        workflow_mode: str = "self_share_sync",
         remote_lookup: Callable[[str], str] | None = None,
     ) -> None:
         self.store = store
         self.cms = cms
+        self.workflow_mode = str(workflow_mode or "self_share_sync")
         self._remote_lookup = remote_lookup or fetch_remote_latest_tag
         self._defaults = {
             "enabled": bool(enabled),
@@ -204,6 +421,7 @@ class CmsVersionChecker:
             "container": str(container or "cms").strip(),
             "docker_socket": str(docker_socket or "").strip(),
             "auto_pull": bool(auto_pull),
+            "compose_dir": str(compose_dir or "").strip(),
         }
 
     def _effective(self) -> dict[str, Any]:
@@ -234,6 +452,7 @@ class CmsVersionChecker:
             "container",
             "docker_socket",
             "auto_pull",
+            "compose_dir",
         }
         clean: dict[str, Any] = {}
         for key, value in (patch or {}).items():
@@ -274,6 +493,7 @@ class CmsVersionChecker:
                 "container": settings["container"],
                 "docker_socket": settings["docker_socket"],
                 "auto_pull": settings["auto_pull"],
+                "compose_dir": settings["compose_dir"],
             }
         )
         payload.setdefault("current_version", "")
@@ -286,6 +506,8 @@ class CmsVersionChecker:
         payload.setdefault("message", "")
         payload.setdefault("remote_version", "")
         payload.setdefault("update_available", False)
+        payload.setdefault("upgrade_status", "")
+        payload.setdefault("upgrade_error", "")
         return payload
 
     def check(self, *, notify: Callable[[str, str], None] | None = None) -> dict[str, Any]:
@@ -331,8 +553,11 @@ class CmsVersionChecker:
             "interval_seconds": settings["interval_seconds"],
             "docker_socket": settings["docker_socket"],
             "auto_pull": settings["auto_pull"],
+            "compose_dir": settings["compose_dir"],
             "remote_version": remote_version,
             "update_available": update_available,
+            "upgrade_status": state.get("upgrade_status") or "",
+            "upgrade_error": state.get("upgrade_error") or "",
         }
         if changed:
             pull_result = ""
@@ -376,6 +601,83 @@ class CmsVersionChecker:
             json.dumps(state, ensure_ascii=False, sort_keys=True),
         )
         return state
+
+    def upgrade(self, version: str = "") -> dict[str, Any]:
+        settings = self._effective()
+        state = self.status()
+        version = str(version or state.get("remote_version") or "").strip()
+        container = str(settings["container"] or "").strip()
+        socket_path = str(settings["docker_socket"] or "").strip()
+        target_image = image_for_version(str(settings["image"] or ""), version)
+        old_name = f"{container}-pre-upgrade"
+
+        def persist(status: str, error: str = "", message: str = "", **extra: Any) -> dict[str, Any]:
+            state.update(extra)
+            state["upgrade_status"] = status
+            state["upgrade_error"] = error
+            if message:
+                state["message"] = message
+            self.store.set_runtime_state(
+                CMS_VERSION_STATE_KEY,
+                json.dumps(state, ensure_ascii=False, sort_keys=True),
+            )
+            return state
+
+        if not version:
+            return persist("failed", "没有可升级的远程版本", "没有可升级的远程版本")
+        if not socket_path or not container:
+            return persist("failed", "未配置 Docker Socket 或容器名", "未配置 Docker Socket 或容器名")
+
+        inspect = docker_inspect_container(socket_path, container)
+        if inspect is None:
+            return persist("failed", f"找不到容器 {container}", f"找不到容器 {container}")
+
+        pull_result = docker_pull_image(socket_path, target_image)
+        state["pull_result"] = pull_result
+        if pull_result != "pulled":
+            return persist("failed", pull_result, f"镜像拉取失败：{pull_result}")
+
+        docker_remove_container(socket_path, old_name)
+        rename_error = docker_rename_container(socket_path, container, old_name)
+        if rename_error:
+            return persist("failed", rename_error, f"无法备份当前容器：{rename_error}")
+        docker_stop_container(socket_path, old_name)
+
+        create_error = docker_create_container(socket_path, container, inspect, target_image)
+        if create_error:
+            _rollback_upgrade(socket_path, container, old_name, remove_new=False)
+            return persist("failed", create_error, f"容器重建失败，已回滚：{create_error}")
+
+        start_error = docker_start_container(socket_path, container)
+        if start_error:
+            _rollback_upgrade(socket_path, container, old_name, remove_new=True)
+            return persist("failed", start_error, f"容器启动失败，已回滚：{start_error}")
+        if not docker_wait_running(socket_path, container):
+            _rollback_upgrade(socket_path, container, old_name, remove_new=True)
+            return persist("failed", "容器未能进入 running", "容器未能进入 running，已回滚")
+
+        ok, reason = verify_cms_guards(
+            container=container,
+            docker_socket=socket_path,
+            workflow_mode=self.workflow_mode,
+        )
+        if not ok:
+            _rollback_upgrade(socket_path, container, old_name, remove_new=True)
+            return persist("failed", reason, f"STRM 守卫验证失败，已回滚：{reason}")
+
+        docker_remove_container(socket_path, old_name)
+        compose_note = patch_compose_image(str(settings.get("compose_dir") or ""), target_image)
+        message = f"CMS 已升级到 {version}"
+        if compose_note:
+            message = f"{message}；{compose_note}"
+        return persist(
+            "succeeded",
+            "",
+            message,
+            update_available=False,
+            update_ready=False,
+            remote_version=version,
+        )
 
 
 def start_cms_version_check_loop(

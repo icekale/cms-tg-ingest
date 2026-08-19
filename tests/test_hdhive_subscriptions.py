@@ -15,6 +15,7 @@ from app.hdhive_subscriptions import (
     HdhiveSubscriptionService,
     HdhiveSubscriptionScheduler,
     HdhiveUrlError,
+    diagnose_subscription_check,
     episode_keys,
     parse_hdhive_tv_url,
     select_best_resource,
@@ -191,6 +192,25 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(item.unlock_points_spent, 20)
         self.assertEqual(item.unlock_points_source, "estimated")
         self.assertGreater(item.unlocked_at or 0, 0)
+
+    def test_orphan_enqueued_without_task_is_unlocked_again(self):
+        unlock_items = [HdhiveUnlockItem("ghost", True, "https://115cdn.com/s/ghost?password=abcd", "", "", False)]
+        directory, store, subscription, proxy, service, intake_calls = self.make_service(
+            [resource("ghost", resolution="1080P", points=0)], unlock_items
+        )
+        try:
+            stored = store.upsert_item(subscription.id, "S01E01-S01E07", "ghost", "valid", 1080, 0)
+            store.mark_item_enqueued(stored.id)
+            result = service.check(subscription.id)
+            current = store.get_item(stored.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.enqueued, 1)
+        self.assertEqual(proxy.unlock_calls, [["ghost"]])
+        self.assertEqual(intake_calls, [(["https://115cdn.com/s/ghost?password=abcd"], "464100862")])
+        self.assertEqual(current.status, "enqueued")
+        self.assertGreater(current.unlocked_at or 0, 0)
 
     def test_high_cost_resource_waits_for_confirmation(self):
         directory, store, subscription, proxy, service, intake_calls = self.make_service([resource("high", points=21)])
@@ -1080,3 +1100,68 @@ class HdhiveSubscriptionSchedulerTests(unittest.TestCase):
 
             self.assertEqual(snapshot["last_run_id"], run.run_id)
             self.assertEqual(snapshot["last_summary"], run.summary)
+
+
+class SubscriptionCheckDiagnosisTests(unittest.TestCase):
+    def test_emby_failure_with_leftover_discovered_items(self):
+        diagnosis = diagnose_subscription_check(
+            {"emby_skip_unavailable": True, "enqueued": 0, "discovered": 2},
+            [{"status": "discovered", "skip_reason": "", "last_error": ""}],
+        )
+
+        self.assertEqual(diagnosis.conclusion, "未入队：Emby 查询失败，已停止自动解锁")
+        self.assertEqual(diagnosis.counts["enqueued"], 0)
+
+    def test_all_unparsed(self):
+        items = [
+            {"status": "unparsed", "skip_reason": "无法识别季集编号", "last_error": ""}
+            for _ in range(3)
+        ]
+
+        diagnosis = diagnose_subscription_check({"unparsed": 3, "enqueued": 0}, items)
+
+        self.assertEqual(diagnosis.conclusion, "未入队：3 个无法识别季集")
+        self.assertEqual(diagnosis.counts["unparsed"], 3)
+        self.assertEqual(diagnosis.reasons, ("无法识别季集编号",))
+
+    def test_all_emby_exists(self):
+        diagnosis = diagnose_subscription_check(
+            {"emby_exists": 1, "enqueued": 0},
+            [{"status": "emby_exists", "skip_reason": "Emby 中已存在该集", "last_error": ""}],
+        )
+
+        self.assertEqual(diagnosis.conclusion, "无需入队：集数已在 Emby")
+
+    def test_pending_confirmation(self):
+        diagnosis = diagnose_subscription_check(
+            {"pending_confirmation": 1, "enqueued": 0},
+            [{"status": "pending_confirmation", "skip_reason": "积分超过自动解锁阈值或费用未知", "last_error": ""}],
+        )
+
+        self.assertEqual(diagnosis.conclusion, "未入队：1 个待确认")
+        self.assertIn("积分超过自动解锁阈值或费用未知", diagnosis.reasons)
+
+    def test_enqueued(self):
+        diagnosis = diagnose_subscription_check(
+            {"enqueued": 1},
+            [{"status": "enqueued", "skip_reason": "", "last_error": "", "task_id": 12}],
+        )
+
+        self.assertEqual(diagnosis.conclusion, "已入队 1 个")
+        self.assertEqual(diagnosis.counts["enqueued"], 1)
+
+    def test_orphan_enqueued_without_task_is_not_terminal(self):
+        diagnosis = diagnose_subscription_check(
+            {"enqueued": 0, "discovered": 1},
+            [{"status": "enqueued", "skip_reason": "", "last_error": "", "task_id": None, "unlocked_url": ""}],
+        )
+
+        self.assertEqual(diagnosis.conclusion, "未入队：1 个入队记录无效，没有任务")
+        self.assertEqual(diagnosis.counts["enqueued"], 0)
+        self.assertIn("入队记录无效，没有任务", diagnosis.reasons)
+
+    def test_empty_summary_without_items(self):
+        diagnosis = diagnose_subscription_check({}, [])
+
+        self.assertEqual(diagnosis.conclusion, "尚无检查结果")
+        self.assertEqual(diagnosis.reasons, ())

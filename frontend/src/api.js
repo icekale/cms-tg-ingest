@@ -58,6 +58,7 @@ export const api = {
   resetCmsVersion: () => request('settings/cms-version/reset', { method: 'POST' }),
   cmsVersionCheck: () => request('cms/version/check', { method: 'POST' }),
   cmsVersionPull: () => request('cms/version/pull', { method: 'POST' }),
+  cmsVersionUpgrade: () => request('cms/version/upgrade', { method: 'POST' }),
   embyDashboard: (refresh = false) => request('emby/dashboard', {
     headers: refresh ? { 'X-Emby-Dashboard-Refresh': '1' } : {},
   }),

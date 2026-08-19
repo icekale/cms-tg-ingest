@@ -2499,7 +2499,7 @@ class WebApp:
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/cms/version":
             status, response_headers, response_body = api_response(
-                api_cms_version(self.cms_version_checker)
+                api_cms_version(self.cms_version_checker, self.background_jobs)
             )
             return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path == "/api/v1/cms/version/check":
@@ -2526,12 +2526,36 @@ class WebApp:
             self.cms_version_checker.pull()
             # Re-serialize through api_cms_version so the upgrade_hint (built
             # from the persisted update_available state) is included.
-            payload = api_cms_version(self.cms_version_checker)
+            payload = api_cms_version(self.cms_version_checker, self.background_jobs)
             status, response_headers, response_body = api_response(payload)
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path == "/api/v1/cms/version/upgrade":
+            if self.cms_version_checker is None or not callable(
+                getattr(self.cms_version_checker, "upgrade", None)
+            ):
+                status, response_headers, response_body = api_response(
+                    {"error": "cms_version_check_disabled"},
+                    status=409,
+                )
+                return status, {**response_headers, **auth_headers}, response_body
+            try:
+                values = self._api_body(body, headers)
+            except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError):
+                values = {}
+            version = str(values.get("version") or "")
+            if not version:
+                version = str((self.cms_version_checker.status() or {}).get("remote_version") or "")
+            submission = self._submit_background(
+                "cms:upgrade",
+                lambda: self.cms_version_checker.upgrade(version),
+                description=f"升级 CMS 到 {version}" if version else "升级 CMS 容器",
+            )
+            status, payload = self._job_response(submission)
+            status, response_headers, response_body = api_response(payload, status=status)
             return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/settings/cms-version":
             status, response_headers, response_body = api_response(
-                api_cms_version(self.cms_version_checker)
+                api_cms_version(self.cms_version_checker, self.background_jobs)
             )
             return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path in {

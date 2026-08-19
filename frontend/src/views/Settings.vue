@@ -26,7 +26,9 @@ async function load() {
   try {
     settings.value = await api.settings()
     cms.value = await api.cmsVersion()
-    cms.value.interval_minutes = Math.round(cms.value.interval_seconds / 60)
+    cms.value.interval_minutes = Number.isFinite(Number(cms.value.interval_seconds))
+      ? Math.round(cms.value.interval_seconds / 60)
+      : 1440
     mode.value = settings.value.strm_default_mode
     reviewMode.value = settings.value.self_share_review.mode
     receiveCid.value = ''
@@ -155,7 +157,9 @@ async function saveCmsVersion() {
       docker_socket: cms.value.docker_socket,
       auto_pull: cms.value.auto_pull,
     })
-    cms.value.interval_minutes = Math.round(cms.value.interval_seconds / 60)
+    cms.value.interval_minutes = Number.isFinite(Number(cms.value.interval_seconds))
+      ? Math.round(cms.value.interval_seconds / 60)
+      : 1440
     message.success('CMS 版本更新设置已保存')
   } catch (err) { message.error(err.message) } finally { cmsSaving.value = false }
 }
@@ -163,7 +167,9 @@ async function saveCmsVersion() {
 async function resetCmsVersion() {
   try {
     cms.value = await api.resetCmsVersion()
-    cms.value.interval_minutes = Math.round(cms.value.interval_seconds / 60)
+    cms.value.interval_minutes = Number.isFinite(Number(cms.value.interval_seconds))
+      ? Math.round(cms.value.interval_seconds / 60)
+      : 1440
     message.success('已恢复环境默认设置')
   } catch (err) { message.error(err.message) }
 }
@@ -172,7 +178,9 @@ async function checkCmsVersion() {
   cmsSaving.value = true
   try {
     cms.value = await api.cmsVersionCheck()
-    cms.value.interval_minutes = Math.round(cms.value.interval_seconds / 60)
+    cms.value.interval_minutes = Number.isFinite(Number(cms.value.interval_seconds))
+      ? Math.round(cms.value.interval_seconds / 60)
+      : 1440
     if (!cms.value.current_version) {
       message.success('未获取到 CMS 本地版本')
     } else if (cms.value.update_ready) {
@@ -191,11 +199,40 @@ async function pullCmsImage() {
   cmsSaving.value = true
   try {
     cms.value = await api.cmsVersionPull()
-    cms.value.interval_minutes = Math.round(cms.value.interval_seconds / 60)
+    cms.value.interval_minutes = Number.isFinite(Number(cms.value.interval_seconds))
+      ? Math.round(cms.value.interval_seconds / 60)
+      : 1440
     if (cms.value.pull_result === 'pulled') {
-      message.success('镜像已拉取，请在宿主机执行升级脚本完成容器切换')
+      message.success('镜像已拉取，尚未切换容器')
     } else {
       message.error(`镜像拉取失败：${cms.value.pull_result || '未知错误'}`)
+    }
+  } catch (err) { message.error(err.message) } finally { cmsSaving.value = false }
+}
+
+async function waitForCmsJob() {
+  for (let i = 0; i < 60; i++) {
+    await new Promise(resolve => setTimeout(resolve, 2000))
+    cms.value = await api.cmsVersion()
+    cms.value.interval_minutes = Number.isFinite(Number(cms.value.interval_seconds))
+      ? Math.round(cms.value.interval_seconds / 60)
+      : 1440
+    const state = cms.value.background_job?.state
+    if (!state || !['queued', 'running'].includes(state)) return
+  }
+}
+
+async function upgradeCms() {
+  if (!window.confirm('将拉取新镜像并重启 CMS 容器，入库会短暂中断。确定升级？')) return
+  cmsSaving.value = true
+  try {
+    await api.cmsVersionUpgrade()
+    message.success('升级已提交')
+    await waitForCmsJob()
+    if (cms.value.upgrade_status === 'succeeded') {
+      message.success(cms.value.message || 'CMS 已升级')
+    } else if (cms.value.upgrade_status === 'failed') {
+      message.error(cms.value.upgrade_error || cms.value.message || 'CMS 升级失败')
     }
   } catch (err) { message.error(err.message) } finally { cmsSaving.value = false }
 }
@@ -285,19 +322,17 @@ onMounted(load)
       <n-space align="center"><n-text depth="3">Docker Socket</n-text><n-input v-model:value="cms.docker_socket" placeholder="/var/run/docker.sock" style="width: 260px" /></n-space>
       <n-space align="center"><n-text depth="3">自动拉取镜像</n-text><n-switch v-model:value="cms.auto_pull" /></n-space>
       <n-text depth="3">当前版本：{{ cms.current_version || '未知' }}；远程最新：{{ cms.remote_version || '未知' }}；上次检测：{{ cms.last_seen_version || '-' }}</n-text>
-      <n-text depth="3" v-if="cms.update_available">发现远程新版本 {{ cms.remote_version }}（当前 {{ cms.current_version }}）。「拉取镜像」把新镜像下载到本机，容器切换仍需在宿主机执行升级脚本（含守卫验证 + 失败自动回滚）。</n-text>
+      <n-text depth="3" v-if="cms.update_available">发现远程新版本 {{ cms.remote_version }}（当前 {{ cms.current_version }}）。点「升级」会拉取镜像、重启 CMS 并校验 STRM 守卫，失败自动回滚。</n-text>
       <n-text depth="3" v-else-if="cms.remote_version">当前已是远程最新版本。</n-text>
       <n-text depth="3" v-else>{{ cms.message || '未运行检测' }}</n-text>
+      <n-text depth="3" v-if="cms.upgrade_status">上次升级：{{ cms.upgrade_status }}{{ cms.upgrade_error ? ' · ' + cms.upgrade_error : '' }}</n-text>
       <n-space>
         <n-button type="primary" :loading="cmsSaving" @click="saveCmsVersion">保存</n-button>
         <n-button secondary @click="checkCmsVersion">立即检查</n-button>
+        <n-button v-if="cms.update_available" type="primary" :loading="cmsSaving" @click="upgradeCms">升级</n-button>
         <n-button v-if="cms.update_available" secondary :loading="cmsSaving" @click="pullCmsImage">拉取镜像</n-button>
         <n-button secondary @click="resetCmsVersion">恢复环境默认</n-button>
       </n-space>
-      <div v-if="cms.pull_result === 'pulled'" class="upgrade-hint">
-        <div class="upgrade-hint-title">升级指引（在宿主机执行）</div>
-        <pre class="upgrade-hint-cmd">{{ cms.upgrade_hint || '' }}</pre>
-      </div>
     </n-space>
   </n-card>
 </template>

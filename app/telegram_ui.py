@@ -7,6 +7,7 @@ import re
 import time
 from typing import Any
 
+from app.hdhive_subscriptions import diagnose_subscription_check
 from app.media.classify import expected_task_tmdb_id, extract_tmdb_id_from_name, normalize_text, parse_recognition_json
 from app.models import TaskStage, TaskStatus
 from app.task_diagnostics import describe_task_wait, format_task_observability
@@ -303,6 +304,7 @@ def format_hdhive_subscriptions(
     subscriptions: list[Any],
     scheduler_snapshot: dict[str, Any] | None = None,
     pending_items: list[Any] | None = None,
+    items_by_subscription_id: dict[int, list[Any]] | None = None,
 ) -> str:
     if not subscriptions:
         return "暂无 HDHive 剧集订阅。"
@@ -326,6 +328,8 @@ def format_hdhive_subscriptions(
             summary = json.loads(str(getattr(subscription, "last_summary_json", "{}") or "{}"))
         except (TypeError, ValueError, json.JSONDecodeError):
             summary = {}
+        items = (items_by_subscription_id or {}).get(int(getattr(subscription, "id", 0) or 0), ())
+        diagnosis = diagnose_subscription_check(summary if isinstance(summary, dict) else {}, items)
         if isinstance(summary, dict) and summary:
             counters = []
             for key, label in (
@@ -335,13 +339,17 @@ def format_hdhive_subscriptions(
                 ("filtered", "过滤"),
                 ("pending_confirmation", "待确认"),
                 ("failed", "失败"),
+                ("unparsed", "无法识别"),
+                ("blocked", "阻塞"),
             ):
                 if key in summary:
                     counters.append(f"{label} {summary[key]}")
             if counters:
                 lines.append("   最近检查：" + "，".join(counters))
-            if summary.get("emby_skip_unavailable"):
-                lines.append("   警告：Emby 集数检查不可用，未据此跳过资源")
+            if diagnosis.conclusion:
+                lines.append(f"   {diagnosis.conclusion}")
+            if diagnosis.reasons:
+                lines.append("   原因：" + "；".join(diagnosis.reasons))
         if subscription.last_error:
             lines.append(f"   最近错误：{truncate_text(subscription.last_error, 120)}")
     if pending_items:

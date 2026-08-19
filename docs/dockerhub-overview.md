@@ -28,7 +28,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 固定版本镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.4.1
+docker pull icekale/cms-tg-ingest:0.4.2
 ```
 
 ### 完整 Docker Compose
@@ -38,7 +38,7 @@ docker pull icekale/cms-tg-ingest:0.4.1
 ```yaml
 services:
   cms-tg-ingest:
-    image: icekale/cms-tg-ingest:0.4.1
+    image: icekale/cms-tg-ingest:0.4.2
     container_name: cms-tg-ingest
     restart: unless-stopped
     env_file:
@@ -123,8 +123,8 @@ docker compose logs -f cms-tg-ingest
 - `/api/v1/logs/stream` 是仅供页面读取实时流的内部只读 SSE 端点。
 - 日志页支持级别、关键字和来源（logger）过滤；慢客户端丢行时页面会提示并自动重连。
 - AI 分析接口：`GET /api/v1/logs/analyze` 返回结构化摘要（错误/告警统计、重复模式、修复提示与最近条目），供外部 AI 分析和调用管理 API 修复。
-- CMS 版本检测：`CMS_VERSION_CHECK_ENABLED=true` 后定时探测 CMS 版本，新版本出现时 Telegram 通知并标记 `update_ready`；`CMS_UPDATE_IMAGE` + `CMS_AUTO_PULL_ENABLED=true` 可自动拉取镜像，容器切换在宿主机执行 `scripts/update-cms-container.sh`。
-- Web 设置页新增“CMS 版本更新”配置（开关、频率、镜像、容器、Socket、自动拉取），保存后优先于 `.env`。「立即检查」会对比本地 CMS 版本与 Docker Hub 最新 tag（`CMS_UPDATE_IMAGE` 需填完整镜像名如 `imaliang/cloud-media-sync:latest`），发现新版直接提示。
+- CMS 版本检测：`CMS_VERSION_CHECK_ENABLED=true` 后定时探测 CMS 版本，新版本出现时 Telegram 通知并标记 `update_ready`；`CMS_UPDATE_IMAGE` + `CMS_AUTO_PULL_ENABLED=true` 可自动拉取镜像。设置页「升级」会在容器内重建 CMS 并校验 STRM 守卫，失败自动回滚。
+- Web 设置页“CMS 版本更新”配置（开关、频率、镜像、容器、Socket、自动拉取），保存后优先于 `.env`。「立即检查」对比本地 CMS 与 Docker Hub 最新 tag（`CMS_UPDATE_IMAGE` 需填完整镜像名如 `imaliang/cloud-media-sync:latest`），发现新版可一键升级。
 
 首次部署检查：
 

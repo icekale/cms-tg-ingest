@@ -99,6 +99,154 @@ class SubscriptionCheckResult:
 
 
 @dataclass(frozen=True)
+class SubscriptionCheckDiagnosis:
+    conclusion: str
+    counts: dict[str, int] = field(default_factory=dict)
+    reasons: tuple[str, ...] = ()
+
+
+def _item_value(item: Any, key: str, default: Any = "") -> Any:
+    if isinstance(item, dict):
+        return item.get(key, default)
+    return getattr(item, key, default)
+
+
+def _count_int(summary: dict[str, Any], key: str) -> int:
+    try:
+        return int(summary.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+_ORPHAN_ENQUEUE_REASON = "入队记录无效，没有任务"
+
+
+def _enqueue_task_id(item: Any) -> int | None:
+    value = _item_value(item, "task_id", None)
+    if value in (None, ""):
+        return None
+    try:
+        task_id = int(value)
+    except (TypeError, ValueError):
+        return None
+    return task_id if task_id > 0 else None
+
+
+def is_orphan_enqueued(item: Any) -> bool:
+    if str(_item_value(item, "status") or "") != "enqueued":
+        return False
+    if _enqueue_task_id(item):
+        return False
+    return not str(_item_value(item, "unlocked_url") or "").strip()
+
+
+def diagnose_subscription_check(
+    summary: dict[str, Any] | None,
+    items: list[Any] | None = None,
+) -> SubscriptionCheckDiagnosis:
+    summary = summary if isinstance(summary, dict) else {}
+    rows = list(items or ())
+    counts = {
+        "unparsed": 0,
+        "filtered": 0,
+        "emby_exists": 0,
+        "pending": 0,
+        "failed": 0,
+        "enqueued": 0,
+    }
+    leftover_discovered = 0
+    orphan_enqueued = 0
+    reasons: list[str] = []
+    seen_reasons: set[str] = set()
+    for item in rows:
+        status = str(_item_value(item, "status") or "")
+        if is_orphan_enqueued(item):
+            orphan_enqueued += 1
+            status = ""
+        elif status == "pending_confirmation":
+            counts["pending"] += 1
+        elif status in counts:
+            counts[status] += 1
+        if status == "discovered":
+            leftover_discovered += 1
+        reason = str(_item_value(item, "skip_reason") or "").strip() or str(
+            _item_value(item, "last_error") or ""
+        ).strip()
+        if is_orphan_enqueued(item):
+            reason = _ORPHAN_ENQUEUE_REASON
+        if reason and reason not in seen_reasons and len(reasons) < 3:
+            seen_reasons.add(reason)
+            reasons.append(reason)
+    if not rows:
+        counts["unparsed"] = _count_int(summary, "unparsed")
+        counts["filtered"] = _count_int(summary, "filtered")
+        counts["emby_exists"] = _count_int(summary, "emby_exists")
+        counts["pending"] = _count_int(summary, "pending_confirmation")
+        counts["failed"] = _count_int(summary, "failed")
+        counts["enqueued"] = _count_int(summary, "enqueued")
+    enqueued = counts["enqueued"]
+    pending = counts["pending"]
+    failed = counts["failed"]
+    unparsed = counts["unparsed"]
+    emby_exists = counts["emby_exists"]
+    filtered = counts["filtered"]
+    emby_skip = bool(summary.get("emby_skip_unavailable"))
+    discovered = _count_int(summary, "discovered")
+    if leftover_discovered and emby_skip and enqueued == 0:
+        conclusion = "未入队：Emby 查询失败，已停止自动解锁"
+    elif pending and enqueued == 0:
+        conclusion = f"未入队：{pending} 个待确认"
+    elif failed and enqueued == 0:
+        conclusion = f"未入队：{failed} 个失败"
+    elif orphan_enqueued and enqueued == 0:
+        conclusion = f"未入队：{orphan_enqueued} 个入队记录无效，没有任务"
+    elif unparsed and enqueued == 0:
+        conclusion = f"未入队：{unparsed} 个无法识别季集"
+    elif emby_exists and enqueued == 0 and pending == 0 and failed == 0 and unparsed == 0 and leftover_discovered == 0:
+        conclusion = "无需入队：集数已在 Emby"
+    elif filtered and enqueued == 0 and pending == 0 and failed == 0 and unparsed == 0 and leftover_discovered == 0:
+        conclusion = "未入队：已按过滤规则跳过"
+    elif (
+        emby_skip
+        and enqueued == 0
+        and pending == 0
+        and failed == 0
+        and unparsed == 0
+        and leftover_discovered == 0
+        and discovered > 0
+        and emby_exists == 0
+        and filtered == 0
+    ):
+        conclusion = "未入队：Emby 查询失败，已停止自动解锁"
+    elif enqueued:
+        conclusion = f"已入队 {enqueued} 个"
+    elif not summary and not rows:
+        conclusion = "尚无检查结果"
+    else:
+        conclusion = "本次检查没有可入队资源"
+    return SubscriptionCheckDiagnosis(conclusion=conclusion, counts=counts, reasons=tuple(reasons))
+
+
+def summary_from_check_result(result: Any) -> dict[str, Any]:
+    summary = dict(getattr(result, "summary", None) or {})
+    for key in ("discovered", "enqueued", "pending_confirmation", "failed"):
+        if key not in summary:
+            summary[key] = int(getattr(result, key, 0) or 0)
+    return summary
+
+
+def format_subscription_check_message(result: Any, items: list[Any] | None = None, *, action: str = "check") -> str:
+    summary = summary_from_check_result(result)
+    diagnosis = diagnose_subscription_check(summary, items)
+    prefix = "检查完成" if action == "check" else "已处理确认资源"
+    return (
+        f"{prefix}：{diagnosis.conclusion}\n"
+        f"发现 {summary.get('discovered', 0)}，入队 {summary.get('enqueued', 0)}，"
+        f"无法识别 {diagnosis.counts.get('unparsed', 0)}，阻塞 {summary.get('blocked', 0)}"
+    )
+
+
+@dataclass(frozen=True)
 class HdhiveScheduledRun:
     run_id: str
     status: str
@@ -378,6 +526,8 @@ class HdhiveSubscriptionService:
                     item.id,
                     stale_after_seconds=_UNLOCK_STALE_AFTER_SECONDS,
                 )
+            elif is_orphan_enqueued(item):
+                self.store.reset_orphan_enqueued(item.id)
         group_parsed_sets: dict[str, set[EpisodeKey]] = {}
         for group_key, group_candidates in grouped.items():
             parsed_keys = parsed_by_resource.get(id(group_candidates[0]), ())

@@ -142,7 +142,8 @@ class HdhiveBridgeTests(unittest.TestCase):
             self.assertFalse(callback_thread.is_alive())
             release.set()
             coordinator.shutdown(wait=True)
-            self.assertIn("检查完成：发现 1 个资源", telegram.messages[-1][1])
+            self.assertIn("检查完成：已入队 1 个", telegram.messages[-1][1])
+            self.assertIn("发现 1", telegram.messages[-1][1])
         finally:
             release.set()
             coordinator.shutdown(wait=True)
@@ -172,7 +173,8 @@ class HdhiveBridgeTests(unittest.TestCase):
         )
 
         self.assertTrue(handled)
-        self.assertIn("检查完成：发现 1 个资源", telegram.messages[-1][1])
+        self.assertIn("检查完成：已入队 1 个", telegram.messages[-1][1])
+        self.assertIn("发现 1", telegram.messages[-1][1])
 
     def test_completed_subscription_renders_status_filter_and_summary(self):
         subscription = SimpleNamespace(
@@ -195,6 +197,36 @@ class HdhiveBridgeTests(unittest.TestCase):
         self.assertIn("S01E01-S01E03", text)
         self.assertIn("发现 3", text)
         self.assertIn("入队 1", text)
+        self.assertIn("已入队 1 个", text)
+
+    def test_subscription_list_uses_diagnosis_and_omits_misleading_emby_warning(self):
+        subscription = SimpleNamespace(
+            id=1,
+            title="剧集",
+            tmdb_id="1416",
+            source_url="",
+            status="active",
+            last_error="",
+            episode_filter="",
+            last_summary_json=json.dumps(
+                {
+                    "discovered": 2,
+                    "enqueued": 0,
+                    "emby_skip_unavailable": True,
+                    "unparsed": 0,
+                    "blocked": 2,
+                },
+                ensure_ascii=False,
+            ),
+        )
+        items = [SimpleNamespace(status="discovered", skip_reason="", last_error="")]
+
+        text = format_hdhive_subscriptions([subscription], items_by_subscription_id={1: items})
+
+        self.assertIn("未入队：Emby 查询失败，已停止自动解锁", text)
+        self.assertIn("无法识别 0", text)
+        self.assertIn("阻塞 2", text)
+        self.assertNotIn("未据此跳过资源", text)
 
     def test_subscription_filter_callback_prompts_for_input(self):
         telegram = FakeTelegram()

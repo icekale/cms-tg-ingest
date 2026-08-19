@@ -24,7 +24,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 - **Web 运维台**：查看队列、阶段耗时、健康状态、质量巡检和 HDHive 订阅。
 - **Emby 看板**：独立媒体仪表盘——数据概览（电影/剧集/集数/媒体库数）、我的媒体库（各库代表海报 + 数量）、最近入库海报流，点击直达 Emby 详情/播放。Emby API Key 只在服务端使用，不外泄到浏览器。
 - **暗色模式**：Web 管理台跟随系统深浅色，顶栏可手动切换并记住选择；登录页同步适配。
-- **CMS 版本远程检测**：Web 设置页「立即检查」对比本地 CMS 版本与 Docker Hub 最新 tag，发现新版直接提示（配合 `CMS_UPDATE_IMAGE` 配置）。
+- **CMS 版本检测与一键升级**：Web 设置页「立即检查」对比本地 CMS 版本与 Docker Hub 最新 tag；发现新版可直接「升级」，在容器内完成拉取、重建和 STRM 守卫校验，失败自动回滚。
 - **质量人工队列**：Web 和 Telegram 展示规则、风险、尝试次数和脱敏证据；支持确认后执行、重跑、暂缓、忽略和恢复评估。
 - **Vue 管理台**：访问根路径 `/` 默认进入 `/app/`；旧 Python 页面和 POST 路由继续保留，旧版概览可从 `/legacy` 回退访问。
 
@@ -36,7 +36,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.4.1`。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.4.2`。
 4. 拉取固定版本并启动：
 
 ```sh
@@ -443,7 +443,7 @@ docker compose exec cms-tg-ingest python /app/doctor.py --quiet
 - 日志页支持级别、关键字和来源（logger）过滤；慢客户端丢行时页面会提示并自动重连。
 - 可选开启 `LOG_RATE_LIMIT_ENABLED=true`，相同级别+来源+消息 1 秒内只保留一条，减少高频重复日志（默认关闭）。
 - AI 分析接口：`GET /api/v1/logs/analyze?lines=500&since_seconds=3600&logger=task_runner&keyword=失败&level=ERROR` 返回结构化日志摘要（错误/告警统计、重复模式、修复提示和最近条目），方便外部 AI 直接分析并调用现有任务/清理 API 修复。
-- CMS 版本检测：设置 `CMS_VERSION_CHECK_ENABLED=true` 后，程序定时探测 CMS 版本，出现新版本时通过 Telegram 通知并标记 `update_ready`；可配置 `CMS_UPDATE_IMAGE` 与 `CMS_AUTO_PULL_ENABLED=true` 在检测到新版本时自动拉取镜像。容器切换仍需在宿主机执行 `./scripts/update-cms-container.sh <CMS_COMPOSE_DIR>`（需要 docker socket 时，容器内只负责拉取，不自动重建）。
+- CMS 版本检测：设置 `CMS_VERSION_CHECK_ENABLED=true` 后，程序定时探测 CMS 版本，出现新版本时通过 Telegram 通知并标记 `update_ready`；可配置 `CMS_UPDATE_IMAGE` 与 `CMS_AUTO_PULL_ENABLED=true` 在检测到新版本时自动拉取镜像。设置页「升级」会在容器内重建 CMS 并校验 STRM 守卫，失败自动回滚。
 - Web 设置页新增“CMS 版本更新”配置：可开关检测、设置频率（分钟）、镜像、容器名、Docker Socket 与自动拉取；保存后写入 TaskStore，优先于 `.env`，点击“恢复环境默认”可回到环境配置。
 
 如果任务卡住：
@@ -504,7 +504,7 @@ git push origin v0.2.90
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.4.1
+docker pull icekale/cms-tg-ingest:0.4.2
 docker pull icekale/cms-tg-ingest:latest
 ```
 

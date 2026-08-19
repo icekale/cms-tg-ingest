@@ -486,6 +486,101 @@ class CmsUpdaterPullTests(unittest.TestCase):
             self.assertIn("镜像拉取失败", payload["message"])
 
 
+class CmsUpgradeTests(unittest.TestCase):
+    def _checker(self, tmp, **kwargs):
+        store = TaskStore(Path(tmp) / "tasks.db")
+        defaults = dict(
+            enabled=True,
+            image="imaliang/cloud-media-sync:latest",
+            container="cloud-media-sync",
+            docker_socket="/tmp/fake.sock",
+            remote_lookup=lambda image: "0.4.9.2",
+        )
+        defaults.update(kwargs)
+        return CmsVersionChecker(store, FakeCms("0.4.9.1"), **defaults)
+
+    def test_upgrade_recreates_container_and_removes_old(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            checker = self._checker(tmp)
+            checker.check()
+            with patch.multiple(
+                "app.cms_updater",
+                create=True,
+                docker_pull_image=lambda socket, image, tag="latest": calls.append(("pull", image)) or "pulled",
+                docker_inspect_container=lambda socket, name: {
+                    "Config": {"Image": "imaliang/cloud-media-sync:0.4.9.1", "Env": ["A=1"]},
+                    "HostConfig": {"NetworkMode": "bridge"},
+                    "NetworkSettings": {"Networks": {}},
+                },
+                docker_rename_container=lambda socket, name, new: calls.append(("rename", name, new)) or "",
+                docker_stop_container=lambda socket, name: calls.append(("stop", name)) or "",
+                docker_create_container=lambda socket, name, inspect, image: calls.append(("create", name, image)) or "",
+                docker_start_container=lambda socket, name: calls.append(("start", name)) or "",
+                docker_wait_running=lambda socket, name, timeout=60: True,
+                docker_remove_container=lambda socket, name: calls.append(("remove", name)) or "",
+                verify_cms_guards=lambda **kwargs: (True, ""),
+            ):
+                payload = checker.upgrade("0.4.9.2")
+
+        self.assertEqual(payload["upgrade_status"], "succeeded")
+        self.assertIn(("pull", "imaliang/cloud-media-sync:0.4.9.2"), calls)
+        self.assertIn(("rename", "cloud-media-sync", "cloud-media-sync-pre-upgrade"), calls)
+        self.assertIn(("create", "cloud-media-sync", "imaliang/cloud-media-sync:0.4.9.2"), calls)
+        self.assertIn(("remove", "cloud-media-sync-pre-upgrade"), calls)
+        self.assertNotIn(("remove", "cloud-media-sync"), calls)
+
+    def test_upgrade_rolls_back_when_guards_fail(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            checker = self._checker(tmp)
+            with patch.multiple(
+                "app.cms_updater",
+                create=True,
+                docker_pull_image=lambda socket, image, tag="latest": "pulled",
+                docker_inspect_container=lambda socket, name: {"Config": {}, "HostConfig": {}, "NetworkSettings": {}},
+                docker_rename_container=lambda socket, name, new: calls.append(("rename", name, new)) or "",
+                docker_stop_container=lambda socket, name: calls.append(("stop", name)) or "",
+                docker_create_container=lambda socket, name, inspect, image: "",
+                docker_start_container=lambda socket, name: calls.append(("start", name)) or "",
+                docker_wait_running=lambda socket, name, timeout=60: True,
+                docker_remove_container=lambda socket, name: calls.append(("remove", name)) or "",
+                verify_cms_guards=lambda **kwargs: (False, "守卫缺失"),
+            ):
+                payload = checker.upgrade("0.4.9.2")
+
+        self.assertEqual(payload["upgrade_status"], "failed")
+        self.assertIn("守卫", payload["upgrade_error"])
+        self.assertIn(("remove", "cloud-media-sync"), calls)
+        self.assertIn(("rename", "cloud-media-sync-pre-upgrade", "cloud-media-sync"), calls)
+        self.assertIn(("start", "cloud-media-sync"), calls)
+
+    def test_upgrade_rolls_back_when_create_fails(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            checker = self._checker(tmp)
+            with patch.multiple(
+                "app.cms_updater",
+                create=True,
+                docker_pull_image=lambda socket, image, tag="latest": "pulled",
+                docker_inspect_container=lambda socket, name: {"Config": {}, "HostConfig": {}, "NetworkSettings": {}},
+                docker_rename_container=lambda socket, name, new: calls.append(("rename", name, new)) or "",
+                docker_stop_container=lambda socket, name: calls.append(("stop", name)) or "",
+                docker_create_container=lambda socket, name, inspect, image: "create failed status=500",
+                docker_start_container=lambda socket, name: calls.append(("start", name)) or "",
+                docker_wait_running=lambda socket, name, timeout=60: True,
+                docker_remove_container=lambda socket, name: calls.append(("remove", name)) or "",
+                verify_cms_guards=lambda **kwargs: (True, ""),
+            ):
+                payload = checker.upgrade("0.4.9.2")
+
+        self.assertEqual(payload["upgrade_status"], "failed")
+        self.assertIn("create failed", payload["upgrade_error"])
+        self.assertIn(("rename", "cloud-media-sync-pre-upgrade", "cloud-media-sync"), calls)
+        self.assertIn(("start", "cloud-media-sync"), calls)
+        self.assertNotIn(("remove", "cloud-media-sync"), calls)
+
+
 class CmsUpgradeHintTests(unittest.TestCase):
     def test_hint_builds_host_commands_with_script_copy(self):
         from app.web_api import build_cms_upgrade_hint

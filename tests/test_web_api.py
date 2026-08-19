@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from app.models import TaskStage, TaskStatus
 from app.quality import QualityIssue
-from app.hdhive_subscription_store import HdhiveSubscriptionStore
+from app.hdhive_subscription_store import HdhiveSubscription, HdhiveSubscriptionItem, HdhiveSubscriptionStore
 from app.series_rules import parse_episode_filter
 from app.task_store import TaskStore
 from app.config import Config
@@ -307,6 +307,56 @@ class WebApiTests(unittest.TestCase):
 
         self.assertEqual(payload["background_job"]["description"], "newly queued")
         self.assertEqual(payload["background_job"]["state"], "queued")
+
+    def test_serialize_hdhive_includes_check_diagnosis(self):
+        subscription = HdhiveSubscription(
+            id=1,
+            chat_id="1",
+            source_type="tmdb_tv",
+            source_value="1416",
+            source_url="",
+            title="剧集",
+            tmdb_id="1416",
+            media_type="tv",
+            pan_type="115",
+            status="active",
+            last_checked_at=0,
+            last_error="",
+            created_at=0,
+            updated_at=0,
+            last_summary_json=json.dumps(
+                {"discovered": 1, "enqueued": 0, "emby_skip_unavailable": True, "unparsed": 0},
+                ensure_ascii=False,
+            ),
+        )
+        item = HdhiveSubscriptionItem(
+            id=9,
+            subscription_id=1,
+            episode_key="s01e01",
+            resource_slug="slug",
+            title="资源",
+            validate_status="valid",
+            resolution_score=1080,
+            unlock_points=0,
+            status="discovered",
+            task_id=None,
+            last_error="",
+            unlock_points_spent=None,
+            unlock_points_source="",
+            unlocked_at=None,
+            created_at=0,
+            updated_at=0,
+        )
+        service = SimpleNamespace(
+            list=lambda: [subscription],
+            store=SimpleNamespace(list_items=lambda _subscription_id: [item]),
+            proxy=None,
+        )
+
+        payload = serialize_hdhive(service)
+
+        self.assertEqual(payload["subscriptions"][0]["diagnosis"]["conclusion"], "未入队：Emby 查询失败，已停止自动解锁")
+        self.assertNotIn("unlocked_url", payload["subscriptions"][0]["items"][0])
 
     def _quality_service(self, tmp, store):
         root = Path(tmp) / "library"
@@ -2129,6 +2179,51 @@ class CmsPullRouteTests(unittest.TestCase):
             self.assertEqual(payload["pull_result"], "pulled")
             self.assertIn("update-cms.sh", payload["upgrade_hint"])
             self.assertIn("0.4.9.2", payload["upgrade_hint"])
+
+    def test_upgrade_route_submits_background_job(self):
+        import tempfile
+        from pathlib import Path
+
+        from app.task_store import TaskStore
+        from app.web import WebApp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+
+            class FakeChecker:
+                def __init__(self):
+                    self.upgraded = []
+
+                def status(self):
+                    return {
+                        "enabled": True,
+                        "current_version": "0.4.9.1",
+                        "remote_version": "0.4.9.2",
+                        "update_available": not self.upgraded,
+                        "upgrade_status": "succeeded" if self.upgraded else "",
+                        "upgrade_error": "",
+                    }
+
+                def upgrade(self, version=""):
+                    self.upgraded.append(version or "0.4.9.2")
+                    return self.status()
+
+            checker = FakeChecker()
+            app = WebApp(store, cms_version_checker=checker)
+            status, _headers, body = app.handle_request("POST", "/api/v1/cms/version/upgrade", {}, b"")
+            self.assertEqual(status, 202)
+            payload = json.loads(body)
+            self.assertTrue(payload["started"])
+            self.assertEqual(payload["job"]["outcome"], "accepted")
+            deadline = time.time() + 2
+            while time.time() < deadline and not checker.upgraded:
+                time.sleep(0.05)
+            self.assertEqual(checker.upgraded, ["0.4.9.2"])
+            status, _headers, body = app.handle_request("GET", "/api/v1/settings/cms-version", {}, b"")
+            self.assertEqual(status, 200)
+            page = json.loads(body)
+            self.assertEqual(page["upgrade_status"], "succeeded")
+            self.assertIn(page["background_job"]["state"], {"queued", "running", "succeeded"})
 
 
 if __name__ == "__main__":

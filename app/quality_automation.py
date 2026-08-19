@@ -119,6 +119,9 @@ def quality_notify_signature(summary: QualityRunSummary) -> str:
         for plan in summary.plans
         if plan.execution_status in {"queued", "failed"}
     )
+    if not actionable and summary.error:
+        # Run-level failure with no per-plan detail: dedupe by error text.
+        return f"run-error:{summary.error}"
     return json.dumps(actionable, ensure_ascii=False, sort_keys=True) if actionable else ""
 
 
@@ -129,7 +132,10 @@ def should_notify_quality_run(
 ) -> tuple[bool, str]:
     """Decide whether a finished quality run needs Telegram attention."""
     signature = quality_notify_signature(summary)
-    if summary.failed_count or (signature and signature != previous_signature):
+    if signature and signature != previous_signature:
+        return True, signature
+    if summary.failed_count and not signature:
+        # Run-level failure with no dedupeable plan detail: alert per run.
         return True, signature
     if open_manual_task_ids(summary) - previous_open_ids:
         return True, signature

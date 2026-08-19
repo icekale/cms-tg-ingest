@@ -107,6 +107,7 @@ from app.hdhive_subscriptions import (
     HdhiveSubscriptionScheduler,
     HdhiveSubscriptionService,
     extract_hdhive_tv_urls,
+    format_subscription_check_message,
 )
 from app.series_rules import parse_episode_filter
 
@@ -2321,13 +2322,14 @@ def format_hdhive_subscription_view(
 ) -> tuple[str, dict[str, Any] | None]:
     subscriptions = service.list(str(chat_id))
     pending_items = []
+    items_by_subscription_id: dict[int, list[Any]] = {}
     for subscription in subscriptions:
-        pending_items.extend(
-            item for item in service.store.list_items(subscription.id) if item.status == "pending_confirmation"
-        )
+        items = list(service.store.list_items(subscription.id))
+        items_by_subscription_id[int(subscription.id)] = items
+        pending_items.extend(item for item in items if item.status == "pending_confirmation")
     snapshot = scheduler.status_snapshot() if scheduler is not None else None
     return (
-        format_hdhive_subscriptions(subscriptions, snapshot, pending_items),
+        format_hdhive_subscriptions(subscriptions, snapshot, pending_items, items_by_subscription_id),
         hdhive_subscriptions_keyboard(subscriptions, pending_items),
     )
 
@@ -2390,16 +2392,12 @@ def handle_hdhive_subscription_callback(
                     telegram.send_message(chat_id, f"HDHive 订阅操作失败：{snapshot.error}")
                     return
                 result = result_holder["result"]
-                if action == "check":
-                    message = (
-                        f"检查完成：发现 {result.discovered} 个资源，入队 {result.enqueued} 个，"
-                        f"待确认 {result.pending_confirmation} 个，失败 {result.failed} 个。"
-                    )
-                else:
-                    message = (
-                        f"已处理确认资源：入队 {result.enqueued} 个，"
-                        f"待确认 {result.pending_confirmation} 个，失败 {result.failed} 个。"
-                    )
+                items = service.store.list_items(target_id) if action == "check" else []
+                if action != "check":
+                    confirmed = service.store.get_item(target_id)
+                    if confirmed is not None:
+                        items = service.store.list_items(confirmed.subscription_id)
+                message = format_subscription_check_message(result, items, action=action)
                 text, keyboard = format_hdhive_subscription_view(service, scheduler, chat_id)
                 telegram.send_message(chat_id, f"{message}\n\n{text}", reply_markup=keyboard)
 
@@ -2416,16 +2414,12 @@ def handle_hdhive_subscription_callback(
             return True
         elif action == "check":
             result = service.check(target_id)
-            message = (
-                f"检查完成：发现 {result.discovered} 个资源，入队 {result.enqueued} 个，"
-                f"待确认 {result.pending_confirmation} 个，失败 {result.failed} 个。"
-            )
+            message = format_subscription_check_message(result, service.store.list_items(target_id), action="check")
         else:
             result = service.confirm_item(target_id)
-            message = (
-                f"已处理确认资源：入队 {result.enqueued} 个，"
-                f"待确认 {result.pending_confirmation} 个，失败 {result.failed} 个。"
-            )
+            confirmed = service.store.get_item(target_id)
+            items = service.store.list_items(confirmed.subscription_id) if confirmed is not None else []
+            message = format_subscription_check_message(result, items, action="confirm")
         safe_answer_callback_query(telegram, callback_id, "操作完成", show_alert=False)
         text, keyboard = format_hdhive_subscription_view(service, scheduler, chat_id)
         telegram.send_message(chat_id, f"{message}\n\n{text}", reply_markup=keyboard)
@@ -3298,7 +3292,14 @@ def send_quality_manual_queue(
         try:
             telegram.edit_message_text(chat_id, message_id, text, reply_markup=keyboard)
             return
-        except Exception:
+        except Exception as exc:
+            if "message is not modified" in str(exc).lower():
+                # Queue renders identically (no-op action on a stale copy, busy
+                # task, ...). Telegram rejects the identical edit; re-sending
+                # would spawn a duplicate that carries the same live buttons,
+                # so every press on any copy duplicates the message again.
+                LOG.info("Quality queue unchanged; leaving message %s as-is", message_id)
+                return
             LOG.warning("Failed to refresh Telegram quality message", exc_info=True)
     telegram.send_message(chat_id, text, reply_markup=keyboard)
 
@@ -4971,6 +4972,7 @@ def run_forever(
             container=str(getattr(config, "cms_update_container", "cms") or "cms"),
             docker_socket=str(getattr(config, "cms_update_docker_socket", "/var/run/docker.sock") or ""),
             auto_pull=bool(getattr(config, "cms_auto_pull_enabled", False)),
+            workflow_mode=str(getattr(config, "workflow_mode", "direct") or "direct"),
         )
         start_cms_version_check_loop(
             cms_version_checker,

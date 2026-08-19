@@ -27,6 +27,28 @@ class FakeTelegram:
         self.answers.append((callback_id, text, show_alert))
 
 
+class FailingEditTelegram(FakeTelegram):
+    def __init__(self, error: Exception):
+        super().__init__()
+        self._error = error
+
+    def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+        self.edits.append((chat_id, message_id, text, reply_markup))
+        raise self._error
+
+
+class NotModifiedEditTelegram(FailingEditTelegram):
+    """Telegram that rejects identical edits like the real API does."""
+
+    def __init__(self):
+        super().__init__(
+            RuntimeError(
+                "HTTP 400 from https://api.telegram.org/bot1: "
+                '{"ok":false,"error_code":400,"description":"Bad Request: message is not modified"}'
+            )
+        )
+
+
 class QualityTelegramTests(unittest.TestCase):
     @staticmethod
     def make_service(tmp):
@@ -185,6 +207,106 @@ class QualityTelegramTests(unittest.TestCase):
             bridge.notify_quality_run(service, telegram, "464100862", summary)
 
             self.assertEqual(telegram.messages, [])
+
+    def test_quality_callback_noop_press_does_not_duplicate_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, task = self.make_service(tmp)
+            service.store.mark_quality_ignored(task.id, "test", rule_id="strm_mode_mismatch")
+            telegram = NotModifiedEditTelegram()
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+
+            bridge.handle_update(
+                {
+                    "callback_query": {
+                        "id": "quality-noop",
+                        "from": {"id": 464100862},
+                        "message": {"chat": {"id": 464100862}, "message_id": 17},
+                        "data": f"quality:ignore:{task.id}:strm_mode_mismatch:1",
+                    }
+                },
+                object(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=service.store,
+                task_engine_enabled=True,
+                quality_automation=service,
+            )
+
+            # Ignored task only allows resume; the no-op press leaves the queue
+            # unchanged, the identical edit is rejected, and NO duplicate is sent.
+            self.assertEqual(telegram.messages, [])
+            self.assertEqual(len(telegram.edits), 1)
+            self.assertIn("规则或操作已过期", telegram.answers[-1][1])
+
+    def test_quality_callback_other_edit_failure_still_falls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, task = self.make_service(tmp)
+            telegram = FailingEditTelegram(RuntimeError("HTTP 500 from telegram"))
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+
+            bridge.handle_update(
+                {
+                    "callback_query": {
+                        "id": "quality-edit500",
+                        "from": {"id": 464100862},
+                        "message": {"chat": {"id": 464100862}, "message_id": 18},
+                        "data": f"quality:ignore:{task.id}:strm_mode_mismatch:1",
+                    }
+                },
+                object(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=service.store,
+                task_engine_enabled=True,
+                quality_automation=service,
+            )
+
+            # A genuine failure (not "not modified") still refreshes via a new message.
+            self.assertEqual(len(telegram.messages), 1)
+
+    def test_notify_quality_run_dedupes_persistent_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _task = self.make_service(tmp)
+            telegram = FakeTelegram()
+            summary = QualityRunSummary(
+                run_id="run-f",
+                status="failed",
+                failed_count=1,
+                plans=(
+                    QualityRepairPlan(
+                        task_id=7,
+                        action="reprocess",
+                        reason="probe boom",
+                        rule_id="strm_mode_mismatch",
+                        execution_status="failed",
+                    ),
+                ),
+            )
+
+            bridge.notify_quality_run(service, telegram, "464100862", summary)
+            bridge.notify_quality_run(service, telegram, "464100862", summary)
+
+            self.assertEqual(len(telegram.messages), 1)
+
+    def test_notify_quality_run_dedupes_run_level_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _task = self.make_service(tmp)
+            telegram = FakeTelegram()
+            summary = QualityRunSummary(
+                run_id="run-e",
+                status="failed",
+                failed_count=1,
+                error="SomeError: boom",
+            )
+
+            bridge.notify_quality_run(service, telegram, "464100862", summary)
+            bridge.notify_quality_run(service, telegram, "464100862", summary)
+
+            self.assertEqual(len(telegram.messages), 1)
 
     def test_notify_quality_run_sends_new_actionable_work_once(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -154,13 +154,18 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("hdhiveItemConfirm", api)
         for control in ("confirm", "run", "settings"):
             self.assertIn(control, hdhive)
-        for control in ("episode_filter", "已完结", "emby_skip_unavailable", "设置集数过滤"):
+        for control in ("episode_filter", "已完结", "设置集数过滤", "资源状态", "diagnosis", "waitForHdhiveJob"):
             self.assertIn(control, hdhive)
+        self.assertNotIn("未据此跳过资源", hdhive)
         for mode in ("shared", "direct", "source_shared"):
             self.assertIn(mode, settings)
         self.assertIn("设置", shell)
         self.assertIn("cms-tg-ingest", shell)
         self.assertIn("version", shell)
+        self.assertIn("cmsVersionUpgrade", api)
+        self.assertIn("waitForCmsJob", settings)
+        self.assertIn("升级", settings)
+        self.assertNotIn("升级指引（在宿主机执行）", settings)
 
 
 if __name__ == "__main__":

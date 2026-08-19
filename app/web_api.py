@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 from .background_jobs import redact_background_text
 from .config import DEFAULT_OWN_SHARE_RECEIVE_CODE
+from .hdhive_subscriptions import diagnose_subscription_check
 from .logging_system import LogFilter, redact_text
 from .media.strm import iter_strm_files
 from .models import TaskSnapshot, TaskStage, TaskStatus
@@ -739,6 +740,12 @@ def serialize_hdhive(
         except (TypeError, ValueError, json.JSONDecodeError):
             summary = {}
         row["last_summary"] = summary if isinstance(summary, dict) else {}
+        diagnosis = diagnose_subscription_check(row["last_summary"], item_rows)
+        row["diagnosis"] = {
+            "conclusion": diagnosis.conclusion,
+            "counts": diagnosis.counts,
+            "reasons": list(diagnosis.reasons),
+        }
         row["completed"] = str(row.get("status") or "").lower() == "completed"
         subscriptions.append(row)
     account = None
@@ -1043,15 +1050,18 @@ def build_cms_upgrade_hint(remote_version: str, container: str = "cms-tg-ingest"
     )
 
 
-def api_cms_version(checker: Any | None = None) -> dict[str, Any]:
+def api_cms_version(checker: Any | None = None, background_jobs: Any | None = None) -> dict[str, Any]:
     if checker is None or not callable(getattr(checker, "status", None)):
-        return {"enabled": False, "current_version": "", "update_ready": False}
+        return {"enabled": False, "current_version": "", "update_ready": False, "background_job": None}
     payload = checker.status()
     payload = _safe_api_value(payload)
+    payload.setdefault("upgrade_status", "")
+    payload.setdefault("upgrade_error", "")
     if payload.get("update_available"):
         payload["upgrade_hint"] = build_cms_upgrade_hint(str(payload.get("remote_version") or ""))
     else:
         payload["upgrade_hint"] = ""
+    payload["background_job"] = serialize_background_job(background_jobs, prefix="cms:upgrade")
     return payload
 
 
