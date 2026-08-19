@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { NAlert, NButton, NCard, NDescriptions, NDescriptionsItem, NSelect, NSpace, NTag, useMessage } from 'naive-ui'
 import { useRoute } from 'vue-router'
 import { api } from '../api'
-import { displayTaskTitle } from '../taskView'
+import { displayTaskTitle, taskActionLabel } from '../taskView'
 
 const route = useRoute()
 const message = useMessage()
@@ -53,7 +53,7 @@ onMounted(load)
       <div class="muted">{{ task.completion_drift.recommendation }}</div>
     </n-alert>
     <n-descriptions bordered :column="2">
-      <n-descriptions-item label="STRM 模式"><n-select style="width: 170px" :value="task.strm_mode" :options="modeOptions" @update:value="changeMode" /></n-descriptions-item>
+      <n-descriptions-item label="STRM 模式"><n-select style="width: 170px" :value="task.strm_mode" :options="modeOptions" :input-props="{ 'aria-label': 'STRM 模式' }" @update:value="changeMode" /></n-descriptions-item>
       <n-descriptions-item label="分类">{{ task.category || '-' }}</n-descriptions-item>
       <n-descriptions-item label="为什么慢">{{ task.why_slow || '-' }}</n-descriptions-item>
       <n-descriptions-item label="阶段耗时">{{ task.stage_elapsed || '-' }}</n-descriptions-item>
@@ -61,10 +61,10 @@ onMounted(load)
       <n-descriptions-item label="TMDB">{{ task.tmdb_id || '-' }}</n-descriptions-item>
     </n-descriptions>
     <n-space style="margin-top: 18px">
-      <n-button v-if="canRetry" type="primary" :loading="busyAction === 'retry'" @click="runAction('retry')">重试 retry</n-button>
-      <n-button v-if="canEmby" :loading="busyAction === 'emby'" @click="runAction('emby')">查 Emby emby</n-button>
-      <n-button v-if="canRestore" :loading="busyAction === 'restore'" @click="runAction('restore')">恢复 STRM restore</n-button>
-      <n-button v-if="canReprocess" type="warning" :loading="busyAction === 'reprocess'" @click="runAction('reprocess')">从头重跑 reprocess</n-button>
+      <n-button v-if="canRetry" type="primary" :loading="busyAction === 'retry'" @click="runAction('retry')">{{ taskActionLabel('retry') }}</n-button>
+      <n-button v-if="canEmby" :loading="busyAction === 'emby'" @click="runAction('emby')">{{ taskActionLabel('emby') }}</n-button>
+      <n-button v-if="canRestore" :loading="busyAction === 'restore'" @click="runAction('restore')">{{ taskActionLabel('restore') }}</n-button>
+      <n-button v-if="canReprocess" type="warning" :loading="busyAction === 'reprocess'" @click="runAction('reprocess')">{{ taskActionLabel('reprocess') }}</n-button>
       <n-button secondary @click="load">刷新</n-button>
     </n-space>
     <n-card title="处理时间线" embedded style="margin-top: 18px">

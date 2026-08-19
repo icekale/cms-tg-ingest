@@ -1,9 +1,9 @@
 <script setup>
 import { computed, h, onMounted, ref } from 'vue'
-import { NButton, NCard, NCheckbox, NCheckboxGroup, NDataTable, NModal, NSpace, NTag, useMessage } from 'naive-ui'
+import { NButton, NCard, NCheckbox, NCheckboxGroup, NDataTable, NForm, NFormItem, NInput, NInputNumber, NModal, NSpace, NSwitch, NTag, useMessage } from 'naive-ui'
 import { RouterLink } from 'vue-router'
 import { api } from '../api'
-import { mergeQualityRows, qualityActionLabel, qualityRiskType, qualityStatusLabel } from '../qualityView'
+import { confirmQualityBatchFix, mergeQualityRows, qualityActionLabel, qualityRiskType, qualityStatusLabel } from '../qualityView'
 import { displayTaskTitle } from '../taskView'
 
 const message = useMessage()
@@ -35,6 +35,7 @@ async function load() {
 }
 
 async function fix() {
+  if (!confirmQualityBatchFix()) return
   loading.value = true
   try {
     const result = await api.qualityFix()
@@ -109,6 +110,23 @@ async function runQualityAction(row, action) {
   } finally {
     busyAction.value = ''
   }
+}
+
+function rowKey(row) {
+  return `${row.task_id}:${row.rule_id || 'manual'}`
+}
+
+function rowActions(row) {
+  return ['execute', 'reprocess', 'snooze', 'ignore', 'resume']
+    .filter((action) => (row.available_actions || []).includes(action))
+}
+
+function evidenceLines(row) {
+  const evidence = row.evidence || []
+  if (!evidence.length) return [row.detail || '-']
+  const shown = evidence.slice(0, 3)
+  const extra = evidence.length - shown.length
+  return extra > 0 ? [...shown, `等 ${extra} 条`] : shown
 }
 
 function taskCell(row) {
@@ -238,20 +256,79 @@ onMounted(load)
   </n-card>
 
   <n-card v-if="payload.automation" title="自动巡检设置" class="section-card">
-    <n-space align="center"><label>启用 <input v-model="settings.enabled" type="checkbox"></label><label>时间 <input v-model="settings.time" size="5"></label><label>时区 <input v-model="settings.timezone" size="18"></label><label>任务上限 <input v-model.number="settings.max_tasks" type="number" min="1"></label><label>115 检查上限 <input v-model.number="settings.check_limit" type="number" min="1"></label><n-button @click="saveSettings">保存</n-button><n-button secondary @click="reset">恢复默认</n-button></n-space>
+    <n-form class="compact-form" label-placement="top">
+      <n-form-item label="启用">
+        <n-switch v-model:value="settings.enabled" />
+      </n-form-item>
+      <n-form-item label="时间">
+        <n-input v-model:value="settings.time" aria-label="巡检时间" style="width: 96px" />
+      </n-form-item>
+      <n-form-item label="时区">
+        <n-input v-model:value="settings.timezone" aria-label="巡检时区" style="width: 200px" />
+      </n-form-item>
+      <n-form-item label="任务上限">
+        <n-input-number v-model:value="settings.max_tasks" :min="1" style="width: 120px" />
+      </n-form-item>
+      <n-form-item label="115 检查上限">
+        <n-input-number v-model:value="settings.check_limit" :min="1" style="width: 120px" />
+      </n-form-item>
+      <n-form-item label="操作" :show-feedback="false">
+        <n-space>
+          <n-button @click="saveSettings">保存</n-button>
+          <n-button secondary @click="reset">恢复默认</n-button>
+        </n-space>
+      </n-form-item>
+    </n-form>
     <p class="muted">状态：{{ payload.automation.status }}，下次运行：{{ payload.automation.next_run_at }}</p>
     <p v-if="payload.automation.last_summary" class="muted">最近结果：扫描 {{ payload.automation.last_summary.scanned_count || 0 }}，问题 {{ payload.automation.last_summary.issue_count || 0 }}，排队 {{ payload.automation.last_summary.queued_count || 0 }}，失败 {{ payload.automation.last_summary.failed_count || 0 }}</p>
   </n-card>
 
   <n-card title="人工处理队列">
-    <n-data-table :columns="columns" :data="issues" :loading="loading" :pagination="{ pageSize: 12 }" :scroll-x="1250" />
+    <div class="desktop-table">
+      <n-data-table :columns="columns" :data="issues" :loading="loading" :pagination="{ pageSize: 12 }" :scroll-x="1250" />
+    </div>
+    <div class="mobile-cards" aria-label="人工处理队列">
+      <article v-for="row in issues" :key="rowKey(row)" class="issue-card">
+        <router-link class="task-link" :to="`/tasks/${row.task_id}`">#{{ row.task_id }} {{ displayTaskTitle(row) }}</router-link>
+        <div class="issue-card-meta">{{ row.rule_id || '人工' }} · {{ row.issue_count > 1 ? row.issue_count + ' 个文件' : '1 个文件' }}</div>
+        <n-space>
+          <n-tag size="small" :type="qualityRiskType(row.risk_level)">{{ row.risk_level || '-' }}</n-tag>
+          <n-tag size="small">{{ qualityStatusLabel(row.archived ? 'archived' : row.manual_status) }}</n-tag>
+        </n-space>
+        <div class="quality-evidence">
+          <div v-for="line in evidenceLines(row)" :key="line">{{ line }}</div>
+        </div>
+        <div class="issue-card-actions">
+          <n-button
+            v-for="action in rowActions(row)"
+            :key="action"
+            size="small"
+            :type="action === 'ignore' ? 'error' : action === 'execute' || action === 'reprocess' ? 'warning' : 'default'"
+            :secondary="action !== 'ignore'"
+            :loading="busyAction === `${row.task_id}:${action}`"
+            @click="runQualityAction(row, action)"
+          >{{ qualityActionLabel(action) }}</n-button>
+          <n-button v-if="payload.cleanup_enabled" size="small" secondary @click="openCleanup(row)">失效 STRM</n-button>
+        </div>
+      </article>
+      <div v-if="!issues.length" class="muted">暂无需要处理的问题</div>
+    </div>
   </n-card>
 
   <n-card title="近 30 天巡检趋势" class="section-card">
-    <n-data-table :columns="runColumns" :data="runs.items" :pagination="{ pageSize: 10 }" :scroll-x="700" />
+    <div class="desktop-table">
+      <n-data-table :columns="runColumns" :data="runs.items" :pagination="{ pageSize: 10 }" :scroll-x="700" />
+    </div>
+    <div class="mobile-cards" aria-label="巡检趋势">
+      <article v-for="run in runs.items" :key="run.run_date" class="issue-card">
+        <strong>{{ run.run_date }}</strong>
+        <div class="issue-card-meta">{{ run.status }} · 扫描 {{ run.scanned_count }} · 问题 {{ run.issue_count }} · 排队 {{ run.queued_count }} · 失败 {{ run.failed_count }}</div>
+      </article>
+      <div v-if="!runs.items.length" class="muted">暂无巡检记录</div>
+    </div>
   </n-card>
 
-  <n-modal v-model:show="cleanup.show" preset="card" title="清理失效 STRM" style="width: 640px">
+  <n-modal v-model:show="cleanup.show" preset="card" title="清理失效 STRM" class="cleanup-modal">
     <template v-if="cleanup.result">
       <p>已删除 <b>{{ cleanup.result.removed?.length || 0 }}</b> 个失效 STRM，跳过 <b>{{ cleanup.result.skipped?.length || 0 }}</b> 个。</p>
       <p v-if="cleanup.result.resumed" class="muted">任务已无质量问题，已自动恢复自动评估。</p>
@@ -291,7 +368,10 @@ onMounted(load)
 
 <style scoped>
 .alive-share {
-  color: #d03050;
+  color: var(--danger);
   font-weight: 600;
+}
+.cleanup-modal {
+  width: min(640px, calc(100vw - 32px));
 }
 </style>

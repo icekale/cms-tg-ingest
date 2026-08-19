@@ -48,6 +48,7 @@ onMounted(async () => {
 <template>
   <n-config-provider :theme="isDark ? darkTheme : null" :theme-overrides="isDark ? darkThemeOverrides : lightThemeOverrides">
     <n-message-provider>
+      <a class="skip-link" href="#main-content">跳到内容</a>
       <n-layout class="admin-shell">
       <n-layout-header bordered class="top-header">
         <div class="brand"><img class="brand-logo" :src="brandLogoUrl" alt="" width="38" height="38" /><span>入库助手</span></div>
@@ -60,12 +61,12 @@ onMounted(async () => {
         </div>
       </n-layout-header>
       <n-layout has-sider>
-        <n-layout-sider bordered collapse-mode="width" :collapsed-width="64" :width="220" :collapsed="collapsed" show-trigger @collapse="collapsed = true" @expand="collapsed = false">
+        <n-layout-sider bordered collapse-mode="width" :collapsed-width="64" :width="220" :collapsed="collapsed" show-trigger aria-label="主导航" @collapse="collapsed = true" @expand="collapsed = false">
           <n-menu :value="activeKey" :options="menuOptions" @update:value="navigate" />
         </n-layout-sider>
         <n-layout class="main-column">
           <n-layout-content class="content-wrap">
-            <div class="content-inner"><router-view /></div>
+            <div id="main-content" class="content-inner" role="main" tabindex="-1"><router-view /></div>
           </n-layout-content>
           <n-layout-footer class="app-footer">
             <div class="footer-signature">

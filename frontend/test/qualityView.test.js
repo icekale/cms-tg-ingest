@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  QUALITY_FIX_CONFIRM,
+  confirmQualityBatchFix,
   mergeQualityRows,
   qualityActionLabel,
   qualityRiskType,
@@ -38,6 +40,12 @@ test('mergeQualityRows keeps one actionable row per task and rule', () => {
   assert.deepEqual(rows[0].issue_codes, ['direct_strm', 'unexpected_strm'])
   assert.deepEqual(rows[0].evidence, ['a.strm', 'b.strm'])
   assert.equal(rows[0].issue_count, 2)
+})
+
+test('batch fix asks for confirmation before changing tasks', () => {
+  assert.match(QUALITY_FIX_CONFIRM, /批量修复/)
+  assert.equal(confirmQualityBatchFix(() => true), true)
+  assert.equal(confirmQualityBatchFix(() => false), false)
 })
 
 test('quality labels map backend state to readable UI values', () => {

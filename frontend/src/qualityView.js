@@ -49,8 +49,14 @@ export function mergeQualityRows(items) {
   return [...merged.values()]
 }
 
+export const QUALITY_FIX_CONFIRM = '将按规则批量修复当前可自动处理的问题，入库任务会改状态。确定继续？'
+
 export function qualityActionLabel(action) {
   return ACTION_LABELS[action] || action
+}
+
+export function confirmQualityBatchFix(ask = globalThis.confirm) {
+  return Boolean(ask(QUALITY_FIX_CONFIRM))
 }
 
 export function qualityRiskType(risk) {

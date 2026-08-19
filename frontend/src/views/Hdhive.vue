@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { NButton, NCard, NDataTable, NInput, NSpace, NTag, useMessage } from 'naive-ui'
+import { NButton, NCard, NDataTable, NForm, NFormItem, NInput, NSpace, NSwitch, NTag, useMessage } from 'naive-ui'
 import { api } from '../api'
 
 const message = useMessage()
@@ -136,9 +136,46 @@ onMounted(load)
 <template>
   <div class="page-title"><div><h1>HDHive 订阅</h1><p>管理订阅、集数过滤、确认解锁并查看积分和时间。</p></div><n-space><n-button secondary @click="run">立即检查</n-button><n-button secondary @click="load">刷新</n-button></n-space></div>
   <n-card v-if="data.account" title="账号状态"><n-space><n-tag type="success">{{ data.account.nickname || '已授权' }}</n-tag><span>积分：{{ data.account.points }}</span><span>免费次数：{{ data.account.weekly_free_quota_unlimited ? '无限' : data.account.weekly_free_quota_remaining }}</span></n-space></n-card>
-  <n-card title="自动检查" class="section-card"><n-space><label>启用 <input v-model="settings.enabled" type="checkbox"></label><label>时间 <input v-model="settings.time" size="5"></label><label>时区 <input v-model="settings.timezone" size="18"></label><n-button @click="saveSettings">保存设置</n-button></n-space><p class="muted">状态：{{ data.schedule.status || 'idle' }}，下次：{{ data.schedule.next_run_at || '-' }}</p></n-card>
-  <n-card title="当前订阅" class="section-card"><div v-for="subscription in data.subscriptions" :key="subscription.id" class="subscription-row"><div><strong>#{{ subscription.id }} {{ subscription.title }}</strong><div class="muted"><n-tag size="small" :type="statusType(subscription.status)">{{ statusLabel(subscription.status) }}</n-tag> · TMDB {{ subscription.tmdb_id }} · {{ (subscription.items || []).length }} 个资源</div><div v-if="subscription.episode_filter" class="muted">当前过滤：{{ subscription.episode_filter }}</div><div v-if="summaryText(subscription.last_summary)" class="muted">最近检查：{{ summaryText(subscription.last_summary) }}</div><div v-if="subscription.diagnosis && subscription.diagnosis.conclusion" class="muted">{{ subscription.diagnosis.conclusion }}</div><div v-if="subscription.diagnosis && subscription.diagnosis.reasons && subscription.diagnosis.reasons.length" class="muted">{{ subscription.diagnosis.reasons.join('；') }}</div></div><n-space vertical align="end"><n-space><n-button v-if="subscription.status === 'active'" secondary @click="subscriptionAction(subscription.id, 'pause')">暂停</n-button><n-button v-else secondary @click="subscriptionAction(subscription.id, 'resume')">恢复</n-button><n-button secondary @click="subscriptionAction(subscription.id, 'check')">检查</n-button><n-button type="error" secondary @click="subscriptionAction(subscription.id, 'delete')">删除</n-button></n-space><n-space><n-input v-model:value="filterDraft[subscription.id]" size="small" placeholder="S01E01-S01E10,S02" /><n-button secondary @click="saveFilter(subscription)">设置集数过滤</n-button></n-space></n-space></div><div v-if="!data.subscriptions.length" class="muted">暂无订阅</div></n-card>
-  <n-card title="资源状态" class="section-card"><n-data-table :columns="diagnosticColumns" :data="diagnosticItems" :pagination="{ pageSize: 20 }" /><div v-if="!diagnosticItems.length" class="muted">没有需要关注的资源</div></n-card>
+  <n-card title="自动检查" class="section-card">
+    <n-form class="compact-form" label-placement="top">
+      <n-form-item label="启用">
+        <n-switch v-model:value="settings.enabled" />
+      </n-form-item>
+      <n-form-item label="时间">
+        <n-input v-model:value="settings.time" aria-label="订阅检查时间" style="width: 96px" />
+      </n-form-item>
+      <n-form-item label="时区">
+        <n-input v-model:value="settings.timezone" aria-label="订阅检查时区" style="width: 200px" />
+      </n-form-item>
+      <n-form-item label="操作" :show-feedback="false">
+        <n-button @click="saveSettings">保存设置</n-button>
+      </n-form-item>
+    </n-form>
+    <p class="muted">状态：{{ data.schedule.status || 'idle' }}，下次：{{ data.schedule.next_run_at || '-' }}</p>
+  </n-card>
+  <n-card title="当前订阅" class="section-card"><div v-for="subscription in data.subscriptions" :key="subscription.id" class="subscription-row"><div><strong>#{{ subscription.id }} {{ subscription.title }}</strong><div class="muted"><n-tag size="small" :type="statusType(subscription.status)">{{ statusLabel(subscription.status) }}</n-tag> · TMDB {{ subscription.tmdb_id }} · {{ (subscription.items || []).length }} 个资源</div><div v-if="subscription.episode_filter" class="muted">当前过滤：{{ subscription.episode_filter }}</div><div v-if="summaryText(subscription.last_summary)" class="muted">最近检查：{{ summaryText(subscription.last_summary) }}</div><div v-if="subscription.diagnosis && subscription.diagnosis.conclusion" class="muted">{{ subscription.diagnosis.conclusion }}</div><div v-if="subscription.diagnosis && subscription.diagnosis.reasons && subscription.diagnosis.reasons.length" class="muted">{{ subscription.diagnosis.reasons.join('；') }}</div></div><n-space vertical align="end"><n-space><n-button v-if="subscription.status === 'active'" secondary @click="subscriptionAction(subscription.id, 'pause')">暂停</n-button><n-button v-else secondary @click="subscriptionAction(subscription.id, 'resume')">恢复</n-button><n-button secondary @click="subscriptionAction(subscription.id, 'check')">检查</n-button><n-button type="error" secondary @click="subscriptionAction(subscription.id, 'delete')">删除</n-button></n-space><n-space><n-input v-model:value="filterDraft[subscription.id]" size="small" aria-label="集数过滤" placeholder="S01E01-S01E10,S02" /><n-button secondary @click="saveFilter(subscription)">设置集数过滤</n-button></n-space></n-space></div><div v-if="!data.subscriptions.length" class="muted">暂无订阅</div></n-card>
+  <n-card title="资源状态" class="section-card">
+    <div class="desktop-table">
+      <n-data-table :columns="diagnosticColumns" :data="diagnosticItems" :pagination="{ pageSize: 20 }" :scroll-x="760" />
+    </div>
+    <div class="mobile-cards" aria-label="资源状态">
+      <article v-for="item in diagnosticItems" :key="item.id" class="issue-card">
+        <strong>{{ item.subscriptionTitle }} · {{ item.episode_key }}</strong>
+        <div class="issue-card-meta">{{ itemStatusLabel(item.status) }} · {{ item.skip_reason || item.last_error || item.title || '-' }}</div>
+      </article>
+    </div>
+    <div v-if="!diagnosticItems.length" class="muted">没有需要关注的资源</div>
+  </n-card>
   <n-card title="待确认资源" class="section-card"><div v-for="item in pendingItems" :key="item.id" class="subscription-row"><span>{{ item.subscriptionTitle }} · {{ item.episode_key }} · {{ item.title || item.resource_slug }} · {{ item.unlock_points ?? '未知' }} 积分</span><n-button type="primary" @click="confirmItem(item.id)">确认解锁</n-button></div><div v-if="!pendingItems.length" class="muted">暂无待确认资源</div></n-card>
-  <n-card title="解锁记录"><n-data-table :columns="unlockedColumns" :data="unlockedItems" :pagination="{ pageSize: 20 }" /></n-card>
+  <n-card title="解锁记录">
+    <div class="desktop-table">
+      <n-data-table :columns="unlockedColumns" :data="unlockedItems" :pagination="{ pageSize: 20 }" :scroll-x="760" />
+    </div>
+    <div class="mobile-cards" aria-label="解锁记录">
+      <article v-for="item in unlockedItems" :key="item.id" class="issue-card">
+        <strong>{{ item.subscriptionTitle }} · {{ item.episode_key }}</strong>
+        <div class="issue-card-meta">任务 {{ item.task_id || '-' }} · {{ item.unlock_points_spent ?? '-' }} 积分 · {{ formatTime(item.unlocked_at) }}</div>
+      </article>
+    </div>
+  </n-card>
 </template>

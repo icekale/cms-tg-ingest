@@ -30,7 +30,8 @@ class FrontendTests(unittest.TestCase):
 
         svg = logo.read_text(encoding="utf-8")
         self.assertIn('viewBox="0 0 64 64"', svg)
-        self.assertIn("#1D4ED8", svg)
+        self.assertIn("#4c5fd5", svg)
+        self.assertNotIn("#1D4ED8", svg)
         self.assertIn('aria-label="媒体仓"', svg)
 
         def png_dimensions(path):
@@ -50,7 +51,8 @@ class FrontendTests(unittest.TestCase):
             "%BASE_URL%brand/logo-mark.svg",
             "%BASE_URL%brand/favicon-32.png",
             "%BASE_URL%brand/apple-touch-icon.png",
-            'name="theme-color" content="#1D4ED8"',
+            'name="theme-color" content="#4c5fd5"',
+            'name="theme-color" media="(prefers-color-scheme: dark)" content="#10121a"',
         ):
             self.assertIn(expected, index)
 
@@ -62,6 +64,10 @@ class FrontendTests(unittest.TestCase):
         self.assertNotIn('<span class="brand-mark">CMS</span>', shell)
         self.assertIn(".brand-logo", styles)
         self.assertNotIn(".brand-mark", styles)
+        self.assertIn('aria-label="主导航"', shell)
+        self.assertIn(".issue-card-actions .n-button", styles)
+        self.assertIn(".subscription-row .n-button", styles)
+        self.assertIn("min-height: 44px", styles)
 
     def test_vue_admin_footer_uses_product_signature_layout(self):
         shell = (ROOT / "frontend/src/App.vue").read_text(encoding="utf-8")

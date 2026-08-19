@@ -1,6 +1,20 @@
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 export const THEME_STORAGE_KEY = 'cms-theme'
+export const THEME_COLOR_LIGHT = '#4c5fd5'
+export const THEME_COLOR_DARK = '#10121a'
+
+export function themeColorFor(isDark) {
+  return isDark ? THEME_COLOR_DARK : THEME_COLOR_LIGHT
+}
+
+export function applyThemeColor(isDark, root = typeof document === 'undefined' ? null : document) {
+  if (!root?.querySelectorAll) return
+  const color = themeColorFor(isDark)
+  for (const meta of root.querySelectorAll('meta[name="theme-color"]')) {
+    meta.setAttribute('content', color)
+  }
+}
 
 /**
  * Pure: map a mode plus the system preference to an effective theme.
@@ -42,8 +56,13 @@ export function useTheme() {
   let mql = null
 
   function apply() {
-    document.documentElement.dataset.theme = isDark.value ? 'dark' : 'light'
+    if (typeof document === 'undefined') return
+    const dark = isDark.value
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+    applyThemeColor(dark)
   }
+
+  watch(isDark, apply)
 
   function syncFromSystem() {
     systemPrefersDark.value = readSystemPrefersDark()

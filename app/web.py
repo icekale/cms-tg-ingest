@@ -1641,7 +1641,7 @@ class WebApp:
     --surface: #ffffff;
     --text: #1f2937;
     --text-strong: #141829;
-    --muted: #6b7280;
+    --muted: #5f6b7a;
     --border: #d7dae6;
     --primary: #4c5fd5;
     --primary-hover: #3e4ec4;
@@ -1687,9 +1687,8 @@ class WebApp:
   }}
   .brand {{ display: flex; flex-direction: column; align-items: center; gap: 10px; margin-bottom: 26px; }}
   .brand-logo {{ width: 44px; height: 44px; }}
-  .brand-title {{ font-size: 19px; font-weight: 700; color: var(--text-strong); letter-spacing: -0.01em; }}
+  .brand-title {{ margin: 0; font-size: 19px; font-weight: 700; color: var(--text-strong); letter-spacing: -0.01em; }}
   .brand-sub {{ font-size: 12px; color: var(--muted); }}
-  h1 {{ display: none; }}
   label {{ display: block; font-size: 13px; color: var(--muted); margin: 14px 0 5px; }}
   input {{
     width: 100%;
@@ -1738,15 +1737,14 @@ class WebApp:
 <form class="card" method="post" action="{_LOGIN_PATH}">
   <div class="brand">
     <svg class="brand-logo" viewBox="0 0 64 64" role="img" aria-label="媒体仓" xmlns="http://www.w3.org/2000/svg">
-      <rect x="4" y="4" width="56" height="56" rx="16" fill="#1D4ED8"/>
+      <rect x="4" y="4" width="56" height="56" rx="16" fill="#4c5fd5"/>
       <rect x="16" y="17" width="32" height="30" rx="7" fill="none" stroke="#FFFFFF" stroke-width="4"/>
       <path d="M16 26h32M25 17v9M39 17v9" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round"/>
       <path d="M27 32.5 40 38 27 43.5Z" fill="#FFFFFF"/>
     </svg>
-    <span class="brand-title">入库助手</span>
+    <h1 class="brand-title">入库助手</h1>
     <span class="brand-sub">cms-tg-ingest 管理台 · 115 · CMS · Emby 工作流</span>
   </div>
-  <h1>cms-tg-ingest 管理台</h1>
   <label for="username">用户名</label>
   <input id="username" name="username" autocomplete="username" required autofocus>
   <label for="password">密码</label>

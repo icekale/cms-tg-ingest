@@ -2547,7 +2547,13 @@ class WebLoginAuthTests(unittest.TestCase):
             app = self._app(tmp)
             status, _headers, body = app.handle_request("GET", "/login", {}, b"")
             self.assertEqual(status, 200)
-            self.assertIn("type=\"password\"", body.decode("utf-8"))
+            html = body.decode("utf-8")
+            self.assertIn("type=\"password\"", html)
+            self.assertIn('<h1 class="brand-title">入库助手</h1>', html)
+            self.assertNotIn("h1 { display: none }", html)
+            self.assertNotIn("<h1>cms-tg-ingest 管理台</h1>", html)
+            self.assertIn('fill="#4c5fd5"', html)
+            self.assertNotIn("#1D4ED8", html)
 
     def test_loopback_without_auth_still_allows_anonymous_mode(self):
         # Without username/password the legacy shared-token/anonymous path is

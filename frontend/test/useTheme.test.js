@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { loadThemeMode, resolveThemeMode, useTheme } from '../src/useTheme.js'
+import { applyThemeColor, loadThemeMode, resolveThemeMode, themeColorFor, useTheme } from '../src/useTheme.js'
 
 // Regression guard: isDark must be a real boolean. The bare theme string
 // ('light'/'dark') is always truthy, which broke both apply() and toggle()
@@ -44,4 +44,20 @@ test('loadThemeMode ignores invalid stored values', () => {
   globalThis.localStorage = { getItem: () => 'neon' }
   assert.equal(loadThemeMode(), 'system')
   delete globalThis.localStorage
+})
+
+test('theme-color follows the effective theme, not only prefers-color-scheme', () => {
+  assert.equal(themeColorFor(false), '#4c5fd5')
+  assert.equal(themeColorFor(true), '#10121a')
+  const metas = [
+    { name: 'theme-color', content: '#4c5fd5', media: '', setAttribute(name, value) { this[name] = value } },
+    { name: 'theme-color', content: '#10121a', media: '(prefers-color-scheme: dark)', setAttribute(name, value) { this[name] = value } },
+  ]
+  const root = { querySelectorAll: (sel) => sel === 'meta[name="theme-color"]' ? metas : [] }
+  applyThemeColor(true, root)
+  assert.equal(metas[0].content, '#10121a')
+  assert.equal(metas[1].content, '#10121a')
+  applyThemeColor(false, root)
+  assert.equal(metas[0].content, '#4c5fd5')
+  assert.equal(metas[1].content, '#4c5fd5')
 })

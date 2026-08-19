@@ -1,0 +1,231 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-19T03:52:49Z",
+  "title": "Design System: 入库助手",
+  "extensions": {
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "Desk Indigo",
+        "canonical": "oklch(52% 0.16 275)",
+        "tonalRamp": ["#1a2158", "#24307a", "#3343a8", "#3e4ec4", "#4c5fd5", "#6b78e0", "#8b93ff", "#eef0fc"]
+      },
+      "primary-hover": {
+        "role": "primary",
+        "displayName": "Pressed Indigo",
+        "canonical": "oklch(47% 0.16 275)",
+        "tonalRamp": ["#1a2158", "#24307a", "#2d3896", "#3e4ec4", "#4c5fd5", "#6b78e0", "#8b93ff", "#eef0fc"]
+      },
+      "primary-soft": {
+        "role": "primary",
+        "displayName": "Indigo Wash",
+        "canonical": "oklch(96% 0.02 275)",
+        "tonalRamp": ["#232741", "#3e4ec4", "#6b78e0", "#8b93ff", "#c4c8ff", "#dde0ff", "#eef0fc", "#f8f9fd"]
+      },
+      "primary-invert": {
+        "role": "neutral",
+        "displayName": "Ink Invert",
+        "canonical": "oklch(100% 0 0)",
+        "tonalRamp": ["#0e0f1a", "#141829", "#1f2937", "#4b5563", "#9aa3b5", "#e6e8f0", "#f5f6fb", "#ffffff"]
+      },
+      "bg": {
+        "role": "neutral",
+        "displayName": "Paper",
+        "canonical": "oklch(97% 0.008 275)",
+        "tonalRamp": ["#10121a", "#171a24", "#262b3a", "#4b5563", "#6b7280", "#d7dae6", "#e6e8f0", "#f5f6fb"]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Sheet",
+        "canonical": "oklch(100% 0 0)",
+        "tonalRamp": ["#10121a", "#171a24", "#1d2130", "#262b3a", "#e6e8f0", "#f5f6fb", "#f8f9fd", "#ffffff"]
+      },
+      "surface-2": {
+        "role": "neutral",
+        "displayName": "Inset Sheet",
+        "canonical": "oklch(98% 0.006 275)",
+        "tonalRamp": ["#10121a", "#171a24", "#1d2130", "#262b3a", "#d7dae6", "#e6e8f0", "#f5f6fb", "#f8f9fd"]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "Body Ink",
+        "canonical": "oklch(32% 0.03 260)",
+        "tonalRamp": ["#141829", "#1f2937", "#4b5563", "#6b7280", "#9aa3b5", "#b8c0d0", "#e6e8f0", "#f4f5fa"]
+      },
+      "text-strong": {
+        "role": "neutral",
+        "displayName": "Title Ink",
+        "canonical": "oklch(22% 0.03 270)",
+        "tonalRamp": ["#10121a", "#141829", "#1f2937", "#4b5563", "#6b7280", "#9aa3b5", "#e6e8f0", "#f4f5fa"]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Quiet",
+        "canonical": "oklch(48% 0.025 250)",
+        "tonalRamp": ["#343a4e", "#4b5563", "#6b7280", "#9aa3b5", "#b8c0d0", "#d7dae6", "#e6e8f0", "#f5f6fb"]
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "oklch(93% 0.01 275)",
+        "tonalRamp": ["#171a24", "#262b3a", "#343a4e", "#4b5563", "#d7dae6", "#e6e8f0", "#f5f6fb", "#ffffff"]
+      },
+      "success": {
+        "role": "semantic",
+        "displayName": "Ready Green",
+        "canonical": "oklch(55% 0.14 150)",
+        "tonalRamp": ["#143324", "#145c34", "#1d8a4e", "#4bc47e", "#7ed9a4", "#b7ebc9", "#e7f5ec", "#f4fbf6"]
+      },
+      "warning": {
+        "role": "semantic",
+        "displayName": "Wait Amber",
+        "canonical": "oklch(62% 0.14 80)",
+        "tonalRamp": ["#33290f", "#7a5400", "#b57a00", "#e0a93c", "#f6c85f", "#f8d98a", "#fef4dd", "#fffaf0"]
+      },
+      "danger": {
+        "role": "semantic",
+        "displayName": "Stop Rose",
+        "canonical": "oklch(52% 0.18 15)",
+        "tonalRamp": ["#3a1a24", "#8c1f38", "#d03050", "#f26d82", "#ff8585", "#f7b0ba", "#fcebee", "#fff6f7"]
+      },
+      "dark-bg": {
+        "role": "neutral",
+        "displayName": "Night Paper",
+        "canonical": "oklch(16% 0.02 275)",
+        "tonalRamp": ["#0a0b10", "#10121a", "#171a24", "#1d2130", "#262b3a", "#343a4e", "#4b5563", "#9aa3b5"]
+      },
+      "dark-surface": {
+        "role": "neutral",
+        "displayName": "Night Sheet",
+        "canonical": "oklch(20% 0.02 275)",
+        "tonalRamp": ["#0a0b10", "#10121a", "#171a24", "#1d2130", "#232741", "#262b3a", "#343a4e", "#4b5563"]
+      },
+      "dark-primary": {
+        "role": "primary",
+        "displayName": "Night Indigo",
+        "canonical": "oklch(72% 0.16 275)",
+        "tonalRamp": ["#232741", "#3e4ec4", "#4c5fd5", "#6b78e0", "#8b93ff", "#a5abff", "#c4c8ff", "#eef0fc"]
+      }
+    },
+    "typographyMeta": {
+      "body": { "displayName": "Body", "purpose": "说明、表单、卡片正文。" },
+      "title": { "displayName": "Title", "purpose": "页面 h1，紧、不演戏。" },
+      "label": { "displayName": "Label", "purpose": "统计标签和页脚产品名。" },
+      "mono": { "displayName": "Mono", "purpose": "日志、版本号、命令。" }
+    },
+    "shadows": [
+      { "name": "card-rest", "value": "0 1px 2px rgba(20, 24, 41, 0.04)", "purpose": "亮色指标卡和海报的休息阴影。" },
+      { "name": "card-rest-dark", "value": "0 1px 2px rgba(0, 0, 0, 0.2)", "purpose": "暗色同一位置，略加深但不做光晕。" }
+    ],
+    "motion": [
+      { "name": "ease-standard", "value": "0.15s ease", "purpose": "主题切换按钮的边框和颜色过渡。" },
+      { "name": "media-lift", "value": "0.18s ease", "purpose": "媒体卡悬停轻微上移；prefers-reduced-motion 时关闭。" }
+    ],
+    "breakpoints": [
+      { "name": "phone", "value": "520px" },
+      { "name": "tablet", "value": "860px" },
+      { "name": "content", "value": "1240px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "主操作：保存、升级、批量修复。",
+      "html": "<button class=\"ds-btn-primary\" type=\"button\">保存</button>",
+      "css": ".ds-btn-primary { background: #4c5fd5; color: #ffffff; padding: 8px 14px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: background-color 0.15s ease; } .ds-btn-primary:hover { background: #3e4ec4; } .ds-btn-primary:focus-visible { outline: 2px solid #3e4ec4; outline-offset: 2px; } .ds-btn-primary:active { background: #3e4ec4; }"
+    },
+    {
+      "name": "Primary Button Hover",
+      "kind": "button",
+      "refersTo": "button-primary-hover",
+      "description": "主按钮按下/悬停态。",
+      "html": "<button class=\"ds-btn-primary-hover\" type=\"button\">保存</button>",
+      "css": ".ds-btn-primary-hover { background: #3e4ec4; color: #ffffff; padding: 8px 14px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; } .ds-btn-primary-hover:focus-visible { outline: 2px solid #3e4ec4; outline-offset: 2px; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "刷新、取消、次要操作；描边不铺主色。",
+      "html": "<button class=\"ds-btn-secondary\" type=\"button\">刷新</button>",
+      "css": ".ds-btn-secondary { background: #ffffff; color: #1f2937; padding: 8px 14px; border: 1px solid #e6e8f0; border-radius: 8px; font-weight: 600; cursor: pointer; transition: background-color 0.15s ease, border-color 0.15s ease; } .ds-btn-secondary:hover { background: #f8f9fd; border-color: #d7dae6; } .ds-btn-secondary:focus-visible { outline: 2px solid #3e4ec4; outline-offset: 2px; }"
+    },
+    {
+      "name": "Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "设置页输入。placeholder 只举例，可见 label 在表单项上。",
+      "html": "<label class=\"ds-field\"><span class=\"ds-field-label\">待整理目录 CID</span><input class=\"ds-input\" type=\"text\" placeholder=\"例如 3481694068122059860\" /></label>",
+      "css": ".ds-field { display: flex; flex-direction: column; gap: 6px; max-width: 420px; } .ds-field-label { color: #1f2937; font-size: 14px; font-weight: 600; } .ds-input { width: 100%; padding: 8px 12px; border: 1px solid #e6e8f0; border-radius: 8px; background: #ffffff; color: #1f2937; } .ds-input::placeholder { color: #5f6b7a; } .ds-input:hover { border-color: #d7dae6; } .ds-input:focus-visible { outline: 2px solid #3e4ec4; outline-offset: 1px; border-color: #4c5fd5; }"
+    },
+    {
+      "name": "Sheet Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "设置分区、指标和队列容器。",
+      "html": "<article class=\"ds-card\"><div class=\"ds-card-label\">发现问题</div><div class=\"ds-card-value\">12</div></article>",
+      "css": ".ds-card { background: #ffffff; color: #1f2937; border: 1px solid #e6e8f0; border-radius: 10px; padding: 16px 18px; box-shadow: 0 1px 2px rgba(20, 24, 41, 0.04); max-width: 240px; } .ds-card-label { color: #5f6b7a; font-size: 12px; font-weight: 600; } .ds-card-value { margin-top: 5px; color: #141829; font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }"
+    },
+    {
+      "name": "Kind Chip",
+      "kind": "chip",
+      "refersTo": "chip",
+      "description": "媒体种类和辅助标签。",
+      "html": "<span class=\"ds-chip ds-chip-kind\">电影</span>",
+      "css": ".ds-chip { display: inline-flex; align-items: center; padding: 1px 7px; border-radius: 6px; background: #f8f9fd; border: 1px solid #e6e8f0; color: #4b5563; font-size: 11px; line-height: 18px; } .ds-chip-kind { background: #eef0fc; border-color: transparent; color: #4c5fd5; font-weight: 600; }"
+    },
+    {
+      "name": "Side Nav",
+      "kind": "nav",
+      "refersTo": "chip",
+      "description": "当前项用软主色底，不用粗彩条。",
+      "html": "<nav class=\"ds-nav\" aria-label=\"主导航\"><a class=\"ds-nav-item\" href=\"#\">运行概览</a><a class=\"ds-nav-item is-active\" href=\"#\" aria-current=\"page\">质量巡检</a><a class=\"ds-nav-item\" href=\"#\">设置</a></nav>",
+      "css": ".ds-nav { display: flex; flex-direction: column; gap: 4px; width: 220px; padding: 8px; background: #ffffff; border: 1px solid #e6e8f0; border-radius: 10px; } .ds-nav-item { padding: 10px 12px; border-radius: 8px; color: #1f2937; text-decoration: none; font-weight: 500; } .ds-nav-item:hover { background: #f8f9fd; } .ds-nav-item:focus-visible { outline: 2px solid #3e4ec4; outline-offset: 2px; } .ds-nav-item.is-active { background: #eef0fc; color: #3e4ec4; font-weight: 600; }"
+    },
+    {
+      "name": "Theme Toggle",
+      "kind": "custom",
+      "refersTo": "button-primary",
+      "description": "顶栏 44×44 主题切换，必须有可见名称。",
+      "html": "<button class=\"ds-theme-toggle\" type=\"button\" aria-label=\"暗色 · 点击恢复跟随系统\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\"><path d=\"M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z\" /></svg></button>",
+      "css": ".ds-theme-toggle { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 1px solid #e6e8f0; border-radius: 8px; background: #ffffff; color: #4b5563; cursor: pointer; transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease; } .ds-theme-toggle:hover { background: #f8f9fd; border-color: #d7dae6; color: #1f2937; } .ds-theme-toggle:focus-visible { outline: 2px solid #3e4ec4; outline-offset: 2px; }"
+    },
+    {
+      "name": "Log Console",
+      "kind": "custom",
+      "refersTo": "card",
+      "description": "两种主题都保持深底终端。",
+      "html": "<pre class=\"ds-log\" role=\"log\" aria-label=\"实时日志输出\"><span class=\"ds-log-info\">[info] runner heartbeat ok</span>\n<span class=\"ds-log-warn\">[warning] lock wait 12s</span>\n<span class=\"ds-log-error\">[error] cms upgrade rolled back</span></pre>",
+      "css": ".ds-log { margin: 0; padding: 9px 12px; background: #111827; border: 1px solid #243044; border-radius: 8px; color: #d7deea; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; } .ds-log-info { color: #d7deea; } .ds-log-warn { color: #f6c85f; } .ds-log-error { color: #ff8585; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Media Desk",
+    "overview": "这是家庭媒体库旁边的一张安静工作台，不是 NAS 插件后台。默认克制：浅纸色底、细描边、几乎没有阴影；只有任务卡住、质量告警、解锁花费积分时才提高音量。暗色模式改成分层表面，而不是把浅色反相。\n\n文字用系统中西文黑体，不加载网红英文字体。品牌落在精确的靛蓝主色、表格数字和确认文案上，不靠装饰。",
+    "keyCharacteristics": [
+      "异常优先，首页只回答现在是否正常",
+      "亮色细边 + 一层轻阴影；暗色只用色阶分层",
+      "主色少用，留给链接、主按钮和当前导航",
+      "危险操作先说后果，再让人确认"
+    ],
+    "rules": [
+      { "name": "The One Accent Rule", "body": "主色出现面积不超过一屏的一成。统计数字用墨色，不用主色。", "section": "colors" },
+      { "name": "The No Costume Mono Rule", "body": "等宽字体只用于日志、版本和命令，不拿来装「很技术」。", "section": "typography" },
+      { "name": "The Flat-By-Default Rule", "body": "休息状态用边框。阴影不作为装饰光晕。", "section": "elevation" }
+    ],
+    "dos": [
+      "Do 用 token，不要在组件里另写一套蓝。",
+      "Do 给每个输入可见名称。",
+      "Do 在会改任务或容器的操作前说明后果。",
+      "Do 窄屏把宽表收成卡片。"
+    ],
+    "donts": [
+      "Don't 用 Inter / Geist / Plus Jakarta 这类网红英文字体。",
+      "Don't 把内部 action key 写在按钮上。",
+      "Don't 把底层日志堆到首页。",
+      "Don't 为了「更炫」加渐变字或玻璃拟态。"
+    ]
+  }
+}

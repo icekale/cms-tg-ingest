@@ -1,3 +1,14 @@
+const ACTION_LABELS = {
+  retry: '重试',
+  emby: '查 Emby',
+  restore: '恢复 STRM',
+  reprocess: '从头重跑',
+}
+
+export function taskActionLabel(action) {
+  return ACTION_LABELS[action] || action
+}
+
 export function displayTaskTitle(task = {}) {
   const displayTitle = typeof task.display_title === 'string' ? task.display_title.trim() : ''
   if (displayTitle) return displayTitle
