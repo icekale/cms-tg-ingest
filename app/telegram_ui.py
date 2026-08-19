@@ -251,6 +251,15 @@ def truncate_end(text: str, limit: int) -> str:
     return value[: width - 1] + "…"
 
 
+def format_hdhive_candidate_label(candidate: dict[str, str] | None) -> str:
+    item = candidate if isinstance(candidate, dict) else {}
+    title = str(item.get("title") or "未命名").strip() or "未命名"
+    year = str(item.get("year") or "").strip() or "年份未知"
+    media_type = "电影" if item.get("media_type") == "movie" else "剧集"
+    tmdb_id = str(item.get("tmdb_id") or "").strip() or "-"
+    return f"{title} ({year}) · {media_type} · TMDB {tmdb_id}"
+
+
 def format_taskstore_status(tasks: list[Any]) -> str:
     if not tasks:
         return ""

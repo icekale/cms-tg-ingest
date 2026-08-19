@@ -11,6 +11,7 @@ from app.clients.hdhive import HdhiveAccount, HdhiveResource, HdhiveUnlockItem
 from app.hdhive import HdhiveSessionStore, HdhiveWorkflow
 from app.hdhive_subscriptions import HdhiveSubscriptionService
 from app.telegram_ui import (
+    format_hdhive_candidate_label,
     format_hdhive_subscriptions,
     hdhive_candidate_keyboard,
     hdhive_resource_keyboard,
@@ -599,6 +600,26 @@ class HdhiveBridgeTests(unittest.TestCase):
 
     def test_truncate_end_fits_a_single_ellipsis_when_limit_is_one(self):
         self.assertEqual(truncate_end("abc", 1), "…")
+
+    def test_candidate_label_uses_full_title_and_chinese_type(self):
+        self.assertEqual(
+            format_hdhive_candidate_label(
+                {"title": "攻壳机动队 SAC_2045", "year": "2020", "media_type": "tv", "tmdb_id": "80986"}
+            ),
+            "攻壳机动队 SAC_2045 (2020) · 剧集 · TMDB 80986",
+        )
+        self.assertEqual(
+            format_hdhive_candidate_label(
+                {"title": "搏击俱乐部", "year": "1999", "media_type": "movie", "tmdb_id": "550"}
+            ),
+            "搏击俱乐部 (1999) · 电影 · TMDB 550",
+        )
+
+    def test_candidate_label_fills_missing_title_and_year(self):
+        self.assertEqual(
+            format_hdhive_candidate_label({"media_type": "movie", "tmdb_id": "550"}),
+            "未命名 (年份未知) · 电影 · TMDB 550",
+        )
 
 
 if __name__ == "__main__":
