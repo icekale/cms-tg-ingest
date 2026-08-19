@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.3 - 2026-08-19
+
+- **修复 CMS 一键升级把容器建成网络名**：`docker_create_container` 遍历 `Networks` 时复用了参数 `name`，Compose 网络 `cms_default` 覆盖了 `cloud-media-sync`。结果是新建未启动的 `cms_default`，再 start 正式名就 404 并回滚。现网已因此从 `0.4.9.2` 升到 `0.4.9.3`。
+- 测试：后端 1499 项、前端 29 项全部通过。
+
 ## 0.4.2 - 2026-08-19
 
 - **设置页一键升级 CMS**：发现远程新版后可直接「升级」，经 docker.sock 拉取指定 tag、按现网配置重建容器、校验 STRM 守卫，失败自动回滚；不再需要在 Unraid 手贴 `update-cms.sh`。

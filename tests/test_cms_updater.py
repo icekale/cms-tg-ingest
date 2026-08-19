@@ -8,6 +8,7 @@ from app.cms_updater import (
     CmsVersionChecker,
     _split_image,
     docker_container_started_at,
+    docker_create_container,
     docker_pull_image,
     fetch_remote_latest_tag,
 )
@@ -498,6 +499,35 @@ class CmsUpgradeTests(unittest.TestCase):
         )
         defaults.update(kwargs)
         return CmsVersionChecker(store, FakeCms("0.4.9.1"), **defaults)
+
+    def test_create_keeps_container_name_when_network_is_cms_default(self):
+        captured = {}
+
+        def fake_api(_socket, _method, path, body=None, timeout=30.0, headers=None):
+            captured["path"] = path
+            captured["body"] = json.loads(body.decode())
+            return 201, b'{"Id":"abc"}'
+
+        inspect = {
+            "Config": {"Image": "imaliang/cloud-media-sync:0.4.9.2", "Env": ["A=1"]},
+            "HostConfig": {"NetworkMode": "cms_default"},
+            "NetworkSettings": {
+                "Networks": {"cms_default": {"Aliases": ["cloud-media-sync"]}},
+            },
+        }
+        with patch("app.cms_updater._docker_api", side_effect=fake_api):
+            error = docker_create_container(
+                "/var/run/docker.sock",
+                "cloud-media-sync",
+                inspect,
+                "imaliang/cloud-media-sync:0.4.9.3",
+            )
+
+        self.assertEqual(error, "")
+        self.assertIn("name=cloud-media-sync", captured["path"])
+        self.assertNotIn("cms_default", captured["path"])
+        self.assertEqual(captured["body"]["Image"], "imaliang/cloud-media-sync:0.4.9.3")
+        self.assertIn("cms_default", captured["body"]["NetworkingConfig"]["EndpointsConfig"])
 
     def test_upgrade_recreates_container_and_removes_old(self):
         calls = []

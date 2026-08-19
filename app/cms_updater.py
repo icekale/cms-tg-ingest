@@ -293,13 +293,13 @@ def docker_create_container(
     config["Image"] = str(image)
     networks = (inspect.get("NetworkSettings") or {}).get("Networks") or {}
     endpoints = {}
-    for name, conf in networks.items():
+    for network_name, conf in networks.items():
         if not isinstance(conf, dict):
             continue
         entry = {}
         if conf.get("Aliases"):
             entry["Aliases"] = conf.get("Aliases")
-        endpoints[str(name)] = entry
+        endpoints[str(network_name)] = entry
     body = {
         **config,
         "HostConfig": inspect.get("HostConfig") or {},
