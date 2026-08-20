@@ -13,14 +13,14 @@ cms-tg-ingest 在共享 STRM 模式下，任务完成后会删除 115 转存源�
 
 本补丁在 CMS 容器内安装两个守卫（都 monkey patch app.core.media_sync）：
 1. 删除守卫：
-   a) 方法级（MediaSync.delete_local_file）：目标是 /s/ strm，或目录（含下一层
-      Season 子目录）里有 /s/ strm，则整次删除跳过。CMS 增量同步对 delete_file
-      走 shutil.rmtree(剧集/电影目录)。旧守卫只拦 .strm，海报/nfo 仍被删
-      （2026-08-19：飞驰人生2、小黄人与大怪兽）。只扫同目录时，剧集根目录
-      poster.jpg / fanart.jpg / tvshow.nfo 仍会被删——它们和 .strm 不在一层
-      （2026-08-20：攻壳机动队）。
-   b) os 级兜底（os.remove / os.unlink）：.strm 是 /s/，或同目录 / 下一层
-      Season 子目录（含 dir_fd）里有 /s/ strm，则该次 unlink 跳过。
+   a) 方法级（MediaSync.delete_local_file）：目标落在媒体库/share 根下则整次
+      跳过（唯一例外：/d/ 直链 strm，直链拦截守卫还要删它）。CMS 增量同步对
+      delete_file 走 shutil.rmtree(剧集/电影目录)，按文件名拦会永远漏下一种
+      sidecar（2026-08-20：攻壳机动队根目录海报）。
+   b) os 级兜底（os.remove / os.unlink）：同上。路径解析含 rmtree 的
+      unlink(name, dir_fd=)。宿主机 `/mnt/user/Unraid/strm` 与容器 `/media`
+      视为同一棵树；配置了 `转存` 时自动带上 `share`。根外仍保留 /s/ strm
+      与同目录/下一层 Season sidecar 兜底。
 2. 直链拦截守卫（模块级 create_strm_file(file_path, content)）：所有 strm 文件
    都由该函数写出（build_direct / save_file / save_video / sync_file_to_local
    均调用它）。先原样调用原函数（不破坏 CMS 状态机），再校验 content 与落盘路径：
@@ -90,13 +90,59 @@ _DIRECT_STRM_WRITER = "create_strm_file"
 # os 级删除守卫的独立 marker（verify.sh / doctor.py / web_api.py 按此检测；
 # 自定义需同步修改这 4 处）。独立于方法级守卫，避免任一安装失败影响另一检测。
 _OS_STRM_GUARD_MARKER = "STRM-GUARD os-level delete-protect installed on"
+_DEFAULT_LIBRARY_ROOTS = "/mnt/user/Unraid/strm/转存,/mnt/user/Unraid/strm/share"
+_HOST_MEDIA_PREFIX = "/mnt/user/Unraid/strm"
+_CMS_MEDIA_PREFIX = "/media"
 
 
 def _library_roots() -> list[str]:
-    raw = os.environ.get("STRM_GUARD_LIBRARY_ROOTS", "/mnt/user/Unraid/strm/转存").strip()
+    raw = os.environ.get("STRM_GUARD_LIBRARY_ROOTS", _DEFAULT_LIBRARY_ROOTS).strip()
     if not raw:
         return []
-    return [part.strip() for part in raw.split(",") if part.strip()]
+    roots = [part.strip() for part in raw.split(",") if part.strip()]
+    extra: list[str] = []
+    for root in roots:
+        if root == _HOST_MEDIA_PREFIX or root.startswith(_HOST_MEDIA_PREFIX + "/"):
+            extra.append(_CMS_MEDIA_PREFIX + root[len(_HOST_MEDIA_PREFIX) :])
+        elif root == _CMS_MEDIA_PREFIX or root.startswith(_CMS_MEDIA_PREFIX + "/"):
+            extra.append(_HOST_MEDIA_PREFIX + root[len(_CMS_MEDIA_PREFIX) :])
+    for root in list(roots) + extra:
+        if root.endswith("/转存"):
+            extra.append(root[: -len("转存")] + "share")
+        elif root.endswith("/share"):
+            extra.append(root[: -len("share")] + "转存")
+    out: list[str] = []
+    seen: set[str] = set()
+    for root in roots + extra:
+        if root and root not in seen:
+            seen.add(root)
+            out.append(root)
+    return out
+
+
+def _strm_head(path, dir_fd=None) -> str:
+    try:
+        text_path = os.fspath(path)
+    except Exception:
+        return ""
+    if isinstance(text_path, bytes):
+        try:
+            text_path = os.fsdecode(text_path)
+        except Exception:
+            return ""
+    if not str(text_path).lower().endswith(".strm"):
+        return ""
+    try:
+        if dir_fd is not None:
+            fd = os.open(text_path, os.O_RDONLY, dir_fd=int(dir_fd))
+            with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as fh:
+                return fh.read(512)
+        with open(text_path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read(512)
+    except OSError:
+        return ""
+    except Exception:
+        return ""
 
 
 def _strm_is_self_share(path, dir_fd=None) -> bool:
@@ -109,30 +155,78 @@ def _strm_is_self_share(path, dir_fd=None) -> bool:
     带 dir_fd 时改用 os.open(name, O_RDONLY, dir_fd=fd) 以该目录为基准
     读内容，无需把 fd 还原成路径，跨平台（Linux/macOS 均支持 dir_fd）。
     """
+    return bool(_SELF_SHARE_URL_RE.search(_strm_head(path, dir_fd)))
+
+
+def _is_direct_strm(path, dir_fd=None) -> bool:
+    """目标是 .strm 且内容含 /d/ 直链。媒体库根下唯一次允许删除。"""
+    return _DIRECT_LINK_MARK in _strm_head(path, dir_fd)
+
+
+def _dir_fd_path(dir_fd) -> str:
+    if dir_fd is None:
+        return ""
+    fd = int(dir_fd)
     try:
-        text_path = os.fspath(path)
-    except Exception:
-        return False
-    if isinstance(text_path, bytes):
-        try:
-            text_path = os.fsdecode(text_path)
-        except Exception:
-            return False
-    if not str(text_path).lower().endswith(".strm"):
-        return False
-    try:
-        if dir_fd is not None:
-            fd = os.open(text_path, os.O_RDONLY, dir_fd=int(dir_fd))
-            with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as fh:
-                head = fh.read(512)
-        else:
-            with open(text_path, "r", encoding="utf-8", errors="replace") as fh:
-                head = fh.read(512)
-        return bool(_SELF_SHARE_URL_RE.search(head))
+        return os.readlink(f"/proc/self/fd/{fd}")
     except OSError:
-        return False
+        pass
+    try:
+        import fcntl
+
+        raw = fcntl.fcntl(fd, getattr(fcntl, "F_GETPATH", 50), bytearray(1024))
+        if isinstance(raw, (bytes, bytearray)):
+            return raw.split(b"\x00", 1)[0].decode()
     except Exception:
-        return False
+        return ""
+    return ""
+
+
+def _resolve_delete_path(target, dir_fd=None) -> str:
+    try:
+        name = os.fspath(target)
+    except Exception:
+        name = ""
+    if isinstance(name, bytes):
+        try:
+            name = os.fsdecode(name)
+        except Exception:
+            name = ""
+    name = str(name or "")
+    if dir_fd is None:
+        return name
+    if name and os.path.isabs(name):
+        return name
+    base = _dir_fd_path(dir_fd)
+    if not base:
+        return name
+    return os.path.join(base, name) if name else base
+
+
+def _protected_by_library_root(target, dir_fd=None) -> bool:
+    path = _resolve_delete_path(target, dir_fd)
+    if _within_library_roots(path):
+        return True
+    return bool(dir_fd is not None and _within_library_roots(_dir_fd_path(dir_fd)))
+
+
+def _os_delete_skip_reason(target, dir_fd=None) -> str:
+    if _is_direct_strm(target, dir_fd):
+        return ""
+    if _protected_by_library_root(target, dir_fd):
+        return "library root"
+    if _strm_is_self_share(target, dir_fd):
+        return "self-share STRM"
+    if dir_fd is not None and _dirfd_has_self_share_strm(dir_fd):
+        return "sidecar in self-share dir"
+    if dir_fd is None:
+        try:
+            parent = os.path.dirname(os.fspath(target))
+        except Exception:
+            parent = ""
+        if _dir_has_self_share_strm(parent):
+            return "sidecar in self-share dir"
+    return ""
 
 
 def _dir_files_have_self_share_strm(path: str) -> bool:
@@ -217,6 +311,10 @@ def _dirfd_has_self_share_strm(dir_fd) -> bool:
 def _should_skip_delete(path: str) -> bool:
     if not path:
         return False
+    if _is_direct_strm(path):
+        return False
+    if _within_library_roots(path):
+        return True
     if _strm_is_self_share(path):
         return True
     check = path if os.path.isdir(path) else os.path.dirname(path)
@@ -290,40 +388,17 @@ def _install_os_delete_guard() -> bool:
         # shutil.rmtree（3.12 起）用 os.unlink(name, dir_fd=fd) 删目录内文件，
         # target 只是相对文件名；把 dir_fd 传给守卫以该目录为基准读内容，
         # 否则相对名 open 不到 → 守卫被旁路（2026-08-11 哑舍误删根因）。
-        dir_fd = kwargs.get("dir_fd")
-        if _strm_is_self_share(target, dir_fd=dir_fd):
-            logger.warning("STRM-GUARD os.unlink skip delete self-share STRM: %s", target)
+        reason = _os_delete_skip_reason(target, dir_fd=kwargs.get("dir_fd"))
+        if reason:
+            logger.warning("STRM-GUARD os.unlink skip %s: %s", reason, target)
             return None
-        # 同目录或下一层 Season 有 /s/ strm 时，sidecar（poster/nfo）一并跳过。
-        if dir_fd is not None and _dirfd_has_self_share_strm(dir_fd):
-            logger.warning("STRM-GUARD os.unlink skip sidecar in self-share dir: %s", target)
-            return None
-        if dir_fd is None:
-            try:
-                parent = os.path.dirname(os.fspath(target))
-            except Exception:
-                parent = ""
-            if _dir_has_self_share_strm(parent):
-                logger.warning("STRM-GUARD os.unlink skip sidecar in self-share dir: %s", target)
-                return None
         return _orig_os_unlink(target, *args, **kwargs)
 
     def remove_guarded(target, *args, **kwargs):
-        dir_fd = kwargs.get("dir_fd")
-        if _strm_is_self_share(target, dir_fd=dir_fd):
-            logger.warning("STRM-GUARD os.remove skip delete self-share STRM: %s", target)
+        reason = _os_delete_skip_reason(target, dir_fd=kwargs.get("dir_fd"))
+        if reason:
+            logger.warning("STRM-GUARD os.remove skip %s: %s", reason, target)
             return None
-        if dir_fd is not None and _dirfd_has_self_share_strm(dir_fd):
-            logger.warning("STRM-GUARD os.remove skip sidecar in self-share dir: %s", target)
-            return None
-        if dir_fd is None:
-            try:
-                parent = os.path.dirname(os.fspath(target))
-            except Exception:
-                parent = ""
-            if _dir_has_self_share_strm(parent):
-                logger.warning("STRM-GUARD os.remove skip sidecar in self-share dir: %s", target)
-                return None
         return _orig_os_remove(target, *args, **kwargs)
 
     unlink_guarded._strm_os_guard = True

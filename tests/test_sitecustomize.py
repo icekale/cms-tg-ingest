@@ -49,8 +49,13 @@ class DirFdGuardTest(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self._old_roots = os.environ.get("STRM_GUARD_LIBRARY_ROOTS")
 
     def tearDown(self):
+        if self._old_roots is None:
+            os.environ.pop("STRM_GUARD_LIBRARY_ROOTS", None)
+        else:
+            os.environ["STRM_GUARD_LIBRARY_ROOTS"] = self._old_roots
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _make_dir(self, name="dir", content=_SELF_SHARE_URL):
@@ -122,6 +127,49 @@ class DirFdGuardTest(unittest.TestCase):
         self.assertTrue(os.path.exists(fanart))
         self.assertTrue(os.path.exists(nfo))
         self.assertTrue(os.path.exists(os.path.join(d, "Season 01", "E01.strm")))
+
+    def test_library_roots_alias_host_mount_and_share(self):
+        """宿主机路径要同时覆盖容器 /media 挂载和 share 目录。"""
+        os.environ["STRM_GUARD_LIBRARY_ROOTS"] = "/mnt/user/Unraid/strm/转存"
+        roots = _loaded_guard._library_roots()
+        self.assertIn("/mnt/user/Unraid/strm/转存", roots)
+        self.assertIn("/media/转存", roots)
+        self.assertIn("/mnt/user/Unraid/strm/share", roots)
+        self.assertIn("/media/share", roots)
+
+    def test_rmtree_keeps_any_file_under_library_root(self):
+        """媒体库根下没有 /s/ strm 的普通文件也不得删（不再按文件名打地鼠）。"""
+        os.environ["STRM_GUARD_LIBRARY_ROOTS"] = self.tmp
+        show = os.path.join(self.tmp, "Show")
+        os.makedirs(show)
+        poster = os.path.join(show, "poster.jpg")
+        with open(poster, "w") as fh:
+            fh.write("img")
+        with self.assertRaises(OSError):
+            shutil.rmtree(show)
+        self.assertTrue(os.path.exists(poster))
+
+    def test_unlink_dir_fd_under_library_root_is_skipped(self):
+        """rmtree 的 unlink(name, dir_fd=) 也要按目录是否在媒体库根下拦截。"""
+        os.environ["STRM_GUARD_LIBRARY_ROOTS"] = self.tmp
+        show = os.path.join(self.tmp, "Show")
+        os.makedirs(show)
+        poster = os.path.join(show, "poster.jpg")
+        with open(poster, "w") as fh:
+            fh.write("img")
+        fd = os.open(show, os.O_RDONLY)
+        try:
+            os.unlink("poster.jpg", dir_fd=fd)
+            self.assertTrue(os.path.exists(poster))
+        finally:
+            os.close(fd)
+
+    def test_rmtree_direct_strm_under_library_root_still_deleted(self):
+        """媒体库根下的 /d/ 直链 strm 仍可删（直链拦截守卫要先写后删）。"""
+        os.environ["STRM_GUARD_LIBRARY_ROOTS"] = self.tmp
+        d = self._make_dir(content=_DIRECT_URL)
+        shutil.rmtree(d)
+        self.assertFalse(os.path.exists(d))
 
 
 if __name__ == "__main__":
