@@ -96,6 +96,33 @@ class DirFdGuardTest(unittest.TestCase):
             os.close(fd)
         shutil.rmtree(d, ignore_errors=True)
 
+    def test_rmtree_keeps_same_dir_sidecar(self):
+        """同目录有 /s/ strm 时，rmtree 不得删 thumb/nfo（飞驰人生2）。"""
+        d = self._make_dir()
+        thumb = os.path.join(d, "Season 01", "E01-thumb.jpg")
+        with open(thumb, "w") as fh:
+            fh.write("img")
+        with self.assertRaises(OSError):
+            shutil.rmtree(d)
+        self.assertTrue(os.path.exists(thumb))
+        self.assertTrue(os.path.exists(os.path.join(d, "Season 01", "E01.strm")))
+
+    def test_rmtree_keeps_series_root_poster(self):
+        """剧集根目录海报与 Season 不在同层：rmtree 仍须跳过（攻壳机动队 2026-08-20）。"""
+        d = self._make_dir()
+        poster = os.path.join(d, "poster.jpg")
+        fanart = os.path.join(d, "fanart.jpg")
+        nfo = os.path.join(d, "tvshow.nfo")
+        for path in (poster, fanart, nfo):
+            with open(path, "w") as fh:
+                fh.write("meta")
+        with self.assertRaises(OSError):
+            shutil.rmtree(d)
+        self.assertTrue(os.path.exists(poster))
+        self.assertTrue(os.path.exists(fanart))
+        self.assertTrue(os.path.exists(nfo))
+        self.assertTrue(os.path.exists(os.path.join(d, "Season 01", "E01.strm")))
+
 
 if __name__ == "__main__":
     unittest.main()

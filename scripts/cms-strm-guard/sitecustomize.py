@@ -13,15 +13,14 @@ cms-tg-ingest 在共享 STRM 模式下，任务完成后会删除 115 转存源�
 
 本补丁在 CMS 容器内安装两个守卫（都 monkey patch app.core.media_sync）：
 1. 删除守卫：
-   a) 方法级（MediaSync.delete_local_file）：删除本地 .strm 前读取文件内容，
-      若指向自有分享链接（/s/ 模式）则跳过删除。但 CMS 增量同步（消费 115
-      delete_file 生活事件）的本地删除未必经过该方法，2026-08 线上案例：
-      /s/ 转存 strm 仍被误删且无 skip 日志，说明存在旁路删除路径。
-   b) os 级兜底（os.remove / os.unlink）：进程内一切文件删除的最终咽喉。
-      在 sitecustomize 导入期（早于 CMS 其余模块）同步挂钩，任何删除路径
-      （含增量同步、shutil.rmtree 内部调用）删 .strm 前都校验内容，/s/ 则
-      跳过。注意 rmtree 自 Python 3.12 用 os.unlink(name, dir_fd=fd) 删
-      目录内文件（相对名 + dir_fd），守卫按 dir_fd 基准读内容，否则被旁路。
+   a) 方法级（MediaSync.delete_local_file）：目标是 /s/ strm，或目录（含下一层
+      Season 子目录）里有 /s/ strm，则整次删除跳过。CMS 增量同步对 delete_file
+      走 shutil.rmtree(剧集/电影目录)。旧守卫只拦 .strm，海报/nfo 仍被删
+      （2026-08-19：飞驰人生2、小黄人与大怪兽）。只扫同目录时，剧集根目录
+      poster.jpg / fanart.jpg / tvshow.nfo 仍会被删——它们和 .strm 不在一层
+      （2026-08-20：攻壳机动队）。
+   b) os 级兜底（os.remove / os.unlink）：.strm 是 /s/，或同目录 / 下一层
+      Season 子目录（含 dir_fd）里有 /s/ strm，则该次 unlink 跳过。
 2. 直链拦截守卫（模块级 create_strm_file(file_path, content)）：所有 strm 文件
    都由该函数写出（build_direct / save_file / save_video / sync_file_to_local
    均调用它）。先原样调用原函数（不破坏 CMS 状态机），再校验 content 与落盘路径：
@@ -136,6 +135,94 @@ def _strm_is_self_share(path, dir_fd=None) -> bool:
         return False
 
 
+def _dir_files_have_self_share_strm(path: str) -> bool:
+    """path 目录这一层有 /s/ strm（不看子目录）。"""
+    try:
+        if not path or not os.path.isdir(path):
+            return False
+        with os.scandir(path) as it:
+            for entry in it:
+                if entry.is_file() and _strm_is_self_share(entry.path):
+                    return True
+    except OSError:
+        return False
+    except Exception:
+        return False
+    return False
+
+
+def _dir_has_self_share_strm(path: str) -> bool:
+    """目录或其下一层子目录里有 /s/ strm。
+
+    剧集根目录只有 Season XX/，.strm 在下一层；只扫本层会漏掉 poster.jpg。
+    只往下看一层，避免把分类目录（Dongman/）整棵树判成受保护。
+    """
+    if _dir_files_have_self_share_strm(path):
+        return True
+    try:
+        if not path or not os.path.isdir(path):
+            return False
+        with os.scandir(path) as it:
+            children = [entry.path for entry in it if entry.is_dir(follow_symlinks=False)]
+        return any(_dir_files_have_self_share_strm(child) for child in children)
+    except OSError:
+        return False
+    except Exception:
+        return False
+
+
+def _dirfd_files_have_self_share_strm(dir_fd) -> bool:
+    """dir_fd 这一层有 /s/ strm。"""
+    if dir_fd is None:
+        return False
+    try:
+        for name in os.listdir(dir_fd):
+            if _strm_is_self_share(name, dir_fd=int(dir_fd)):
+                return True
+    except OSError:
+        return False
+    except Exception:
+        return False
+    return False
+
+
+def _dirfd_has_self_share_strm(dir_fd) -> bool:
+    """dir_fd 目录或其下一层子目录里有 /s/ strm。供 rmtree 的 unlink(name, dir_fd=) 用。"""
+    if _dirfd_files_have_self_share_strm(dir_fd):
+        return True
+    if dir_fd is None:
+        return False
+    try:
+        names = os.listdir(dir_fd)
+    except OSError:
+        return False
+    except Exception:
+        return False
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    for name in names:
+        try:
+            child_fd = os.open(name, flags, dir_fd=int(dir_fd))
+        except OSError:
+            continue
+        try:
+            if _dirfd_files_have_self_share_strm(child_fd):
+                return True
+        finally:
+            os.close(child_fd)
+    return False
+
+
+def _should_skip_delete(path: str) -> bool:
+    if not path:
+        return False
+    if _strm_is_self_share(path):
+        return True
+    check = path if os.path.isdir(path) else os.path.dirname(path)
+    return _dir_has_self_share_strm(check)
+
+
 def _extract_delete_local_path(args, kwargs) -> str:
     """从删除方法参数里尽量取出目标本地路径。
 
@@ -203,15 +290,40 @@ def _install_os_delete_guard() -> bool:
         # shutil.rmtree（3.12 起）用 os.unlink(name, dir_fd=fd) 删目录内文件，
         # target 只是相对文件名；把 dir_fd 传给守卫以该目录为基准读内容，
         # 否则相对名 open 不到 → 守卫被旁路（2026-08-11 哑舍误删根因）。
-        if _strm_is_self_share(target, dir_fd=kwargs.get("dir_fd")):
+        dir_fd = kwargs.get("dir_fd")
+        if _strm_is_self_share(target, dir_fd=dir_fd):
             logger.warning("STRM-GUARD os.unlink skip delete self-share STRM: %s", target)
             return None
+        # 同目录或下一层 Season 有 /s/ strm 时，sidecar（poster/nfo）一并跳过。
+        if dir_fd is not None and _dirfd_has_self_share_strm(dir_fd):
+            logger.warning("STRM-GUARD os.unlink skip sidecar in self-share dir: %s", target)
+            return None
+        if dir_fd is None:
+            try:
+                parent = os.path.dirname(os.fspath(target))
+            except Exception:
+                parent = ""
+            if _dir_has_self_share_strm(parent):
+                logger.warning("STRM-GUARD os.unlink skip sidecar in self-share dir: %s", target)
+                return None
         return _orig_os_unlink(target, *args, **kwargs)
 
     def remove_guarded(target, *args, **kwargs):
-        if _strm_is_self_share(target, dir_fd=kwargs.get("dir_fd")):
+        dir_fd = kwargs.get("dir_fd")
+        if _strm_is_self_share(target, dir_fd=dir_fd):
             logger.warning("STRM-GUARD os.remove skip delete self-share STRM: %s", target)
             return None
+        if dir_fd is not None and _dirfd_has_self_share_strm(dir_fd):
+            logger.warning("STRM-GUARD os.remove skip sidecar in self-share dir: %s", target)
+            return None
+        if dir_fd is None:
+            try:
+                parent = os.path.dirname(os.fspath(target))
+            except Exception:
+                parent = ""
+            if _dir_has_self_share_strm(parent):
+                logger.warning("STRM-GUARD os.remove skip sidecar in self-share dir: %s", target)
+                return None
         return _orig_os_remove(target, *args, **kwargs)
 
     unlink_guarded._strm_os_guard = True
@@ -280,8 +392,8 @@ def _install_guard(ms_cls) -> bool:
         # dict 行 / 裸路径字符串；若是 /s/ 自有分享 strm 则跳过删除；否则原样
         # 调用原方法，保证 CMS 更新后即使签名变化，删除流程也绝不因守卫崩溃。
         local_path = _extract_delete_local_path(args, kwargs)
-        if local_path and _strm_is_self_share(local_path):
-            logger.warning("STRM-GUARD skip delete self-share STRM: %s", local_path)
+        if _should_skip_delete(local_path):
+            logger.warning("STRM-GUARD skip delete self-share path: %s", local_path)
             return None
         return original(self, *args, **kwargs)
 
