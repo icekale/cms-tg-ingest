@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   NConfigProvider,
   NLayout,
@@ -13,24 +13,40 @@ import {
 } from 'naive-ui'
 import { RouterView, useRoute, useRouter } from 'vue-router'
 import { api } from './api'
+import { navIcons } from './navIcons'
 import { useTheme } from './useTheme'
 import { darkThemeOverrides, lightThemeOverrides } from './themeOverrides'
 
+const NARROW_NAV = '(max-width: 860px)'
+const PHONE_NAV = '(max-width: 520px)'
+
+function matchesQuery(query) {
+  if (typeof window !== 'undefined' && window.matchMedia) {
+    return window.matchMedia(query).matches
+  }
+  return false
+}
+
 const route = useRoute()
 const router = useRouter()
-const collapsed = ref(false)
+const isNarrow = ref(matchesQuery(NARROW_NAV))
+const isPhone = ref(matchesQuery(PHONE_NAV))
+const collapsed = ref(isNarrow.value)
+const collapsedWidth = computed(() => (isPhone.value ? 0 : 64))
+const navOpen = computed(() => isPhone.value && !collapsed.value)
+const navToggleLabel = computed(() => (collapsed.value ? '打开导航' : '关闭导航'))
 const program = ref({ app_name: 'cms-tg-ingest', version: '' })
 const brandLogoUrl = `${import.meta.env.BASE_URL}brand/logo-mark.svg`
 const { mode, isDark, toggle } = useTheme()
 const menuOptions = [
-  { label: '运行概览', key: '/overview' },
-  { label: 'Emby 看板', key: '/emby-board' },
-  { label: '当前任务', key: '/tasks' },
-  { label: '质量巡检', key: '/quality' },
-  { label: '本地健康', key: '/health' },
-  { label: 'HDHive 订阅', key: '/hdhive' },
-  { label: '实时日志', key: '/logs' },
-  { label: '设置', key: '/settings' },
+  { label: '运行概览', key: '/overview', icon: navIcons.overview },
+  { label: 'Emby 看板', key: '/emby-board', icon: navIcons.emby },
+  { label: '当前任务', key: '/tasks', icon: navIcons.tasks },
+  { label: '质量巡检', key: '/quality', icon: navIcons.quality },
+  { label: '本地健康', key: '/health', icon: navIcons.health },
+  { label: 'HDHive 订阅', key: '/hdhive', icon: navIcons.hdhive },
+  { label: '实时日志', key: '/logs', icon: navIcons.logs },
+  { label: '设置', key: '/settings', icon: navIcons.settings },
 ]
 const activeKey = computed(() => route.path.startsWith('/tasks/') ? '/tasks' : route.path)
 const themeTitle = computed(() => {
@@ -39,9 +55,37 @@ const themeTitle = computed(() => {
   }
   return isDark.value ? '暗色 · 点击恢复跟随系统' : '亮色 · 点击恢复跟随系统'
 })
-function navigate(key) { router.push(key) }
+function navigate(key) {
+  router.push(key)
+  if (isNarrow.value) collapsed.value = true
+}
+
+function toggleNav() {
+  collapsed.value = !collapsed.value
+}
+
+function syncViewport() {
+  const narrow = matchesQuery(NARROW_NAV)
+  const phone = matchesQuery(PHONE_NAV)
+  isNarrow.value = narrow
+  isPhone.value = phone
+  if (narrow) collapsed.value = true
+}
+
+const mediaQueries = []
 onMounted(async () => {
+  if (window.matchMedia) {
+    for (const query of [NARROW_NAV, PHONE_NAV]) {
+      const mql = window.matchMedia(query)
+      mql.addEventListener('change', syncViewport)
+      mediaQueries.push(mql)
+    }
+    syncViewport()
+  }
   try { program.value = await api.settings() } catch (_) { /* Footer stays useful while the API is unavailable. */ }
+})
+onUnmounted(() => {
+  for (const mql of mediaQueries) mql.removeEventListener('change', syncViewport)
 })
 </script>
 
@@ -49,9 +93,24 @@ onMounted(async () => {
   <n-config-provider :theme="isDark ? darkTheme : null" :theme-overrides="isDark ? darkThemeOverrides : lightThemeOverrides">
     <n-message-provider>
       <a class="skip-link" href="#main-content">跳到内容</a>
-      <n-layout class="admin-shell">
+      <n-layout class="admin-shell" :class="{ 'is-phone-nav': isPhone, 'is-nav-open': navOpen }">
       <n-layout-header bordered class="top-header">
-        <div class="brand"><img class="brand-logo" :src="brandLogoUrl" alt="" width="38" height="38" /><span>入库助手</span></div>
+        <div class="brand">
+          <button
+            v-if="isPhone"
+            type="button"
+            class="theme-toggle nav-toggle"
+            :title="navToggleLabel"
+            :aria-label="navToggleLabel"
+            :aria-expanded="navOpen"
+            aria-controls="primary-nav"
+            @click="toggleNav"
+          >
+            <svg v-if="collapsed" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+            <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+          </button>
+          <img class="brand-logo" :src="brandLogoUrl" alt="" width="38" height="38" /><span>入库助手</span>
+        </div>
         <div class="header-actions">
           <div class="header-note">115 · CMS · Emby 工作流</div>
           <button type="button" class="theme-toggle" :title="themeTitle" :aria-label="themeTitle" @click="toggle">
@@ -60,8 +119,9 @@ onMounted(async () => {
           </button>
         </div>
       </n-layout-header>
+      <div v-if="navOpen" class="nav-backdrop" @click="collapsed = true"></div>
       <n-layout has-sider>
-        <n-layout-sider bordered collapse-mode="width" :collapsed-width="64" :width="220" :collapsed="collapsed" show-trigger aria-label="主导航" @collapse="collapsed = true" @expand="collapsed = false">
+        <n-layout-sider id="primary-nav" bordered :collapse-mode="isNarrow ? 'transform' : 'width'" :collapsed-width="collapsedWidth" :width="220" :collapsed="collapsed" :show-trigger="!isPhone" aria-label="主导航" @collapse="collapsed = true" @expand="collapsed = false">
           <n-menu :value="activeKey" :options="menuOptions" @update:value="navigate" />
         </n-layout-sider>
         <n-layout class="main-column">

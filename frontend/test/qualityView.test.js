@@ -2,10 +2,12 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  QUALITY_CLEANUP_CONFIRM,
   QUALITY_FIX_CONFIRM,
   confirmQualityBatchFix,
   mergeQualityRows,
   qualityActionLabel,
+  qualityActionPrompt,
   qualityRiskType,
   qualityStatusLabel,
 } from '../src/qualityView.js'
@@ -46,6 +48,12 @@ test('batch fix asks for confirmation before changing tasks', () => {
   assert.match(QUALITY_FIX_CONFIRM, /批量修复/)
   assert.equal(confirmQualityBatchFix(() => true), true)
   assert.equal(confirmQualityBatchFix(() => false), false)
+})
+
+test('quality action prompts name the consequence before changing a task', () => {
+  assert.match(qualityActionPrompt('reprocess'), /从头重跑/)
+  assert.match(qualityActionPrompt('ignore'), /不会再处理/)
+  assert.match(QUALITY_CLEANUP_CONFIRM, /删除所选失效 STRM/)
 })
 
 test('quality labels map backend state to readable UI values', () => {

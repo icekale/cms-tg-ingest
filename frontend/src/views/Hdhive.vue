@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { NButton, NCard, NDataTable, NForm, NFormItem, NInput, NSpace, NSwitch, NTag, useMessage } from 'naive-ui'
+import { NButton, NCard, NDataTable, NForm, NFormItem, NInput, NPopconfirm, NSpace, NSwitch, NTag, useMessage } from 'naive-ui'
 import { api } from '../api'
 
 const message = useMessage()
@@ -53,7 +53,6 @@ async function createSubscription() {
 }
 
 async function subscriptionAction(id, action) {
-  if (action === 'delete' && !window.confirm('确认删除此订阅？')) return
   try {
     await api.hdhiveSubscriptionAction(id, action)
     message.success(action === 'check' ? '检查已提交' : '操作已提交')
@@ -176,7 +175,7 @@ onMounted(load)
   <n-card title="添加订阅" class="section-card">
     <n-form class="compact-form" label-placement="top" @submit.prevent="createSubscription">
       <n-form-item label="HDHive 剧集链接">
-        <n-input v-model:value="createDraft.url" aria-label="HDHive 剧集链接" placeholder="https://hdhive.com/tv/..." style="min-width: 280px" />
+        <n-input v-model:value="createDraft.url" aria-label="HDHive 剧集链接" placeholder="https://hdhive.com/tv/..." style="min-width: min(280px, 100%)" />
       </n-form-item>
       <n-form-item label="或 TMDB ID">
         <n-input v-model:value="createDraft.tmdb_id" aria-label="TMDB 剧集 ID" placeholder="255358" style="width: 120px" />
@@ -190,7 +189,7 @@ onMounted(load)
     </n-form>
     <p class="muted">只接受剧集。粘贴 HDHive 剧集页，或填写 TMDB 剧集 ID。创建后不会立即解锁，可再点检查。</p>
   </n-card>
-  <n-card title="当前订阅" class="section-card"><div v-for="subscription in data.subscriptions" :key="subscription.id" class="subscription-row"><div><strong>#{{ subscription.id }} {{ subscription.title }}</strong><div class="muted"><n-tag size="small" :type="statusType(subscription.status)">{{ statusLabel(subscription.status) }}</n-tag> · TMDB {{ subscription.tmdb_id }} · {{ (subscription.items || []).length }} 个资源</div><div v-if="subscription.episode_filter" class="muted">当前过滤：{{ subscription.episode_filter }}</div><div v-if="summaryText(subscription.last_summary)" class="muted">最近检查：{{ summaryText(subscription.last_summary) }}</div><div v-if="subscription.diagnosis && subscription.diagnosis.conclusion" class="muted">{{ subscription.diagnosis.conclusion }}</div><div v-if="subscription.diagnosis && subscription.diagnosis.reasons && subscription.diagnosis.reasons.length" class="muted">{{ subscription.diagnosis.reasons.join('；') }}</div></div><n-space vertical align="end"><n-space><n-button v-if="subscription.status === 'active'" secondary @click="subscriptionAction(subscription.id, 'pause')">暂停</n-button><n-button v-else secondary @click="subscriptionAction(subscription.id, 'resume')">恢复</n-button><n-button secondary @click="subscriptionAction(subscription.id, 'check')">检查</n-button><n-button type="error" secondary @click="subscriptionAction(subscription.id, 'delete')">删除</n-button></n-space><n-space><n-input v-model:value="filterDraft[subscription.id]" size="small" aria-label="集数过滤" placeholder="S01E01-S01E10,S02" /><n-button secondary @click="saveFilter(subscription)">设置集数过滤</n-button></n-space></n-space></div><div v-if="!data.subscriptions.length" class="muted">暂无订阅。可在上方粘贴 HDHive 剧集链接或填写 TMDB ID。</div></n-card>
+  <n-card title="当前订阅" class="section-card"><div v-for="subscription in data.subscriptions" :key="subscription.id" class="subscription-row"><div><strong>#{{ subscription.id }} {{ subscription.title }}</strong><div class="muted"><n-tag size="small" :type="statusType(subscription.status)">{{ statusLabel(subscription.status) }}</n-tag> · TMDB {{ subscription.tmdb_id }} · {{ (subscription.items || []).length }} 个资源</div><div v-if="subscription.episode_filter" class="muted">当前过滤：{{ subscription.episode_filter }}</div><div v-if="summaryText(subscription.last_summary)" class="muted">最近检查：{{ summaryText(subscription.last_summary) }}</div><div v-if="subscription.diagnosis && subscription.diagnosis.conclusion" class="muted">{{ subscription.diagnosis.conclusion }}</div><div v-if="subscription.diagnosis && subscription.diagnosis.reasons && subscription.diagnosis.reasons.length" class="muted">{{ subscription.diagnosis.reasons.join('；') }}</div></div><n-space vertical align="end"><n-space><n-button v-if="subscription.status === 'active'" secondary @click="subscriptionAction(subscription.id, 'pause')">暂停</n-button><n-button v-else secondary @click="subscriptionAction(subscription.id, 'resume')">恢复</n-button><n-button secondary @click="subscriptionAction(subscription.id, 'check')">检查</n-button><n-popconfirm @positive-click="subscriptionAction(subscription.id, 'delete')"><template #trigger><n-button type="error" secondary>删除</n-button></template>删除后不再检查新集，已入队任务不受影响。确定删除此订阅？</n-popconfirm></n-space><n-space><n-input v-model:value="filterDraft[subscription.id]" size="small" aria-label="集数过滤" placeholder="S01E01-S01E10,S02" /><n-button secondary @click="saveFilter(subscription)">设置集数过滤</n-button></n-space></n-space></div><div v-if="!data.subscriptions.length" class="muted">暂无订阅。可在上方粘贴 HDHive 剧集链接或填写 TMDB ID。</div></n-card>
   <n-card title="资源状态" class="section-card">
     <div class="desktop-table">
       <n-data-table :columns="diagnosticColumns" :data="diagnosticItems" :pagination="{ pageSize: 20 }" :scroll-x="760" />
@@ -203,7 +202,7 @@ onMounted(load)
     </div>
     <div v-if="!diagnosticItems.length" class="muted">没有需要关注的资源</div>
   </n-card>
-  <n-card title="待确认资源" class="section-card"><div v-for="item in pendingItems" :key="item.id" class="subscription-row"><span>{{ item.subscriptionTitle }} · {{ item.episode_key }} · {{ item.title || item.resource_slug }} · {{ item.unlock_points ?? '未知' }} 积分</span><n-button type="primary" @click="confirmItem(item.id)">确认解锁</n-button></div><div v-if="!pendingItems.length" class="muted">暂无待确认资源</div></n-card>
+  <n-card title="待确认资源" class="section-card"><div v-for="item in pendingItems" :key="item.id" class="subscription-row"><span>{{ item.subscriptionTitle }} · {{ item.episode_key }} · {{ item.title || item.resource_slug }} · {{ item.unlock_points ?? '未知' }} 积分</span><n-popconfirm @positive-click="confirmItem(item.id)"><template #trigger><n-button type="primary">确认解锁</n-button></template>将花费 {{ item.unlock_points ?? '未知' }} 积分解锁该资源，确定继续？</n-popconfirm></div><div v-if="!pendingItems.length" class="muted">暂无待确认资源</div></n-card>
   <n-card title="解锁记录">
     <div class="desktop-table">
       <n-data-table :columns="unlockedColumns" :data="unlockedItems" :pagination="{ pageSize: 20 }" :scroll-x="760" />

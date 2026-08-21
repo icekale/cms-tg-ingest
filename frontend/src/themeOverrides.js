@@ -3,7 +3,7 @@
 
 const commonLight = {
   primaryColor: '#4c5fd5',
-  primaryColorHover: '#6b78e0',
+  primaryColorHover: '#3e4ec4',
   primaryColorPressed: '#3e4ec4',
   primaryColorSuppl: '#4c5fd5',
   infoColor: '#2f6fbe',

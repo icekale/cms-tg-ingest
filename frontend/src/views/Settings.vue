@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, ref } from 'vue'
-import { NButton, NCard, NForm, NFormItem, NInput, NInputNumber, NSelect, NSpace, NSwitch, NText, useMessage } from 'naive-ui'
+import { NButton, NCard, NForm, NFormItem, NInput, NInputNumber, NModal, NPopconfirm, NSelect, NSpace, NSwitch, NText, useMessage } from 'naive-ui'
 import { api } from '../api'
 
 const message = useMessage()
@@ -20,6 +20,7 @@ const tmdbApiKey = ref('')
 const tmdbBearerToken = ref('')
 const savingEmby = ref(false)
 const savingTmdb = ref(false)
+const reviewOffPrompt = ref(false)
 
 async function load() {
   loading.value = true
@@ -81,8 +82,20 @@ async function clearReceiveCid() {
   } catch (err) { message.error(err.message) }
 }
 
+function requestReviewMode(value) {
+  if (value === 'off') {
+    reviewOffPrompt.value = true
+    return
+  }
+  return saveReviewMode(value)
+}
+
+async function confirmReviewOff() {
+  reviewOffPrompt.value = false
+  await saveReviewMode('off')
+}
+
 async function saveReviewMode(value) {
-  if (value === 'off' && !window.confirm('关闭后，Emby 入库确认完成即清理 115 源文件。确定关闭分享审核观察？')) return
   savingReview.value = true
   try {
     const result = await api.setSelfShareReview(value)
@@ -223,7 +236,6 @@ async function waitForCmsJob() {
 }
 
 async function upgradeCms() {
-  if (!window.confirm('将拉取新镜像并重启 CMS 容器，入库会短暂中断。确定升级？')) return
   cmsSaving.value = true
   try {
     await api.cmsVersionUpgrade()
@@ -255,7 +267,7 @@ onMounted(load)
   <n-card v-if="settings" title="分享审核观察" class="section-card">
     <n-form class="settings-form" label-placement="top">
       <n-form-item label="观察方式">
-        <n-select :value="reviewMode" :options="settings.self_share_review_modes" :loading="savingReview" @update:value="saveReviewMode" />
+        <n-select :value="reviewMode" :options="settings.self_share_review_modes" :loading="savingReview" @update:value="requestReviewMode" />
       </n-form-item>
       <n-text depth="3" v-if="reviewMode === 'ten_minutes'">分享创建后观察 10 分钟并复检一次，通过后清理 115 源文件。</n-text>
       <n-text depth="3" v-if="reviewMode === 'off'">已关闭观察；Emby 入库确认后将直接清理 115 源文件。</n-text>
@@ -353,10 +365,25 @@ onMounted(load)
       <n-space>
         <n-button type="primary" :loading="cmsSaving" @click="saveCmsVersion">保存</n-button>
         <n-button secondary @click="checkCmsVersion">立即检查</n-button>
-        <n-button v-if="cms.update_available" type="primary" :loading="cmsSaving" @click="upgradeCms">升级</n-button>
+        <n-popconfirm v-if="cms.update_available" @positive-click="upgradeCms">
+          <template #trigger>
+            <n-button type="primary" :loading="cmsSaving">升级</n-button>
+          </template>
+          将拉取新镜像并重启 CMS 容器，入库会短暂中断。确定升级？
+        </n-popconfirm>
         <n-button v-if="cms.update_available" secondary :loading="cmsSaving" @click="pullCmsImage">拉取镜像</n-button>
         <n-button secondary @click="resetCmsVersion">恢复环境默认</n-button>
       </n-space>
     </n-form>
   </n-card>
+  <n-modal
+    v-model:show="reviewOffPrompt"
+    preset="dialog"
+    title="关闭分享审核观察"
+    positive-text="关闭观察"
+    negative-text="取消"
+    @positive-click="confirmReviewOff"
+  >
+    关闭后，Emby 入库确认完成即清理 115 源文件。确定关闭？
+  </n-modal>
 </template>

@@ -1,9 +1,9 @@
 <script setup>
 import { computed, h, onMounted, ref } from 'vue'
-import { NButton, NCard, NCheckbox, NCheckboxGroup, NDataTable, NForm, NFormItem, NInput, NInputNumber, NModal, NSpace, NSwitch, NTag, useMessage } from 'naive-ui'
+import { NButton, NCard, NCheckbox, NCheckboxGroup, NDataTable, NForm, NFormItem, NInput, NInputNumber, NModal, NPopconfirm, NSpace, NSwitch, NTag, useMessage } from 'naive-ui'
 import { RouterLink } from 'vue-router'
 import { api } from '../api'
-import { mergeQualityRows, qualityActionLabel, qualityRiskType, qualityStatusLabel } from '../qualityView'
+import { mergeQualityRows, QUALITY_CLEANUP_CONFIRM, qualityActionLabel, qualityActionPrompt, qualityRiskType, qualityStatusLabel } from '../qualityView'
 import { displayTaskTitle } from '../taskView'
 
 const message = useMessage()
@@ -19,14 +19,13 @@ const ruleCounts = computed(() => Object.entries(payload.value.rule_counts || {}
 async function load() {
   loading.value = true
   try {
-    const data = await api.quality()
+    const [data, history] = await Promise.all([
+      api.quality(),
+      api.qualityRuns().catch(() => ({ items: [], trend: [] })),
+    ])
     payload.value = data
     if (data.automation) settings.value = { ...settings.value, ...data.automation }
-    try {
-      runs.value = await api.qualityRuns()
-    } catch (err) {
-      runs.value = { items: [], trend: [] }
-    }
+    runs.value = history
   } catch (err) {
     message.error(err.message)
   } finally {
@@ -64,19 +63,7 @@ async function reset() {
   }
 }
 
-function confirmAction(action) {
-  const prompts = {
-    execute: '将任务重新入队执行，确定继续？',
-    reprocess: '将任务从头重跑，确定继续？',
-    snooze: '将该问题暂缓 24 小时，确定继续？',
-    ignore: '忽略该质量问题后，自动巡检不会再处理它，确定继续？',
-    resume: '恢复该问题的规则评估，确定继续？',
-  }
-  return window.confirm(prompts[action] || '确认执行该质量操作？')
-}
-
 async function runQualityAction(row, action) {
-  if (!confirmAction(action)) return
   const key = `${row.task_id}:${action}`
   busyAction.value = key
   try {
@@ -124,13 +111,17 @@ function taskCell(row) {
 function actionCell(row) {
   const actions = ['execute', 'reprocess', 'snooze', 'ignore', 'resume']
     .filter((action) => (row.available_actions || []).includes(action))
-  const buttons = actions.map((action) => h(NButton, {
-    size: 'small',
-    type: action === 'ignore' ? 'error' : action === 'execute' || action === 'reprocess' ? 'warning' : 'default',
-    secondary: action !== 'ignore',
-    loading: busyAction.value === `${row.task_id}:${action}`,
-    onClick: () => runQualityAction(row, action),
-  }, { default: () => qualityActionLabel(action) }))
+  const buttons = actions.map((action) => h(NPopconfirm, {
+    onPositiveClick: () => runQualityAction(row, action),
+  }, {
+    trigger: () => h(NButton, {
+      size: 'small',
+      type: action === 'ignore' ? 'error' : action === 'execute' || action === 'reprocess' ? 'warning' : 'default',
+      secondary: action !== 'ignore',
+      loading: busyAction.value === `${row.task_id}:${action}`,
+    }, { default: () => qualityActionLabel(action) }),
+    default: () => qualityActionPrompt(action),
+  }))
   if (payload.value.cleanup_enabled) {
     buttons.push(h(NButton, {
       size: 'small',
@@ -286,15 +277,21 @@ onMounted(load)
           <div v-for="line in evidenceLines(row)" :key="line">{{ line }}</div>
         </div>
         <div class="issue-card-actions">
-          <n-button
+          <n-popconfirm
             v-for="action in rowActions(row)"
             :key="action"
-            size="small"
-            :type="action === 'ignore' ? 'error' : action === 'execute' || action === 'reprocess' ? 'warning' : 'default'"
-            :secondary="action !== 'ignore'"
-            :loading="busyAction === `${row.task_id}:${action}`"
-            @click="runQualityAction(row, action)"
-          >{{ qualityActionLabel(action) }}</n-button>
+            @positive-click="runQualityAction(row, action)"
+          >
+            <template #trigger>
+              <n-button
+                size="small"
+                :type="action === 'ignore' ? 'error' : action === 'execute' || action === 'reprocess' ? 'warning' : 'default'"
+                :secondary="action !== 'ignore'"
+                :loading="busyAction === `${row.task_id}:${action}`"
+              >{{ qualityActionLabel(action) }}</n-button>
+            </template>
+            {{ qualityActionPrompt(action) }}
+          </n-popconfirm>
           <n-button v-if="payload.cleanup_enabled" size="small" secondary @click="openCleanup(row)">失效 STRM</n-button>
         </div>
       </article>
@@ -340,9 +337,14 @@ onMounted(load)
         提示：{{ cleanup.candidates.filter((c) => c.share_state === 'valid').length }} 个文件的分享在 115 仍有效，如需删除请在下方勾选（执行时会再次验证）。
       </p>
       <n-space style="margin-top: 12px">
-        <n-button type="primary" :loading="cleanup.running" :disabled="!cleanup.checked.length" @click="runCleanup">
-          删除所选（{{ cleanup.checked.length }}）
-        </n-button>
+        <n-popconfirm :disabled="!cleanup.checked.length" @positive-click="runCleanup">
+          <template #trigger>
+            <n-button type="primary" :loading="cleanup.running" :disabled="!cleanup.checked.length">
+              删除所选（{{ cleanup.checked.length }}）
+            </n-button>
+          </template>
+          {{ QUALITY_CLEANUP_CONFIRM }}
+        </n-popconfirm>
         <n-button @click="cleanup.show = false">取消</n-button>
       </n-space>
     </template>
@@ -355,7 +357,7 @@ onMounted(load)
 
 <style scoped>
 .alive-share {
-  color: var(--danger);
+  color: var(--warning);
   font-weight: 600;
 }
 .cleanup-modal {

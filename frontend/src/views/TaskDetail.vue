@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { NAlert, NButton, NCard, NDescriptions, NDescriptionsItem, NSelect, NSpace, NTag, useMessage } from 'naive-ui'
+import { NAlert, NButton, NCard, NDescriptions, NDescriptionsItem, NPopconfirm, NSelect, NSpace, NTag, useMessage } from 'naive-ui'
 import { useRoute } from 'vue-router'
 import { api } from '../api'
 import { displayTaskTitle, taskActionLabel } from '../taskView'
@@ -33,7 +33,6 @@ const canRestore = computed(() => actionSet().has('restore'))
 const canReprocess = computed(() => actionSet().has('reprocess'))
 
 async function runAction(action) {
-  if (['restore', 'reprocess'].includes(action) && !window.confirm(action === 'restore' ? '确认恢复该任务的 STRM？' : '确认从头重跑该任务？')) return
   busyAction.value = action
   try {
     task.value = await api.taskAction(route.params.id, action)
@@ -63,8 +62,18 @@ onMounted(load)
     <n-space style="margin-top: 18px">
       <n-button v-if="canRetry" type="primary" :loading="busyAction === 'retry'" @click="runAction('retry')">{{ taskActionLabel('retry') }}</n-button>
       <n-button v-if="canEmby" :loading="busyAction === 'emby'" @click="runAction('emby')">{{ taskActionLabel('emby') }}</n-button>
-      <n-button v-if="canRestore" :loading="busyAction === 'restore'" @click="runAction('restore')">{{ taskActionLabel('restore') }}</n-button>
-      <n-button v-if="canReprocess" type="warning" :loading="busyAction === 'reprocess'" @click="runAction('reprocess')">{{ taskActionLabel('reprocess') }}</n-button>
+      <n-popconfirm v-if="canRestore" @positive-click="runAction('restore')">
+        <template #trigger>
+          <n-button :loading="busyAction === 'restore'">{{ taskActionLabel('restore') }}</n-button>
+        </template>
+        将按当前任务恢复 STRM 文件，确定继续？
+      </n-popconfirm>
+      <n-popconfirm v-if="canReprocess" @positive-click="runAction('reprocess')">
+        <template #trigger>
+          <n-button type="warning" :loading="busyAction === 'reprocess'">{{ taskActionLabel('reprocess') }}</n-button>
+        </template>
+        将从头重跑该任务，已完成阶段会再走一遍，确定继续？
+      </n-popconfirm>
       <n-button secondary @click="load">刷新</n-button>
     </n-space>
     <n-card title="处理时间线" embedded style="margin-top: 18px">
