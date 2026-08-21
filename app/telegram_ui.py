@@ -160,6 +160,14 @@ def quality_manual_rows(rows: list[dict[str, Any]], limit: int = 8) -> list[dict
     return selected
 
 
+def format_quality_scan_summary(rows: list[dict[str, Any]]) -> str:
+    """One-line Telegram report; no action buttons."""
+    count = sum(1 for row in rows if str(row.get("rule_id") or "") not in {"", "no_issue"})
+    if count <= 0:
+        return "质量巡检：未发现需要关注的本地 STRM 问题。"
+    return f"质量巡检：发现 {count} 个问题，请到 Web 质量页查看。"
+
+
 def format_quality_manual_report(rows: list[dict[str, Any]]) -> str:
     rows = quality_manual_rows(rows)
     if not rows:

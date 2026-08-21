@@ -172,7 +172,6 @@ from app.telegram_ui import (
     format_status,
     format_taskstore_history,
     format_taskstore_status,
-    format_quality_manual_report,
     format_hdhive_candidate_label,
     hdhive_candidate_keyboard,
     hdhive_confirmation_keyboard,
@@ -183,6 +182,7 @@ from app.telegram_ui import (
     quality_issue_for_row,
     quality_issue_rows,
     quality_keyboard,
+    format_quality_scan_summary,
     quality_manual_keyboard,
     task_action_keyboard,
     truncate_text,
@@ -360,9 +360,7 @@ def start_quality_automation_loop(
     def loop() -> None:
         while not stop_event.wait(interval):
             try:
-                summary = automation.run_if_due()
-                if summary:
-                    notify_quality_run(automation, telegram, chat_id, summary)
+                automation.run_if_due()
             except Exception:
                 LOG.exception("Quality automation loop failed")
 
@@ -1356,12 +1354,12 @@ class SubmissionStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def latest_self_share_identity(self, dest_path: str, tmdb_id: str = "") -> tuple[str, str] | None:
-        """Return the newest moved, valid self-share identity for one media directory."""
+    def live_self_share_identities(self, dest_path: str, tmdb_id: str = "") -> tuple[tuple[str, str], ...]:
+        """Return all moved, valid self-share identities for one media directory."""
         dest_path = str(dest_path or "").strip()
         target_tmdb = str(tmdb_id or "").strip()
         if not dest_path:
-            return None
+            return ()
         with self._lock, self._connection() as conn:
             rows = conn.execute(
                 """
@@ -1376,6 +1374,8 @@ class SubmissionStore:
                 """,
                 (dest_path,),
             ).fetchall()
+        identities: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
         for row in rows:
             try:
                 recognition = json.loads(str(row["recognition_json"] or "{}"))
@@ -1390,8 +1390,17 @@ class SubmissionStore:
             if not share_code:
                 continue
             receive_code = str(row["own_share_receive_code"] or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
-            return share_code, receive_code
-        return None
+            identity = (share_code, receive_code)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            identities.append(identity)
+        return tuple(identities)
+
+    def latest_self_share_identity(self, dest_path: str, tmdb_id: str = "") -> tuple[str, str] | None:
+        """Return the newest moved, valid self-share identity for one media directory."""
+        identities = self.live_self_share_identities(dest_path, tmdb_id)
+        return identities[0] if identities else None
 
     def all_confirmed_with_emby_path(self) -> list[dict[str, Any]]:
         with self._lock, self._connection() as conn:
@@ -1576,13 +1585,18 @@ class SubmissionStore:
         return [dict(row) for row in rows]
 
 
-def quality_share_identity_for_task(store: SubmissionStore, task: Any) -> tuple[str, str] | None:
+def quality_share_identities_for_task(store: SubmissionStore, task: Any) -> tuple[tuple[str, str], ...]:
     metadata = getattr(task, "metadata", {})
     if not isinstance(metadata, dict):
         metadata = {}
     dest_path = str(metadata.get("dest_path") or "").strip()
     tmdb_id = str(metadata.get("tmdb_id") or getattr(task, "tmdb_id", "") or "").strip()
-    return store.latest_self_share_identity(dest_path, tmdb_id)
+    return store.live_self_share_identities(dest_path, tmdb_id)
+
+
+def quality_share_identity_for_task(store: SubmissionStore, task: Any) -> tuple[str, str] | None:
+    identities = quality_share_identities_for_task(store, task)
+    return identities[0] if identities else None
 
 def should_wait_for_category(row: dict[str, Any]) -> bool:
     return str(row.get("category_status") or "") == "uncertain" and not row.get("category_choice")
@@ -3297,11 +3311,10 @@ def send_quality_manual_queue(
     message_id: int | str | None = None,
 ) -> None:
     rows = _quality_rows_for_telegram(quality_automation)
-    text = format_quality_manual_report(rows)
-    keyboard = quality_manual_keyboard(rows)
+    text = format_quality_scan_summary(rows)
     if message_id is not None and hasattr(telegram, "edit_message_text"):
         try:
-            telegram.edit_message_text(chat_id, message_id, text, reply_markup=keyboard)
+            telegram.edit_message_text(chat_id, message_id, text)
             return
         except Exception as exc:
             if "message is not modified" in str(exc).lower():
@@ -3312,7 +3325,7 @@ def send_quality_manual_queue(
                 LOG.info("Quality queue unchanged; leaving message %s as-is", message_id)
                 return
             LOG.warning("Failed to refresh Telegram quality message", exc_info=True)
-    telegram.send_message(chat_id, text, reply_markup=keyboard)
+    telegram.send_message(chat_id, text)
 
 
 def handle_quality_action_callback(
@@ -4811,13 +4824,13 @@ def run_forever(
                 task_store,
                 cleanup_client=p115 if self_share_config.cleanup_after_emby else None,
             ),
-            on_enabled_changed=set_invalid_probe_enabled,
-            share_identity_resolver=lambda task: quality_share_identity_for_task(store, task),
+            on_enabled_changed=None,
+            share_identity_resolver=lambda task: quality_share_identities_for_task(store, task),
             strm_url_probe=(
                 (lambda url: cms.probe_strm_url(url)) if cms is not None else None
             ),
         )
-        set_invalid_probe_enabled(bool(quality_automation.config.quality_auto_enabled))
+        set_invalid_probe_enabled(False)
         quality_thread = start_quality_automation_loop(
             quality_automation,
             telegram,

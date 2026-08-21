@@ -197,7 +197,7 @@ class QualityAutomation:
     ARCHIVE_ISSUE_CODES = frozenset(
         {"unsafe_metadata", "unsafe_path", "invalid_share", "invalid_share_cleaned", "source_deleted"}
     )
-    SCAN_CACHE_PREFIX = "quality_dir_fp:"
+    SCAN_CACHE_PREFIX = "quality_dir_fp:live:"
     SCAN_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
     _STATUS_KEY = "quality_auto_status"
     _SUMMARY_KEY = "quality_auto_last_summary"
@@ -205,7 +205,7 @@ class QualityAutomation:
     _OVERRIDES_KEY = "quality_auto_overrides"
     _RULE_CONFIG_KEY = "quality_rule_config"
     DEFAULT_RULE_CONFIG = {
-        "allow_auto_reprocess": True,
+        "allow_auto_reprocess": False,
         "max_attempts": 2,
         "cooldown_seconds": 86400,
     }
@@ -265,6 +265,9 @@ class QualityAutomation:
         self.on_enabled_changed = on_enabled_changed
         self.share_identity_resolver = share_identity_resolver if callable(share_identity_resolver) else None
         self.strm_url_probe = strm_url_probe if callable(strm_url_probe) else None
+
+    def _repair_enabled(self) -> bool:
+        return bool(getattr(self.config, "quality_auto_repair_enabled", False))
 
     def _load_rule_config(self) -> dict[str, bool | int]:
         values: dict[str, object] = dict(self.DEFAULT_RULE_CONFIG)
@@ -397,6 +400,7 @@ class QualityAutomation:
         local_now = self._local_now(now)
         return {
             "enabled": bool(self.config.quality_auto_enabled),
+            "repair_enabled": self._repair_enabled(),
             "time": str(self.config.quality_auto_time),
             "timezone": str(self.config.quality_auto_timezone),
             "max_tasks": int(self.config.quality_auto_max_tasks),
@@ -495,13 +499,15 @@ class QualityAutomation:
             tasks = self.store.list_recent_tasks(limit=scan_limit)
             current_time = local_now.timestamp()
             retired_ids: set[int] = set()
+            repair_enabled = self._repair_enabled()
             for task in tasks:
                 try:
                     self._ensure_terminal_marker(task, current_time)
                     self._archive_terminal_task(task, current_time, run_id)
-                    revalidated = self._auto_revalidate_share(task, current_time)
-                    if not revalidated and self._retire_unfixable_task(task, current_time, run_id):
-                        retired_ids.add(task.id)
+                    if repair_enabled:
+                        revalidated = self._auto_revalidate_share(task, current_time)
+                        if not revalidated and self._retire_unfixable_task(task, current_time, run_id):
+                            retired_ids.add(task.id)
                 except Exception:
                     LOG.debug("Quality cleanup failed task_id=%s", task.id, exc_info=True)
             tasks = [task for task in tasks if task.id not in retired_ids]
@@ -542,7 +548,7 @@ class QualityAutomation:
                         fingerprint,
                         [issue for issue in issues if issue.task_id == task.id],
                     )
-            if self.strm_url_probe is not None:
+            if repair_enabled and self.strm_url_probe is not None:
                 scan_ids = {task.id for task in scan_tasks}
                 probed: list[QualityIssue] = []
                 for task in scan_tasks:
@@ -567,8 +573,15 @@ class QualityAutomation:
                 max_tasks=limit,
                 check_limit=max(1, int(self.config.quality_auto_115_check_limit)),
             )
-            if self.repair_adapter is not None:
+            if repair_enabled and self.repair_adapter is not None:
                 plans = [self.execute_plan(plan, run_id) if plan.action != "skip" else plan for plan in plans]
+            elif not repair_enabled:
+                plans = [
+                    replace(plan, execution_status="skipped", reason="scan_only")
+                    if plan.action != "skip" and plan.execution_status == "planned"
+                    else plan
+                    for plan in plans
+                ]
             finished_local = local_now if injected_now else self._local_now(datetime.now(self._timezone))
             failed_count = sum(plan.execution_status == "failed" for plan in plans)
             rule_counts: dict[str, int] = {}
@@ -690,9 +703,8 @@ class QualityAutomation:
         source_evidence = self._has_source_evidence(task)
         risk_controlled = self._risk_controlled(task, current_time)
         queued = bool(state.get("quality_repair_queued"))
-        auto_allowed = bool(
-            match.auto_allowed
-            and match.auto_action == "reprocess"
+        repairable = bool(
+            match.auto_action == "reprocess"
             and safe
             and source_evidence
             and not risk_controlled
@@ -702,6 +714,7 @@ class QualityAutomation:
             and manual_status == "open"
             and next_eligible <= current_time
         )
+        auto_allowed = bool(repairable and match.auto_allowed)
         rule_actions = {
             str(value).strip().lower()
             for value in match.manual_actions
@@ -718,7 +731,7 @@ class QualityAutomation:
                 actions.extend(action for action in ("snooze", "ignore") if action in rule_actions)
         elif not queued and not busy and not terminal:
             actions.extend(action for action in ("snooze", "ignore") if action in rule_actions)
-            if auto_allowed:
+            if auto_allowed or repairable:
                 actions.extend(action for action in ("execute", "reprocess") if action not in actions)
             elif match.rule_id in {"missing_destination", "missing_strm"} and safe:
                 actions.append("reprocess")

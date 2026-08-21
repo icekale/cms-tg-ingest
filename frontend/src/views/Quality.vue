@@ -3,7 +3,7 @@ import { computed, h, onMounted, ref } from 'vue'
 import { NButton, NCard, NCheckbox, NCheckboxGroup, NDataTable, NForm, NFormItem, NInput, NInputNumber, NModal, NSpace, NSwitch, NTag, useMessage } from 'naive-ui'
 import { RouterLink } from 'vue-router'
 import { api } from '../api'
-import { confirmQualityBatchFix, mergeQualityRows, qualityActionLabel, qualityRiskType, qualityStatusLabel } from '../qualityView'
+import { mergeQualityRows, qualityActionLabel, qualityRiskType, qualityStatusLabel } from '../qualityView'
 import { displayTaskTitle } from '../taskView'
 
 const message = useMessage()
@@ -27,20 +27,6 @@ async function load() {
     } catch (err) {
       runs.value = { items: [], trend: [] }
     }
-  } catch (err) {
-    message.error(err.message)
-  } finally {
-    loading.value = false
-  }
-}
-
-async function fix() {
-  if (!confirmQualityBatchFix()) return
-  loading.value = true
-  try {
-    const result = await api.qualityFix()
-    message.success(`已入队 ${result.fixed || 0} 个修复任务`)
-    await load()
   } catch (err) {
     message.error(err.message)
   } finally {
@@ -240,8 +226,8 @@ onMounted(load)
 
 <template>
   <div class="page-title">
-    <div><h1>质量巡检</h1><p>查看规则判定和安全证据，人工操作会经过后端状态校验。</p></div>
-    <n-space><n-button type="primary" :loading="loading" @click="fix">批量修复</n-button><n-button secondary @click="run">立即巡检</n-button><n-button secondary :loading="loading" @click="load">刷新</n-button></n-space>
+    <div><h1>质量巡检</h1><p>只读报表：同一剧集目录里指向任一仍有效自有分享的 STRM 视为健康。默认不自动重跑。</p></div>
+    <n-space><n-button type="primary" @click="run">立即巡检</n-button><n-button secondary :loading="loading" @click="load">刷新</n-button></n-space>
   </div>
 
   <div class="metric-grid quality-metrics">
@@ -257,7 +243,7 @@ onMounted(load)
 
   <n-card v-if="payload.automation" title="自动巡检设置" class="section-card">
     <n-form class="compact-form" label-placement="top">
-      <n-form-item label="启用">
+      <n-form-item label="定时扫描">
         <n-switch v-model:value="settings.enabled" />
       </n-form-item>
       <n-form-item label="时间">
@@ -279,15 +265,16 @@ onMounted(load)
         </n-space>
       </n-form-item>
     </n-form>
+    <p class="muted">启用后只扫描写报表，不会自动重跑、占任务或推 Telegram 操作按钮。自动修复请用环境变量 QUALITY_AUTO_REPAIR_ENABLED，不推荐。</p>
     <p class="muted">状态：{{ payload.automation.status }}，下次运行：{{ payload.automation.next_run_at }}</p>
     <p v-if="payload.automation.last_summary" class="muted">最近结果：扫描 {{ payload.automation.last_summary.scanned_count || 0 }}，问题 {{ payload.automation.last_summary.issue_count || 0 }}，排队 {{ payload.automation.last_summary.queued_count || 0 }}，失败 {{ payload.automation.last_summary.failed_count || 0 }}</p>
   </n-card>
 
-  <n-card title="人工处理队列">
+  <n-card title="巡检结果">
     <div class="desktop-table">
       <n-data-table :columns="columns" :data="issues" :loading="loading" :pagination="{ pageSize: 12 }" :scroll-x="1250" />
     </div>
-    <div class="mobile-cards" aria-label="人工处理队列">
+    <div class="mobile-cards" aria-label="巡检结果">
       <article v-for="row in issues" :key="rowKey(row)" class="issue-card">
         <router-link class="task-link" :to="`/tasks/${row.task_id}`">#{{ row.task_id }} {{ displayTaskTitle(row) }}</router-link>
         <div class="issue-card-meta">{{ row.rule_id || '人工' }} · {{ row.issue_count > 1 ? row.issue_count + ' 个文件' : '1 个文件' }}</div>

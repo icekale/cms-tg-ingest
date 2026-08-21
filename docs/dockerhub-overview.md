@@ -18,7 +18,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 - 磁力和 ED2K 始终锁定 shared STRM；云下载输出支持多文件，并在移动中断后幂等恢复。
 - 支持 Emby 刷新、入库确认和媒体库名称反馈。
 - 支持 HDHive 搜索、网盘筛选、单条/批量解锁和剧集订阅。
-- 质量巡检支持 Web/Telegram 人工队列，展示规则、风险、尝试次数和脱敏证据，并支持确认后执行、重跑、暂缓、忽略和恢复评估。
+- 质量巡检是 Web 只读报表：同一剧集目录里任一仍有效自有分享都算健康；Telegram 只回问题计数，默认不自动重跑、不占任务。失效 STRM 仍需在 Web 预览确认后删除。
 - **Emby 看板**：数据概览（电影/剧集/集数/媒体库数）、我的媒体库（各库代表海报 + 数量）、最近入库海报流，点击直达 Emby 详情/播放；Emby API Key 只在服务端使用。
 - **暗色模式**：Web 管理台跟随系统深浅色，顶栏可手动切换并记住选择；登录页同步适配。
 - **CMS 版本远程检测**：设置页「立即检查」对比本地 CMS 与 Docker Hub 最新 tag，发现新版直接提示。
@@ -28,7 +28,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 固定版本镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.4.7
+docker pull icekale/cms-tg-ingest:0.4.8
 ```
 
 ### 完整 Docker Compose
@@ -38,7 +38,7 @@ docker pull icekale/cms-tg-ingest:0.4.7
 ```yaml
 services:
   cms-tg-ingest:
-    image: icekale/cms-tg-ingest:0.4.7
+    image: icekale/cms-tg-ingest:0.4.8
     container_name: cms-tg-ingest
     restart: unless-stopped
     env_file:

@@ -43,10 +43,12 @@ class QualityAutomationConfigTests(unittest.TestCase):
             config = Config.from_env()
 
         self.assertFalse(config.quality_auto_enabled)
+        self.assertFalse(config.quality_auto_repair_enabled)
         self.assertEqual(config.quality_auto_time, "02:50")
         self.assertEqual(config.quality_auto_timezone, "Asia/Shanghai")
         self.assertEqual(config.quality_auto_max_tasks, 50)
         self.assertEqual(config.quality_auto_115_check_limit, 3)
+        self.assertEqual(config.quality_unfixable_retention_days, 0)
 
     def test_backup_defaults_to_daily_local_database_snapshots(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):
@@ -108,6 +110,15 @@ class QualityAutomationConfigTests(unittest.TestCase):
                 config = Config.from_env()
 
         self.assertEqual(config.quality_archive_after_seconds, 86400)
+
+    def test_quality_unfixable_retention_days_can_be_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            env["QUALITY_UNFIXABLE_RETENTION_DAYS"] = "0"
+            with patch.dict(os.environ, env, clear=True):
+                config = Config.from_env()
+
+        self.assertEqual(config.quality_unfixable_retention_days, 0)
 
     def test_quality_unfixable_retention_days_parses_from_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -558,8 +569,14 @@ class _ManualActionRuleEngine:
 
 
 class QualityPlanningTests(unittest.TestCase):
-    def make_service(self, tmp, max_tasks=50):
+    def make_service(self, tmp, max_tasks=50, *, repair=False, allow_auto_reprocess=None):
         library = Path(tmp) / "library"
+        store = TaskStore(Path(tmp) / "tasks.db")
+        if repair or allow_auto_reprocess:
+            store.set_runtime_state(
+                QualityAutomation._RULE_CONFIG_KEY,
+                json.dumps({"allow_auto_reprocess": True, "max_attempts": 2, "cooldown_seconds": 86400}),
+            )
         config = Config(
             tg_bot_token="token",
             tg_allowed_chat_id="chat",
@@ -568,9 +585,10 @@ class QualityPlanningTests(unittest.TestCase):
             cms_password="pass",
             task_db_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
+            quality_auto_repair_enabled=repair,
             quality_auto_max_tasks=max_tasks,
         )
-        return QualityAutomation(TaskStore(Path(tmp) / "tasks.db"), config, allowed_roots=[library]), library
+        return QualityAutomation(store, config, allowed_roots=[library]), library
 
     @staticmethod
     def add_task(store, share_code, dest_path=None, own_share_code="own", **extra_metadata):
@@ -589,7 +607,7 @@ class QualityPlanningTests(unittest.TestCase):
 
     def test_issue_planning_maps_local_issues_to_one_safe_plan_per_task(self):
         with tempfile.TemporaryDirectory() as tmp:
-            service, library = self.make_service(tmp)
+            service, library = self.make_service(tmp, allow_auto_reprocess=True)
             missing_dest = self.add_task(service.store, "missing-dest", library / "not-created")
             empty_dest = library / "empty"
             empty_dest.mkdir(parents=True)
@@ -615,6 +633,32 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertEqual(plans[unexpected.id].reason, "unexpected_strm")
             self.assertEqual(summary.planned_count, 1)
             self.assertTrue(all(isinstance(plan, QualityRepairPlan) for plan in summary.plans))
+
+    def test_scan_only_run_does_not_execute_repair_or_probe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = FakeQualityRepairAdapter()
+            probes: list[str] = []
+            service, library = self.make_service(tmp, allow_auto_reprocess=True)
+            service.repair_adapter = adapter
+            service.strm_url_probe = lambda url: probes.append(url) or True
+            dest = library / "direct"
+            dest.mkdir(parents=True)
+            (dest / "movie.strm").write_text("https://cms/d/direct.mkv", encoding="utf-8")
+            self.add_task(service.store, "scan-only", dest, own_share_receive_code="1212")
+
+            summary = service.run_once("scan-only-run")
+
+            self.assertEqual(adapter.calls, [])
+            self.assertEqual(probes, [])
+            self.assertEqual(summary.queued_count, 0)
+            self.assertTrue(any(plan.reason == "scan_only" for plan in summary.plans))
+            self.assertFalse(any(str(task.claimed_by or "").startswith("quality:") for task in service.store.list_recent_tasks()))
+
+    def test_quality_defaults_do_not_allow_auto_reprocess(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _ = self.make_service(tmp)
+            self.assertFalse(service.rule_config["allow_auto_reprocess"])
+            self.assertFalse(service._repair_enabled())
 
     def test_missing_destination_is_manual_skip_and_never_calls_adapter(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -959,7 +1003,7 @@ class QualityPlanningTests(unittest.TestCase):
     def test_expired_snooze_is_open_for_planning_and_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = FakeQualityRepairAdapter()
-            service, library = self.make_service(tmp)
+            service, library = self.make_service(tmp, allow_auto_reprocess=True)
             service.repair_adapter = adapter
             destination = library / "expired-snooze"
             destination.mkdir(parents=True)
@@ -1010,12 +1054,8 @@ class QualityPlanningTests(unittest.TestCase):
     def test_reprocess_requires_complete_source_evidence_and_rule_match(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = FakeQualityRepairAdapter()
-            service, library = self.make_service(tmp)
+            service, library = self.make_service(tmp, allow_auto_reprocess=True)
             service.repair_adapter = adapter
-            service.store.set_runtime_state(
-                "quality_rule_config",
-                json.dumps({"allow_auto_reprocess": True, "max_attempts": 2, "cooldown_seconds": 86400}),
-            )
             dest = library / "direct"
             dest.mkdir(parents=True)
             (dest / "movie.strm").write_text("https://cms/d/direct.mkv", encoding="utf-8")
@@ -1055,7 +1095,7 @@ class QualityPlanningTests(unittest.TestCase):
     def test_115_check_budget_limits_reprocess_adapter_calls(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = FakeQualityRepairAdapter()
-            service, library = self.make_service(tmp)
+            service, library = self.make_service(tmp, repair=True)
             service.repair_adapter = adapter
             service.config.quality_auto_115_check_limit = 1
             tasks = []
@@ -1080,7 +1120,7 @@ class QualityPlanningTests(unittest.TestCase):
     def test_max_tasks_budget_limits_actual_adapter_calls_across_tasks(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = FakeQualityRepairAdapter()
-            service, library = self.make_service(tmp, max_tasks=1)
+            service, library = self.make_service(tmp, max_tasks=1, repair=True)
             service.repair_adapter = adapter
             tasks = []
             for name in ("max-one", "max-two"):
@@ -1099,7 +1139,7 @@ class QualityPlanningTests(unittest.TestCase):
 
     def test_reprocess_cooldown_and_attempt_limit_block_until_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
-            service, library = self.make_service(tmp)
+            service, library = self.make_service(tmp, allow_auto_reprocess=True)
             dest = library / "cooldown"
             dest.mkdir(parents=True)
             task = self.add_task(service.store, "cooldown", dest, own_share_receive_code="1212")
@@ -1218,7 +1258,7 @@ class QualityPlanningTests(unittest.TestCase):
             direct_dest = library / "direct"
             direct_dest.mkdir(parents=True)
             (direct_dest / "movie.strm").write_text("https://cms/d/direct.mkv", encoding="utf-8")
-            service, _ = self.make_service(tmp, max_tasks=1)
+            service, _ = self.make_service(tmp, max_tasks=1, allow_auto_reprocess=True)
             direct = self.add_task(service.store, "direct", direct_dest, own_share_receive_code="1212")
             clean = service.store.upsert_task("clean", "", "https://115cdn.com/s/clean")
             service.store.record_event(clean.id, TaskStage.MOVED, TaskStatus.SUCCEEDED, "moved")
@@ -1724,6 +1764,11 @@ class RenewingCleanupAdapter(FakeQualityRepairAdapter):
 class QualityRepairExecutionTests(unittest.TestCase):
     def make_service(self, tmp, adapter=None):
         library = Path(tmp) / "library"
+        store = TaskStore(Path(tmp) / "tasks.db")
+        store.set_runtime_state(
+            QualityAutomation._RULE_CONFIG_KEY,
+            json.dumps({"allow_auto_reprocess": True, "max_attempts": 2, "cooldown_seconds": 86400}),
+        )
         config = Config(
             tg_bot_token="token",
             tg_allowed_chat_id="chat",
@@ -1732,9 +1777,10 @@ class QualityRepairExecutionTests(unittest.TestCase):
             cms_password="pass",
             task_db_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
+            quality_auto_repair_enabled=True,
         )
         return QualityAutomation(
-            TaskStore(Path(tmp) / "tasks.db"),
+            store,
             config,
             allowed_roots=[library],
             repair_adapter=adapter,

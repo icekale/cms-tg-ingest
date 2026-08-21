@@ -920,21 +920,9 @@ def render_quality_page(
         row["items"].append(item)
     grouped = list(grouped.values())
     tasks: dict[int, Any | None] = {}
-    actionable_task_ids: set[int] = set()
     for row in grouped:
         task_id = int(row["task_id"])
         tasks[task_id] = store.find_task(task_id)
-        if any(item.get("auto_allowed") for item in row["items"]):
-            actionable_task_ids.add(task_id)
-        elif quality_automation is None:
-            descriptor_for_row = row["items"][0] if row["items"] else None
-            if (
-                descriptor_for_row
-                and descriptor_for_row.get("rule_id") in {"strm_mode_mismatch", "unexpected_strm"}
-                and tasks[task_id] is not None
-                and "reprocess" in available_task_actions(tasks[task_id], max_retries)
-            ):
-                actionable_task_ids.add(task_id)
     category_counts = {
         "目标目录缺失": sum(issue.code == "missing_dest" for issue in issues),
         "STRM 缺失": sum(issue.code == "missing_strm" for issue in issues),
@@ -1015,10 +1003,6 @@ def render_quality_page(
         else '<div class="empty-state is-healthy"><strong>未发现本地 STRM 问题</strong><p>当前本地文件巡检结果健康。</p></div>'
     )
     fix_action = ""
-    if actionable_task_ids:
-        fix_action = f"""<form method="post" action="/quality/fix" onsubmit="return confirm('将按当前允许的质量动作入队重跑，不会恢复缺失目录。确定继续？')">
-        <button class="button-primary" type="submit">修复 {len(actionable_task_ids)} 个可处理任务</button>
-      </form>"""
     automation_markup = ""
     if quality_automation is not None:
         snapshot = quality_automation.status_snapshot()
@@ -1028,7 +1012,7 @@ def render_quality_page(
         run_button = "" if status_label == "running" else '<form method="post" action="/quality/run"><button class="button-primary" type="submit">立即巡检</button></form>'
         automation_markup = f"""
 <section class="panel" data-section="quality-automation">
-  <div class="panel-header"><div><h2>自动巡检</h2><p class="subtle">每天按本地时间运行一次；正常修复不发送 Telegram。</p></div><span class="badge status-{html.escape(status_label)}">{html.escape(status_label)}</span></div>
+  <div class="panel-header"><div><h2>自动巡检</h2><p class="subtle">每天按本地时间扫描一次，只写报表，默认不自动修复、不推 Telegram 按钮。</p></div><span class="badge status-{html.escape(status_label)}">{html.escape(status_label)}</span></div>
   <div class="summary-grid">
     <div class="summary-item"><div class="summary-label">自动运行</div><div class="summary-value">{'已启用' if snapshot.get('enabled') else '已停用'}</div></div>
     <div class="summary-item"><div class="summary-label">执行时间</div><div class="summary-value">{html.escape(str(snapshot.get('time') or '-'))} · {html.escape(str(snapshot.get('timezone') or '-'))}</div></div>
@@ -1053,7 +1037,7 @@ def render_quality_page(
   <div>
     <p class="eyebrow">本地质量巡检</p>
     <h1>TaskStore 本地轻量巡检</h1>
-    <p class="subtle">只读取本地 TaskStore 和 STRM 文件路径，不会扫描 115。</p>
+    <p class="subtle">只读取本地 TaskStore 和 STRM 文件路径，不会扫描 115。同一目录任一仍有效自有分享都算健康。</p>
   </div>
   <div class="actions"><a class="button" href="/quality">重新巡检</a><a class="button" href="/">返回运行概览</a></div>
 </div>
@@ -1061,7 +1045,7 @@ def render_quality_page(
 {automation_markup}
 <section class="panel">
   <div class="panel-header">
-    <div><h2>巡检结果</h2><p class="subtle">发现缺失目录或直链 STRM 时，可以入队执行安全修复。</p></div>
+    <div><h2>巡检结果</h2><p class="subtle">只读报表。真孤儿可用失效 STRM 预览删除；默认不批量入队重跑。</p></div>
     <div class="actions">{fix_action}</div>
   </div>
   {results_markup}

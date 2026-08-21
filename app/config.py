@@ -80,6 +80,17 @@ def positive_int_env(name: str, default: int) -> int:
     return value
 
 
+def non_negative_int_env(name: str, default: int) -> int:
+    raw_value = os.environ.get(name, str(default))
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a non-negative integer, got {raw_value!r}") from exc
+    if value < 0:
+        raise ValueError(f"{name} must be greater than or equal to zero")
+    return value
+
+
 def normalize_task_max_retries(value: Any, default: int = 3) -> int:
     """Normalize the task retry limit to a positive integer."""
     try:
@@ -185,12 +196,13 @@ class Config:
     task_worker_interval_seconds: int = 5
     task_max_retries: int = 3
     quality_auto_enabled: bool = False
+    quality_auto_repair_enabled: bool = False
     quality_auto_time: str = "02:50"
     quality_auto_timezone: str = "Asia/Shanghai"
     quality_auto_max_tasks: int = 50
     quality_auto_115_check_limit: int = 3
     quality_archive_after_seconds: int = 7 * 24 * 3600
-    quality_unfixable_retention_days: int = 30
+    quality_unfixable_retention_days: int = 0
     quality_strm_cleanup_enabled: bool = False
     backup_enabled: bool = True
     backup_time: str = "03:30"
@@ -330,6 +342,9 @@ class Config:
             task_worker_interval_seconds=env_int("TASK_WORKER_INTERVAL_SECONDS", 5),
             task_max_retries=normalize_task_max_retries(os.environ.get("TASK_MAX_RETRIES", "3")),
             quality_auto_enabled=parse_bool_env(os.environ.get("QUALITY_AUTO_ENABLED"), False),
+            quality_auto_repair_enabled=parse_bool_env(
+                os.environ.get("QUALITY_AUTO_REPAIR_ENABLED"), False
+            ),
             quality_auto_time=parse_quality_auto_time(os.environ.get("QUALITY_AUTO_TIME", "02:50")),
             quality_auto_timezone=parse_quality_auto_timezone(
                 os.environ.get("QUALITY_AUTO_TIMEZONE", "Asia/Shanghai")
@@ -339,8 +354,8 @@ class Config:
             quality_archive_after_seconds=positive_int_env(
                 "QUALITY_ARCHIVE_AFTER_SECONDS", 7 * 24 * 3600
             ),
-            quality_unfixable_retention_days=positive_int_env(
-                "QUALITY_UNFIXABLE_RETENTION_DAYS", 30
+            quality_unfixable_retention_days=non_negative_int_env(
+                "QUALITY_UNFIXABLE_RETENTION_DAYS", 0
             ),
             quality_strm_cleanup_enabled=parse_bool_env(
                 os.environ.get("QUALITY_STRM_CLEANUP_ENABLED"), False

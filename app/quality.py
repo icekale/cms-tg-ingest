@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from dataclasses import replace
 from pathlib import Path, PureWindowsPath
@@ -24,7 +24,59 @@ class QualityIssue:
 
 
 _StrmDirectoryScan = tuple[tuple[tuple[Path, str], ...], tuple[QualityIssue, ...]]
-ShareIdentityResolver = Callable[[TaskSnapshot], tuple[str, str] | None]
+ShareIdentity = tuple[str, str]
+ShareIdentityResolver = Callable[[TaskSnapshot], ShareIdentity | Sequence[ShareIdentity] | None]
+
+
+def normalize_share_identities(value: object) -> tuple[ShareIdentity, ...]:
+    """Accept one (code, receive) pair or a sequence of pairs."""
+    if value is None:
+        return ()
+    if isinstance(value, (tuple, list)):
+        if (
+            len(value) == 2
+            and isinstance(value[0], str)
+            and not isinstance(value[1], (tuple, list))
+        ):
+            return _share_identity_pair(value[0], value[1])
+        pairs: list[ShareIdentity] = []
+        seen: set[ShareIdentity] = set()
+        for item in value:
+            if not isinstance(item, (tuple, list)) or not item:
+                continue
+            receive = item[1] if len(item) > 1 else ""
+            for identity in _share_identity_pair(item[0], receive):
+                if identity not in seen:
+                    seen.add(identity)
+                    pairs.append(identity)
+        return tuple(pairs)
+    return ()
+
+
+def _share_identity_pair(code: object, receive: object) -> tuple[ShareIdentity, ...]:
+    share_code = str(code or "").strip()
+    if not share_code:
+        return ()
+    receive_code = str(receive or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
+    return ((share_code, receive_code),)
+
+
+def share_markers_for_identities(
+    own_share_code: str = "",
+    own_share_receive_code: str = DEFAULT_OWN_SHARE_RECEIVE_CODE,
+    accepted_identities: Iterable[ShareIdentity] | None = None,
+) -> tuple[str, ...]:
+    markers: list[str] = []
+    seen: set[str] = set()
+    pairs = list(accepted_identities or ())
+    if str(own_share_code or "").strip():
+        pairs.insert(0, (str(own_share_code).strip(), own_share_receive_code))
+    for identity in normalize_share_identities(pairs):
+        marker = f"/s/{identity[0]}_{identity[1]}_"
+        if marker not in seen:
+            seen.add(marker)
+            markers.append(marker)
+    return tuple(markers) if markers else ("/s/",)
 
 
 def redact_quality_detail(value: object) -> str:
@@ -50,6 +102,7 @@ def inspect_task_files(
     expected_mode: str = "shared",
     own_share_code: str = "",
     own_share_receive_code: str = DEFAULT_OWN_SHARE_RECEIVE_CODE,
+    accepted_identities: Iterable[ShareIdentity] | None = None,
     allowed_roots: Iterable[str | Path] | None = None,
     _scan_cache: dict[Path, _StrmDirectoryScan] | None = None,
 ) -> list[QualityIssue]:
@@ -88,8 +141,11 @@ def inspect_task_files(
             _scan_cache[cache_key] = scan
     entries, base_issues = scan
     issues = list(base_issues)
-    receive_code = str(own_share_receive_code or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
-    expected_marker = f"/s/{own_share_code}_{receive_code}_" if own_share_code else "/s/"
+    markers = share_markers_for_identities(
+        own_share_code,
+        own_share_receive_code,
+        accepted_identities,
+    )
     for path, text in entries:
         if "/d/" in text:
             if expected_mode != "direct":
@@ -97,7 +153,7 @@ def inspect_task_files(
         elif expected_mode == "source_shared":
             if "/s/" not in text:
                 issues.append(QualityIssue("unexpected_strm", "STRM 不是预期的分享链接", str(path)))
-        elif expected_mode == "direct" or expected_marker not in text:
+        elif expected_mode == "direct" or not any(marker in text for marker in markers):
             issues.append(QualityIssue("unexpected_strm", "STRM 不是预期的分享链接", str(path)))
     return issues
 
@@ -112,7 +168,7 @@ def scan_task_quality(
     allowed_roots = tuple(allowed_roots) if allowed_roots is not None else None
     issues: list[QualityIssue] = []
     scan_cache: dict[Path, _StrmDirectoryScan] = {}
-    identity_cache: dict[tuple[str, str], tuple[str, str] | None] = {}
+    identity_cache: dict[tuple[str, str], tuple[ShareIdentity, ...]] = {}
     task_rows = list(tasks) if tasks is not None else store.list_recent_tasks(limit=limit)
     for task in task_rows:
         title = task.title or str(task.metadata.get("received_title") or "") or task.share_code
@@ -127,25 +183,22 @@ def scan_task_quality(
             continue
         own_share_code = str(task.metadata.get("own_share_code") or "").strip()
         own_share_receive_code = str(task.metadata.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
+        accepted_identities: tuple[ShareIdentity, ...] = ()
         if expected_mode == "shared" and callable(share_identity_resolver):
             identity_key = (dest_path, str(task.metadata.get("tmdb_id") or task.tmdb_id or "").strip())
             if identity_key not in identity_cache:
                 try:
-                    identity_cache[identity_key] = share_identity_resolver(task)
+                    identity_cache[identity_key] = normalize_share_identities(share_identity_resolver(task))
                 except Exception:
-                    identity_cache[identity_key] = None
-            latest_identity = identity_cache[identity_key]
-            if latest_identity:
-                latest_code, latest_receive_code = latest_identity
-                if str(latest_code or "").strip():
-                    own_share_code = str(latest_code).strip()
-                    own_share_receive_code = str(latest_receive_code or own_share_receive_code).strip() or own_share_receive_code
+                    identity_cache[identity_key] = ()
+            accepted_identities = identity_cache[identity_key]
         for issue in inspect_task_files(
             task,
             dest_path=dest_path,
             expected_mode=expected_mode,
             own_share_code=own_share_code,
             own_share_receive_code=own_share_receive_code,
+            accepted_identities=accepted_identities,
             allowed_roots=allowed_roots,
             _scan_cache=scan_cache,
         ):

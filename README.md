@@ -36,7 +36,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.4.7`。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.4.8`。
 4. 拉取固定版本并启动：
 
 ```sh
@@ -270,7 +270,7 @@ http://<unraid-ip>:8788/hdhive
 http://<unraid-ip>:8788/app/
 ```
 
-API 位于 `/api/v1/overview`、`/api/v1/tasks`、`/api/v1/health`、`/api/v1/quality` 和 `/api/v1/hdhive`，并提供任务操作、质量修复/设置、历史清理和 HDHive 订阅操作的 POST 接口。它们沿用 Web Token 认证，不返回 Cookie、访问令牌或 115 分享密码。
+API 位于 `/api/v1/overview`、`/api/v1/tasks`、`/api/v1/health`、`/api/v1/quality` 和 `/api/v1/hdhive`，并提供任务操作、质量报表/设置、历史清理和 HDHive 订阅操作的 POST 接口。它们沿用 Web Token 认证，不返回 Cookie、访问令牌或 115 分享密码。
 
 可查看 OAuth 状态、订阅来源、最近/下次检查、发现/入队/待确认/失败统计，并执行暂停、恢复、删除、立即检查和确认解锁。
 
@@ -308,7 +308,7 @@ v0.2 的任务引擎让真实 Telegram/CMS 工作流的新自分享链接默认�
 - Vue 任务详情页和旧任务详情页都保留这些操作，并显示事件时间线、阶段耗时和 115 调用统计。
 - /health 会显示 TaskStore 本地队列健康、worker 心跳和 115 风控冷却。
 - /quality 会先执行 TaskStore 本地轻量巡检。
-- Web `/quality` 页面只读取本地 TaskStore 和 STRM 文件；Vue 和旧版页面都支持本地巡检、自动巡检设置和修复入队，不扫描 115。
+- Web `/quality` 页面只读取本地 TaskStore 和 STRM 文件；Vue 和旧版页面都支持本地巡检和只读报表，不扫描 115，默认不入队修复。
 - TaskEngine 开启时，新 self-share 链接不会回退到旧 start_status_poll 轮询路径。
 
 关键设置：
@@ -330,7 +330,7 @@ TASK_MAX_RETRIES=3
 - **运行概览** `/app/overview`：统计卡（活跃任务 / 需处理 / 锁等待 / 默认 STRM）+ 当前队列，三秒判断系统是否正常。
 - **Emby 看板** `/app/emby-board`：数据概览（电影 / 剧集 / 总集数 / 媒体库数）、我的媒体库（各库代表海报 + 数量）、最近入库海报流；点击海报跳 Emby 详情/播放。需要 `EMBY_BASE_URL` + `EMBY_API_KEY`；Emby 不可达时页面显示空态引导，不影响其它页面。
 - **当前任务** `/app/tasks`：任务列表（阶段 / 状态 / STRM 模式 / 为什么慢），支持终止与删除。
-- **质量巡检** `/app/quality`：本地巡检、修复入队、历史与设置。
+- **质量巡检** `/app/quality`：本地巡检、只读报表、历史与设置。
 - **本地健康** `/app/health`：Runner 心跳、CMS STRM 守卫、直链拦截守卫状态。
 - **HDHive 订阅** `/app/hdhive`：订阅管理与解锁记录。
 - **实时日志** `/app/logs`：SSE 流式日志，支持级别/关键字过滤。
@@ -340,19 +340,20 @@ TASK_MAX_RETRIES=3
 
 ## 质量巡检
 
-首次部署建议保持关闭，手动完成一次完整入库测试后再开启：
+定时扫描默认关闭。开启后也只生成报表，不会自动重跑或占任务。同一剧集目录里指向任一仍有效自有分享的 STRM 视为健康：
 
 ```env
-QUALITY_AUTO_ENABLED=true
+QUALITY_AUTO_ENABLED=false
+QUALITY_AUTO_REPAIR_ENABLED=false
 QUALITY_AUTO_TIME=02:50
 QUALITY_AUTO_TIMEZONE=Asia/Shanghai
 QUALITY_AUTO_MAX_TASKS=50
 QUALITY_AUTO_115_CHECK_LIMIT=3
 QUALITY_ARCHIVE_AFTER_SECONDS=604800
-QUALITY_UNFIXABLE_RETENTION_DAYS=30
+QUALITY_UNFIXABLE_RETENTION_DAYS=0
 ```
 
-质量巡检只读取本地 TaskStore 和 STRM 文件，检查缺失 STRM、直链 STRM、异常目录和需要恢复的任务。它不扫描整个 115 网盘。风控、未知分享状态和路径不安全时只记录问题，不自动删除文件。
+质量巡检只读取本地 TaskStore 和 STRM 文件，检查缺失 STRM、直链 STRM、以及不属于该目录任何仍有效分享的异常文件。它不扫描整个 115 网盘。风控、未知分享状态和路径不安全时只记录问题，不自动删除文件。`QUALITY_AUTO_REPAIR_ENABLED` 默认关闭，不建议打开。
 
 失效 STRM 清理（可选，默认关闭）：转存目录按剧集文件夹复用时会残留旧分享世代的 STRM（`unexpected_strm`）。设置 `QUALITY_STRM_CLEANUP_ENABLED=true` 后，质量页每个任务行出现“失效 STRM”按钮：先预览引用“无存活任务分享码”的文件清单，勾选后显式确认才逐文件删除；直链文件不参与自动清理；删除后若任务问题清空且等待人工，会自动恢复评估。每个文件的操作记录写入任务详情。
 
@@ -504,7 +505,7 @@ git push origin v0.2.90
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.4.7
+docker pull icekale/cms-tg-ingest:0.4.8
 docker pull icekale/cms-tg-ingest:latest
 ```
 

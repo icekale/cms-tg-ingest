@@ -414,8 +414,10 @@ class StatusRepairTests(unittest.TestCase):
             store.update_move(int(latest["id"]), "moved", dest_path=str(dest))
 
             identity = store.latest_self_share_identity(str(dest), "1416")
+            identities = store.live_self_share_identities(str(dest), "1416")
 
             self.assertEqual(identity, ("newshare", "1212"))
+            self.assertEqual(identities, (("newshare", "1212"), ("oldshare", "1212")))
 
     def test_submission_store_creates_self_share_performance_indexes(self):
         with tempfile.TemporaryDirectory() as tmp:

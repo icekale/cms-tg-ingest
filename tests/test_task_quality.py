@@ -215,14 +215,48 @@ class TaskQualityTests(unittest.TestCase):
             self.assertEqual(reads, [strm])
             self.assertEqual([(issue.task_id, issue.code) for issue in issues], [(tasks[1].id, "unexpected_strm")])
 
-    def test_scan_uses_latest_completed_share_identity_for_same_destination(self):
+    def test_scan_accepts_any_live_share_identity_for_same_destination(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             dest = root / "Series"
             dest.mkdir()
-            (dest / "episode.strm").write_text("http://cms/s/newshare_1212_fileid.mkv", encoding="utf-8")
+            (dest / "old.strm").write_text("http://cms/s/oldshare_1212_fileid.mkv", encoding="utf-8")
+            (dest / "new.strm").write_text("http://cms/s/newshare_1212_fileid.mkv", encoding="utf-8")
             store = TaskStore(root / "tasks.db")
-            task = store.upsert_task("old-task", "", "https://115cdn.com/s/old-task")
+            tasks = []
+            for share_code, own_share_code in (("old-task", "oldshare"), ("new-task", "newshare")):
+                task = store.upsert_task(share_code, "", f"https://115cdn.com/s/{share_code}")
+                tasks.append(
+                    store.record_event(
+                        task.id,
+                        TaskStage.MOVED,
+                        TaskStatus.SUCCEEDED,
+                        "moved",
+                        metadata_patch={
+                            "dest_path": str(dest),
+                            "own_share_code": own_share_code,
+                            "own_share_receive_code": "1212",
+                            "tmdb_id": "1416",
+                        },
+                    )
+                )
+
+            issues = scan_task_quality(
+                store,
+                tasks=tasks,
+                share_identity_resolver=lambda current: (("oldshare", "1212"), ("newshare", "1212")),
+            )
+
+            self.assertEqual(issues, [])
+
+    def test_scan_flags_share_code_outside_live_identities(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "Series"
+            dest.mkdir()
+            (dest / "dead.strm").write_text("http://cms/s/deadshare_1212_fileid.mkv", encoding="utf-8")
+            store = TaskStore(root / "tasks.db")
+            task = store.upsert_task("live-task", "", "https://115cdn.com/s/live-task")
             task = store.record_event(
                 task.id,
                 TaskStage.MOVED,
@@ -230,7 +264,7 @@ class TaskQualityTests(unittest.TestCase):
                 "moved",
                 metadata_patch={
                     "dest_path": str(dest),
-                    "own_share_code": "oldshare",
+                    "own_share_code": "newshare",
                     "own_share_receive_code": "1212",
                     "tmdb_id": "1416",
                 },
@@ -239,10 +273,10 @@ class TaskQualityTests(unittest.TestCase):
             issues = scan_task_quality(
                 store,
                 tasks=[task],
-                share_identity_resolver=lambda current: ("newshare", "1212"),
+                share_identity_resolver=lambda current: (("oldshare", "1212"), ("newshare", "1212")),
             )
 
-            self.assertEqual(issues, [])
+            self.assertEqual([(issue.task_id, issue.code) for issue in issues], [(task.id, "unexpected_strm")])
 
     def test_scan_rejects_strm_symlink_target_outside_allowed_root_before_reading(self):
         with tempfile.TemporaryDirectory() as tmp:

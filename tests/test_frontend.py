@@ -152,7 +152,10 @@ class FrontendTests(unittest.TestCase):
         self.assertIn('type="password"', settings)
         for control in ("fix", "run", "settings", "reset"):
             self.assertIn(control, api)
+        for control in ("run", "settings", "reset"):
             self.assertIn(control, quality)
+        self.assertIn("立即巡检", quality)
+        self.assertNotIn("批量修复", quality)
         for control in ("pause", "resume", "delete", "check"):
             self.assertIn(control, hdhive)
         self.assertIn("hdhiveSubscriptionAction", api)

@@ -8,7 +8,12 @@ from app.config import Config
 from app.models import TaskStage, TaskStatus
 from app.quality_automation import QualityAutomation, QualityRepairPlan, QualityRunSummary
 from app.task_store import TaskStore
-from app.telegram_ui import format_quality_manual_report, quality_manual_keyboard, quality_manual_rows
+from app.telegram_ui import (
+    format_quality_manual_report,
+    format_quality_scan_summary,
+    quality_manual_keyboard,
+    quality_manual_rows,
+)
 
 
 class FakeTelegram:
@@ -124,11 +129,9 @@ class QualityTelegramTests(unittest.TestCase):
                 quality_automation=service,
             )
 
-            self.assertIn("质量 Telegram 任务", telegram.messages[-1][1])
-            buttons = [button for line in (telegram.messages[-1][2] or {}).get("inline_keyboard", []) for button in line]
-            self.assertTrue(buttons)
-            self.assertTrue(all(button["callback_data"].startswith("quality:") for button in buttons))
-            self.assertEqual(json.loads(json.dumps(telegram.messages[-1][2], ensure_ascii=False))["inline_keyboard"][0][0]["callback_data"].split(":")[2], str(task.id))
+            self.assertIn("质量巡检：发现", telegram.messages[-1][1])
+            self.assertIn("Web 质量页", telegram.messages[-1][1])
+            self.assertIsNone(telegram.messages[-1][2])
 
     def test_quality_callback_uses_automation_cas_and_refreshes_message(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -331,6 +334,23 @@ class QualityTelegramTests(unittest.TestCase):
 
             self.assertEqual(len(telegram.messages), 1)
             self.assertIn("质量", telegram.messages[0][1])
+
+    def test_quality_scan_summary_is_count_only(self):
+        empty = format_quality_scan_summary([])
+        counted = format_quality_scan_summary(
+            [{"rule_id": "unexpected_strm"}, {"rule_id": "no_issue"}, {"rule_id": "strm_mode_mismatch"}]
+        )
+        self.assertEqual(empty, "质量巡检：未发现需要关注的本地 STRM 问题。")
+        self.assertEqual(counted, "质量巡检：发现 2 个问题，请到 Web 质量页查看。")
+
+    def test_quality_startup_does_not_pause_invalid_share_probe_when_scan_enabled(self):
+        source = Path(bridge.__file__).read_text(encoding="utf-8")
+        self.assertIn("on_enabled_changed=None", source)
+        self.assertIn("set_invalid_probe_enabled(False)", source)
+        self.assertNotIn(
+            "set_invalid_probe_enabled(bool(quality_automation.config.quality_auto_enabled))",
+            source,
+        )
 
 
 if __name__ == "__main__":
