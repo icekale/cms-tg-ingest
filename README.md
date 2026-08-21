@@ -20,7 +20,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 - **任务可追踪**：TaskStore 记录接收、整理、识别、建分享、STRM、移动、Emby、清理等阶段。
 - **低频和风控保护**：低频 115 调用，限制扫描预算和重试频率；检测到风控后进入冷却，不连续轰击 115。
 - **HDHive 搜索与解锁**：复用 CMS 已授权的单个 HDHive 账号，按 TMDB 匹配影片/剧集、筛选网盘、单条或批量解锁。
-- **HDHive 剧集订阅**：用 `/订阅 <HDHive剧集链接>` 创建订阅，按计划检查新集，费用未知或较高时等待确认。
+- **HDHive 剧集订阅**：可在 Web `/app/hdhive` 或用 `/订阅 <HDHive剧集链接>` 创建订阅，按计划检查新集，费用未知或较高时等待确认。
 - **Web 运维台**：查看队列、阶段耗时、健康状态、质量巡检和 HDHive 订阅。
 - **Emby 看板**：独立媒体仪表盘——数据概览（电影/剧集/集数/媒体库数）、我的媒体库（各库代表海报 + 数量）、最近入库海报流，点击直达 Emby 详情/播放。Emby API Key 只在服务端使用，不外泄到浏览器。
 - **暗色模式**：Web 管理台跟随系统深浅色，顶栏可手动切换并记住选择；登录页同步适配。
@@ -36,7 +36,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.4.5`。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.4.6`。
 4. 拉取固定版本并启动：
 
 ```sh
@@ -231,7 +231,7 @@ OAuth 文件建议挂载整个 CMS 配置目录，而不是只挂载单个文件
 
 ### HDHive 剧集订阅
 
-直接发送 HDHive 剧集页面链接也可以创建订阅：
+Web 管理台 `/app/hdhive` 也可以粘贴 HDHive 剧集页面链接，或填写 TMDB 剧集 ID 创建订阅。直接发送 HDHive 剧集页面链接也可以创建订阅：
 
 ```text
 https://hdhive.com/tv/<slug>
@@ -504,7 +504,7 @@ git push origin v0.2.90
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.4.5
+docker pull icekale/cms-tg-ingest:0.4.6
 docker pull icekale/cms-tg-ingest:latest
 ```
 

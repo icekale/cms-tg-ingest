@@ -414,6 +414,7 @@ class HdhiveSubscriptionService:
         on_item_enqueued: Callable[[HdhiveSubscription, HdhiveSubscriptionItem], None] | None = None,
         tmdb_resolver: Any | None = None,
         emby: Any | None = None,
+        default_chat_id: str = "",
     ):
         self.proxy = proxy
         self.store = store
@@ -422,6 +423,7 @@ class HdhiveSubscriptionService:
         self.on_item_enqueued = on_item_enqueued
         self.tmdb_resolver = tmdb_resolver
         self.emby = emby
+        self.default_chat_id = str(default_chat_id or "")
 
     def create_from_url(self, chat_id: str, url: str) -> HdhiveSubscription:
         page = self.proxy.resolve_tv_page(url)

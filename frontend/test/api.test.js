@@ -151,6 +151,26 @@ test('cms version upgrade posts to the upgrade endpoint', async () => {
   }
 })
 
+test('hdhive create subscription posts url or tmdb payload', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options })
+    return { ok: true, status: 200, json: async () => ({ subscription: { id: 9 } }) }
+  }
+
+  try {
+    await api.hdhiveCreateSubscription({ url: 'https://hdhive.com/tv/slug' })
+    await api.hdhiveCreateSubscription({ tmdb_id: '1416', title: "Grey's Anatomy" })
+    assert.equal(calls[0].url, '/api/v1/hdhive/subscriptions')
+    assert.equal(calls[0].options.method, 'POST')
+    assert.deepEqual(JSON.parse(calls[0].options.body), { url: 'https://hdhive.com/tv/slug' })
+    assert.deepEqual(JSON.parse(calls[1].options.body), { tmdb_id: '1416', title: "Grey's Anatomy" })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 test('cms version pull posts to the pull endpoint', async () => {
   const originalFetch = globalThis.fetch
   let requestedPath = ''

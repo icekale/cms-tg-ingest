@@ -480,6 +480,7 @@ def create_hdhive_subscription_service(
         on_item_enqueued=on_item_enqueued,
         tmdb_resolver=tmdb_resolver,
         emby=emby,
+        default_chat_id=str(getattr(config, "tg_allowed_chat_id", "") or ""),
     )
 
 

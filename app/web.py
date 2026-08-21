@@ -58,6 +58,8 @@ from .self_share_settings import (
 )
 from .integration_credentials import resolve_emby_credentials, resolve_tmdb_credentials
 from .strm_mode import STRM_MODE_LABELS
+from .clients.hdhive import HdhiveProxyError
+from .hdhive_subscriptions import HdhiveUrlError, parse_hdhive_tv_url
 from .web_api import (
     api_response,
     api_task_detail,
@@ -1366,7 +1368,13 @@ def render_hdhive_page(
                         f'''<tr><td>{html.escape(title)}</td><td>{html.escape(item.episode_key)}</td><td>{html.escape(item.title or item.resource_slug)}</td><td>{html.escape(str(item.unlock_points if item.unlock_points is not None else "未知"))}</td><td><form method="post" action="/hdhive/item/{item.id}/confirm"><button class="button-primary" type="submit">确认解锁</button></form></td></tr>'''
                     )
 
-    subscriptions_markup = "".join(rows) or '<div class="empty-state">暂无 HDHive 剧集订阅。可在 Telegram 发送 HDHive 的剧集页面链接创建订阅。</div>'
+    create_markup = '''<form method="post" action="/hdhive/subscriptions" class="actions">
+  <label>HDHive 链接 <input name="url" placeholder="https://hdhive.com/tv/..."></label>
+  <label>或 TMDB ID <input name="tmdb_id" placeholder="255358"></label>
+  <label>剧名 <input name="title" placeholder="可选"></label>
+  <button class="button-primary" type="submit">添加订阅</button>
+</form>'''
+    subscriptions_markup = "".join(rows) or '<div class="empty-state">暂无 HDHive 剧集订阅。可在上方粘贴剧集页面链接，或填写 TMDB 剧集 ID。</div>'
     pending_markup = (
         '<div class="table-wrap"><table><thead><tr><th>剧集</th><th>集数</th><th>资源</th><th>积分</th><th>操作</th></tr></thead><tbody>'
         + "".join(pending_rows)
@@ -1397,6 +1405,7 @@ def render_hdhive_page(
 </div>
 <section class="panel"><div class="panel-header"><h2>账号状态</h2></div>{_hdhive_account_markup(service)}</section>
 <section class="panel"><div class="panel-header"><h2>自动检查</h2></div>{schedule_markup}{settings_markup}{_background_job_status_markup(background_jobs, "hdhive:")}</section>
+<section class="panel"><div class="panel-header"><h2>添加订阅</h2></div>{create_markup}</section>
 <section class="panel"><div class="panel-header"><h2>当前订阅</h2></div>{subscription_error}{subscriptions_markup}</section>
 <section class="panel"><div class="panel-header"><h2>待确认资源</h2><span class="subtle">费用超过自动解锁阈值时需要确认</span></div>{pending_markup}</section>
 <section class="panel"><div class="panel-header"><h2>解锁记录</h2><span class="subtle">显示实际/估算积分、解锁时间和关联任务号</span></div>{unlocked_markup}</section>
@@ -1986,6 +1995,19 @@ class WebApp:
                 return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"HDHive scheduler unavailable"
             self._submit_background("hdhive:run", scheduler.run_now, description="检查全部 HDHive 订阅")
             return 303, {"Location": "/hdhive", **auth_headers}, b""
+        if method == "POST" and path == "/hdhive/subscriptions":
+            service = self.hdhive_service
+            if service is None:
+                return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, b"HDHive service unavailable"
+            try:
+                values = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+                self._create_hdhive_subscription(
+                    service,
+                    {key: items[0] if items else "" for key, items in values.items()},
+                )
+            except (UnicodeDecodeError, ValueError, TypeError, HdhiveUrlError, HdhiveProxyError) as exc:
+                return 400, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, str(exc).encode("utf-8")
+            return 303, {"Location": "/hdhive", **auth_headers}, b""
         if method == "POST":
             hdhive_parts = [part for part in path.split("/") if part]
             service = self.hdhive_service
@@ -2077,6 +2099,31 @@ class WebApp:
         else:
             response_headers["Cache-Control"] = "no-cache"
         return 200, response_headers, candidate.read_bytes()
+
+    def _hdhive_owner_chat_id(self, service: Any) -> str:
+        value = str(getattr(service, "default_chat_id", "") or "").strip()
+        if value:
+            return value
+        try:
+            for subscription in service.list():
+                existing = str(getattr(subscription, "chat_id", "") or "").strip()
+                if existing:
+                    return existing
+        except Exception:
+            pass
+        raise ValueError("没有可用的订阅归属账号")
+
+    def _create_hdhive_subscription(self, service: Any, values: dict[str, Any]) -> Any:
+        url = str(values.get("url") or "").strip()
+        tmdb_id = str(values.get("tmdb_id") or "").strip()
+        title = str(values.get("title") or "").strip()
+        chat_id = self._hdhive_owner_chat_id(service)
+        if url:
+            parse_hdhive_tv_url(url)
+            return service.create_from_url(chat_id, url)
+        if tmdb_id:
+            return service.create_from_tmdb(chat_id, tmdb_id, title)
+        raise ValueError("请提供 HDHive 剧集链接或 TMDB 剧集 ID")
 
     @staticmethod
     def _api_body(body: bytes, headers: dict[str, str]) -> dict[str, Any]:
@@ -2313,6 +2360,26 @@ class WebApp:
             status, response_headers, response_body = api_response({"settings": settings})
             return status, {**response_headers, **auth_headers}, response_body
         parts = path.split("/")
+        if method == "POST" and path == "/api/v1/hdhive/subscriptions":
+            service = self.hdhive_service
+            if service is None:
+                status, response_headers, response_body = api_response({"error": "hdhive_unavailable"}, status=409)
+                return status, {**response_headers, **auth_headers}, response_body
+            try:
+                values = self._api_body(body, headers)
+                subscription = self._create_hdhive_subscription(service, values)
+                serialized = serialize_hdhive_subscription(service, subscription.id)
+            except (UnicodeDecodeError, ValueError, TypeError, KeyError, json.JSONDecodeError, HdhiveUrlError) as exc:
+                status, response_headers, response_body = api_response({"error": str(exc)}, status=400)
+                return status, {**response_headers, **auth_headers}, response_body
+            except HdhiveProxyError as exc:
+                status, response_headers, response_body = api_response(
+                    {"error": str(exc), "code": exc.error_code},
+                    status=400,
+                )
+                return status, {**response_headers, **auth_headers}, response_body
+            status, response_headers, response_body = api_response({"subscription": serialized})
+            return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and len(parts) == 7 and parts[3] == "hdhive" and parts[4] in {"subscription", "subscriptions"} and parts[5].isdigit():
             service = self.hdhive_service
             if service is None:

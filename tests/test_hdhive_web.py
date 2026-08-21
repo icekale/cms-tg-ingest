@@ -1,3 +1,4 @@
+import json
 import threading
 import tempfile
 import unittest
@@ -6,6 +7,7 @@ from types import SimpleNamespace
 import bridge
 from app.clients.hdhive import HdhiveAccount
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
+from app.hdhive_subscriptions import parse_hdhive_tv_url
 from app.background_jobs import BackgroundJobCoordinator
 from app.series_rules import parse_episode_filter
 from app.task_store import TaskStore
@@ -47,9 +49,30 @@ class FakeHdhiveService:
         self.check_calls = []
         self.confirm_calls = []
         self.filter_calls = []
+        self.create_calls = []
+        self.default_chat_id = "464100862"
 
     def list(self, chat_id=None):
         return self.store.list_subscriptions(chat_id)
+
+    def create_from_url(self, chat_id, url):
+        parsed = parse_hdhive_tv_url(url)
+        self.create_calls.append(("url", str(chat_id), parsed.url))
+        return self.store.create_subscription(
+            str(chat_id),
+            "hdhive_tv",
+            parsed.slug,
+            parsed.slug,
+            "255358",
+            source_url=parsed.url,
+        )
+
+    def create_from_tmdb(self, chat_id, tmdb_id, title):
+        tmdb_id = str(tmdb_id or "").strip()
+        if not tmdb_id.isdigit():
+            raise ValueError("TMDB 剧集 ID 无效")
+        self.create_calls.append(("tmdb", str(chat_id), tmdb_id, str(title or "")))
+        return self.store.create_subscription(str(chat_id), "tmdb_tv", tmdb_id, title or tmdb_id, tmdb_id)
 
     def pause(self, subscription_id):
         return self.store.set_status(subscription_id, "paused")
@@ -252,7 +275,7 @@ class HdhiveWebTests(unittest.TestCase):
 
         page = payload.decode("utf-8")
         self.assertEqual(status, 200)
-        for text in ("HDHive 订阅", "测试账号", "88", "攻壳机动队", "TMDB：255358", "01:30", "发现 1", "待确认", "攻壳机动队 S01E02"):
+        for text in ("HDHive 订阅", "添加订阅", "测试账号", "88", "攻壳机动队", "TMDB：255358", "01:30", "发现 1", "待确认", "攻壳机动队 S01E02"):
             self.assertIn(text, page)
         self.assertNotIn("legacy-secret", page)
         self.assertIn("password=***", page)
@@ -422,6 +445,164 @@ class HdhiveWebTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("episode", payload.decode("utf-8"))
         self.assertEqual(current.episode_filter, "S02")
+
+    def test_api_creates_subscription_from_hdhive_url(self):
+        directory, app, service, _scheduler, _subscription, _item = self.make_app()
+        try:
+            status, _headers, body = app.handle_request(
+                "POST",
+                "/api/v1/hdhive/subscriptions",
+                {"Content-Type": "application/json"},
+                json.dumps({"url": "https://hdhive.com/tv/newshow01"}).encode("utf-8"),
+            )
+            payload = json.loads(body)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["subscription"]["tmdb_id"], "255358")
+        self.assertEqual(payload["subscription"]["title"], "newshow01")
+        self.assertNotIn("source_url", payload["subscription"])
+        self.assertEqual(
+            service.create_calls,
+            [("url", "464100862", "https://hdhive.com/tv/newshow01")],
+        )
+
+    def test_api_creates_subscription_from_tmdb_id(self):
+        directory, app, service, _scheduler, _subscription, _item = self.make_app()
+        try:
+            status, _headers, body = app.handle_request(
+                "POST",
+                "/api/v1/hdhive/subscriptions",
+                {"Content-Type": "application/json"},
+                json.dumps({"tmdb_id": "1416", "title": "Grey's Anatomy"}).encode("utf-8"),
+            )
+            payload = json.loads(body)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["subscription"]["tmdb_id"], "1416")
+        self.assertEqual(payload["subscription"]["title"], "Grey's Anatomy")
+        self.assertEqual(service.create_calls, [("tmdb", "464100862", "1416", "Grey's Anatomy")])
+
+    def test_api_prefers_url_when_both_url_and_tmdb_are_provided(self):
+        directory, app, service, _scheduler, _subscription, _item = self.make_app()
+        try:
+            status, _headers, _body = app.handle_request(
+                "POST",
+                "/api/v1/hdhive/subscriptions",
+                {"Content-Type": "application/json"},
+                json.dumps(
+                    {
+                        "url": "https://hdhive.com/tv/preferurl",
+                        "tmdb_id": "1416",
+                        "title": "Ignored",
+                    }
+                ).encode("utf-8"),
+            )
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(service.create_calls[0][0], "url")
+
+    def test_api_rejects_invalid_create_payloads(self):
+        directory, app, service, _scheduler, _subscription, _item = self.make_app()
+        try:
+            empty_status, _headers, empty_body = app.handle_request(
+                "POST",
+                "/api/v1/hdhive/subscriptions",
+                {"Content-Type": "application/json"},
+                b"{}",
+            )
+            url_status, _headers, url_body = app.handle_request(
+                "POST",
+                "/api/v1/hdhive/subscriptions",
+                {"Content-Type": "application/json"},
+                json.dumps({"url": "https://evil.example/tv/abc"}).encode("utf-8"),
+            )
+            tmdb_status, _headers, tmdb_body = app.handle_request(
+                "POST",
+                "/api/v1/hdhive/subscriptions",
+                {"Content-Type": "application/json"},
+                json.dumps({"tmdb_id": "abc"}).encode("utf-8"),
+            )
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(empty_status, 400)
+        self.assertIn("HDHive 剧集链接", json.loads(empty_body)["error"])
+        self.assertEqual(url_status, 400)
+        self.assertIn("HDHive", json.loads(url_body)["error"])
+        self.assertEqual(tmdb_status, 400)
+        self.assertIn("TMDB", json.loads(tmdb_body)["error"])
+        self.assertEqual(service.create_calls, [])
+
+    def test_api_create_uses_existing_subscription_chat_id_when_default_missing(self):
+        directory, app, service, _scheduler, _subscription, _item = self.make_app()
+        service.default_chat_id = ""
+        try:
+            status, _headers, _body = app.handle_request(
+                "POST",
+                "/api/v1/hdhive/subscriptions",
+                {"Content-Type": "application/json"},
+                json.dumps({"tmdb_id": "1396", "title": "Breaking Bad"}).encode("utf-8"),
+            )
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(service.create_calls, [("tmdb", "464100862", "1396", "Breaking Bad")])
+
+    def test_api_create_rejects_missing_owner_chat_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = HdhiveSubscriptionStore(Path(tmp) / "tasks.db")
+            service = FakeHdhiveService(store)
+            service.default_chat_id = ""
+            app = WebApp(TaskStore(Path(tmp) / "other.db"), web_token="", hdhive_service=service)
+            status, _headers, body = app.handle_request(
+                "POST",
+                "/api/v1/hdhive/subscriptions",
+                {"Content-Type": "application/json"},
+                json.dumps({"tmdb_id": "1396", "title": "Breaking Bad"}).encode("utf-8"),
+            )
+
+        self.assertEqual(status, 400)
+        self.assertIn("归属", json.loads(body)["error"])
+        self.assertEqual(service.create_calls, [])
+
+    def test_api_create_returns_unavailable_without_service(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = WebApp(TaskStore(Path(tmp) / "tasks.db"), web_token="")
+            status, _headers, body = app.handle_request(
+                "POST",
+                "/api/v1/hdhive/subscriptions",
+                {"Content-Type": "application/json"},
+                json.dumps({"tmdb_id": "1416"}).encode("utf-8"),
+            )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body)["error"], "hdhive_unavailable")
+
+    def test_legacy_create_form_creates_subscription_and_redirects(self):
+        directory, app, service, _scheduler, _subscription, _item = self.make_app()
+        try:
+            status, headers, _payload = app.handle_request(
+                "POST",
+                "/hdhive/subscriptions",
+                {"Content-Type": "application/x-www-form-urlencoded"},
+                b"url=https%3A%2F%2Fhdhive.com%2Ftv%2Flegacyslug",
+            )
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(status, 303)
+        self.assertEqual(headers["Location"], "/hdhive")
+        self.assertEqual(
+            service.create_calls,
+            [("url", "464100862", "https://hdhive.com/tv/legacyslug")],
+        )
 
 
 if __name__ == "__main__":

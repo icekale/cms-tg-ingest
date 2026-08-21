@@ -405,6 +405,7 @@ class HdhiveBridgeTests(unittest.TestCase):
                 hdhive_enabled=True,
                 task_db_path=str(Path(directory) / "tasks.db"),
                 hdhive_auto_unlock_max_points=20,
+                tg_allowed_chat_id="464100862",
             )
             proxy = object()
             workflow = SimpleNamespace(proxy=proxy)
@@ -414,6 +415,7 @@ class HdhiveBridgeTests(unittest.TestCase):
             self.assertIsInstance(service, HdhiveSubscriptionService)
             self.assertIs(service.proxy, proxy)
             self.assertIs(service.enqueue_links, callback)
+            self.assertEqual(service.default_chat_id, "464100862")
 
     def test_subscription_service_factory_passes_tmdb_and_emby_clients(self):
         with tempfile.TemporaryDirectory() as directory:

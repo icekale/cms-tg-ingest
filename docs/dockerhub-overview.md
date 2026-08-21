@@ -28,7 +28,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 固定版本镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.4.5
+docker pull icekale/cms-tg-ingest:0.4.6
 ```
 
 ### 完整 Docker Compose
@@ -38,7 +38,7 @@ docker pull icekale/cms-tg-ingest:0.4.5
 ```yaml
 services:
   cms-tg-ingest:
-    image: icekale/cms-tg-ingest:0.4.5
+    image: icekale/cms-tg-ingest:0.4.6
     container_name: cms-tg-ingest
     restart: unless-stopped
     env_file:
@@ -180,7 +180,7 @@ HDHive 搜索默认筛选 `115`。费用未知或超过阈值时停在待确认�
 https://hdhive.com/tv/<slug>
 ```
 
-订阅不会立即解锁。程序每天按 `01:30`（`Asia/Shanghai`）检查新增资源；费用未知或超过阈值时等待 `确认解锁`。Web 管理页为 `/hdhive`，可以查看 OAuth 状态、下次检查时间和订阅统计。
+订阅不会立即解锁。程序每天按 `01:30`（`Asia/Shanghai`）检查新增资源；费用未知或超过阈值时等待 `确认解锁`。Web 管理页为 `/hdhive`，可以添加订阅、查看 OAuth 状态、下次检查时间和订阅统计。
 
 订阅支持智能判断：集数过滤示例为 `S01E01-S01E10,S02`，默认跳过 `S00` 特殊集；多季资源按季集编号识别，Emby 已有集数会跳过。程序根据 TMDB 完结状态和季集数量标记已完结订阅；无法解析季集、费用未知或超过自动阈值的资源不自动解锁，完结订阅可手动恢复。
 

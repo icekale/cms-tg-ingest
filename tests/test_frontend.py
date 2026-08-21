@@ -157,10 +157,11 @@ class FrontendTests(unittest.TestCase):
             self.assertIn(control, hdhive)
         self.assertIn("hdhiveSubscriptionAction", api)
         self.assertIn("hdhiveSubscriptionFilter", api)
+        self.assertIn("hdhiveCreateSubscription", api)
         self.assertIn("hdhiveItemConfirm", api)
         for control in ("confirm", "run", "settings"):
             self.assertIn(control, hdhive)
-        for control in ("episode_filter", "已完结", "设置集数过滤", "资源状态", "diagnosis", "waitForHdhiveJob"):
+        for control in ("episode_filter", "已完结", "设置集数过滤", "资源状态", "diagnosis", "waitForHdhiveJob", "添加订阅", "hdhiveCreateSubscription"):
             self.assertIn(control, hdhive)
         self.assertNotIn("未据此跳过资源", hdhive)
         for mode in ("shared", "direct", "source_shared"):
