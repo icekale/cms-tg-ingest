@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.hdhive_cards import TmdbDetailCache, build_hdhive_unlock_card
+from app.hdhive_cards import TmdbDetailCache, build_hdhive_unlock_card, format_hdhive_subscription_completed
 
 
 class _TrackingConnection:
@@ -58,6 +58,28 @@ class HdhiveCardTests(unittest.TestCase):
         self.assertIn("6 分（实际）", caption)
         self.assertIn("任务：#42", caption)
         self.assertEqual(poster, "https://image.tmdb.org/t/p/w500/poster.jpg")
+
+    def test_completed_notice_uses_title_status_and_expected_count(self):
+        text = format_hdhive_subscription_completed(
+            SimpleNamespace(id=12, title="剧名", tmdb_id="255358"),
+            {"tmdb_status": "Ended", "expected": 10},
+        )
+
+        self.assertEqual(
+            text,
+            "#12 剧名 已完结。\n"
+            "TMDB Ended，预期 10 集均已入队、已在 Emby 或已过滤。\n"
+            "之后不再每日检查。可在订阅里点恢复。",
+        )
+
+    def test_completed_notice_falls_back_to_tmdb_id_and_unknown_status(self):
+        text = format_hdhive_subscription_completed(
+            SimpleNamespace(id=3, title="", tmdb_id="999"),
+            {"expected": "2"},
+        )
+
+        self.assertIn("#3 999 已完结。", text)
+        self.assertIn("TMDB 未知，预期 2 集", text)
 
     def test_tmdb_cache_closes_connections_on_success_and_error(self):
         with tempfile.TemporaryDirectory() as tmp:

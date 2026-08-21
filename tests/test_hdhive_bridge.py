@@ -438,6 +438,24 @@ class HdhiveBridgeTests(unittest.TestCase):
             self.assertIs(service.tmdb_resolver, tmdb)
             self.assertIs(service.emby, emby)
 
+    def test_subscription_service_factory_passes_completion_callback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            completed = lambda *_args: None
+            config = SimpleNamespace(
+                hdhive_enabled=True,
+                task_db_path=str(Path(directory) / "tasks.db"),
+                hdhive_auto_unlock_max_points=20,
+            )
+
+            service = bridge.create_hdhive_subscription_service(
+                config,
+                SimpleNamespace(proxy=object()),
+                lambda _urls, _chat: None,
+                on_subscription_completed=completed,
+            )
+
+            self.assertIs(service.on_subscription_completed, completed)
+
     def test_direct_hdhive_url_creates_subscription_without_normal_intake(self):
         telegram = FakeTelegram()
         service = FakeSubscriptionService()

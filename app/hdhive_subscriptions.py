@@ -444,6 +444,7 @@ class HdhiveSubscriptionService:
         enqueue_links: Callable[[list[str], str], Any],
         auto_unlock_max_points: int = 20,
         on_item_enqueued: Callable[[HdhiveSubscription, HdhiveSubscriptionItem], None] | None = None,
+        on_subscription_completed: Callable[[HdhiveSubscription, dict[str, Any]], None] | None = None,
         tmdb_resolver: Any | None = None,
         emby: Any | None = None,
         default_chat_id: str = "",
@@ -453,6 +454,7 @@ class HdhiveSubscriptionService:
         self.enqueue_links = enqueue_links
         self.auto_unlock_max_points = max(0, int(auto_unlock_max_points))
         self.on_item_enqueued = on_item_enqueued
+        self.on_subscription_completed = on_subscription_completed
         self.tmdb_resolver = tmdb_resolver
         self.emby = emby
         self.default_chat_id = str(default_chat_id or "")
@@ -501,6 +503,7 @@ class HdhiveSubscriptionService:
         subscription = self.store.get_subscription(subscription_id)
         if subscription is None or subscription.status == "deleted":
             raise KeyError(f"HDHive subscription {subscription_id} does not exist")
+        previous_status = subscription.status
         try:
             resources = self.proxy.resources("tv", subscription.tmdb_id)
         except Exception as exc:
@@ -851,6 +854,18 @@ class HdhiveSubscriptionService:
             "tmdb_status": tmdb_status,
             "emby_skip_unavailable": emby_skip_unavailable,
         }
+        if (
+            subscription_status == "completed"
+            and previous_status != "completed"
+            and self.on_subscription_completed is not None
+        ):
+            try:
+                self.on_subscription_completed(
+                    self.store.get_subscription(subscription.id) or subscription,
+                    summary,
+                )
+            except Exception:
+                LOG.exception("HDHive completion notification failed subscription_id=%s", subscription.id)
         self.store.record_check(subscription.id, "", summary=summary)
         return SubscriptionCheckResult(
             discovered=discovered,

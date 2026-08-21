@@ -1,7 +1,7 @@
 # HDHive 订阅完结通知
 
 日期：2026-08-21  
-状态：已确认，待用户审阅设计稿
+状态：已实施
 
 ## 背景
 
@@ -49,7 +49,7 @@ TMDB Ended，预期 10 集均已入队、已在 Emby 或已过滤。
 - 集数用本次 `summary["expected"]`。
 - 不写分享链接、积分或任务号。
 
-格式函数放在现有 HDHive 文案模块（`app/hdhive_cards.py` 或 `app/telegram_ui.py`），纯函数，便于单测。
+格式函数放在 `app/hdhive_cards.py`，纯函数，便于单测。
 
 ## 接线
 

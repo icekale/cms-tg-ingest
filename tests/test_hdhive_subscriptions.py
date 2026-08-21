@@ -145,7 +145,15 @@ class HdhiveSubscriptionUrlTests(unittest.TestCase):
 
 
 class HdhiveSubscriptionServiceTests(unittest.TestCase):
-    def make_service(self, resources, unlock_items=None, *, tmdb_resolver=None, emby=None):
+    def make_service(
+        self,
+        resources,
+        unlock_items=None,
+        *,
+        tmdb_resolver=None,
+        emby=None,
+        on_subscription_completed=None,
+    ):
         directory = tempfile.TemporaryDirectory()
         store = HdhiveSubscriptionStore(Path(directory.name) / "tasks.db")
         subscription = store.create_subscription("464100862", "tmdb_tv", "255358", "剧集", "255358")
@@ -158,6 +166,7 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
             auto_unlock_max_points=20,
             tmdb_resolver=tmdb_resolver,
             emby=emby,
+            on_subscription_completed=on_subscription_completed,
         )
         return directory, store, subscription, proxy, service, intake_calls
 
@@ -835,6 +844,87 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(current.status, "completed")
         self.assertEqual(result.summary["expected"], 2)
         self.assertEqual(result.summary["tmdb_status"], "Ended")
+
+    def test_first_completion_notifies_once_and_recheck_is_silent(self):
+        tmdb = FakeTmdbResolver(
+            {
+                "ok": True,
+                "status": "Ended",
+                "seasons": [{"season_number": 1, "episode_count": 2}],
+            }
+        )
+        notices = []
+        unlock_items = [
+            HdhiveUnlockItem("s1e2", True, "https://115cdn.com/s/s1e2?password=abcd", "", "", False)
+        ]
+        directory, store, subscription, _proxy, service, _intake_calls = self.make_service(
+            [resource("s1e1", episode_key="s1e1"), resource("s1e2", episode_key="s1e2")],
+            unlock_items,
+            tmdb_resolver=tmdb,
+            emby=FakeEmby({"S01E01"}),
+            on_subscription_completed=lambda sub, summary: notices.append((sub.status, summary["expected"], summary["tmdb_status"])),
+        )
+        try:
+            first = service.check(subscription.id)
+            second = service.check(subscription.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(first.subscription_status, "completed")
+        self.assertEqual(second.subscription_status, "completed")
+        self.assertEqual(notices, [("completed", 2, "Ended")])
+
+    def test_completion_callback_error_does_not_roll_back_status(self):
+        tmdb = FakeTmdbResolver(
+            {
+                "ok": True,
+                "status": "Ended",
+                "seasons": [{"season_number": 1, "episode_count": 2}],
+            }
+        )
+
+        def boom(_subscription, _summary):
+            raise RuntimeError("telegram down")
+
+        unlock_items = [
+            HdhiveUnlockItem("s1e2", True, "https://115cdn.com/s/s1e2?password=abcd", "", "", False)
+        ]
+        directory, store, subscription, _proxy, service, _intake_calls = self.make_service(
+            [resource("s1e1", episode_key="s1e1"), resource("s1e2", episode_key="s1e2")],
+            unlock_items,
+            tmdb_resolver=tmdb,
+            emby=FakeEmby({"S01E01"}),
+            on_subscription_completed=boom,
+        )
+        try:
+            with self.assertLogs("cms-tg-ingest", level="ERROR"):
+                result = service.check(subscription.id)
+            current = store.get_subscription(subscription.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.subscription_status, "completed")
+        self.assertEqual(current.status, "completed")
+
+    def test_incomplete_series_does_not_notify(self):
+        notices = []
+        tmdb = FakeTmdbResolver({"ok": False, "status": ""})
+        unlock_items = [
+            HdhiveUnlockItem("s1e1", True, "https://115cdn.com/s/s1e1?password=abcd", "", "", False)
+        ]
+        directory, _store, subscription, _proxy, service, _intake_calls = self.make_service(
+            [resource("s1e1", episode_key="s1e1")],
+            unlock_items,
+            tmdb_resolver=tmdb,
+            on_subscription_completed=lambda *_args: notices.append(True),
+        )
+        try:
+            result = service.check(subscription.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.subscription_status, "active")
+        self.assertEqual(notices, [])
 
     def test_emby_failure_blocks_automatic_unlock_and_reports_reason(self):
         emby = FakeEmby(error=RuntimeError("Emby unavailable"))

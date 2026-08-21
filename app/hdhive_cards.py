@@ -94,3 +94,21 @@ def build_hdhive_unlock_card(
         )
     )
     return caption, _tmdb_poster_url(details)
+
+
+def format_hdhive_subscription_completed(subscription: Any, summary: dict[str, Any] | None = None) -> str:
+    payload = summary if isinstance(summary, dict) else {}
+    title = str(getattr(subscription, "title", "") or getattr(subscription, "tmdb_id", "") or "剧集").strip()
+    subscription_id = getattr(subscription, "id", "")
+    tmdb_status = str(payload.get("tmdb_status") or "").strip() or "未知"
+    try:
+        expected = int(payload.get("expected") or 0)
+    except (TypeError, ValueError):
+        expected = 0
+    return "\n".join(
+        (
+            f"#{subscription_id} {title} 已完结。",
+            f"TMDB {tmdb_status}，预期 {expected} 集均已入队、已在 Emby 或已过滤。",
+            "之后不再每日检查。可在订阅里点恢复。",
+        )
+    )

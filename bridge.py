@@ -101,7 +101,7 @@ from app.media.classify import (
 )
 from app.media.sources import parse_media_sources
 from app.hdhive import HdhiveSelectionError, HdhiveSessionStore, HdhiveWorkflow
-from app.hdhive_cards import TmdbDetailCache, build_hdhive_unlock_card
+from app.hdhive_cards import TmdbDetailCache, build_hdhive_unlock_card, format_hdhive_subscription_completed
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
 from app.hdhive_subscriptions import (
     HdhiveSubscriptionScheduler,
@@ -465,6 +465,7 @@ def create_hdhive_subscription_service(
     hdhive_workflow: HdhiveWorkflow | None,
     enqueue_links: Any,
     on_item_enqueued: Any | None = None,
+    on_subscription_completed: Any | None = None,
     tmdb_resolver: Any | None = None,
     emby: EmbyClient | None = None,
 ) -> HdhiveSubscriptionService | None:
@@ -476,6 +477,7 @@ def create_hdhive_subscription_service(
         enqueue_links=enqueue_links,
         auto_unlock_max_points=int(getattr(config, "hdhive_auto_unlock_max_points", 20)),
         on_item_enqueued=on_item_enqueued,
+        on_subscription_completed=on_subscription_completed,
         tmdb_resolver=tmdb_resolver,
         emby=emby,
         default_chat_id=str(getattr(config, "tg_allowed_chat_id", "") or ""),
@@ -4958,11 +4960,18 @@ def run_forever(
         else:
             telegram.send_message(subscription.chat_id, caption)
 
+    def notify_hdhive_subscription_completed(subscription: Any, summary: Any = None) -> None:
+        chat_id = str(getattr(subscription, "chat_id", "") or "")
+        if not chat_id or not hasattr(telegram, "send_message"):
+            return
+        telegram.send_message(chat_id, format_hdhive_subscription_completed(subscription, summary if isinstance(summary, dict) else {}))
+
     hdhive_subscription_service = create_hdhive_subscription_service(
         config,
         hdhive_workflow,
         enqueue_hdhive_links,
         on_item_enqueued=notify_hdhive_item,
+        on_subscription_completed=notify_hdhive_subscription_completed,
         tmdb_resolver=tmdb_resolver,
         emby=emby,
     )
