@@ -2446,6 +2446,7 @@ class WebApp:
                 "tasks": api_tasks(
                     self.store,
                     limit=20,
+                    open_only=True,
                     lifecycle_actions_enabled=self.task_engine_enabled,
                     media_enricher=self.media_enricher,
                 ),

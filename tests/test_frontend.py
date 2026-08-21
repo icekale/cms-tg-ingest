@@ -158,6 +158,8 @@ class FrontendTests(unittest.TestCase):
             self.assertIn(action, task_detail)
         self.assertIn("clearHistory", api)
         self.assertIn("clearHistory", overview)
+        self.assertIn("暂无进行中的任务", overview)
+        self.assertIn("setInterval", overview)
         self.assertIn("setOwnShareReceiveCode", api)
         self.assertIn("clearOwnShareReceiveCode", api)
         self.assertIn("setSelfShareReceiveCid", api)

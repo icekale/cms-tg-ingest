@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import { NButton, NCard, NPopconfirm, NSpace, NStatistic, NTag, useMessage } from 'naive-ui'
 import { api } from '../api'
 import { displayTaskTitle } from '../taskView'
@@ -9,9 +9,9 @@ const error = ref('')
 const loading = ref(false)
 const message = useMessage()
 const modeLabels = { shared: '自有分享', direct: '直链', source_shared: '原始分享' }
-async function load() {
-  loading.value = true
-  try { data.value = await api.overview(); error.value = '' } catch (err) { error.value = err.message } finally { loading.value = false }
+async function load({ silent = false } = {}) {
+  if (!silent) loading.value = true
+  try { data.value = await api.overview(); error.value = '' } catch (err) { error.value = err.message } finally { if (!silent) loading.value = false }
 }
 async function clearHistory() {
   try {
@@ -20,7 +20,15 @@ async function clearHistory() {
     await load()
   } catch (err) { message.error(err.message) }
 }
-onMounted(load)
+let refreshTimer = 0
+onMounted(() => {
+  load()
+  refreshTimer = window.setInterval(() => {
+    if (typeof document !== 'undefined' && document.hidden) return
+    load({ silent: true })
+  }, 15000)
+})
+onUnmounted(() => window.clearInterval(refreshTimer))
 </script>
 
 <template>
@@ -39,7 +47,7 @@ onMounted(load)
           <router-link class="task-link" :to="`/tasks/${task.id}`">#{{ task.id }} {{ displayTaskTitle(task) }}</router-link>
           <span class="muted"> · {{ task.stage }} · </span><n-tag size="small">{{ task.status }}</n-tag>
         </div>
-        <span v-if="!data.tasks.items.length" class="muted">暂无任务</span>
+        <span v-if="!data.tasks.items.length" class="muted">暂无进行中的任务</span>
       </n-space>
     </n-card>
   </template>

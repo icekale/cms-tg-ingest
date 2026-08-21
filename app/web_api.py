@@ -802,8 +802,13 @@ def api_tasks(
     lifecycle_actions_enabled: bool = True,
     max_retries: int = 3,
     media_enricher: Any | None = None,
+    open_only: bool = False,
 ) -> dict[str, Any]:
-    tasks = store.list_recent_tasks(limit=max(1, min(int(limit), 500)))
+    capped = max(1, min(int(limit), 500))
+    if open_only:
+        tasks = store.list_open_tasks()[:capped]
+    else:
+        tasks = store.list_recent_tasks(limit=capped)
     serialized = [
         serialize_task(
             task,

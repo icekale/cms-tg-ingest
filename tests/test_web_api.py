@@ -1925,6 +1925,33 @@ class CmsOsStrmGuardApiTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+class OverviewQueueTests(unittest.TestCase):
+    def test_overview_lists_open_tasks_instead_of_recent_succeeded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            finished = store.upsert_task("done-recent", "", "https://115cdn.com/s/done-recent")
+            store.record_event(finished.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done", title="刚完成")
+            failed = store.upsert_task("failed-old", "", "https://115cdn.com/s/failed-old")
+            store.record_event(
+                failed.id,
+                TaskStage.CLOUD_DOWNLOADING,
+                TaskStatus.FAILED,
+                "failed",
+                title="旧失败",
+                error_summary="需要处理",
+            )
+            store.patch_metadata(finished.id, {"touched": "later"})
+
+            app = WebApp(store)
+            status, _headers, body = app.handle_request("GET", "/api/v1/overview", {}, b"")
+
+        self.assertEqual(status, 200)
+        items = json.loads(body)["tasks"]["items"]
+        self.assertEqual([item["id"] for item in items], [failed.id])
+        self.assertEqual(items[0]["status"], TaskStatus.FAILED.value)
+        self.assertNotIn(finished.id, [item["id"] for item in items])
+
+
 class ApiTasksMediaEnricherTests(unittest.TestCase):
     def test_overview_api_enriches_media_metadata(self):
         import tempfile
