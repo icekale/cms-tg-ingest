@@ -301,9 +301,9 @@ def _parse_episode_keys(value: str, default_season: int | None = None) -> tuple[
         elif updated_through.group("season") is not None:
             season = int(updated_through.group("season"))
         else:
-            # A season-less "更新至第20集" note is interpreted against the
-            # resource's own season when known; otherwise it is skipped rather
-            # than guessed (a wrong season would corrupt emby matching).
+            # A season-less "更新至第20集" note uses the resource season or a
+            # caller-supplied default (TMDB single-season). Otherwise it is
+            # skipped rather than guessed.
             season = default_season
         if season is not None:
             return _episode_range(season, 1, int(updated_through.group("end")))
