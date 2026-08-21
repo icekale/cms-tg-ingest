@@ -313,7 +313,17 @@ def _parse_episode_keys(value: str, default_season: int | None = None) -> tuple[
     return (EpisodeKey(int(match.group(1)), int(match.group(2))),)
 
 
-def episode_keys(resource: HdhiveResource) -> tuple[EpisodeKey, ...]:
+def _resource_season_number(resource: HdhiveResource) -> int | None:
+    if resource.season_number is None:
+        return None
+    try:
+        season_number = int(resource.season_number)
+    except (TypeError, ValueError):
+        return None
+    return season_number if season_number >= 0 else None
+
+
+def episode_keys(resource: HdhiveResource, default_season: int | None = None) -> tuple[EpisodeKey, ...]:
     if resource.season_number is not None and resource.episode_number is not None:
         try:
             season_number = int(resource.season_number)
@@ -323,6 +333,9 @@ def episode_keys(resource: HdhiveResource) -> tuple[EpisodeKey, ...]:
         else:
             if season_number >= 0 and episode_number > 0:
                 return (EpisodeKey(season_number, episode_number),)
+    season_hint = _resource_season_number(resource)
+    if season_hint is None:
+        season_hint = default_season
     for value in (
         getattr(resource, "episode_key", ""),
         getattr(resource, "episode_code", ""),
@@ -330,13 +343,7 @@ def episode_keys(resource: HdhiveResource) -> tuple[EpisodeKey, ...]:
         getattr(resource, "title", ""),
     ):
         if value:
-            default_season = None
-            if resource.season_number is not None:
-                try:
-                    default_season = int(resource.season_number)
-                except (TypeError, ValueError):
-                    default_season = None
-            parsed = _parse_episode_keys(str(value), default_season=default_season)
+            parsed = _parse_episode_keys(str(value), default_season=season_hint)
             if parsed:
                 return parsed
     return ()
@@ -355,8 +362,33 @@ def _format_episode_keys(keys: tuple[EpisodeKey, ...]) -> str:
     return ",".join(key.normalized for key in keys)
 
 
-def episode_key(resource: HdhiveResource) -> str:
-    parsed = episode_keys(resource)
+def _default_season_from_tmdb(details: dict[str, Any]) -> int | None:
+    if not details or details.get("ok") is False:
+        return None
+    seasons = details.get("seasons")
+    if not isinstance(seasons, list):
+        return None
+    numbers: list[int] = []
+    for season in seasons:
+        if not isinstance(season, dict):
+            continue
+        season_number = season.get("season_number")
+        episode_count = season.get("episode_count")
+        if isinstance(season_number, bool) or isinstance(episode_count, bool):
+            continue
+        try:
+            season_number = int(season_number)
+            episode_count = int(episode_count)
+        except (TypeError, ValueError):
+            continue
+        if season_number >= 1 and episode_count > 0:
+            numbers.append(season_number)
+    unique = sorted(set(numbers))
+    return unique[0] if len(unique) == 1 else None
+
+
+def episode_key(resource: HdhiveResource, default_season: int | None = None) -> str:
+    parsed = episode_keys(resource, default_season=default_season)
     if parsed:
         return _format_episode_keys(parsed)
     return str(getattr(resource, "episode_key", "") or resource.slug).strip().lower()
@@ -475,6 +507,20 @@ class HdhiveSubscriptionService:
             self.store.record_check(subscription.id, str(exc))
             raise
 
+        tmdb_details: dict[str, Any] = {}
+        tmdb_status = ""
+        tmdb_lookup_failed = False
+        if self._dependency_enabled(self.tmdb_resolver):
+            try:
+                details = self.tmdb_resolver.lookup(subscription.tmdb_id, "tv", subscription.title)
+                if isinstance(details, dict):
+                    tmdb_details = details
+                    tmdb_status = str(details.get("status") or "")
+            except Exception:
+                tmdb_lookup_failed = True
+                LOG.warning("HDHive TMDB lookup unavailable subscription_id=%s", subscription.id, exc_info=True)
+        default_season = _default_season_from_tmdb(tmdb_details)
+
         episode_filter = parse_episode_filter(subscription.episode_filter)
         grouped: dict[str, list[HdhiveResource]] = {}
         parsed_by_resource: dict[int, tuple[EpisodeKey, ...]] = {}
@@ -483,8 +529,8 @@ class HdhiveSubscriptionService:
         for resource in resources:
             if str(resource.pan_type or "").strip().lower() != "115":
                 continue
-            parsed_keys = episode_keys(resource)
-            key = episode_key(resource)
+            parsed_keys = episode_keys(resource, default_season=default_season)
+            key = episode_key(resource, default_season=default_season)
             grouped.setdefault(key, []).append(resource)
             parsed_by_resource[id(resource)] = parsed_keys
             item = self.store.upsert_item(
@@ -762,19 +808,6 @@ class HdhiveSubscriptionService:
             except Exception as exc:
                 self.store.mark_item_intake_failed(saved_item.id, str(exc))
                 failed += 1
-
-        tmdb_details: dict[str, Any] = {}
-        tmdb_status = ""
-        tmdb_lookup_failed = False
-        if self._dependency_enabled(self.tmdb_resolver):
-            try:
-                details = self.tmdb_resolver.lookup(subscription.tmdb_id, "tv", subscription.title)
-                if isinstance(details, dict):
-                    tmdb_details = details
-                    tmdb_status = str(details.get("status") or "")
-            except Exception:
-                tmdb_lookup_failed = True
-                LOG.warning("HDHive TMDB lookup unavailable subscription_id=%s", subscription.id, exc_info=True)
 
         expected = self._expected_episode_keys(tmdb_details, episode_filter)
         terminal: set[Any] = set()

@@ -643,6 +643,82 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         parsed = episode_keys(resource("bundle", episode_key="", remark="更新至第20集"))
         self.assertEqual(parsed, ())
 
+    def test_seasonless_updated_through_uses_caller_default_season(self):
+        parsed = episode_keys(
+            resource(
+                "bundle",
+                episode_key="",
+                remark="亚马逊 19.8M码率来源 更新至01集（第一集平台重新给音轨码率高一点） 杜比视界+杜比全景声",
+            ),
+            default_season=1,
+        )
+        self.assertEqual((parsed[0].normalized, parsed[-1].normalized), ("S01E01", "S01E01"))
+
+    def test_single_season_tmdb_parses_seasonless_updated_through(self):
+        tmdb = FakeTmdbResolver(
+            {
+                "ok": True,
+                "status": "Returning Series",
+                "seasons": [
+                    {"season_number": 0, "episode_count": 1},
+                    {"season_number": 1, "episode_count": 8},
+                ],
+            }
+        )
+        unlock_items = [
+            HdhiveUnlockItem("pack", True, "https://115cdn.com/s/pack?password=abcd", "", "", False)
+        ]
+        directory, store, subscription, proxy, service, intake_calls = self.make_service(
+            [
+                resource(
+                    "pack",
+                    episode_key="",
+                    remark="亚马逊 19.8M码率来源 更新至01集（第一集平台重新给音轨码率高一点） 杜比视界+杜比全景声",
+                )
+            ],
+            unlock_items,
+            tmdb_resolver=tmdb,
+        )
+        try:
+            result = service.check(subscription.id)
+            item = store.list_items(subscription.id)[0]
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.enqueued, 1)
+        self.assertEqual(result.summary["unparsed"], 0)
+        self.assertEqual(item.status, "enqueued")
+        self.assertEqual(item.normalized_episode_key, "S01E01")
+        self.assertEqual(intake_calls, [(["https://115cdn.com/s/pack?password=abcd"], "464100862")])
+        self.assertEqual(proxy.unlock_calls, [["pack"]])
+
+    def test_multi_season_tmdb_does_not_guess_seasonless_updated_through(self):
+        tmdb = FakeTmdbResolver(
+            {
+                "ok": True,
+                "status": "Returning Series",
+                "seasons": [
+                    {"season_number": 1, "episode_count": 10},
+                    {"season_number": 2, "episode_count": 8},
+                    {"season_number": 3, "episode_count": 8},
+                ],
+            }
+        )
+        directory, store, subscription, proxy, service, _intake_calls = self.make_service(
+            [resource("pack", episode_key="", remark="更新至01集")],
+            tmdb_resolver=tmdb,
+        )
+        try:
+            result = service.check(subscription.id)
+            item = store.list_items(subscription.id)[0]
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.enqueued, 0)
+        self.assertEqual(result.summary["unparsed"], 1)
+        self.assertEqual(item.status, "unparsed")
+        self.assertEqual(proxy.unlock_calls, [])
+
     def test_resource_remark_range_is_not_skipped_when_one_emby_episode_is_missing(self):
         emby = FakeEmby({"S03E01"})
         unlock_items = [
