@@ -554,11 +554,40 @@ class CmsUpgradeTests(unittest.TestCase):
                 payload = checker.upgrade("0.4.9.2")
 
         self.assertEqual(payload["upgrade_status"], "succeeded")
+        self.assertEqual(payload["current_version"], "0.4.9.2")
+        self.assertEqual(payload["last_seen_version"], "0.4.9.2")
+        self.assertFalse(payload["update_available"])
         self.assertIn(("pull", "imaliang/cloud-media-sync:0.4.9.2"), calls)
         self.assertIn(("rename", "cloud-media-sync", "cloud-media-sync-pre-upgrade"), calls)
         self.assertIn(("create", "cloud-media-sync", "imaliang/cloud-media-sync:0.4.9.2"), calls)
         self.assertIn(("remove", "cloud-media-sync-pre-upgrade"), calls)
         self.assertNotIn(("remove", "cloud-media-sync"), calls)
+
+    def test_upgrade_clears_stale_cms_client_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checker = self._checker(tmp)
+            checker.cms._cached_version = "v0.4.9.1 - PRO"
+            checker.cms.token = "old-token"
+            with patch.multiple(
+                "app.cms_updater",
+                create=True,
+                docker_pull_image=lambda socket, image, tag="latest": "pulled",
+                docker_inspect_container=lambda socket, name: {
+                    "Config": {"Image": "imaliang/cloud-media-sync:0.4.9.1"},
+                    "HostConfig": {},
+                    "NetworkSettings": {"Networks": {}},
+                },
+                docker_rename_container=lambda socket, name, new: "",
+                docker_stop_container=lambda socket, name: "",
+                docker_create_container=lambda socket, name, inspect, image: "",
+                docker_start_container=lambda socket, name: "",
+                docker_wait_running=lambda socket, name, timeout=60: True,
+                docker_remove_container=lambda socket, name: "",
+                verify_cms_guards=lambda **kwargs: (True, ""),
+            ):
+                checker.upgrade("0.4.9.2")
+        self.assertEqual(checker.cms._cached_version, "")
+        self.assertEqual(checker.cms.token, "")
 
     def test_upgrade_rolls_back_when_guards_fail(self):
         calls = []

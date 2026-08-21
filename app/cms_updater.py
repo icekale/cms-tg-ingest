@@ -670,6 +670,12 @@ class CmsVersionChecker:
         message = f"CMS 已升级到 {version}"
         if compose_note:
             message = f"{message}；{compose_note}"
+        # Persist the tag we just installed. The previous current_version is
+        # the old CMS login string and would keep the settings page stale.
+        if hasattr(self.cms, "_cached_version"):
+            self.cms._cached_version = ""
+        if hasattr(self.cms, "token"):
+            self.cms.token = ""
         return persist(
             "succeeded",
             "",
@@ -677,6 +683,10 @@ class CmsVersionChecker:
             update_available=False,
             update_ready=False,
             remote_version=version,
+            current_version=version,
+            last_seen_version=version,
+            last_seen_at=time.time(),
+            last_changed_at=time.time(),
         )
 
 
