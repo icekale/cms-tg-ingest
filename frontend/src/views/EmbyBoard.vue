@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, ref } from 'vue'
-import { NButton, NCard, NStatistic, NSpace, useMessage } from 'naive-ui'
+import { NButton, NCard, NStatistic, useMessage } from 'naive-ui'
 import { api } from '../api'
 
 const message = useMessage()
@@ -51,9 +51,9 @@ function ratingText(item) {
 <template>
   <div class="page-title">
     <div><h1>Emby 看板</h1><p>媒体库概览、最近入库与各库规模。</p></div>
-    <n-space>
+    <div class="page-actions">
       <n-button secondary :loading="loading" @click="load(true)">刷新</n-button>
-    </n-space>
+    </div>
   </div>
 
   <n-card v-if="error" type="error" class="section-card">{{ error }}</n-card>

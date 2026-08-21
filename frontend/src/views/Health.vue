@@ -14,7 +14,7 @@ const guardLabel = (status) => ({ installed: '已安装', missing: '未安装', 
 </script>
 
 <template>
-  <div class="page-title"><div><h1>本地健康</h1><p>TaskRunner、115 风控冷却和等待原因。</p></div><n-button secondary @click="load">刷新</n-button></div>
+  <div class="page-title"><div><h1>本地健康</h1><p>TaskRunner、115 风控冷却和等待原因。</p></div><div class="page-actions"><n-button secondary @click="load">刷新</n-button></div></div>
   <n-card v-if="health">
     <n-tag :type="health.runner_heartbeat_stale ? 'warning' : 'success'">{{ health.runner_heartbeat_stale ? '心跳过期' : '运行正常' }}</n-tag>
     <n-descriptions bordered :column="2" style="margin-top: 18px">

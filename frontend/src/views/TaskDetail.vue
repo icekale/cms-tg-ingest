@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { NAlert, NButton, NCard, NDescriptions, NDescriptionsItem, NPopconfirm, NSelect, NSpace, NTag, useMessage } from 'naive-ui'
+import { NAlert, NButton, NCard, NDescriptions, NDescriptionsItem, NPopconfirm, NSelect, NTag, useMessage } from 'naive-ui'
 import { useRoute } from 'vue-router'
 import { api } from '../api'
 import { displayTaskTitle, taskActionLabel } from '../taskView'
@@ -59,7 +59,7 @@ onMounted(load)
       <n-descriptions-item label="115 调用">{{ task.stage_p115_calls || '-' }}</n-descriptions-item>
       <n-descriptions-item label="TMDB">{{ task.tmdb_id || '-' }}</n-descriptions-item>
     </n-descriptions>
-    <n-space style="margin-top: 18px">
+    <div class="action-row" style="margin-top: 18px">
       <n-button v-if="canRetry" type="primary" :loading="busyAction === 'retry'" @click="runAction('retry')">{{ taskActionLabel('retry') }}</n-button>
       <n-button v-if="canEmby" :loading="busyAction === 'emby'" @click="runAction('emby')">{{ taskActionLabel('emby') }}</n-button>
       <n-popconfirm v-if="canRestore" @positive-click="runAction('restore')">
@@ -75,7 +75,7 @@ onMounted(load)
         将从头重跑该任务，已完成阶段会再走一遍，确定继续？
       </n-popconfirm>
       <n-button secondary @click="load">刷新</n-button>
-    </n-space>
+    </div>
     <n-card title="处理时间线" embedded style="margin-top: 18px">
       <div v-for="event in task.events || []" :key="event.id" class="event-row"><n-tag size="small">{{ event.stage }}</n-tag><span>{{ event.message }}</span><span class="muted">{{ eventTime(event.created_at) }}</span></div>
       <div v-if="!(task.events || []).length" class="muted">暂无事件</div>

@@ -218,7 +218,7 @@ onMounted(load)
 <template>
   <div class="page-title">
     <div><h1>质量巡检</h1><p>只读报表：同一剧集目录里指向任一仍有效自有分享的 STRM 视为健康。默认不自动重跑。</p></div>
-    <n-space><n-button type="primary" @click="run">立即巡检</n-button><n-button secondary :loading="loading" @click="load">刷新</n-button></n-space>
+    <div class="page-actions"><n-button type="primary" @click="run">立即巡检</n-button><n-button secondary :loading="loading" @click="load">刷新</n-button></div>
   </div>
 
   <div class="metric-grid quality-metrics">
@@ -234,26 +234,26 @@ onMounted(load)
 
   <n-card v-if="payload.automation" title="自动巡检设置" class="section-card">
     <n-form class="compact-form" label-placement="top">
-      <n-form-item label="定时扫描">
+      <n-form-item label="定时扫描" :show-feedback="false">
         <n-switch v-model:value="settings.enabled" />
       </n-form-item>
-      <n-form-item label="时间">
+      <n-form-item label="时间" :show-feedback="false">
         <n-input v-model:value="settings.time" aria-label="巡检时间" style="width: 96px" />
       </n-form-item>
-      <n-form-item label="时区">
+      <n-form-item label="时区" :show-feedback="false">
         <n-input v-model:value="settings.timezone" aria-label="巡检时区" style="width: 200px" />
       </n-form-item>
-      <n-form-item label="任务上限">
+      <n-form-item label="任务上限" :show-feedback="false">
         <n-input-number v-model:value="settings.max_tasks" :min="1" style="width: 120px" />
       </n-form-item>
-      <n-form-item label="115 检查上限">
+      <n-form-item label="115 检查上限" :show-feedback="false">
         <n-input-number v-model:value="settings.check_limit" :min="1" style="width: 120px" />
       </n-form-item>
       <n-form-item label="操作" :show-feedback="false">
-        <n-space>
+        <div class="action-row">
           <n-button @click="saveSettings">保存</n-button>
           <n-button secondary @click="reset">恢复默认</n-button>
-        </n-space>
+        </div>
       </n-form-item>
     </n-form>
     <p class="muted">启用后只扫描写报表，不会自动重跑、占任务或推 Telegram 操作按钮。自动修复请用环境变量 QUALITY_AUTO_REPAIR_ENABLED，不推荐。</p>
@@ -319,11 +319,11 @@ onMounted(load)
       <p v-if="cleanup.result.skipped?.length" class="muted">
         跳过原因：{{ cleanup.result.skipped.map((s) => `${cleanupFileName(s.path)}: ${CLEANUP_SKIP_REASONS[s.reason] || s.reason}`).join('；') }}
       </p>
-      <n-space style="margin-top: 12px"><n-button type="primary" @click="cleanup.show = false; load()">关闭</n-button></n-space>
+      <div class="form-actions"><n-button type="primary" @click="cleanup.show = false; load()">关闭</n-button></div>
     </template>
     <template v-else-if="cleanup.error">
       <p class="muted">{{ cleanup.error }}</p>
-      <n-space style="margin-top: 12px"><n-button @click="cleanup.show = false">关闭</n-button></n-space>
+      <div class="form-actions"><n-button @click="cleanup.show = false">关闭</n-button></div>
     </template>
     <template v-else-if="cleanup.candidates.length">
       <p class="muted">以下 STRM 引用了已无存活任务引用的分享码。分享仍在 115 的默认不勾选（删除会断链）；已失效的默认勾选。</p>
@@ -336,7 +336,7 @@ onMounted(load)
       <p v-if="cleanup.candidates.some((c) => c.share_state === 'valid')" class="muted">
         提示：{{ cleanup.candidates.filter((c) => c.share_state === 'valid').length }} 个文件的分享在 115 仍有效，如需删除请在下方勾选（执行时会再次验证）。
       </p>
-      <n-space style="margin-top: 12px">
+      <div class="form-actions">
         <n-popconfirm :disabled="!cleanup.checked.length" @positive-click="runCleanup">
           <template #trigger>
             <n-button type="primary" :loading="cleanup.running" :disabled="!cleanup.checked.length">
@@ -346,11 +346,11 @@ onMounted(load)
           {{ QUALITY_CLEANUP_CONFIRM }}
         </n-popconfirm>
         <n-button @click="cleanup.show = false">取消</n-button>
-      </n-space>
+      </div>
     </template>
     <template v-else>
       <p class="muted">没有可清理的失效 STRM 文件。</p>
-      <n-space style="margin-top: 12px"><n-button @click="cleanup.show = false">关闭</n-button></n-space>
+      <div class="form-actions"><n-button @click="cleanup.show = false">关闭</n-button></div>
     </template>
   </n-modal>
 </template>

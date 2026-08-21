@@ -24,7 +24,7 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="page-title"><div><h1>运行概览</h1><p>把当前队列、风险和下一步操作放在一个页面。</p></div><n-space><n-popconfirm @positive-click="clearHistory"><template #trigger><n-button secondary>清理历史</n-button></template>确认清理已完成历史任务？</n-popconfirm><n-button secondary :loading="loading" @click="load">刷新</n-button></n-space></div>
+  <div class="page-title"><div><h1>运行概览</h1><p>把当前队列、风险和下一步操作放在一个页面。</p></div><div class="page-actions"><n-popconfirm @positive-click="clearHistory"><template #trigger><n-button secondary>清理历史</n-button></template>确认清理已完成历史任务？</n-popconfirm><n-button secondary :loading="loading" @click="load">刷新</n-button></div></div>
   <n-card v-if="error" type="error" class="section-card">{{ error }}</n-card>
   <template v-else-if="data">
     <div class="metric-grid">

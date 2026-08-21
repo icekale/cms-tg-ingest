@@ -72,7 +72,7 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="page-title"><div><h1>当前任务</h1><p>任务级模式在 STRM 副作用开始前可调整，进入锁定阶段后不可更改。</p></div><n-space><n-button secondary :loading="loading" @click="load">刷新</n-button></n-space></div>
+  <div class="page-title"><div><h1>当前任务</h1><p>任务级模式在 STRM 副作用开始前可调整，进入锁定阶段后不可更改。</p></div><div class="page-actions"><n-button secondary :loading="loading" @click="load">刷新</n-button></div></div>
   <n-card>
     <div class="desktop-table">
       <n-data-table :columns="columns" :data="tasks" :loading="loading" :pagination="{ pageSize: 20 }" />

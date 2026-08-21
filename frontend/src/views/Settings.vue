@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, ref } from 'vue'
-import { NButton, NCard, NForm, NFormItem, NInput, NInputNumber, NModal, NPopconfirm, NSelect, NSpace, NSwitch, NText, useMessage } from 'naive-ui'
+import { NButton, NCard, NForm, NFormItem, NInput, NInputNumber, NModal, NPopconfirm, NSelect, NSwitch, NText, useMessage } from 'naive-ui'
 import { api } from '../api'
 
 const message = useMessage()
@@ -253,7 +253,7 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="page-title"><div><h1>设置</h1><p>统一管理新任务的默认 STRM 工作方式。</p></div><n-button secondary :loading="loading" @click="load">刷新</n-button></div>
+  <div class="page-title"><div><h1>设置</h1><p>统一管理新任务的默认 STRM 工作方式。</p></div><div class="page-actions"><n-button secondary :loading="loading" @click="load">刷新</n-button></div></div>
   <n-card v-if="settings" title="STRM 模式" class="section-card">
     <n-form class="settings-form" label-placement="top">
       <n-form-item label="默认 STRM 模式">
@@ -280,10 +280,10 @@ onMounted(load)
       <n-form-item label="新访问码">
         <n-input v-model:value="receiveCode" type="password" show-password-on="click" placeholder="例如 1212" />
       </n-form-item>
-      <n-space>
+      <div class="form-actions">
         <n-button type="primary" :disabled="!receiveCode" @click="saveReceiveCode">保存</n-button>
         <n-button secondary @click="clearReceiveCode">使用 CMS 配置</n-button>
-      </n-space>
+      </div>
     </n-form>
   </n-card>
   <n-card v-if="settings" title="待整理目录" class="section-card">
@@ -292,10 +292,10 @@ onMounted(load)
       <n-form-item label="待整理目录 CID">
         <n-input v-model:value="receiveCid" placeholder="例如 3481694068122059860" />
       </n-form-item>
-      <n-space>
+      <div class="form-actions">
         <n-button type="primary" :disabled="!receiveCid" @click="saveReceiveCid">保存</n-button>
         <n-button secondary @click="clearReceiveCid">使用环境配置</n-button>
-      </n-space>
+      </div>
       <n-text depth="3">用于 115 转存和云下载的目标目录。Web 保存值写入 TaskStore，重启后仍保留。</n-text>
     </n-form>
   </n-card>
@@ -311,10 +311,10 @@ onMounted(load)
       <n-form-item label="Emby API Key">
         <n-input v-model:value="embyApiKey" type="password" show-password-on="click" placeholder="Emby API Key" />
       </n-form-item>
-      <n-space>
+      <div class="form-actions">
         <n-button type="primary" :loading="savingEmby" :disabled="!embyBaseUrl && !embyApiKey" @click="saveEmbyCredentials">保存</n-button>
         <n-button secondary @click="clearEmbyCredentials">恢复环境配置</n-button>
-      </n-space>
+      </div>
       <n-text depth="3">保存后立即生效（Emby 看板、入库确认与刷新）；只填一项时仅更新该项。留空保存不会覆盖已有值。</n-text>
     </n-form>
   </n-card>
@@ -330,10 +330,10 @@ onMounted(load)
       <n-form-item label="TMDB Bearer Token">
         <n-input v-model:value="tmdbBearerToken" type="password" show-password-on="click" placeholder="可选" />
       </n-form-item>
-      <n-space>
+      <div class="form-actions">
         <n-button type="primary" :loading="savingTmdb" :disabled="!tmdbApiKey && !tmdbBearerToken" @click="saveTmdbCredentials">保存</n-button>
         <n-button secondary @click="clearTmdbCredentials">恢复环境配置</n-button>
-      </n-space>
+      </div>
       <n-text depth="3">用于媒体元数据刮削（海报、评分、简介）。保存后立即生效；留空保存不会覆盖已有值。</n-text>
     </n-form>
   </n-card>
@@ -362,7 +362,7 @@ onMounted(load)
       <n-text depth="3" v-else-if="cms.remote_version">当前已是远程最新版本。</n-text>
       <n-text depth="3" v-else>{{ cms.message || '未运行检测' }}</n-text>
       <n-text depth="3" v-if="cms.upgrade_status">上次升级：{{ cms.upgrade_status }}{{ cms.upgrade_error ? ' · ' + cms.upgrade_error : '' }}</n-text>
-      <n-space>
+      <div class="form-actions">
         <n-button type="primary" :loading="cmsSaving" @click="saveCmsVersion">保存</n-button>
         <n-button secondary @click="checkCmsVersion">立即检查</n-button>
         <n-popconfirm v-if="cms.update_available" @positive-click="upgradeCms">
@@ -373,7 +373,7 @@ onMounted(load)
         </n-popconfirm>
         <n-button v-if="cms.update_available" secondary :loading="cmsSaving" @click="pullCmsImage">拉取镜像</n-button>
         <n-button secondary @click="resetCmsVersion">恢复环境默认</n-button>
-      </n-space>
+      </div>
     </n-form>
   </n-card>
   <n-modal

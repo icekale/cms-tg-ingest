@@ -112,7 +112,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="page-title">
     <div><h1>实时日志</h1><p>查看本程序最近和实时输出，不包含 CMS 自身日志。</p></div>
-    <n-tag :type="statusType">{{ statusLabel }}</n-tag>
+    <div class="page-actions"><n-tag :type="statusType">{{ statusLabel }}</n-tag></div>
   </div>
   <n-card>
     <div class="log-toolbar">
@@ -120,11 +120,9 @@ onBeforeUnmount(() => {
       <n-select v-model:value="lineLimit" filterable :input-props="{ 'aria-label': '日志行数' }" :options="lineOptions" style="width: 120px" />
       <n-input v-model:value="keywordDraft" aria-label="日志关键字" maxlength="100" clearable placeholder="关键字" style="max-width: 280px" @keyup.enter="applyKeyword" />
       <n-input v-model:value="loggerDraft" aria-label="日志来源" maxlength="100" clearable placeholder="来源(如 task_runner)" style="max-width: 220px" @keyup.enter="applyKeyword" />
-      <n-space>
-        <n-button secondary @click="applyKeyword">筛选</n-button>
-        <n-button secondary @click="reconnect">重连</n-button>
-        <n-button secondary @click="clearVisibleLogs">清空</n-button>
-      </n-space>
+      <n-button secondary @click="applyKeyword">筛选</n-button>
+      <n-button secondary @click="reconnect">重连</n-button>
+      <n-button secondary @click="clearVisibleLogs">清空</n-button>
     </div>
     <div ref="logViewport" class="log-viewport" role="log" tabindex="0" aria-label="实时日志输出">
       <pre v-for="entry in visibleEntries" :key="entry.id" class="log-entry" :class="levelClass(entry.level)">{{ entry.text }}</pre>
