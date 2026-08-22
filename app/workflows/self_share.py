@@ -43,7 +43,7 @@ from app.media.classify import (
     normalize_tmdb_hint_name,
     user_movie_category_bucket,
 )
-from app.media.intake_identity import snapshot_files
+from app.media.intake_identity import CONFLICT, INCOMPLETE, dest_id_from_file_hits, snapshot_files
 from app.media.strm import (
     category_from_existing_library_folder,
     category_from_existing_library_match,
@@ -294,9 +294,17 @@ def has_authoritative_category(row: dict[str, Any], recognition: dict[str, Any])
 def is_unverified_received_source(folder: dict[str, Any], task_metadata: dict[str, Any], receive_cid: str) -> bool:
     file_id = str(folder.get("file_id") or "").strip()
     parent_id = str(folder.get("parent_id") or folder.get("pid") or "").strip()
-    if file_id and file_id in {str(value) for value in (task_metadata.get("received_file_ids") or []) if str(value)}:
+    receive_cid = str(receive_cid or "").strip()
+    if receive_cid and parent_id == receive_cid:
         return True
-    return bool(receive_cid and parent_id == str(receive_cid).strip())
+    identity = task_metadata.get("intake_identity")
+    root_ids = identity.get("root_ids") if isinstance(identity, dict) else []
+    return bool(
+        receive_cid
+        and file_id
+        and file_id in {str(value) for value in (root_ids or []) if str(value)}
+        and parent_id == receive_cid
+    )
 
 
 def has_tmdb_folder_mismatch(folder: dict[str, Any], recognition: dict[str, Any], row: dict[str, Any], share_name: str) -> bool:
@@ -1501,6 +1509,52 @@ class BridgeSelfShareTaskWorkflow:
         file_id = str(task.metadata.get("cloud_output_file_id") or "").strip()
         return [file_id] if file_id else []
 
+    def _resolve_intake_dest_folder(
+        self,
+        stage_metadata: dict[str, Any],
+        recognition: dict[str, Any],
+    ) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
+        identity = stage_metadata.get("intake_identity")
+        if not isinstance(identity, dict):
+            return "", None, None
+        files = [item for item in (identity.get("files") or []) if isinstance(item, dict)]
+        expected_ids = [str(item.get("id") or "").strip() for item in files if str(item.get("id") or "").strip()]
+        if not expected_ids:
+            return "empty_files", None, None
+        if not hasattr(self.p115, "search_files"):
+            return INCOMPLETE, None, None
+        file_hits: list[dict[str, Any]] = []
+        folder_hits: list[dict[str, Any]] = []
+        for item in files:
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                file_hits.extend(self.p115.search_files(name) or [])
+            except Exception:
+                LOG.debug("Failed to search intake file name=%s", name, exc_info=True)
+        tmdb_id = str(stage_metadata.get("tmdb_hint_id") or recognition.get("tmdb_id") or "").strip()
+        if tmdb_id:
+            try:
+                folder_hits.extend(self.p115.search_files(tmdb_id) or [])
+            except Exception:
+                LOG.debug("Failed to search intake tmdb_id=%s", tmdb_id, exc_info=True)
+        dest = dest_id_from_file_hits(file_hits=file_hits, folder_hits=folder_hits, expected_ids=expected_ids)
+        root_ids = {str(value) for value in (identity.get("root_ids") or []) if str(value)}
+        if dest == CONFLICT:
+            return CONFLICT, None, None
+        if dest == INCOMPLETE or dest in root_ids:
+            return INCOMPLETE, None, None
+        folder_hit = next((item for item in folder_hits if p115_item_id(item) == dest), None)
+        if not folder_hit:
+            return INCOMPLETE, None, None
+        folder = {
+            "file_id": dest,
+            "file_name": p115_file_name(folder_hit),
+            "parent_id": p115_item_parent_id(folder_hit),
+        }
+        return dest, folder, {**identity, "dest_id": dest}
+
     def _stage_organizing(self, task):
         row = self._submission_row(task)
         if not row:
@@ -1601,6 +1655,40 @@ class BridgeSelfShareTaskWorkflow:
             for value in (stage_metadata.get("rejected_organized_file_ids") or [])
             if str(value).strip()
         }
+        folder_from_intake_hits = False
+        dest_status, dest_folder, dest_identity = self._resolve_intake_dest_folder(stage_metadata, recognition)
+        if dest_status == "empty_files" and not row.get("own_share_file_id"):
+            return StageResult.defer(
+                "等待 CMS 整理完成",
+                self.self_share_config.auto_organize_retry_seconds or 30,
+                {
+                    "submission_id": int(row["id"]),
+                    "organized_scan_cursor": organized_scan_cursor or {},
+                    "rejected_organized_file_ids": sorted(rejected_file_ids),
+                    **hint_metadata,
+                },
+            )
+        if dest_status == CONFLICT:
+            return StageResult.needs_action(
+                "接收文件落到多个片库目录，已停止自动绑定",
+                {"submission_id": int(row["id"])},
+            )
+        if dest_status == INCOMPLETE:
+            return StageResult.defer(
+                "等待 CMS 整理完成",
+                self.self_share_config.auto_organize_retry_seconds or 30,
+                {
+                    "submission_id": int(row["id"]),
+                    "organized_scan_cursor": organized_scan_cursor or {},
+                    "rejected_organized_file_ids": sorted(rejected_file_ids),
+                    **hint_metadata,
+                },
+            )
+        if dest_folder:
+            folder = dest_folder
+            folder_from_intake_hits = True
+            if dest_identity:
+                stage_metadata["intake_identity"] = dest_identity
         find_kwargs = {
             "excluded_parent_ids": excluded_parent_ids,
             "min_update_time": min_update_time,
@@ -1710,9 +1798,10 @@ class BridgeSelfShareTaskWorkflow:
                     folder.get("file_name"),
                 )
                 folder = None
-        if folder and is_unverified_received_source(folder, stage_metadata, receive_cid):
+        if folder and is_unverified_received_source(folder, stage_metadata, receive_cid) and not folder_from_intake_hits:
             folder = None
-        folder = self._reject_if_unrelated(folder, task, rejected_file_ids)
+        if not folder_from_intake_hits:
+            folder = self._reject_if_unrelated(folder, task, rejected_file_ids)
         if rejected_file_ids:
             find_kwargs["excluded_file_ids"] = rejected_file_ids
         if not folder:
@@ -1793,14 +1882,20 @@ class BridgeSelfShareTaskWorkflow:
         )
         if hasattr(self.store, "update_recognition"):
             row = self.store.update_recognition(int(row["id"]), recognition, "organized_found") or row
+        complete_metadata = {
+            "submission_id": int(row["id"]),
+            "organized_folder": folder,
+            "organized_scan_cursor": {},
+            **hint_metadata,
+        }
+        identity = stage_metadata.get("intake_identity")
+        if isinstance(identity, dict):
+            dest_id = str(folder.get("file_id") or identity.get("dest_id") or "").strip()
+            if dest_id:
+                complete_metadata["intake_identity"] = {**identity, "dest_id": dest_id}
         return StageResult.complete(
             "已找到 CMS 整理后的 115 文件夹",
-            {
-                "submission_id": int(row["id"]),
-                "organized_folder": folder,
-                "organized_scan_cursor": {},
-                **hint_metadata,
-            },
+            complete_metadata,
         )
 
     def _stage_recognizing(self, task):
