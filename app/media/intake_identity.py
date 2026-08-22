@@ -78,12 +78,30 @@ def dest_id_from_file_hits(
         if dest_id:
             found[file_id] = dest_id
     expected = [str(value) for value in expected_ids if str(value)]
-    if not expected or any(file_id not in found for file_id in expected):
+    if not expected or not found:
         return INCOMPLETE
     dests = set(found.values())
     if len(dests) != 1:
         return CONFLICT
     return dests.pop()
+
+
+def collect_file_ids_under_dest(dest_id: str, list_files: ListFiles) -> set[str]:
+    dest_id = str(dest_id or "").strip()
+    found: set[str] = set()
+    if not dest_id:
+        return found
+    children = list_files(dest_id, limit=500)
+    for item in children:
+        item_id = p115_item_id(item)
+        if item_id:
+            found.add(item_id)
+        if p115_is_folder(item) and is_season_folder_name(p115_file_name(item)):
+            for episode in list_files(item_id, limit=500):
+                episode_id = p115_item_id(episode)
+                if episode_id:
+                    found.add(episode_id)
+    return found
 
 
 def cleanup_root_action(

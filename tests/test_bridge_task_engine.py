@@ -56,6 +56,8 @@ class FakeP115:
         self.files_by_parent = {}
         self.list_file_calls = []
         self.search_hits = {}
+        self.search_calls = []
+        self.folder_paths = {}
 
     def receive_share_to_cid(self, share_code, receive_code, receive_cid):
         intent = self.prepare_share_receive(share_code, receive_code, receive_cid)
@@ -153,7 +155,11 @@ class FakeP115:
         return list(self.files_by_parent.get(str(parent_id), []))
 
     def search_files(self, search_value, limit=20):
+        self.search_calls.append(str(search_value))
         return list(self.search_hits.get(str(search_value), []))
+
+    def folder_path(self, folder_id):
+        return list(self.folder_paths.get(str(folder_id), []))
 
 
 class FakeTelegram:
@@ -2348,6 +2354,120 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             stored = self.submissions.find_by_id(int(row["id"]))
             self.assertEqual(result.outcome, StageOutcome.DEFER)
             self.assertNotEqual(stored["own_share_file_id"], "season-3")
+
+    def test_organizing_walks_up_season_from_folder_path_without_tmdb(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            self.p115.search_hits = {
+                "九门.S01E01.mp4": [
+                    {"fid": "ep1", "cid": "season-1", "n": "九门.S01E01.mp4"},
+                ],
+            }
+            self.p115.folder_paths["season-1"] = [
+                {"cid": "dest-271016", "n": "J-九门-2026-[tmdb=271016]", "pid": "tv-parent"},
+                {"cid": "season-1", "n": "Season 01", "pid": "dest-271016"},
+            ]
+            self.p115.files_by_parent["dest-271016"] = [
+                {"cid": "season-1", "n": "Season 01", "pid": "dest-271016"},
+            ]
+            self.p115.files_by_parent["season-1"] = [
+                {"fid": "ep1", "n": "九门.S01E01.mp4", "cid": "season-1"},
+            ]
+            row = self._row()
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_items_complete": True,
+                    "intake_identity": {
+                        "root_ids": ["recv-s1"],
+                        "files": [{"id": "ep1", "name": "九门.S01E01.mp4"}],
+                    },
+                },
+                row["id"],
+            )
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(stored["own_share_file_id"], "dest-271016")
+            self.assertEqual(result.metadata["intake_identity"]["dest_id"], "dest-271016")
+            self.assertNotEqual(stored["own_share_file_id"], "season-1")
+
+    def test_organizing_reuses_dest_id_without_searching(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            self.p115.files_by_parent["dest-c-441531"] = [
+                {"fid": "video-mkv-402", "n": "拆弹专家.2017.mkv", "cid": "dest-c-441531"},
+            ]
+            row = self._row()
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_items_complete": True,
+                    "intake_identity": {
+                        "root_ids": ["recv-folder-402"],
+                        "files": [{"id": "video-mkv-402", "name": "拆弹专家.2017.mkv"}],
+                        "dest_id": "dest-c-441531",
+                    },
+                },
+                row["id"],
+            )
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(stored["own_share_file_id"], "dest-c-441531")
+            self.assertEqual(self.p115.search_calls, [])
+
+    def test_organizing_lists_dest_to_locate_remaining_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            self.p115.search_hits = {
+                "九门.S01E01.mp4": [
+                    {"fid": "ep1", "cid": "season-1", "n": "九门.S01E01.mp4"},
+                ],
+            }
+            self.p115.folder_paths["season-1"] = [
+                {"cid": "dest-271016", "n": "J-九门-2026-[tmdb=271016]", "pid": "tv-parent"},
+                {"cid": "season-1", "n": "Season 01", "pid": "dest-271016"},
+            ]
+            self.p115.files_by_parent["dest-271016"] = [
+                {"cid": "season-1", "n": "Season 01", "pid": "dest-271016"},
+            ]
+            self.p115.files_by_parent["season-1"] = [
+                {"fid": "ep1", "n": "九门.S01E01.mp4", "cid": "season-1"},
+                {"fid": "ep2", "n": "九门.S01E02.mp4", "cid": "season-1"},
+            ]
+            row = self._row()
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_items_complete": True,
+                    "intake_identity": {
+                        "root_ids": ["recv-s1"],
+                        "files": [
+                            {"id": "ep1", "name": "九门.S01E01.mp4"},
+                            {"id": "ep2", "name": "九门.S01E02.mp4"},
+                        ],
+                    },
+                },
+                row["id"],
+            )
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(stored["own_share_file_id"], "dest-271016")
+            self.assertNotIn("九门.S01E02.mp4", self.p115.search_calls)
 
     def test_organizing_stage_persists_and_reuses_organized_scan_cursor(self):
         with tempfile.TemporaryDirectory() as tmp:

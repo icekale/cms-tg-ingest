@@ -1204,6 +1204,18 @@ class P115WebClient:
         self._ensure_state(resp, "115 list files failed")
         return iter_items(resp.get("data") or resp)
 
+    def folder_path(self, folder_id: str) -> list[dict[str, Any]]:
+        folder_id = str(folder_id or "").strip()
+        if not folder_id:
+            return []
+        resp = self._request(
+            "https://webapi.115.com/files",
+            params={"cid": folder_id, "limit": 1, "offset": 0, "show_dir": 1, "fc_mix": 1},
+        )
+        self._ensure_state(resp, "115 list files failed")
+        path = resp.get("path") or []
+        return [item for item in path if isinstance(item, dict)]
+
     def file_exists_in_parent(self, file_id: str, parent_id: str) -> bool:
         expected_id = str(file_id or "").strip()
         offset = 0

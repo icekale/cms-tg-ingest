@@ -2,6 +2,7 @@ import unittest
 
 from app.media.intake_identity import (
     cleanup_root_action,
+    collect_file_ids_under_dest,
     dest_id_from_file_hits,
     is_season_folder_name,
     is_video_name,
@@ -142,6 +143,37 @@ class IntakeIdentityDestTests(unittest.TestCase):
             expected_ids=["video-mkv-402"],
         )
         self.assertEqual(dest, "incomplete")
+
+    def test_located_subset_same_dest_is_enough(self):
+        dest = dest_id_from_file_hits(
+            file_hits=[
+                {"fid": "ep-a", "cid": "dest-a", "n": "A.mkv"},
+            ],
+            folder_hits=[
+                {"cid": "dest-a", "n": "Show A", "pid": "tv-parent"},
+            ],
+            expected_ids=["ep-a", "ep-b"],
+        )
+        self.assertEqual(dest, "dest-a")
+
+    def test_collect_file_ids_under_dest_includes_season_children(self):
+        listed = {
+            "dest-108978": [
+                {"cid": "season-3", "n": "Season 3", "pid": "dest-108978"},
+            ],
+            "season-3": [
+                {"fid": "ep-s3-e1", "n": "Reacher.S03E01.mkv", "cid": "season-3"},
+                {"fid": "ep-s3-e2", "n": "Reacher.S03E02.mkv", "cid": "season-3"},
+            ],
+        }
+
+        def list_files(parent_id, limit=500):
+            return list(listed.get(str(parent_id), []))
+
+        self.assertEqual(
+            collect_file_ids_under_dest("dest-108978", list_files),
+            {"season-3", "ep-s3-e1", "ep-s3-e2"},
+        )
 
     def test_two_library_roots_conflict(self):
         dest = dest_id_from_file_hits(

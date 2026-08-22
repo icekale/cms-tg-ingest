@@ -47,6 +47,7 @@ from app.media.intake_identity import (
     CONFLICT,
     INCOMPLETE,
     cleanup_root_action,
+    collect_file_ids_under_dest,
     dest_id_from_file_hits,
     is_season_folder_name,
     snapshot_files,
@@ -1574,6 +1575,60 @@ class BridgeSelfShareTaskWorkflow:
         dest_id = str(identity.get("dest_id") or "").strip() if isinstance(identity, dict) else ""
         return bool(dest_id and str(folder_id or "").strip() == dest_id)
 
+    def _p115_list_files(self, parent_id: str, limit: int = 500, **_kwargs: Any) -> list[dict[str, Any]]:
+        try:
+            return self.p115.list_files(parent_id, limit=limit)
+        except TypeError:
+            return self.p115.list_files(parent_id)
+
+    def _enrich_folder_hits_from_file_parents(
+        self,
+        file_hits: list[dict[str, Any]],
+        folder_hits: list[dict[str, Any]],
+        expected_ids: list[str],
+    ) -> None:
+        if not hasattr(self.p115, "folder_path"):
+            return
+        folders = {p115_item_id(item) for item in folder_hits if p115_item_id(item)}
+        expected = {str(value) for value in expected_ids if str(value)}
+        parents = {
+            p115_item_parent_id(item)
+            for item in file_hits
+            if p115_item_id(item) in expected and p115_item_parent_id(item)
+        }
+        for parent_id in parents - folders:
+            try:
+                path = self.p115.folder_path(parent_id) or []
+            except Exception:
+                LOG.debug("Failed to read folder path parent=%s", parent_id, exc_info=True)
+                continue
+            for folder in path:
+                folder_id = p115_item_id(folder) or str(folder.get("cid") or "").strip()
+                if folder_id and folder_id not in {"0", "1"}:
+                    folder_hits.append(folder)
+                    folders.add(folder_id)
+
+    def _intake_expected_files_located(
+        self,
+        dest: str,
+        expected_ids: list[str],
+        file_hits: list[dict[str, Any]],
+    ) -> bool:
+        expected = {str(value) for value in expected_ids if str(value)}
+        if not expected or not dest:
+            return False
+        found = {p115_item_id(item) for item in file_hits if p115_item_id(item) in expected}
+        if expected <= found:
+            return True
+        if not hasattr(self.p115, "list_files"):
+            return False
+        try:
+            found.update(collect_file_ids_under_dest(dest, self._p115_list_files))
+        except Exception:
+            LOG.debug("Failed to list dest children dest=%s", dest, exc_info=True)
+            return False
+        return expected <= found
+
     def _resolve_intake_dest_folder(
         self,
         stage_metadata: dict[str, Any],
@@ -1588,18 +1643,40 @@ class BridgeSelfShareTaskWorkflow:
         expected_ids = [str(item.get("id") or "").strip() for item in files if str(item.get("id") or "").strip()]
         if not expected_ids:
             return "empty_files", None, None
+        receive_cid = str(receive_cid or "").strip()
+        root_ids = {str(value) for value in (identity.get("root_ids") or []) if str(value)}
+        persisted_dest = str(identity.get("dest_id") or "").strip()
+        if persisted_dest and self._intake_expected_files_located(persisted_dest, expected_ids, []):
+            path: list[dict[str, Any]] = []
+            if hasattr(self.p115, "folder_path"):
+                try:
+                    path = self.p115.folder_path(persisted_dest) or []
+                except Exception:
+                    LOG.debug("Failed to read persisted dest path dest=%s", persisted_dest, exc_info=True)
+            folder_hit = next((item for item in path if p115_item_id(item) == persisted_dest), None)
+            folder = {
+                "file_id": persisted_dest,
+                "file_name": p115_file_name(folder_hit) if folder_hit else persisted_dest,
+                "parent_id": p115_item_parent_id(folder_hit) if folder_hit else "",
+            }
+            if not folder["file_name"]:
+                folder["file_name"] = persisted_dest
+            dest_name = str(folder.get("file_name") or persisted_dest).strip()
+            if is_season_folder_name(dest_name):
+                return INCOMPLETE, None, None
+            if (
+                persisted_dest == receive_cid
+                or persisted_dest in root_ids
+                or self._dest_is_receive_child(persisted_dest, receive_cid) is not False
+            ):
+                return INCOMPLETE, None, None
+            if receive_cid and str(folder.get("parent_id") or "").strip() == receive_cid:
+                return INCOMPLETE, None, None
+            return persisted_dest, folder, {**identity, "dest_id": persisted_dest}
         file_hits: list[dict[str, Any]] = []
         folder_hits: list[dict[str, Any]] = []
         tmdb_search_failed = False
         if hasattr(self.p115, "search_files"):
-            for item in files:
-                name = str(item.get("name") or "").strip()
-                if not name:
-                    continue
-                try:
-                    file_hits.extend(self.p115.search_files(name) or [])
-                except Exception:
-                    LOG.debug("Failed to search intake file name=%s", name, exc_info=True)
             tmdb_id = str(stage_metadata.get("tmdb_hint_id") or recognition.get("tmdb_id") or "").strip()
             if tmdb_id:
                 try:
@@ -1607,9 +1684,7 @@ class BridgeSelfShareTaskWorkflow:
                 except Exception:
                     tmdb_search_failed = True
                     LOG.debug("Failed to search intake tmdb_id=%s", tmdb_id, exc_info=True)
-        receive_cid = str(receive_cid or "").strip()
         tmdb_dest_ids = {p115_item_id(item) for item in folder_hits if p115_item_id(item)}
-        root_ids = {str(value) for value in (identity.get("root_ids") or []) if str(value)}
         if folder_hits and hasattr(self.p115, "list_files"):
             dest_children: list[dict[str, Any]] = []
             for item in list(folder_hits):
@@ -1619,16 +1694,33 @@ class BridgeSelfShareTaskWorkflow:
                 if is_season_folder_name(p115_file_name(item)):
                     continue
                 try:
-                    try:
-                        children = self.p115.list_files(folder_id, limit=500)
-                    except TypeError:
-                        children = self.p115.list_files(folder_id)
+                    children = self._p115_list_files(folder_id)
                 except Exception:
                     LOG.debug("Failed to list dest children dest=%s", folder_id, exc_info=True)
                     continue
                 dest_children.extend(child for child in (children or []) if isinstance(child, dict))
             folder_hits.extend(dest_children)
-        dest = dest_id_from_file_hits(file_hits=file_hits, folder_hits=folder_hits, expected_ids=expected_ids)
+        dest = INCOMPLETE
+        if hasattr(self.p115, "search_files"):
+            for item in files:
+                name = str(item.get("name") or "").strip()
+                if name:
+                    try:
+                        file_hits.extend(self.p115.search_files(name) or [])
+                    except Exception:
+                        LOG.debug("Failed to search intake file name=%s", name, exc_info=True)
+                self._enrich_folder_hits_from_file_parents(file_hits, folder_hits, expected_ids)
+                dest = dest_id_from_file_hits(
+                    file_hits=file_hits,
+                    folder_hits=folder_hits,
+                    expected_ids=expected_ids,
+                )
+                if dest == CONFLICT:
+                    return CONFLICT, None, None
+                if dest != INCOMPLETE:
+                    if self._intake_expected_files_located(dest, expected_ids, file_hits):
+                        break
+                    return INCOMPLETE, None, None
         if dest == CONFLICT:
             return CONFLICT, None, None
         if dest != INCOMPLETE:
