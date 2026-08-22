@@ -1,5 +1,7 @@
 import unittest
 
+from app.quality import QualityIssue, format_task_quality_report
+from app.quality_automation import QualityRepairPlan, QualityRunSummary
 from app.telegram_rich import RichDocument, bold, details, heading, paragraph, table
 from app.telegram_ui import (
     format_history,
@@ -11,6 +13,7 @@ from app.telegram_ui import (
     format_taskstore_history,
     format_taskstore_status,
 )
+from bridge import _quality_attention_message
 
 
 class TelegramRichTests(unittest.TestCase):
@@ -110,6 +113,40 @@ class TelegramUiRichTests(unittest.TestCase):
         ]
         doc = format_quality_report(rows)
         self.assertIn("疑似错配", doc.to_plain())
+        self.assertIn("table", [block["type"] for block in doc.to_blocks()])
+
+
+class BridgeRichFormatterTests(unittest.TestCase):
+    def test_task_quality_report_table(self):
+        doc = format_task_quality_report(
+            [QualityIssue(code="unexpected_strm", message="多余 STRM", detail="", task_id=4, title="剧")]
+        )
+        self.assertIn("TaskStore 轻量巡检", doc.to_plain())
+        self.assertIn("table", [block["type"] for block in doc.to_blocks()])
+
+    def test_task_quality_report_empty(self):
+        self.assertIn("未发现本地 STRM 问题", format_task_quality_report([]).to_plain())
+
+    def test_quality_attention_includes_run_id(self):
+        summary = QualityRunSummary(
+            run_id="run-1",
+            status="ok",
+            scanned_count=3,
+            issue_count=1,
+            failed_count=1,
+            plans=(
+                QualityRepairPlan(
+                    task_id=8,
+                    action="reprocess",
+                    reason="失败",
+                    title="剧",
+                    execution_status="failed",
+                ),
+            ),
+        )
+        doc = _quality_attention_message(summary)
+        self.assertIn("run-1", doc.to_plain())
+        self.assertIn("质量巡检需要关注", doc.to_plain())
         self.assertIn("table", [block["type"] for block in doc.to_blocks()])
 
 

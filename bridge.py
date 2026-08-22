@@ -24,7 +24,7 @@ from app.clients.cms import CmsClient
 from app.cms_cloud_index import CmsCloudDataIndex
 from app.clients.emby import EmbyClient
 from app.clients.http import FormHttp, HttpJson, HttpRequestError, load_cookie_value
-from app.telegram_rich import RichDocument
+from app.telegram_rich import RichDocument, bold, details, heading, paragraph, table
 from app.clients.hdhive import HdhiveProxyClient, HdhiveProxyError
 from app.clients.p115 import (
     CMS_PARENT_CID_CATEGORY_MAP,
@@ -309,20 +309,22 @@ class _QualityRepairAdapter:
         return str(updated.get("cleanup_status") or "").lower() == "deleted"
 
 
-def _quality_attention_message(summary: QualityRunSummary) -> str:
-    plans = [
-        plan
-        for plan in summary.plans
-        if plan.execution_status in {"failed", "skipped"}
-    ]
-    lines = [
-        f"质量巡检需要关注：{summary.run_id}",
-        f"扫描 {summary.scanned_count} 个任务，发现 {summary.issue_count} 个问题，失败 {summary.failed_count} 个，跳过 {len(plans)} 个。",
-    ]
+def _quality_attention_message(summary: QualityRunSummary) -> RichDocument:
+    plans = [plan for plan in summary.plans if plan.execution_status in {"failed", "skipped"}]
+    rows = []
     for plan in plans[:10]:
         title = plan.title or f"任务 #{plan.task_id}"
-        lines.append(f"#{plan.task_id} {title}：{plan.reason}")
-    return "\n".join(lines)
+        rows.append((f"#{plan.task_id}", title, plan.reason))
+    blocks = [
+        heading("质量巡检需要关注"),
+        paragraph(
+            f"{summary.run_id}：扫描 {summary.scanned_count} 个任务，发现 {summary.issue_count} 个问题，"
+            f"失败 {summary.failed_count} 个，跳过 {len(plans)} 个。"
+        ),
+    ]
+    if rows:
+        blocks.append(table(("#", "任务", "原因"), rows))
+    return RichDocument(tuple(blocks))
 
 
 def notify_quality_run(
@@ -1708,32 +1710,36 @@ def format_health(
     task_health: str | None = None,
     hdhive_enabled: bool | None = None,
     hdhive_ok: bool | None = None,
-) -> str:
+) -> RichDocument:
     source_ok = all(safe_resolve(root).exists() for root in move_config.source_roots)
     lib_ok = all(safe_resolve(root).exists() for root in move_config.library_roots.values())
-    lines = [f"CMS: {'OK' if cms_ok else 'FAIL'}"]
+    rows = [("CMS", bold("OK") if cms_ok else bold("FAIL"), "")]
     if telegram_ok is not None:
-        lines.append(f"Telegram: {'OK' if telegram_ok else 'FAIL'}")
-    if telegram_last_error_at:
-        lines.append(f"Telegram最近瞬时错误: {telegram_last_error_at}")
+        extra = telegram_last_error_at or ""
+        rows.append(("Telegram", bold("OK") if telegram_ok else bold("FAIL"), extra))
     if openai_enabled is not None:
         if openai_enabled:
-            lines.append(f"OpenAI分类兜底: {'OK' if openai_ok else 'FAIL'}")
+            rows.append(("OpenAI分类兜底", bold("OK") if openai_ok else bold("FAIL"), ""))
         else:
-            lines.append("OpenAI分类兜底: DISABLED")
+            rows.append(("OpenAI分类兜底", "DISABLED", ""))
     if hdhive_enabled is not None:
-        lines.append(f"HDHive: {'OK' if hdhive_ok else 'FAIL'}" if hdhive_enabled else "HDHive: DISABLED")
-    lines.extend(
+        if hdhive_enabled:
+            rows.append(("HDHive", bold("OK") if hdhive_ok else bold("FAIL"), ""))
+        else:
+            rows.append(("HDHive", "DISABLED", ""))
+    rows.extend(
         [
-            f"Emby: {'OK' if emby_ok else 'FAIL'}",
-            f"STRM源: {'OK' if source_ok else 'FAIL'} ({len(move_config.source_roots)})",
-            f"媒体库映射: {'OK' if lib_ok else 'FAIL'} ({len(move_config.library_roots)})",
-            f"冲突策略: {move_config.conflict_policy}",
+            ("Emby", bold("OK") if emby_ok else bold("FAIL"), ""),
+            ("STRM源", bold("OK") if source_ok else bold("FAIL"), str(len(move_config.source_roots))),
+            ("媒体库映射", bold("OK") if lib_ok else bold("FAIL"), str(len(move_config.library_roots))),
+            ("冲突策略", move_config.conflict_policy, ""),
         ]
     )
+    blocks = [heading("健康检查"), table(("组件", "状态", "说明"), rows)]
     if task_health:
-        lines.extend(["", task_health])
-    return "\n".join(lines)
+        health_lines = [paragraph(line) for line in str(task_health).splitlines() if line]
+        blocks.append(details("TaskStore", health_lines))
+    return RichDocument(tuple(blocks))
 
 
 class OpenAIClassifier:
