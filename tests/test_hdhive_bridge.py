@@ -193,13 +193,14 @@ class HdhiveBridgeTests(unittest.TestCase):
             ),
         )
 
-        text = format_hdhive_subscriptions([subscription])
+        text = format_hdhive_subscriptions([subscription]).to_plain()
 
         self.assertIn("已完结", text)
         self.assertIn("S01E01-S01E03", text)
         self.assertIn("发现 3", text)
         self.assertIn("入队 1", text)
         self.assertIn("已入队 1 个", text)
+        self.assertIn("details", [block["type"] for block in format_hdhive_subscriptions([subscription]).to_blocks()])
 
     def test_subscription_list_uses_diagnosis_and_omits_misleading_emby_warning(self):
         subscription = SimpleNamespace(
@@ -223,7 +224,7 @@ class HdhiveBridgeTests(unittest.TestCase):
         )
         items = [SimpleNamespace(status="discovered", skip_reason="", last_error="")]
 
-        text = format_hdhive_subscriptions([subscription], items_by_subscription_id={1: items})
+        text = format_hdhive_subscriptions([subscription], items_by_subscription_id={1: items}).to_plain()
 
         self.assertIn("未入队：Emby 查询失败，已停止自动解锁", text)
         self.assertIn("无法识别 0", text)

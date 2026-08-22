@@ -356,25 +356,29 @@ def format_hdhive_subscriptions(
     scheduler_snapshot: dict[str, Any] | None = None,
     pending_items: list[Any] | None = None,
     items_by_subscription_id: dict[int, list[Any]] | None = None,
-) -> str:
+) -> RichDocument:
     if not subscriptions:
-        return "暂无 HDHive 剧集订阅。"
-    lines = ["HDHive 剧集订阅："]
+        return document(paragraph("暂无 HDHive 剧集订阅。"))
+    blocks: list = [heading("HDHive 剧集订阅")]
     if scheduler_snapshot:
-        lines.append(
-            f"自动检查：{'开启' if scheduler_snapshot.get('enabled') else '关闭'}，"
-            f"每天 {scheduler_snapshot.get('time') or '01:30'}，下次：{scheduler_snapshot.get('next_run_at') or '-'}"
+        blocks.append(
+            paragraph(
+                f"自动检查：{'开启' if scheduler_snapshot.get('enabled') else '关闭'}，"
+                f"每天 {scheduler_snapshot.get('time') or '01:30'}，下次：{scheduler_snapshot.get('next_run_at') or '-'}"
+            )
         )
-    for index, subscription in enumerate(subscriptions, 1):
-        status = {"active": "运行中", "paused": "已暂停", "error": "异常", "completed": "已完结"}.get(
-            subscription.status,
-            subscription.status,
-        )
+    table_rows = []
+    extras = []
+    status_map = {"active": "运行中", "paused": "已暂停", "error": "异常", "completed": "已完结"}
+    for subscription in subscriptions:
+        status = status_map.get(subscription.status, subscription.status)
         source = subscription.source_url or f"TMDB:{subscription.tmdb_id}"
-        lines.append(f"{index}. #{subscription.id} {subscription.title or subscription.tmdb_id} | {status} | {source}")
+        title = subscription.title or subscription.tmdb_id
+        table_rows.append((f"#{subscription.id}", str(title), str(status), str(source)))
+        detail_blocks = []
         episode_filter = str(getattr(subscription, "episode_filter", "") or "").strip()
         if episode_filter:
-            lines.append(f"   集数过滤：{episode_filter}")
+            detail_blocks.append(paragraph(f"集数过滤：{episode_filter}"))
         try:
             summary = json.loads(str(getattr(subscription, "last_summary_json", "{}") or "{}"))
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -396,16 +400,20 @@ def format_hdhive_subscriptions(
                 if key in summary:
                     counters.append(f"{label} {summary[key]}")
             if counters:
-                lines.append("   最近检查：" + "，".join(counters))
+                detail_blocks.append(paragraph("最近检查：" + "，".join(counters)))
             if diagnosis.conclusion:
-                lines.append(f"   {diagnosis.conclusion}")
+                detail_blocks.append(paragraph(diagnosis.conclusion))
             if diagnosis.reasons:
-                lines.append("   原因：" + "；".join(diagnosis.reasons))
+                detail_blocks.append(paragraph("原因：" + "；".join(diagnosis.reasons)))
         if subscription.last_error:
-            lines.append(f"   最近错误：{truncate_text(subscription.last_error, 120)}")
+            detail_blocks.append(paragraph(f"最近错误：{truncate_text(subscription.last_error, 120)}"))
+        if detail_blocks:
+            extras.append(details(f"#{subscription.id} {title}", detail_blocks))
+    blocks.append(table(("#", "剧名", "状态", "来源"), table_rows))
+    blocks.extend(extras)
     if pending_items:
-        lines.append(f"待确认高费用资源：{len(pending_items)} 个，请点击按钮确认。")
-    return "\n".join(lines)
+        blocks.append(paragraph(f"待确认高费用资源：{len(pending_items)} 个，请点击按钮确认。"))
+    return RichDocument(tuple(blocks))
 
 
 def hdhive_subscriptions_keyboard(

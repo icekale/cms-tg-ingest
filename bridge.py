@@ -2434,7 +2434,7 @@ def format_hdhive_subscription_view(
     service: HdhiveSubscriptionService,
     scheduler: HdhiveSubscriptionScheduler | None,
     chat_id: int | str,
-) -> tuple[str, dict[str, Any] | None]:
+) -> tuple[RichDocument, dict[str, Any] | None]:
     subscriptions = service.list(str(chat_id))
     pending_items = []
     items_by_subscription_id: dict[int, list[Any]] = {}
