@@ -1127,6 +1127,18 @@ class BridgeSelfShareTaskWorkflow:
         operation = self.task_store.find_operation(int(task.id), operation_key)
         if operation is None and self._should_reuse_received_self_share_state(existing, task.metadata):
             metadata = self._received_metadata(existing, task.metadata)
+            identity = metadata.get("intake_identity")
+            if not isinstance(identity, dict):
+                roots = self._received_items_for_snapshot(task, existing)
+                if roots:
+                    try:
+                        metadata["intake_identity"] = self._intake_identity_from_roots(roots)
+                    except Exception:
+                        return StageResult.defer(
+                            "等待确认 115 接收后的本地文件",
+                            _RECEIVE_RECOVERY_RETRY_SECONDS,
+                            metadata,
+                        )
             if reprocess_reset:
                 metadata["self_share_reprocess_reset"] = True
             if reprocess_started_at:
@@ -1242,15 +1254,14 @@ class BridgeSelfShareTaskWorkflow:
             "tmdb_hint_normalized": False,
         }
         roots = received.get("received_items") or []
-        list_files = self.p115.list_files if hasattr(self.p115, "list_files") else (lambda *_a, **_k: [])
         try:
-            files = snapshot_files(roots, list_files)
+            metadata["intake_identity"] = self._intake_identity_from_roots(roots)
         except Exception:
-            files = []
-        metadata["intake_identity"] = {
-            "root_ids": [str(item.get("file_id") or "").strip() for item in roots if str(item.get("file_id") or "").strip()],
-            "files": files,
-        }
+            return StageResult.defer(
+                "等待确认 115 接收后的本地文件",
+                _RECEIVE_RECOVERY_RETRY_SECONDS,
+                metadata,
+            )
         if reprocess_reset:
             metadata["self_share_reprocess_reset"] = True
         if reprocess_started_at:
@@ -3138,7 +3149,7 @@ class BridgeSelfShareTaskWorkflow:
         )
 
     def _cleanup_residue_operations(self, task, row: dict[str, Any]) -> tuple[StageResult | None, int]:
-        parent_ids = self.self_share_config.source_cleanup_parent_ids or set()
+        parent_ids = self._cleanup_parent_ids(task)
         if not parent_ids or not hasattr(self.cleanup_client, "find_source_residue_files"):
             return None, 0
         manifest_key = f"{operation_scope(task)}:delete_residue:manifest"
@@ -3525,6 +3536,30 @@ class BridgeSelfShareTaskWorkflow:
             )
         )
 
+    def _received_items_for_snapshot(self, task, row: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        items = (getattr(task, "metadata", None) or {}).get("received_items")
+        roots: list[dict[str, Any]] = []
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("file_id") or "").strip():
+                    roots.append(dict(item))
+        if roots:
+            return roots
+        return self._received_item_candidates(task, row or {})
+
+    def _intake_identity_from_roots(self, roots: list[dict[str, Any]]) -> dict[str, Any]:
+        list_files = self.p115.list_files if hasattr(self.p115, "list_files") else (lambda *_a, **_k: [])
+        return {
+            "root_ids": [
+                str(item.get("file_id") or "").strip()
+                for item in roots
+                if str(item.get("file_id") or "").strip()
+            ],
+            "files": snapshot_files(roots, list_files),
+        }
+
     def _received_metadata(self, row: dict[str, Any], task_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         metadata = {
             "submission_id": int(row["id"]),
@@ -3534,6 +3569,9 @@ class BridgeSelfShareTaskWorkflow:
         receive_target_cid = str((task_metadata or {}).get("receive_target_cid") or "").strip()
         if receive_target_cid:
             metadata["receive_target_cid"] = receive_target_cid
+        identity = (task_metadata or {}).get("intake_identity")
+        if isinstance(identity, dict):
+            metadata["intake_identity"] = dict(identity)
         return metadata
 
     def _has_persisted_category_suggestion(self, recognition: dict[str, Any]) -> bool:

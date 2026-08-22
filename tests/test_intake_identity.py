@@ -51,6 +51,35 @@ class IntakeIdentitySnapshotTests(unittest.TestCase):
         )
         self.assertEqual(files, [{"id": "lone-mkv", "name": "Movie.mkv"}])
 
+    def test_snapshot_empty_folder_returns_empty_files(self):
+        files = snapshot_files(
+            [{"file_id": "empty-folder", "file_name": "Empty", "is_folder": True}],
+            lambda *_args, **_kwargs: [],
+        )
+        self.assertEqual(files, [])
+
+    def test_snapshot_raises_when_folder_list_fails(self):
+        def list_files(parent_id, limit=500):
+            raise RuntimeError("115 risk control")
+
+        with self.assertRaises(RuntimeError):
+            snapshot_files(
+                [{"file_id": "recv-folder", "file_name": "Show", "is_folder": True}],
+                list_files,
+            )
+
+    def test_snapshot_raises_when_season_list_fails(self):
+        def list_files(parent_id, limit=500):
+            if str(parent_id) == "recv-folder":
+                return [{"cid": "season-1", "n": "Season 1", "pid": "recv-folder"}]
+            raise RuntimeError("115 risk control")
+
+        with self.assertRaises(RuntimeError):
+            snapshot_files(
+                [{"file_id": "recv-folder", "file_name": "Show", "is_folder": True}],
+                list_files,
+            )
+
 
 class IntakeIdentityDestTests(unittest.TestCase):
     def test_movie_parent_is_dest(self):

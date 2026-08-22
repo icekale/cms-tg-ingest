@@ -725,6 +725,100 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["received_title"], "received title")
             self.assertEqual(result.metadata["receive_target_cid"], "pinned-cid")
 
+    def test_received_stage_reuse_snapshots_identity_from_received_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            self.p115.files_by_parent["recv-folder-402"] = [
+                {"fid": "video-mkv-402", "cid": "recv-folder-402", "n": "拆弹专家.2017.mkv"},
+            ]
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="received_to_pending",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECEIVED,
+                {
+                    "receive_target_cid": "pending-cid",
+                    "received_file_ids": ["share-fid-402"],
+                    "received_items": [
+                        {
+                            "file_id": "recv-folder-402",
+                            "file_name": "拆弹专家 (2017) {tmdb-441531}",
+                            "is_folder": True,
+                            "parent_id": "pending-cid",
+                            "received_item_verified": True,
+                        }
+                    ],
+                },
+            )
+
+            result = workflow.run_stage(task)
+            identity = result.metadata.get("intake_identity") or {}
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(self.p115.received, [])
+            self.assertEqual(identity.get("root_ids"), ["recv-folder-402"])
+            self.assertEqual(
+                identity.get("files"),
+                [{"id": "video-mkv-402", "name": "拆弹专家.2017.mkv"}],
+            )
+            self.assertNotIn("dest_id", identity)
+            self.assertEqual(len({"share-fid-402", "recv-folder-402", "pending-cid", "video-mkv-402"}), 4)
+
+    def test_received_stage_reuse_preserves_existing_intake_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            existing_identity = {
+                "root_ids": ["recv-folder-402"],
+                "files": [{"id": "video-mkv-402", "name": "拆弹专家.2017.mkv"}],
+            }
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="received_to_pending",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECEIVED,
+                {
+                    "receive_target_cid": "pending-cid",
+                    "received_file_ids": ["share-fid-402"],
+                    "intake_identity": existing_identity,
+                },
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(self.p115.received, [])
+            self.assertEqual(result.metadata.get("intake_identity"), existing_identity)
+            self.assertEqual(self.p115.list_file_calls, [])
+
+    def test_received_stage_defers_when_folder_list_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            original_list_files = self.p115.list_files
+
+            def list_files(parent_id, limit=100):
+                raise RuntimeError("115 risk control")
+
+            self.p115.list_files = list_files
+            task = self._claim_task("abc", "1234", TaskStage.RECEIVED)
+
+            result = workflow.run_stage(task)
+            identity = result.metadata.get("intake_identity")
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIn("等待确认 115 接收后的本地文件", result.message)
+            self.assertFalse(isinstance(identity, dict) and identity.get("files") == [])
+            self.p115.list_files = original_list_files
+
     def test_cloud_task_receive_cid_prefers_cloud_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp, receive_cid="configured-cid")

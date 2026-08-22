@@ -39,18 +39,12 @@ def snapshot_files(roots: list[dict[str, Any]], list_files: ListFiles) -> list[d
         if not root.get("is_folder"):
             add(file_id, name)
             continue
-        try:
-            children = list_files(file_id, limit=500)
-        except Exception:
-            continue
+        children = list_files(file_id, limit=500)
         for item in children:
             child_id = p115_item_id(item)
             child_name = p115_file_name(item)
             if p115_is_folder(item) and is_season_folder_name(child_name):
-                try:
-                    episodes = list_files(child_id, limit=500)
-                except Exception:
-                    continue
+                episodes = list_files(child_id, limit=500)
                 for episode in episodes:
                     add(p115_item_id(episode), p115_file_name(episode))
                 continue
