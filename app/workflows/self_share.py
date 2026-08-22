@@ -43,7 +43,14 @@ from app.media.classify import (
     normalize_tmdb_hint_name,
     user_movie_category_bucket,
 )
-from app.media.intake_identity import CONFLICT, INCOMPLETE, dest_id_from_file_hits, is_season_folder_name, snapshot_files
+from app.media.intake_identity import (
+    CONFLICT,
+    INCOMPLETE,
+    cleanup_root_action,
+    dest_id_from_file_hits,
+    is_season_folder_name,
+    snapshot_files,
+)
 from app.media.strm import (
     category_from_existing_library_folder,
     category_from_existing_library_match,
@@ -2984,19 +2991,27 @@ class BridgeSelfShareTaskWorkflow:
                 metadata = self._cleanup_metadata(row)
                 metadata.update(review_metadata)
                 return StageResult.defer(review_message, review_delay, metadata)
-            file_id = str(row.get("own_share_file_id") or "").strip()
-            if self._is_library_dest_cleanup_target(task, row, file_id):
-                row = self.store.update_cleanup(int(row["id"]), "deleted", file_id="") or row
+            identity = task.metadata.get("intake_identity") or {}
+            identity = identity if isinstance(identity, dict) else {}
+            if identity:
+                cleanup_result = self._cleanup_intake_roots(task, row, review_metadata)
+                if isinstance(cleanup_result, StageResult):
+                    return cleanup_result
+                row = cleanup_result
             else:
-                parent_id = self._delete_source_parent_id(task, row, file_id)
-                if not parent_id:
-                    metadata = self._cleanup_metadata(row)
-                    metadata.update(review_metadata)
-                    return StageResult.needs_action("缺少 115 转存源父目录，无法安全核对删除结果", metadata)
-                recovery = self._journaled_delete(task, file_id, parent_id, "delete_source")
-                if recovery is not None:
-                    return recovery
-                row = self.store.update_cleanup(int(row["id"]), "deleted", file_id=file_id) or row
+                file_id = str(row.get("own_share_file_id") or "").strip()
+                if self._is_library_dest_cleanup_target(task, row, file_id):
+                    row = self.store.update_cleanup(int(row["id"]), "deleted", file_id="") or row
+                else:
+                    parent_id = self._delete_source_parent_id(task, row, file_id)
+                    if not parent_id:
+                        metadata = self._cleanup_metadata(row)
+                        metadata.update(review_metadata)
+                        return StageResult.needs_action("缺少 115 转存源父目录，无法安全核对删除结果", metadata)
+                    recovery = self._journaled_delete(task, file_id, parent_id, "delete_source")
+                    if recovery is not None:
+                        return recovery
+                    row = self.store.update_cleanup(int(row["id"]), "deleted", file_id=file_id) or row
         residue_result, residue_count = self._cleanup_residue_operations(task, row)
         if residue_result is not None:
             return residue_result
@@ -3005,6 +3020,81 @@ class BridgeSelfShareTaskWorkflow:
         if residue_count:
             metadata["residue_deleted_count"] = residue_count
         return StageResult.complete("115 转存源已删除，自有分享保留", metadata)
+
+    def _cleanup_parent_ids(self, task) -> set[str]:
+        cleanup_parents = set(self.self_share_config.source_cleanup_parent_ids or set())
+        receive_cid = self._task_receive_cid(task)
+        if receive_cid:
+            cleanup_parents.add(receive_cid)
+        if hasattr(self.cms, "auto_organize_excluded_parent_ids"):
+            try:
+                cleanup_parents.update(self.cms.auto_organize_excluded_parent_ids() or set())
+            except Exception:
+                LOG.debug("Failed to load CMS auto organize excluded folders", exc_info=True)
+        return cleanup_parents
+
+    def _intake_root_parent_id(self, task, row: dict[str, Any], root_id: str) -> str:
+        parent_id = ""
+        if hasattr(self.cleanup_client, "file_parent_id"):
+            parent_id = str(self.cleanup_client.file_parent_id(root_id) or "").strip()
+        if not parent_id:
+            parent_id = source_delete_parent_id(task, row, root_id)
+        return parent_id
+
+    def _cleanup_intake_roots(
+        self,
+        task,
+        row: dict[str, Any],
+        review_metadata: dict[str, Any],
+    ) -> StageResult | dict[str, Any]:
+        identity = task.metadata.get("intake_identity") or {}
+        identity = identity if isinstance(identity, dict) else {}
+        dest_id = str(identity.get("dest_id") or row.get("own_share_file_id") or "").strip()
+        own_share_id = str(row.get("own_share_file_id") or "").strip()
+        protected = {value for value in (dest_id, own_share_id) if value}
+        cleanup_parents = self._cleanup_parent_ids(task)
+        deleted_id = ""
+        for raw_root in identity.get("root_ids") or []:
+            root_id = str(raw_root or "").strip()
+            if not root_id or root_id in protected:
+                continue
+            parent_id = self._intake_root_parent_id(task, row, root_id)
+            action = cleanup_root_action(
+                root_id=root_id,
+                parent_id=parent_id,
+                dest_id=dest_id,
+                cleanup_parents=cleanup_parents,
+            )
+            if action == "skip":
+                continue
+            if action == "needs_action":
+                metadata = self._cleanup_metadata(row)
+                metadata.update(review_metadata)
+                return StageResult.needs_action(
+                    "接收根当前不在待整理或冗余目录，已停止自动清理",
+                    metadata,
+                )
+            recovery = self._journaled_delete(task, root_id, parent_id, "delete_source")
+            if recovery is not None:
+                return recovery
+            deleted_id = root_id
+        return self.store.update_cleanup(int(row["id"]), "deleted", file_id=deleted_id) or row
+
+    def _residue_excluded_file_ids(self, task, row: dict[str, Any]) -> set[str]:
+        excluded = {str(row.get("own_share_file_id") or "").strip()}
+        identity = task.metadata.get("intake_identity") or {}
+        identity = identity if isinstance(identity, dict) else {}
+        dest_id = str(identity.get("dest_id") or "").strip()
+        if dest_id:
+            excluded.add(dest_id)
+        for item in identity.get("files") or []:
+            if not isinstance(item, dict):
+                continue
+            file_id = str(item.get("id") or "").strip()
+            if file_id:
+                excluded.add(file_id)
+        excluded.discard("")
+        return excluded
 
     def _delete_source_parent_id(self, task, row: dict[str, Any], file_id: str) -> str:
         return source_delete_parent_id(task, row, file_id)
@@ -3044,7 +3134,7 @@ class BridgeSelfShareTaskWorkflow:
                     recognition,
                     share_name,
                     parent_ids,
-                    excluded_file_ids={str(row.get("own_share_file_id") or "").strip()},
+                    excluded_file_ids=self._residue_excluded_file_ids(task, row),
                     min_update_time=float(row.get("created_at") or 0),
                 )
             except Exception as exc:
