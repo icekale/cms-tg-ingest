@@ -654,19 +654,17 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 expected_updated_at=received_task.updated_at,
             )
             self.tasks.set_self_share_receive_cid_override("222")
-            self.p115.folder = {
-                "file_id": "received-folder",
-                "file_name": "received folder",
-                "parent_id": "111",
-            }
 
             result = workflow.run_stage(organizing_task)
 
             self.assertEqual(received.outcome, StageOutcome.COMPLETE)
             self.assertEqual(self.p115.received, [("abc", "1234", "111")])
+            self.assertEqual(received.metadata["receive_target_cid"], "111")
+            self.assertEqual(organizing_task.metadata["receive_target_cid"], "111")
+            self.assertEqual(workflow._task_receive_cid(organizing_task), "111")
             self.assertEqual(result.outcome, StageOutcome.DEFER)
-            self.assertIn("111", self.p115.find_organized_calls[0][2])
-            self.assertNotIn("222", self.p115.find_organized_calls[0][2])
+            self.assertIn("等待 CMS 整理", result.message)
+            self.assertEqual(self.p115.find_organized_calls, [])
 
     def test_received_stage_stops_when_claimed_receive_cid_persistence_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1477,19 +1475,22 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
 
     def test_organizing_stage_uses_season_folder_child_video_to_find_dest(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmdb = FakeReacherTmdbResolver()
-            workflow = self._workflow(tmp, tmdb_resolver=tmdb)
-            self.p115.files_by_parent["season-1"] = [
-                {
-                    "fid": "ep1",
-                    "pid": "season-1",
-                    "n": "Reacher.S01E01.2160p.UHD.BluRay.REMUX.mkv",
-                },
-            ]
+            workflow = self._workflow(tmp, tmdb_resolver=FakeReacherTmdbResolver())
+            episode_name = "Reacher.S01E01.2160p.UHD.BluRay.REMUX.mkv"
+            self.p115.search_hits = {
+                episode_name: [
+                    {"fid": "ep1", "cid": "season-1", "n": episode_name},
+                ],
+                "108978": [
+                    {
+                        "cid": "dest-108978",
+                        "n": "X-侠探杰克-2022-[tmdb=108978]",
+                        "pid": "tv-parent",
+                    },
+                ],
+            }
             self.p115.files_by_parent["dest-108978"] = [
                 {"cid": "season-1", "n": "Season 1", "pid": "dest-108978"},
-                {"cid": "season-2", "n": "Season 2", "pid": "dest-108978"},
-                {"cid": "season-3", "n": "Season 3", "pid": "dest-108978"},
             ]
             row = self._row()
             row = self.submissions.update_status(
@@ -1498,20 +1499,6 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 title="Season 3等3个文件(夹)",
             ) or row
             row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
-            calls = []
-
-            def find_organized_folder(recognition, title, excluded_parent_ids=None, min_update_time=0, **kwargs):
-                calls.append((dict(recognition), title, kwargs))
-                if recognition.get("tmdb_id") == "108978":
-                    return {
-                        "file_id": "dest-108978",
-                        "file_name": "X-侠探杰克-2022-[tmdb=108978]",
-                        "parent_id": "tv-parent",
-                        "category": "外国电视",
-                    }
-                return None
-
-            self.p115.find_organized_folder = find_organized_folder
             task = self._claim_task(
                 "abc",
                 "1234",
@@ -1519,106 +1506,39 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 {
                     "submission_id": row["id"],
                     "received_title": "Season 3等3个文件(夹)",
-                    "received_file_ids": ["season-1", "season-2", "season-3"],
+                    "received_file_ids": ["share-fid-reacher"],
                     "received_items": [
                         {
-                            "file_id": "season-1",
+                            "file_id": "recv-s1",
                             "file_name": "Season 1",
                             "is_folder": True,
-                            "received_item_verified": True,
-                        },
-                        {
-                            "file_id": "season-2",
-                            "file_name": "Season 2",
-                            "is_folder": True,
-                            "received_item_verified": True,
-                        },
-                        {
-                            "file_id": "season-3",
-                            "file_name": "Season 3",
-                            "is_folder": True,
+                            "parent_id": "pending-cid",
                             "received_item_verified": True,
                         },
                     ],
                     "received_items_complete": True,
-                    "received_expected_item_count": 3,
+                    "tmdb_hint_normalized": True,
+                    "tmdb_hint_id": "108978",
+                    "intake_identity": {
+                        "root_ids": ["recv-s1"],
+                        "files": [{"id": "ep1", "name": episode_name}],
+                    },
                 },
                 row["id"],
             )
 
             result = workflow.run_stage(task)
             stored = self.submissions.find_by_id(int(row["id"]))
-            recognition = bridge.parse_recognition_json(stored)
 
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
-            self.assertEqual(tmdb.searches, [("Reacher", "tv")])
-            self.assertTrue(any(call[0].get("tmdb_id") == "108978" for call in calls))
             self.assertEqual(result.metadata["organized_folder"]["file_id"], "dest-108978")
-            self.assertEqual(recognition["tmdb_id"], "108978")
+            self.assertEqual(result.metadata["intake_identity"]["dest_id"], "dest-108978")
             self.assertEqual(stored["own_share_file_id"], "dest-108978")
+            self.assertNotEqual(stored["own_share_file_id"], "season-1")
+            self.assertNotEqual(stored["own_share_file_id"], "recv-s1")
+            self.assertNotEqual(stored["own_share_file_id"], "share-fid-reacher")
+            self.assertEqual(self.p115.find_organized_calls, [])
             self.assertEqual(self.p115.renamed, [])
-
-    def test_organizing_stage_rejects_dest_that_does_not_contain_received_seasons(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmdb = FakeReacherTmdbResolver()
-            workflow = self._workflow(tmp, tmdb_resolver=tmdb)
-            self.p115.files_by_parent["season-1"] = [
-                {
-                    "fid": "ep1",
-                    "pid": "season-1",
-                    "n": "Reacher.S01E01.2160p.UHD.BluRay.REMUX.mkv",
-                },
-            ]
-            self.p115.files_by_parent["old-dest"] = [
-                {"cid": "old-s2", "n": "Season 2", "pid": "old-dest"},
-            ]
-            row = self._row()
-            row = self.submissions.update_status(
-                int(row["id"]),
-                "received",
-                title="Season 3等3个文件(夹)",
-            ) or row
-            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
-
-            def find_organized_folder(recognition, title, excluded_parent_ids=None, min_update_time=0, **kwargs):
-                if recognition.get("tmdb_id") == "108978":
-                    return {
-                        "file_id": "old-dest",
-                        "file_name": "侠探杰克 (2022) {tmdb-108978}",
-                        "parent_id": "tv-parent",
-                        "category": "外国电视",
-                    }
-                return None
-
-            self.p115.find_organized_folder = find_organized_folder
-            task = self._claim_task(
-                "abc",
-                "1234",
-                TaskStage.ORGANIZING,
-                {
-                    "submission_id": row["id"],
-                    "received_file_ids": ["season-1", "season-2", "season-3"],
-                    "received_items": [
-                        {
-                            "file_id": "season-1",
-                            "file_name": "Season 1",
-                            "is_folder": True,
-                            "received_item_verified": True,
-                        },
-                    ],
-                    "received_items_complete": True,
-                    "received_expected_item_count": 3,
-                },
-                row["id"],
-            )
-
-            result = workflow.run_stage(task)
-            stored = self.submissions.find_by_id(int(row["id"]))
-
-            self.assertEqual(result.outcome, StageOutcome.DEFER)
-            self.assertIn("等待 CMS 整理", result.message)
-            self.assertIsNone(stored["own_share_file_id"])
-            self.assertIn("old-dest", result.metadata.get("rejected_organized_file_ids") or [])
 
     def test_organizing_binds_movie_dest_from_moved_video_fid(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3759,13 +3679,13 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
 
     def test_own_share_stage_rejects_received_file_id_without_folder_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
-            workflow = self._workflow(tmp)
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
             row = self._row()
             row = self.submissions.update_self_share(
                 int(row["id"]),
                 workflow_mode="self_share_sync",
                 workflow_phase="auto_organize_submitted",
-                own_share_file_id="share-snapshot-id",
+                own_share_file_id="recv-root-id",
                 own_share_file_name="基督山伯爵士 4K原盘REMUX [HDR]",
             ) or row
             task = self._claim_task(
@@ -3775,7 +3695,17 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 {
                     "submission_id": row["id"],
                     "received_file_ids": ["share-snapshot-id"],
-                    "own_share_file_id": "share-snapshot-id",
+                    "own_share_file_id": "recv-root-id",
+                    "receive_target_cid": "pending-cid",
+                    "organized_folder": {
+                        "file_id": "recv-root-id",
+                        "file_name": "基督山伯爵士 4K原盘REMUX [HDR]",
+                        "parent_id": "pending-cid",
+                    },
+                    "intake_identity": {
+                        "root_ids": ["recv-root-id"],
+                        "files": [{"id": "video-fid-monte", "name": "Monte.Cristo.mkv"}],
+                    },
                 },
                 row["id"],
             )
@@ -3783,6 +3713,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             result = workflow.run_stage(task)
 
             self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("可验证", result.message)
             self.assertEqual(self.p115.created_shares, [])
 
     def test_share_alias_stage_preserves_cms_folder_name_without_creating_alias(self):
