@@ -12,6 +12,7 @@ from .models import TaskSnapshot
 from .quality_rules import is_path_within_allowed_roots
 from .strm_mode import effective_task_strm_mode, normalize_strm_mode
 from .task_store import TaskStore
+from .telegram_rich import RichDocument, document, heading, paragraph, table
 
 
 @dataclass(frozen=True)
@@ -206,13 +207,13 @@ def scan_task_quality(
     return issues
 
 
-def format_task_quality_report(issues: list[QualityIssue]) -> str:
+def format_task_quality_report(issues: list[QualityIssue]) -> RichDocument:
     if not issues:
-        return "TaskStore 轻量巡检：未发现本地 STRM 问题。"
-    lines = ["TaskStore 轻量巡检：发现本地 STRM 问题"]
-    for idx, issue in enumerate(issues, 1):
+        return document(paragraph("TaskStore 轻量巡检：未发现本地 STRM 问题。"))
+    rows = []
+    for issue in issues:
         title = issue.title or f"任务 #{issue.task_id}"
         task_label = f"#{issue.task_id} {title}" if issue.task_id else title
         detail = f"：{redact_quality_detail(issue.detail)}" if issue.detail else ""
-        lines.append(f"{idx}. {task_label} - {issue.message}{detail}")
-    return "\n".join(lines)
+        rows.append((task_label, f"{issue.message}{detail}"))
+    return document(heading("TaskStore 轻量巡检"), table(("# / 任务", "问题"), rows))

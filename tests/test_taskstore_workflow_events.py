@@ -108,6 +108,9 @@ class FakePollTelegram:
     def send_message(self, chat_id, text, reply_markup=None):
         self.messages.append((chat_id, text, reply_markup))
 
+    def send_rich_message(self, chat_id, document, reply_markup=None):
+        self.messages.append((chat_id, document.to_plain(), reply_markup))
+
 
 class PollTaskStoreIntegrationTests(unittest.TestCase):
     def test_status_poll_records_cms_status_and_emby_disabled(self):

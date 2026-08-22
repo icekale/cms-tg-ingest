@@ -698,6 +698,9 @@ class FakeTelegram:
         self.messages.append((chat_id, text, reply_markup))
         return {"ok": True}
 
+    def send_rich_message(self, chat_id, document, reply_markup=None):
+        self.messages.append((chat_id, document.to_plain(), reply_markup))
+
     def answer_callback_query(self, callback_id, text=None, show_alert=False):
         self.answers.append((callback_id, text, show_alert))
         return {"ok": True}
@@ -1356,14 +1359,14 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             )
 
             message = telegram.messages[-1][1]
-            task_lines = [line for line in message.splitlines() if line.startswith(tuple(f"{idx}." for idx in range(1, 9)))]
+            task_lines = [line for line in message.splitlines() if " | " in line and title_prefix in line]
             self.assertEqual(len(task_lines), 8)
             self.assertIn(title_prefix, message)
             self.assertIn(error_prefix, message)
             self.assertIn("...", message)
             self.assertNotIn("A" * 160, message)
             self.assertNotIn("B" * 160, message)
-            self.assertLess(len(message), 2500)
+            self.assertLess(len(message), 3000)
             for line in task_lines:
                 self.assertLessEqual(len(line), 260)
 

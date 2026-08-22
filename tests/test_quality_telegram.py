@@ -25,6 +25,11 @@ class FakeTelegram:
     def send_message(self, chat_id, text, reply_markup=None):
         self.messages.append((chat_id, text, reply_markup))
 
+    def send_rich_message(self, chat_id, document, reply_markup=None):
+        self.rich_messages = getattr(self, "rich_messages", [])
+        self.rich_messages.append((chat_id, document, reply_markup))
+        self.messages.append((chat_id, document.to_plain(), reply_markup))
+
     def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
         self.edits.append((chat_id, message_id, text, reply_markup))
 
@@ -109,7 +114,7 @@ class QualityTelegramTests(unittest.TestCase):
         self.assertTrue(data)
         self.assertTrue(all(len(value) <= 64 for value in data))
         self.assertTrue(all("/private/path" not in value for value in data))
-        self.assertIn("质量任务", format_quality_manual_report(rows))
+        self.assertIn("质量任务", format_quality_manual_report(rows).to_plain())
 
     def test_quality_command_shows_rule_queue_and_callbacks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -129,6 +134,7 @@ class QualityTelegramTests(unittest.TestCase):
                 quality_automation=service,
             )
 
+            self.assertFalse(getattr(telegram, "rich_messages", []))
             self.assertIn("质量巡检：发现", telegram.messages[-1][1])
             self.assertIn("Web 质量页", telegram.messages[-1][1])
             self.assertIsNone(telegram.messages[-1][2])

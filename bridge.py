@@ -23,7 +23,8 @@ from typing import Any
 from app.clients.cms import CmsClient
 from app.cms_cloud_index import CmsCloudDataIndex
 from app.clients.emby import EmbyClient
-from app.clients.http import FormHttp, HttpJson, load_cookie_value
+from app.clients.http import FormHttp, HttpJson, HttpRequestError, load_cookie_value
+from app.telegram_rich import RichDocument, bold, details, heading, paragraph, table
 from app.clients.hdhive import HdhiveProxyClient, HdhiveProxyError
 from app.clients.p115 import (
     CMS_PARENT_CID_CATEGORY_MAP,
@@ -308,20 +309,22 @@ class _QualityRepairAdapter:
         return str(updated.get("cleanup_status") or "").lower() == "deleted"
 
 
-def _quality_attention_message(summary: QualityRunSummary) -> str:
-    plans = [
-        plan
-        for plan in summary.plans
-        if plan.execution_status in {"failed", "skipped"}
-    ]
-    lines = [
-        f"质量巡检需要关注：{summary.run_id}",
-        f"扫描 {summary.scanned_count} 个任务，发现 {summary.issue_count} 个问题，失败 {summary.failed_count} 个，跳过 {len(plans)} 个。",
-    ]
+def _quality_attention_message(summary: QualityRunSummary) -> RichDocument:
+    plans = [plan for plan in summary.plans if plan.execution_status in {"failed", "skipped"}]
+    rows = []
     for plan in plans[:10]:
         title = plan.title or f"任务 #{plan.task_id}"
-        lines.append(f"#{plan.task_id} {title}：{plan.reason}")
-    return "\n".join(lines)
+        rows.append((f"#{plan.task_id}", title, plan.reason))
+    blocks = [
+        heading("质量巡检需要关注"),
+        paragraph(
+            f"{summary.run_id}：扫描 {summary.scanned_count} 个任务，发现 {summary.issue_count} 个问题，"
+            f"失败 {summary.failed_count} 个，跳过 {len(plans)} 个。"
+        ),
+    ]
+    if rows:
+        blocks.append(table(("#", "任务", "原因"), rows))
+    return RichDocument(tuple(blocks))
 
 
 def notify_quality_run(
@@ -340,7 +343,7 @@ def notify_quality_run(
     if not should_send:
         return
     rows = _quality_rows_for_telegram(automation)
-    telegram.send_message(
+    telegram.send_rich_message(
         chat_id,
         _quality_attention_message(summary),
         reply_markup=quality_manual_keyboard(rows),
@@ -1707,32 +1710,36 @@ def format_health(
     task_health: str | None = None,
     hdhive_enabled: bool | None = None,
     hdhive_ok: bool | None = None,
-) -> str:
+) -> RichDocument:
     source_ok = all(safe_resolve(root).exists() for root in move_config.source_roots)
     lib_ok = all(safe_resolve(root).exists() for root in move_config.library_roots.values())
-    lines = [f"CMS: {'OK' if cms_ok else 'FAIL'}"]
+    rows = [("CMS", bold("OK") if cms_ok else bold("FAIL"), "")]
     if telegram_ok is not None:
-        lines.append(f"Telegram: {'OK' if telegram_ok else 'FAIL'}")
-    if telegram_last_error_at:
-        lines.append(f"Telegram最近瞬时错误: {telegram_last_error_at}")
+        extra = telegram_last_error_at or ""
+        rows.append(("Telegram", bold("OK") if telegram_ok else bold("FAIL"), extra))
     if openai_enabled is not None:
         if openai_enabled:
-            lines.append(f"OpenAI分类兜底: {'OK' if openai_ok else 'FAIL'}")
+            rows.append(("OpenAI分类兜底", bold("OK") if openai_ok else bold("FAIL"), ""))
         else:
-            lines.append("OpenAI分类兜底: DISABLED")
+            rows.append(("OpenAI分类兜底", "DISABLED", ""))
     if hdhive_enabled is not None:
-        lines.append(f"HDHive: {'OK' if hdhive_ok else 'FAIL'}" if hdhive_enabled else "HDHive: DISABLED")
-    lines.extend(
+        if hdhive_enabled:
+            rows.append(("HDHive", bold("OK") if hdhive_ok else bold("FAIL"), ""))
+        else:
+            rows.append(("HDHive", "DISABLED", ""))
+    rows.extend(
         [
-            f"Emby: {'OK' if emby_ok else 'FAIL'}",
-            f"STRM源: {'OK' if source_ok else 'FAIL'} ({len(move_config.source_roots)})",
-            f"媒体库映射: {'OK' if lib_ok else 'FAIL'} ({len(move_config.library_roots)})",
-            f"冲突策略: {move_config.conflict_policy}",
+            ("Emby", bold("OK") if emby_ok else bold("FAIL"), ""),
+            ("STRM源", bold("OK") if source_ok else bold("FAIL"), str(len(move_config.source_roots))),
+            ("媒体库映射", bold("OK") if lib_ok else bold("FAIL"), str(len(move_config.library_roots))),
+            ("冲突策略", move_config.conflict_policy, ""),
         ]
     )
+    blocks = [heading("健康检查"), table(("组件", "状态", "说明"), rows)]
     if task_health:
-        lines.extend(["", task_health])
-    return "\n".join(lines)
+        health_lines = [paragraph(line) for line in str(task_health).splitlines() if line]
+        blocks.append(details("TaskStore", health_lines))
+    return RichDocument(tuple(blocks))
 
 
 class OpenAIClassifier:
@@ -1926,6 +1933,87 @@ class TelegramClient:
             method="POST",
             payload=payload,
         )
+
+    @staticmethod
+    def _is_rich_format_failure(exc: Exception | None = None, resp: dict | None = None) -> bool:
+        if exc is not None and TelegramClient._is_transient_telegram_error(exc):
+            return False
+        status = int(getattr(exc, "status_code", 0) or 0) if exc is not None else int((resp or {}).get("error_code") or 0)
+        text = str(exc if exc is not None else (resp or {}).get("description") or "").lower()
+        if status in {400, 404}:
+            return True
+        if "unknown method" in text or "method not found" in text:
+            return True
+        return "bad request" in text and ("rich" in text or "block" in text)
+
+    def send_rich_message(self, chat_id: int | str, document: RichDocument, reply_markup: dict | None = None) -> None:
+        if not document:
+            return
+        payload = {
+            "chat_id": chat_id,
+            "rich_message": {
+                "blocks": document.to_blocks(),
+                "skip_entity_detection": True,
+            },
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        try:
+            resp = self.http.request(self.base_url + "/sendRichMessage", method="POST", payload=payload)
+        except Exception as exc:
+            if self._is_rich_format_failure(exc=exc):
+                LOG.warning("Telegram sendRichMessage rejected, falling back to sendMessage: %s", exc)
+                self.send_message(chat_id, document.to_plain(), reply_markup=reply_markup)
+                return
+            raise
+        if resp.get("ok"):
+            return
+        if self._is_rich_format_failure(resp=resp):
+            LOG.warning(
+                "Telegram sendRichMessage rejected, falling back to sendMessage: %s",
+                resp.get("description") or resp.get("error_code"),
+            )
+            self.send_message(chat_id, document.to_plain(), reply_markup=reply_markup)
+            return
+        raise RuntimeError(resp.get("description") or "Telegram sendRichMessage failed")
+
+    def edit_rich_message(
+        self,
+        chat_id: int | str,
+        message_id: int | str,
+        document: RichDocument,
+        reply_markup: dict | None = None,
+    ) -> None:
+        if not document:
+            return
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "rich_message": {
+                "blocks": document.to_blocks(),
+                "skip_entity_detection": True,
+            },
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        try:
+            resp = self.http.request(self.base_url + "/editMessageText", method="POST", payload=payload)
+        except Exception as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            if self._is_rich_format_failure(exc=exc):
+                LOG.warning("Telegram edit rich message rejected, falling back to text: %s", exc)
+                self.edit_message_text(chat_id, message_id, document.to_plain(), reply_markup=reply_markup)
+                return
+            raise
+        description = str(resp.get("description") or "")
+        if resp.get("ok") or "message is not modified" in description.lower():
+            return
+        if self._is_rich_format_failure(resp=resp):
+            LOG.warning("Telegram edit rich message rejected, falling back to text: %s", description)
+            self.edit_message_text(chat_id, message_id, document.to_plain(), reply_markup=reply_markup)
+            return
+        raise RuntimeError(description or "Telegram editMessageText failed")
 
     def edit_message_text(
         self,
@@ -2346,7 +2434,7 @@ def format_hdhive_subscription_view(
     service: HdhiveSubscriptionService,
     scheduler: HdhiveSubscriptionScheduler | None,
     chat_id: int | str,
-) -> tuple[str, dict[str, Any] | None]:
+) -> tuple[RichDocument, dict[str, Any] | None]:
     subscriptions = service.list(str(chat_id))
     pending_items = []
     items_by_subscription_id: dict[int, list[Any]] = {}
@@ -2426,7 +2514,7 @@ def handle_hdhive_subscription_callback(
                         items = service.store.list_items(confirmed.subscription_id)
                 message = format_subscription_check_message(result, items, action=action)
                 text, keyboard = format_hdhive_subscription_view(service, scheduler, chat_id)
-                telegram.send_message(chat_id, f"{message}\n\n{text}", reply_markup=keyboard)
+                telegram.send_rich_message(chat_id, text.with_leading_paragraph(message), reply_markup=keyboard)
 
             key = f"hdhive:subscription:{target_id}" if action == "check" else f"hdhive:item:{target_id}"
             description = f"检查 HDHive 订阅 #{target_id}" if action == "check" else f"确认 HDHive 资源 #{target_id}"
@@ -2449,7 +2537,7 @@ def handle_hdhive_subscription_callback(
             message = format_subscription_check_message(result, items, action="confirm")
         safe_answer_callback_query(telegram, callback_id, "操作完成", show_alert=False)
         text, keyboard = format_hdhive_subscription_view(service, scheduler, chat_id)
-        telegram.send_message(chat_id, f"{message}\n\n{text}", reply_markup=keyboard)
+        telegram.send_rich_message(chat_id, text.with_leading_paragraph(message), reply_markup=keyboard)
     except Exception as exc:
         safe_answer_callback_query(telegram, callback_id, "操作失败", show_alert=True)
         telegram.send_message(chat_id, f"HDHive 订阅操作失败：{_redact_telegram_error(exc)[:160]}")
@@ -2487,9 +2575,9 @@ def handle_hdhive_filter_input(
         return True
     with _HDHIVE_PENDING_FILTERS_LOCK:
         _HDHIVE_PENDING_FILTERS.pop(key, None)
-    text_value = "已清除集数过滤。" if not value else f"已设置集数过滤：{value}"
-    view_text, keyboard = format_hdhive_subscription_view(service, scheduler, chat_id)
-    telegram.send_message(chat_id, f"{text_value}\n\n{view_text}", reply_markup=keyboard)
+    message = "已清除集数过滤。" if not value else f"已设置集数过滤：{value}"
+    text, keyboard = format_hdhive_subscription_view(service, scheduler, chat_id)
+    telegram.send_rich_message(chat_id, text.with_leading_paragraph(message), reply_markup=keyboard)
     return True
 
 
@@ -2596,7 +2684,7 @@ def handle_hdhive_callback(
             )
             telegram.answer_callback_query(callback_id, "已创建订阅", show_alert=False)
             text, keyboard = format_hdhive_subscription_view(subscription_service, subscription_scheduler, chat_id)
-            telegram.send_message(chat_id, f"已订阅：{subscription.title}\n\n{text}", reply_markup=keyboard)
+            telegram.send_rich_message(chat_id, text.with_leading_paragraph(f"已订阅：{subscription.title}"), reply_markup=keyboard)
             return True
         if action == "filter":
             if argument == "all":
@@ -4276,12 +4364,12 @@ def handle_update(
                 lines.append(f"已订阅：{subscription.title or subscription.tmdb_id}（#{subscription.id}）")
             except Exception as exc:
                 lines.append(f"订阅失败：{str(exc)[:160]}")
-        view_text, keyboard = format_hdhive_subscription_view(
+        text, keyboard = format_hdhive_subscription_view(
             hdhive_subscription_service,
             hdhive_subscription_scheduler,
             chat_id,
         )
-        telegram.send_message(chat_id, "\n".join(lines) + "\n\n" + view_text, reply_markup=keyboard)
+        telegram.send_rich_message(chat_id, text.with_leading_paragraph("\n".join(lines)), reply_markup=keyboard)
         return
     if command == "/hdhive_subscriptions":
         if hdhive_subscription_service is None:
@@ -4292,7 +4380,7 @@ def handle_update(
             hdhive_subscription_scheduler,
             chat_id,
         )
-        telegram.send_message(chat_id, text, reply_markup=keyboard)
+        telegram.send_rich_message(chat_id, text, reply_markup=keyboard)
         return
     if handle_hdhive_filter_input(
         text,
@@ -4307,22 +4395,22 @@ def handle_update(
             tasks = task_store.list_recent_tasks(limit=8)
             taskstore_status = format_taskstore_status(tasks)
             if taskstore_status:
-                telegram.send_message(chat_id, taskstore_status, reply_markup=task_action_keyboard(tasks, max_retries=max_retries))
+                telegram.send_rich_message(chat_id, taskstore_status, reply_markup=task_action_keyboard(tasks, max_retries=max_retries))
                 return
-        telegram.send_message(chat_id, format_status(store.recent(limit=8)))
+        telegram.send_rich_message(chat_id, format_status(store.recent(limit=8)))
         return
     if command == "/metrics":
         payload = build_metrics_snapshot(store)
         write_metrics_snapshot(store, metrics_path_for_store(store))
-        telegram.send_message(chat_id, format_metrics(payload))
+        telegram.send_rich_message(chat_id, format_metrics(payload))
         return
     if command == "/history":
         if task_engine_enabled and task_store is not None:
             taskstore_history = format_taskstore_history(task_store.list_recent_tasks(limit=10))
             if taskstore_history:
-                telegram.send_message(chat_id, taskstore_history)
+                telegram.send_rich_message(chat_id, taskstore_history)
                 return
-        telegram.send_message(chat_id, format_history(store.recent(limit=10)))
+        telegram.send_rich_message(chat_id, format_history(store.recent(limit=10)))
         return
     if command == "/quality":
         if task_engine_enabled and task_store is not None:
@@ -4331,10 +4419,10 @@ def handle_update(
                 return
             issues = scan_task_quality(task_store)
             if issues:
-                telegram.send_message(chat_id, format_task_quality_report(issues))
+                telegram.send_rich_message(chat_id, format_task_quality_report(issues))
                 return
         rows = store.recent(limit=50)
-        telegram.send_message(chat_id, format_quality_report(rows), reply_markup=quality_keyboard(rows))
+        telegram.send_rich_message(chat_id, format_quality_report(rows), reply_markup=quality_keyboard(rows))
         return
     if command == "/clear_history":
         telegram.send_message(
@@ -4346,7 +4434,7 @@ def handle_update(
     if command == "/health":
         telegram_ok = telegram.healthcheck() if hasattr(telegram, "healthcheck") else None
         cms_ok = cms.healthcheck() if hasattr(cms, "healthcheck") else True
-        telegram.send_message(
+        telegram.send_rich_message(
             chat_id,
             format_health(
                 move_config or MoveConfig.from_config(Config.from_env()),
@@ -4376,12 +4464,12 @@ def handle_update(
                     lines.append(f"已订阅：{subscription.title or subscription.tmdb_id}（#{subscription.id}）")
                 except Exception as exc:
                     lines.append(f"订阅失败：{str(exc)[:160]}")
-            view_text, keyboard = format_hdhive_subscription_view(
+            text, keyboard = format_hdhive_subscription_view(
                 hdhive_subscription_service,
                 hdhive_subscription_scheduler,
                 chat_id,
             )
-            telegram.send_message(chat_id, "\n".join(lines) + "\n\n" + view_text, reply_markup=keyboard)
+            telegram.send_rich_message(chat_id, text.with_leading_paragraph("\n".join(lines)), reply_markup=keyboard)
             return
 
     if hdhive_workflow is not None:

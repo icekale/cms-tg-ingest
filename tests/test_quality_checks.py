@@ -124,8 +124,7 @@ class EmbyQualityMatchTests(unittest.TestCase):
             }
         ]
 
-        report = bridge.format_quality_report(rows)
-
+        report = bridge.format_quality_report(rows).to_plain()
         self.assertIn("疑似错配", report)
         self.assertIn("航海王", report)
         self.assertIn("我是余欢水", report)

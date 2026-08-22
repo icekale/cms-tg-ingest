@@ -74,6 +74,10 @@ class FakeTelegram:
     def send_message(self, *args, **kwargs):
         return None
 
+    def send_rich_message(self, chat_id, document, reply_markup=None):
+        self.messages = getattr(self, "messages", [])
+        self.messages.append((chat_id, document.to_plain(), reply_markup))
+
 
 class FakeSubmissionStore:
     def __init__(self):
