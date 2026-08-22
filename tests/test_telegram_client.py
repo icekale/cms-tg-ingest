@@ -4,6 +4,8 @@ from unittest.mock import patch
 from bridge import TelegramClient
 from app.clients.http import _redact_url
 from app.clients.http import HttpJson
+from app.clients.http import HttpRequestError
+from app.telegram_rich import RichDocument, heading, table
 
 
 class FakeResponse:
@@ -127,6 +129,77 @@ class TelegramClientTests(unittest.TestCase):
 
         self.assertEqual(client._consecutive_transient, 0)
         self.assertTrue(any("timeout=30" in url for url, _kwargs in http.calls))
+
+
+class TelegramRichClientTests(unittest.TestCase):
+    def test_send_rich_message_posts_blocks(self):
+        http = SequenceHttp([{"ok": True}])
+        doc = RichDocument((heading("健康检查"), table(("组件", "状态"), (("CMS", "OK"),))))
+        keyboard = {"inline_keyboard": [[{"text": "x", "callback_data": "x"}]]}
+
+        TelegramClient("secret", http=http).send_rich_message(1, doc, reply_markup=keyboard)
+
+        url, kwargs = http.calls[0]
+        self.assertTrue(url.endswith("/sendRichMessage"))
+        payload = kwargs["payload"]
+        self.assertEqual(payload["chat_id"], 1)
+        self.assertTrue(payload["rich_message"]["skip_entity_detection"])
+        self.assertEqual(payload["rich_message"]["blocks"][0]["type"], "heading")
+        self.assertEqual(payload["reply_markup"], keyboard)
+        self.assertEqual(len(http.calls), 1)
+
+    def test_empty_document_does_not_send(self):
+        http = SequenceHttp([])
+        TelegramClient("secret", http=http).send_rich_message(1, RichDocument())
+        self.assertEqual(http.calls, [])
+
+    def test_http_400_falls_back_to_send_message(self):
+        http = SequenceHttp(
+            [
+                HttpRequestError("HTTP 400 from https://api.telegram.org/bot<redacted>/sendRichMessage: bad", status_code=400),
+                {"ok": True},
+            ]
+        )
+        doc = RichDocument((heading("任务统计"),))
+        keyboard = {"inline_keyboard": []}
+
+        TelegramClient("secret", http=http).send_rich_message(9, doc, reply_markup=keyboard)
+
+        self.assertTrue(http.calls[0][0].endswith("/sendRichMessage"))
+        self.assertTrue(http.calls[1][0].endswith("/sendMessage"))
+        self.assertEqual(http.calls[1][1]["payload"]["text"], doc.to_plain())
+        self.assertEqual(http.calls[1][1]["payload"]["reply_markup"], keyboard)
+
+    def test_ok_false_400_falls_back(self):
+        http = SequenceHttp(
+            [
+                {"ok": False, "error_code": 400, "description": "Bad Request: can't parse rich blocks"},
+                {"ok": True},
+            ]
+        )
+        doc = RichDocument((heading("最近任务"),))
+        TelegramClient("secret", http=http).send_rich_message(1, doc)
+        self.assertTrue(http.calls[1][0].endswith("/sendMessage"))
+        self.assertEqual(http.calls[1][1]["payload"]["text"], "最近任务")
+
+    def test_unknown_method_falls_back(self):
+        http = SequenceHttp(
+            [
+                HttpRequestError("HTTP 404 from https://api.telegram.org/bot<redacted>/sendRichMessage: unknown method", status_code=404),
+                {"ok": True},
+            ]
+        )
+        TelegramClient("secret", http=http).send_rich_message(1, RichDocument((heading("最近历史"),)))
+        self.assertTrue(http.calls[1][0].endswith("/sendMessage"))
+
+    def test_network_error_does_not_fall_back(self):
+        http = SequenceHttp(
+            [RuntimeError("Cannot reach https://api.telegram.org/bot<redacted>/sendRichMessage: Remote end closed")]
+        )
+        with self.assertRaises(RuntimeError):
+            TelegramClient("secret", http=http).send_rich_message(1, RichDocument((heading("健康检查"),)))
+        self.assertEqual(len(http.calls), 1)
+        self.assertTrue(http.calls[0][0].endswith("/sendRichMessage"))
 
 
 if __name__ == "__main__":

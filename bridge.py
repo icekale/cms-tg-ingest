@@ -23,7 +23,8 @@ from typing import Any
 from app.clients.cms import CmsClient
 from app.cms_cloud_index import CmsCloudDataIndex
 from app.clients.emby import EmbyClient
-from app.clients.http import FormHttp, HttpJson, load_cookie_value
+from app.clients.http import FormHttp, HttpJson, HttpRequestError, load_cookie_value
+from app.telegram_rich import RichDocument
 from app.clients.hdhive import HdhiveProxyClient, HdhiveProxyError
 from app.clients.p115 import (
     CMS_PARENT_CID_CATEGORY_MAP,
@@ -1926,6 +1927,49 @@ class TelegramClient:
             method="POST",
             payload=payload,
         )
+
+    @staticmethod
+    def _is_rich_format_failure(exc: Exception | None = None, resp: dict | None = None) -> bool:
+        if exc is not None and TelegramClient._is_transient_telegram_error(exc):
+            return False
+        status = int(getattr(exc, "status_code", 0) or 0) if exc is not None else int((resp or {}).get("error_code") or 0)
+        text = str(exc if exc is not None else (resp or {}).get("description") or "").lower()
+        if status in {400, 404}:
+            return True
+        if "unknown method" in text or "method not found" in text:
+            return True
+        return "bad request" in text and ("rich" in text or "block" in text)
+
+    def send_rich_message(self, chat_id: int | str, document: RichDocument, reply_markup: dict | None = None) -> None:
+        if not document:
+            return
+        payload = {
+            "chat_id": chat_id,
+            "rich_message": {
+                "blocks": document.to_blocks(),
+                "skip_entity_detection": True,
+            },
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        try:
+            resp = self.http.request(self.base_url + "/sendRichMessage", method="POST", payload=payload)
+        except Exception as exc:
+            if self._is_rich_format_failure(exc=exc):
+                LOG.warning("Telegram sendRichMessage rejected, falling back to sendMessage: %s", exc)
+                self.send_message(chat_id, document.to_plain(), reply_markup=reply_markup)
+                return
+            raise
+        if resp.get("ok"):
+            return
+        if self._is_rich_format_failure(resp=resp):
+            LOG.warning(
+                "Telegram sendRichMessage rejected, falling back to sendMessage: %s",
+                resp.get("description") or resp.get("error_code"),
+            )
+            self.send_message(chat_id, document.to_plain(), reply_markup=reply_markup)
+            return
+        raise RuntimeError(resp.get("description") or "Telegram sendRichMessage failed")
 
     def edit_message_text(
         self,
