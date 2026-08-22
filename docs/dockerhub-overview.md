@@ -28,7 +28,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 固定版本镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.4.15
+docker pull icekale/cms-tg-ingest:0.4.16
 ```
 
 ### 完整 Docker Compose
@@ -38,7 +38,7 @@ docker pull icekale/cms-tg-ingest:0.4.15
 ```yaml
 services:
   cms-tg-ingest:
-    image: icekale/cms-tg-ingest:0.4.15
+    image: icekale/cms-tg-ingest:0.4.16
     container_name: cms-tg-ingest
     restart: unless-stopped
     env_file:
