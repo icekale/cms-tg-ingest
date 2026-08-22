@@ -1524,11 +1524,6 @@ class BridgeSelfShareTaskWorkflow:
                 "file_name": p115_file_name(folder_hit) or dest,
                 "parent_id": p115_item_parent_id(folder_hit),
             }
-        if dest and hasattr(self.p115, "list_files"):
-            try:
-                self.p115.list_files(dest, limit=1)
-            except Exception:
-                LOG.debug("Failed to list dest folder dest=%s", dest, exc_info=True)
         return {"file_id": dest, "file_name": dest, "parent_id": ""}
 
     def _resolve_intake_dest_folder(
@@ -1536,6 +1531,7 @@ class BridgeSelfShareTaskWorkflow:
         stage_metadata: dict[str, Any],
         recognition: dict[str, Any],
         own_share_file_id: str = "",
+        receive_cid: str = "",
     ) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
         identity = stage_metadata.get("intake_identity")
         if not isinstance(identity, dict):
@@ -1563,15 +1559,21 @@ class BridgeSelfShareTaskWorkflow:
                     LOG.debug("Failed to search intake tmdb_id=%s", tmdb_id, exc_info=True)
         dest = dest_id_from_file_hits(file_hits=file_hits, folder_hits=folder_hits, expected_ids=expected_ids)
         root_ids = {str(value) for value in (identity.get("root_ids") or []) if str(value)}
+        receive_cid = str(receive_cid or "").strip()
         if dest == CONFLICT:
             return CONFLICT, None, None
+        if dest == receive_cid or dest in root_ids:
+            return INCOMPLETE, None, None
         bound_dest = str(identity.get("dest_id") or own_share_file_id or "").strip()
-        if dest == INCOMPLETE or dest in root_ids:
-            if bound_dest and bound_dest not in root_ids:
+        if dest == INCOMPLETE:
+            if bound_dest and bound_dest not in root_ids and bound_dest != receive_cid:
                 folder = self._folder_record_for_dest(bound_dest, folder_hits)
-                return bound_dest, folder, {**identity, "dest_id": bound_dest}
+                if str(folder.get("parent_id") or "").strip() != receive_cid or not receive_cid:
+                    return bound_dest, folder, {**identity, "dest_id": bound_dest}
             return INCOMPLETE, None, None
         folder = self._folder_record_for_dest(dest, folder_hits)
+        if receive_cid and str(folder.get("parent_id") or "").strip() == receive_cid:
+            return INCOMPLETE, None, None
         return dest, folder, {**identity, "dest_id": dest}
 
     def _complete_organized_folder(
@@ -1728,6 +1730,7 @@ class BridgeSelfShareTaskWorkflow:
             stage_metadata,
             recognition,
             own_share_file_id=str(row.get("own_share_file_id") or ""),
+            receive_cid=receive_cid,
         )
         if dest_status == "empty_files" and not row.get("own_share_file_id"):
             return StageResult.defer(
@@ -1970,16 +1973,20 @@ class BridgeSelfShareTaskWorkflow:
                 "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享",
                 {"submission_id": int(row["id"]), "own_share_file_id": ""},
             )
-        if has_tmdb_folder_mismatch(
-            folder,
-            recognition,
-            row,
-            str(folder.get("file_name") or task.title or task.share_code),
-        ):
-            return StageResult.needs_action(
-                "CMS 整理目录与源任务 TMDB 不一致或无法确认，已阻止创建自有分享",
-                {"submission_id": int(row["id"]), "own_share_file_id": ""},
-            )
+        identity = task.metadata.get("intake_identity")
+        dest_id = str(identity.get("dest_id") or "").strip() if isinstance(identity, dict) else ""
+        folder_id = str(folder.get("file_id") or "").strip()
+        if folder_id != dest_id or not dest_id:
+            if has_tmdb_folder_mismatch(
+                folder,
+                recognition,
+                row,
+                str(folder.get("file_name") or task.title or task.share_code),
+            ):
+                return StageResult.needs_action(
+                    "CMS 整理目录与源任务 TMDB 不一致或无法确认，已阻止创建自有分享",
+                    {"submission_id": int(row["id"]), "own_share_file_id": ""},
+                )
         file_id = str(folder.get("file_id") or "").strip()
         folder_name = str(folder.get("file_name") or row.get("own_share_file_name") or task.title or "").strip()
         share_name = str(row.get("title") or task.title or folder_name or task.share_code).strip()

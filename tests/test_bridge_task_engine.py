@@ -1712,6 +1712,100 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(stored["own_share_file_id"], "dest-c-441531")
             self.assertEqual(result.metadata["intake_identity"]["dest_id"], "dest-c-441531")
 
+    def test_organizing_defers_when_video_still_under_receive_cid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, tmdb_resolver=FakeTmdbResolver())
+            self.p115.search_hits = {
+                "拆弹专家.2017.mkv": [
+                    {"fid": "video-mkv-402", "cid": "pending-cid", "n": "拆弹专家.2017.mkv"},
+                ],
+            }
+            row = self._row()
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_file_ids": ["share-fid-402"],
+                    "received_items": [
+                        {
+                            "file_id": "video-mkv-402",
+                            "file_name": "拆弹专家.2017.mkv",
+                            "is_folder": False,
+                            "parent_id": "pending-cid",
+                            "received_item_verified": True,
+                        }
+                    ],
+                    "received_items_complete": True,
+                    "tmdb_hint_normalized": True,
+                    "tmdb_hint_id": "441531",
+                    "tmdb_hint_title": "拆弹专家",
+                    "tmdb_hint_category": "华语电影",
+                    "intake_identity": {
+                        "root_ids": ["video-mkv-402"],
+                        "files": [{"id": "video-mkv-402", "name": "拆弹专家.2017.mkv"}],
+                    },
+                },
+                row["id"],
+            )
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIn("等待 CMS 整理", result.message)
+            self.assertNotEqual(stored["own_share_file_id"], "pending-cid")
+
+    def test_recognizing_keeps_intake_dest_without_tmdb_in_folder_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, tmdb_resolver=FakeTmdbResolver())
+            self.p115.search_hits = {
+                "拆弹专家.2017.mkv": [
+                    {"fid": "video-mkv-402", "cid": "dest-c-441531", "n": "拆弹专家.2017.mkv"},
+                ],
+            }
+            row = self._row()
+            row = self.submissions.update_status(
+                int(row["id"]),
+                "received",
+                title="拆弹专家 (2017) {tmdb-441531}",
+            ) or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            organize_meta = {
+                "submission_id": row["id"],
+                "received_file_ids": ["share-fid-402"],
+                "received_items": [
+                    {
+                        "file_id": "recv-folder-402",
+                        "file_name": "拆弹专家 (2017) {tmdb-441531}",
+                        "is_folder": True,
+                        "parent_id": "pending-cid",
+                        "received_item_verified": True,
+                    }
+                ],
+                "received_items_complete": True,
+                "tmdb_hint_normalized": True,
+                "tmdb_hint_id": "441531",
+                "tmdb_hint_title": "拆弹专家",
+                "tmdb_hint_category": "华语电影",
+                "intake_identity": {
+                    "root_ids": ["recv-folder-402"],
+                    "files": [{"id": "video-mkv-402", "name": "拆弹专家.2017.mkv"}],
+                },
+            }
+            task = self._claim_task("abc", "1234", TaskStage.ORGANIZING, organize_meta, row["id"])
+            organizing = workflow.run_stage(task)
+            self.assertEqual(organizing.outcome, StageOutcome.COMPLETE)
+            recognizing_task = self._claim_task("abc", "1234", TaskStage.RECOGNIZING, organizing.metadata, row["id"])
+            recognizing = workflow.run_stage(recognizing_task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertFalse(
+                recognizing.outcome == StageOutcome.NEEDS_ACTION and "TMDB 不一致" in str(recognizing.message or "")
+            )
+            self.assertEqual(stored["own_share_file_id"], "dest-c-441531")
+            identity = recognizing.metadata.get("intake_identity") or organizing.metadata.get("intake_identity") or {}
+            self.assertEqual(identity.get("dest_id") or stored.get("own_share_file_id"), "dest-c-441531")
+
     def test_organizing_stage_persists_and_reuses_organized_scan_cursor(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp, tmdb_resolver=FakeTmdbResolver())
