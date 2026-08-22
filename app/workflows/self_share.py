@@ -1526,6 +1526,25 @@ class BridgeSelfShareTaskWorkflow:
             }
         return {"file_id": dest, "file_name": dest, "parent_id": ""}
 
+    def _dest_is_receive_child(self, dest: str, receive_cid: str) -> bool:
+        dest = str(dest or "").strip()
+        receive_cid = str(receive_cid or "").strip()
+        if not dest or not receive_cid or dest == receive_cid:
+            return False
+        if not hasattr(self.p115, "list_files"):
+            return False
+        try:
+            items = self.p115.list_files(receive_cid, limit=500)
+        except Exception:
+            LOG.debug("Failed to list receive_cid children dest=%s", dest, exc_info=True)
+            return False
+        return any(p115_item_id(item) == dest for item in items if isinstance(item, dict))
+
+    def _intake_dest_skips_tmdb_mismatch(self, folder_id: str, metadata: dict[str, Any] | None) -> bool:
+        identity = metadata.get("intake_identity") if isinstance(metadata, dict) else None
+        dest_id = str(identity.get("dest_id") or "").strip() if isinstance(identity, dict) else ""
+        return bool(dest_id and str(folder_id or "").strip() == dest_id)
+
     def _resolve_intake_dest_folder(
         self,
         stage_metadata: dict[str, Any],
@@ -1562,14 +1581,20 @@ class BridgeSelfShareTaskWorkflow:
         receive_cid = str(receive_cid or "").strip()
         if dest == CONFLICT:
             return CONFLICT, None, None
-        if dest == receive_cid or dest in root_ids:
+        if dest == receive_cid or dest in root_ids or self._dest_is_receive_child(dest, receive_cid):
             return INCOMPLETE, None, None
-        bound_dest = str(identity.get("dest_id") or own_share_file_id or "").strip()
+        persisted = str(own_share_file_id or "").strip()
         if dest == INCOMPLETE:
-            if bound_dest and bound_dest not in root_ids and bound_dest != receive_cid:
-                folder = self._folder_record_for_dest(bound_dest, folder_hits)
-                if str(folder.get("parent_id") or "").strip() != receive_cid or not receive_cid:
-                    return bound_dest, folder, {**identity, "dest_id": bound_dest}
+            if (
+                persisted
+                and persisted not in root_ids
+                and persisted != receive_cid
+                and not self._dest_is_receive_child(persisted, receive_cid)
+            ):
+                folder = self._folder_record_for_dest(persisted, folder_hits)
+                if receive_cid and str(folder.get("parent_id") or "").strip() == receive_cid:
+                    return INCOMPLETE, None, None
+                return persisted, folder, {**identity, "dest_id": persisted}
             return INCOMPLETE, None, None
         folder = self._folder_record_for_dest(dest, folder_hits)
         if receive_cid and str(folder.get("parent_id") or "").strip() == receive_cid:
@@ -1732,7 +1757,7 @@ class BridgeSelfShareTaskWorkflow:
             own_share_file_id=str(row.get("own_share_file_id") or ""),
             receive_cid=receive_cid,
         )
-        if dest_status == "empty_files" and not row.get("own_share_file_id"):
+        if dest_status == "empty_files":
             return StageResult.defer(
                 "等待 CMS 整理完成",
                 self.self_share_config.auto_organize_retry_seconds or 30,
@@ -1973,10 +1998,7 @@ class BridgeSelfShareTaskWorkflow:
                 "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享",
                 {"submission_id": int(row["id"]), "own_share_file_id": ""},
             )
-        identity = task.metadata.get("intake_identity")
-        dest_id = str(identity.get("dest_id") or "").strip() if isinstance(identity, dict) else ""
-        folder_id = str(folder.get("file_id") or "").strip()
-        if folder_id != dest_id or not dest_id:
+        if not self._intake_dest_skips_tmdb_mismatch(folder.get("file_id"), task.metadata):
             if has_tmdb_folder_mismatch(
                 folder,
                 recognition,
@@ -2224,7 +2246,9 @@ class BridgeSelfShareTaskWorkflow:
         if not file_id or not canonical_name:
             return StageResult.failed("缺少 CMS 整理后的文件夹", error_type="organized_folder_missing")
         recognition = self._recognition_from_row(row)
-        if has_tmdb_folder_mismatch({"file_name": canonical_name}, recognition, row, canonical_name):
+        if not self._intake_dest_skips_tmdb_mismatch(file_id, task.metadata) and has_tmdb_folder_mismatch(
+            {"file_name": canonical_name}, recognition, row, canonical_name
+        ):
             return StageResult.needs_action(
                 "CMS 整理目录与源任务 TMDB 不一致或无法确认，已阻止创建自有分享",
                 {"submission_id": int(row["id"]), "own_share_file_id": ""},
@@ -2248,7 +2272,7 @@ class BridgeSelfShareTaskWorkflow:
         if not file_id:
             return StageResult.failed("缺少自有分享文件夹 ID", error_type="own_share_file_missing")
         recognition = self._recognition_from_row(row)
-        if has_tmdb_folder_mismatch(
+        if not self._intake_dest_skips_tmdb_mismatch(file_id, task.metadata) and has_tmdb_folder_mismatch(
             {"file_name": str(row.get("own_share_file_name") or "")},
             recognition,
             row,
@@ -2260,11 +2284,6 @@ class BridgeSelfShareTaskWorkflow:
             )
         folder = task.metadata.get("organized_folder")
         if isinstance(folder, dict) and is_unverified_received_source(folder, task.metadata, self._task_receive_cid(task)):
-            return StageResult.needs_action(
-                "等待可验证的 CMS 整理后源目录，当前 115 ID 仍是接收/分享快照，拒绝创建自有分享",
-                self._own_share_metadata(row) | {"own_share_file_id": ""},
-            )
-        if file_id in {str(value) for value in (task.metadata.get("received_file_ids") or []) if str(value)}:
             return StageResult.needs_action(
                 "等待可验证的 CMS 整理后源目录，当前 115 ID 仍是接收/分享快照，拒绝创建自有分享",
                 self._own_share_metadata(row) | {"own_share_file_id": ""},
