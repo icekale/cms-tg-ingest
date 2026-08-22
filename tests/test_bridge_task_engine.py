@@ -193,12 +193,16 @@ class FakeCleanupClient:
     def __init__(self):
         self.deleted = []
         self.parents = {}
+        self.file_parent_id = self._file_parent_id
 
     def delete_file(self, file_id):
         self.deleted.append(file_id)
 
-    def file_parent_id(self, file_id):
+    def _file_parent_id(self, file_id):
         return str(self.parents.get(str(file_id), "") or "")
+
+    def file_exists_in_parent(self, file_id, parent_id):
+        return str(self.parents.get(str(file_id), "") or "") == str(parent_id or "")
 
 
 class FakeClassifier:
@@ -6524,6 +6528,74 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             workflow._now = lambda: 101.0
             result = workflow.run_stage(task)
             self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(cleanup.deleted, [])
+
+    def test_cleaned_stage_deletes_root_without_file_parent_id_api(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = FakeCleanupClient()
+            cleanup.parents["recv-folder-402"] = "redundant-cid"
+            del cleanup.file_parent_id
+            workflow = self._workflow(tmp, cleanup_client=cleanup)
+            workflow.self_share_config.review_grace_seconds = 1
+            workflow.self_share_config.review_checkpoints_seconds = (1,)
+            workflow.self_share_config.source_cleanup_parent_ids = {"redundant-cid"}
+            row = self._self_share_row(title="C-拆弹专家-2017-[tmdb=441531]", tmdb_id="441531")
+            row = self.submissions.update_self_share(int(row["id"]), own_share_file_id="dest-c-441531") or row
+            dest = Path(tmp) / "library" / "C-拆弹专家-2017-[tmdb=441531]"
+            self._write_strm(dest)
+            row = self.submissions.update_move(int(row["id"]), "moved", dest_path=str(dest), category_final="华语电影") or row
+            row = self.submissions.update_emby(int(row["id"]), "confirmed") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.CLEANED,
+                {
+                    "submission_id": row["id"],
+                    "share_created_at": 100.0,
+                    "intake_identity": {
+                        "root_ids": ["recv-folder-402"],
+                        "files": [{"id": "video-mkv-402", "name": "拆弹专家.2017.mkv"}],
+                        "dest_id": "dest-c-441531",
+                    },
+                },
+                row["id"],
+            )
+            workflow._now = lambda: 101.0
+            result = workflow.run_stage(task)
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(cleanup.deleted, ["recv-folder-402"])
+            self.assertNotIn("dest-c-441531", cleanup.deleted)
+
+    def test_cleaned_stage_skips_root_when_parent_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = FakeCleanupClient()
+            del cleanup.file_parent_id
+            workflow = self._workflow(tmp, cleanup_client=cleanup)
+            workflow.self_share_config.review_grace_seconds = 1
+            workflow.self_share_config.review_checkpoints_seconds = (1,)
+            row = self._self_share_row()
+            dest = Path(tmp) / "library" / row["own_share_file_name"]
+            self._write_strm(dest)
+            row = self.submissions.update_move(int(row["id"]), "moved", dest_path=str(dest), category_final="华语电影") or row
+            row = self.submissions.update_emby(int(row["id"]), "confirmed") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.CLEANED,
+                {
+                    "submission_id": row["id"],
+                    "share_created_at": 100.0,
+                    "intake_identity": {
+                        "root_ids": ["recv-folder-402"],
+                        "files": [{"id": "video-mkv-402", "name": "Movie.mkv"}],
+                        "dest_id": "folder-id",
+                    },
+                },
+                row["id"],
+            )
+            workflow._now = lambda: 101.0
+            result = workflow.run_stage(task)
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
             self.assertEqual(cleanup.deleted, [])
 
 

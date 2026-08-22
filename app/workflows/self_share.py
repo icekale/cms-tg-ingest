@@ -3033,13 +3033,30 @@ class BridgeSelfShareTaskWorkflow:
                 LOG.debug("Failed to load CMS auto organize excluded folders", exc_info=True)
         return cleanup_parents
 
-    def _intake_root_parent_id(self, task, row: dict[str, Any], root_id: str) -> str:
-        parent_id = ""
-        if hasattr(self.cleanup_client, "file_parent_id"):
-            parent_id = str(self.cleanup_client.file_parent_id(root_id) or "").strip()
-        if not parent_id:
-            parent_id = source_delete_parent_id(task, row, root_id)
-        return parent_id
+    def _intake_root_parent_id(self, root_id: str, cleanup_parents: set[str]) -> str:
+        resolver = getattr(self.cleanup_client, "file_parent_id", None)
+        if callable(resolver):
+            parent_id = str(resolver(root_id) or "").strip()
+            if parent_id:
+                return parent_id
+        exists = None
+        if callable(getattr(self.cleanup_client, "file_exists_in_parent", None)):
+            exists = self.cleanup_client.file_exists_in_parent
+        elif callable(getattr(self.p115, "file_exists_in_parent", None)):
+            exists = self.p115.file_exists_in_parent
+        if exists is None:
+            return ""
+        for cid in cleanup_parents:
+            cid = str(cid or "").strip()
+            if not cid:
+                continue
+            try:
+                if exists(root_id, cid):
+                    return cid
+            except Exception:
+                LOG.debug("Failed to probe intake root parent %s in %s", root_id, cid, exc_info=True)
+                continue
+        return ""
 
     def _cleanup_intake_roots(
         self,
@@ -3058,7 +3075,7 @@ class BridgeSelfShareTaskWorkflow:
             root_id = str(raw_root or "").strip()
             if not root_id or root_id in protected:
                 continue
-            parent_id = self._intake_root_parent_id(task, row, root_id)
+            parent_id = self._intake_root_parent_id(root_id, cleanup_parents)
             action = cleanup_root_action(
                 root_id=root_id,
                 parent_id=parent_id,
