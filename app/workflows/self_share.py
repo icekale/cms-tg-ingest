@@ -43,6 +43,7 @@ from app.media.classify import (
     normalize_tmdb_hint_name,
     user_movie_category_bucket,
 )
+from app.media.intake_identity import snapshot_files
 from app.media.strm import (
     category_from_existing_library_folder,
     category_from_existing_library_match,
@@ -1224,6 +1225,16 @@ class BridgeSelfShareTaskWorkflow:
             "received_snapshot_complete": bool(received.get("received_snapshot_complete", False)),
             "receive_target_cid": receive_cid,
             "tmdb_hint_normalized": False,
+        }
+        roots = received.get("received_items") or []
+        list_files = self.p115.list_files if hasattr(self.p115, "list_files") else (lambda *_a, **_k: [])
+        try:
+            files = snapshot_files(roots, list_files)
+        except Exception:
+            files = []
+        metadata["intake_identity"] = {
+            "root_ids": [str(item.get("file_id") or "").strip() for item in roots if str(item.get("file_id") or "").strip()],
+            "files": files,
         }
         if reprocess_reset:
             metadata["self_share_reprocess_reset"] = True

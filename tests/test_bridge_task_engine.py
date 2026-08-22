@@ -55,6 +55,7 @@ class FakeP115:
         self.share_list_states = {}
         self.files_by_parent = {}
         self.list_file_calls = []
+        self.search_hits = {}
 
     def receive_share_to_cid(self, share_code, receive_code, receive_cid):
         intent = self.prepare_share_receive(share_code, receive_code, receive_cid)
@@ -150,6 +151,9 @@ class FakeP115:
     def list_files(self, parent_id, limit=100):
         self.list_file_calls.append((str(parent_id), limit))
         return list(self.files_by_parent.get(str(parent_id), []))
+
+    def search_files(self, search_value, limit=20):
+        return list(self.search_hits.get(str(search_value), []))
 
 
 class FakeTelegram:
@@ -748,6 +752,34 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["submission_id"], row["id"])
             self.assertEqual(result.metadata["received_file_ids"], ["file-a", "file-b"])
             self.assertEqual(updated["workflow_phase"], "received_to_pending")
+
+    def test_received_stage_snapshots_distinct_video_file_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            self.p115.files_by_parent["received-a"] = [
+                {"fid": "video-a", "cid": "received-a", "n": "Movie.A.mkv"},
+                {"fid": "sub-a", "cid": "received-a", "n": "Movie.A.ass"},
+            ]
+            self.p115.files_by_parent["received-b"] = [
+                {"fid": "video-b", "cid": "received-b", "n": "Movie.B.mkv"},
+            ]
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="auto_organize_submitted",
+            ) or row
+            task = self._claim_task("abc", "1234", TaskStage.RECEIVED, {"force_reprocess": True})
+
+            result = workflow.run_stage(task)
+            identity = result.metadata.get("intake_identity") or {}
+            self.assertEqual(identity.get("root_ids"), ["received-a", "received-b"])
+            self.assertEqual(
+                {(item["id"], item["name"]) for item in identity.get("files") or []},
+                {("video-a", "Movie.A.mkv"), ("video-b", "Movie.B.mkv")},
+            )
+            self.assertNotIn("file-a", {item["id"] for item in identity.get("files") or []})
+            self.assertEqual(result.metadata.get("received_file_ids"), ["file-a", "file-b"])
 
     def test_force_reprocess_clears_existing_self_share_output_before_receiving(self):
         with tempfile.TemporaryDirectory() as tmp:

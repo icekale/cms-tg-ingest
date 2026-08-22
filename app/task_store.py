@@ -61,6 +61,7 @@ REPROCESS_METADATA_DELETE_KEYS = (
     "received_expected_item_count",
     "received_existing_file_ids",
     "received_snapshot_complete",
+    "intake_identity",
     "tmdb_hint_id",
     "tmdb_hint_title",
     "tmdb_hint_category",
