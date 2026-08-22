@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Callable
 
-from app.clients.p115 import p115_file_name, p115_is_folder, p115_item_id
+from app.clients.p115 import p115_file_name, p115_is_folder, p115_item_id, p115_item_parent_id
 
 VIDEO_SUFFIXES = (".mkv", ".mp4", ".ts", ".iso", ".avi", ".mov", ".wmv", ".m2ts")
 _SEASON_NAME = re.compile(r"(?i)^(season\s*\d+|第.+季)$")
@@ -56,3 +56,37 @@ def snapshot_files(roots: list[dict[str, Any]], list_files: ListFiles) -> list[d
                 continue
             add(child_id, child_name)
     return files
+
+
+INCOMPLETE = "incomplete"
+CONFLICT = "conflict"
+
+
+def dest_id_from_file_hits(
+    *,
+    file_hits: list[dict[str, Any]],
+    folder_hits: list[dict[str, Any]],
+    expected_ids: list[str],
+) -> str:
+    folders = {p115_item_id(item): item for item in folder_hits if p115_item_id(item)}
+    found: dict[str, str] = {}
+    for item in file_hits:
+        file_id = p115_item_id(item)
+        if file_id not in {str(value) for value in expected_ids}:
+            continue
+        parent_id = p115_item_parent_id(item)
+        parent = folders.get(parent_id) or {}
+        parent_name = p115_file_name(parent)
+        if is_season_folder_name(parent_name):
+            dest_id = str(parent.get("pid") or parent.get("parent_id") or "").strip()
+        else:
+            dest_id = parent_id
+        if dest_id:
+            found[file_id] = dest_id
+    expected = [str(value) for value in expected_ids if str(value)]
+    if not expected or any(file_id not in found for file_id in expected):
+        return INCOMPLETE
+    dests = set(found.values())
+    if len(dests) != 1:
+        return CONFLICT
+    return dests.pop()

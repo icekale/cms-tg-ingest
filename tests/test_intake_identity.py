@@ -1,6 +1,11 @@
 import unittest
 
-from app.media.intake_identity import is_season_folder_name, is_video_name, snapshot_files
+from app.media.intake_identity import (
+    dest_id_from_file_hits,
+    is_season_folder_name,
+    is_video_name,
+    snapshot_files,
+)
 
 
 class IntakeIdentitySnapshotTests(unittest.TestCase):
@@ -44,3 +49,53 @@ class IntakeIdentitySnapshotTests(unittest.TestCase):
             lambda *_args, **_kwargs: [],
         )
         self.assertEqual(files, [{"id": "lone-mkv", "name": "Movie.mkv"}])
+
+
+class IntakeIdentityDestTests(unittest.TestCase):
+    def test_movie_parent_is_dest(self):
+        dest = dest_id_from_file_hits(
+            file_hits=[
+                {"fid": "video-mkv-402", "cid": "dest-c-441531", "n": "拆弹专家.2017.mkv"},
+            ],
+            folder_hits=[
+                {"cid": "dest-c-441531", "n": "C-拆弹专家-2017-[tmdb=441531]", "pid": "movie-parent"},
+                {"cid": "recv-folder-402", "n": "拆弹专家 (2017) [tmdb=441531]", "pid": "redundant-cid"},
+            ],
+            expected_ids=["video-mkv-402"],
+        )
+        self.assertEqual(dest, "dest-c-441531")
+
+    def test_season_parent_walks_up_to_show_root(self):
+        dest = dest_id_from_file_hits(
+            file_hits=[
+                {"fid": "ep-s3-e1", "cid": "season-3", "n": "Reacher.S03E01.mkv"},
+            ],
+            folder_hits=[
+                {"cid": "season-3", "n": "Season 3", "pid": "dest-108978"},
+                {"cid": "dest-108978", "n": "X-侠探杰克-2022-[tmdb=108978]", "pid": "tv-parent"},
+            ],
+            expected_ids=["ep-s3-e1"],
+        )
+        self.assertEqual(dest, "dest-108978")
+
+    def test_missing_file_is_incomplete(self):
+        dest = dest_id_from_file_hits(
+            file_hits=[],
+            folder_hits=[],
+            expected_ids=["video-mkv-402"],
+        )
+        self.assertEqual(dest, "incomplete")
+
+    def test_two_library_roots_conflict(self):
+        dest = dest_id_from_file_hits(
+            file_hits=[
+                {"fid": "ep-a", "cid": "dest-a", "n": "A.mkv"},
+                {"fid": "ep-b", "cid": "dest-b", "n": "B.mkv"},
+            ],
+            folder_hits=[
+                {"cid": "dest-a", "n": "Show A", "pid": "tv-parent"},
+                {"cid": "dest-b", "n": "Show B", "pid": "tv-parent"},
+            ],
+            expected_ids=["ep-a", "ep-b"],
+        )
+        self.assertEqual(dest, "conflict")
