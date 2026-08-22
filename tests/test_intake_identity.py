@@ -1,6 +1,7 @@
 import unittest
 
 from app.media.intake_identity import (
+    cleanup_root_action,
     dest_id_from_file_hits,
     is_season_folder_name,
     is_video_name,
@@ -99,3 +100,49 @@ class IntakeIdentityDestTests(unittest.TestCase):
             expected_ids=["ep-a", "ep-b"],
         )
         self.assertEqual(dest, "conflict")
+
+
+class IntakeIdentityCleanupTests(unittest.TestCase):
+    def test_delete_empty_root_in_redundant(self):
+        self.assertEqual(
+            cleanup_root_action(
+                root_id="recv-folder-402",
+                parent_id="redundant-cid",
+                dest_id="dest-c-441531",
+                cleanup_parents={"pending-cid", "redundant-cid"},
+            ),
+            "delete",
+        )
+
+    def test_skip_when_root_is_dest(self):
+        self.assertEqual(
+            cleanup_root_action(
+                root_id="dest-c-441531",
+                parent_id="movie-parent",
+                dest_id="dest-c-441531",
+                cleanup_parents={"pending-cid", "redundant-cid"},
+            ),
+            "skip",
+        )
+
+    def test_skip_when_root_already_gone(self):
+        self.assertEqual(
+            cleanup_root_action(
+                root_id="recv-folder-402",
+                parent_id="",
+                dest_id="dest-c-441531",
+                cleanup_parents={"pending-cid"},
+            ),
+            "skip",
+        )
+
+    def test_needs_action_when_root_sits_in_library(self):
+        self.assertEqual(
+            cleanup_root_action(
+                root_id="recv-folder-402",
+                parent_id="movie-parent",
+                dest_id="dest-c-441531",
+                cleanup_parents={"pending-cid", "redundant-cid"},
+            ),
+            "needs_action",
+        )

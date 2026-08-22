@@ -90,3 +90,20 @@ def dest_id_from_file_hits(
     if len(dests) != 1:
         return CONFLICT
     return dests.pop()
+
+
+def cleanup_root_action(
+    *,
+    root_id: str,
+    parent_id: str,
+    dest_id: str,
+    cleanup_parents: set[str],
+) -> str:
+    root_id = str(root_id or "").strip()
+    parent_id = str(parent_id or "").strip()
+    dest_id = str(dest_id or "").strip()
+    if not root_id or root_id == dest_id or not parent_id:
+        return "skip"
+    if parent_id in {str(value) for value in cleanup_parents if str(value)}:
+        return "delete"
+    return "needs_action"
