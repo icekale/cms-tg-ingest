@@ -1971,6 +1971,44 @@ class TelegramClient:
             return
         raise RuntimeError(resp.get("description") or "Telegram sendRichMessage failed")
 
+    def edit_rich_message(
+        self,
+        chat_id: int | str,
+        message_id: int | str,
+        document: RichDocument,
+        reply_markup: dict | None = None,
+    ) -> None:
+        if not document:
+            return
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "rich_message": {
+                "blocks": document.to_blocks(),
+                "skip_entity_detection": True,
+            },
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        try:
+            resp = self.http.request(self.base_url + "/editMessageText", method="POST", payload=payload)
+        except Exception as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            if self._is_rich_format_failure(exc=exc):
+                LOG.warning("Telegram edit rich message rejected, falling back to text: %s", exc)
+                self.edit_message_text(chat_id, message_id, document.to_plain(), reply_markup=reply_markup)
+                return
+            raise
+        description = str(resp.get("description") or "")
+        if resp.get("ok") or "message is not modified" in description.lower():
+            return
+        if self._is_rich_format_failure(resp=resp):
+            LOG.warning("Telegram edit rich message rejected, falling back to text: %s", description)
+            self.edit_message_text(chat_id, message_id, document.to_plain(), reply_markup=reply_markup)
+            return
+        raise RuntimeError(description or "Telegram editMessageText failed")
+
     def edit_message_text(
         self,
         chat_id: int | str,

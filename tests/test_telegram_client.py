@@ -201,6 +201,36 @@ class TelegramRichClientTests(unittest.TestCase):
         self.assertEqual(len(http.calls), 1)
         self.assertTrue(http.calls[0][0].endswith("/sendRichMessage"))
 
+    def test_edit_rich_message_posts_rich_message(self):
+        http = SequenceHttp([{"ok": True}])
+        doc = RichDocument((heading("健康检查"),))
+        TelegramClient("secret", http=http).edit_rich_message(1, 17, doc)
+        url, kwargs = http.calls[0]
+        self.assertTrue(url.endswith("/editMessageText"))
+        self.assertEqual(kwargs["payload"]["message_id"], 17)
+        self.assertTrue(kwargs["payload"]["rich_message"]["skip_entity_detection"])
+
+    def test_edit_rich_not_modified_is_success(self):
+        http = SequenceHttp(
+            [{"ok": False, "error_code": 400, "description": "Bad Request: message is not modified"}]
+        )
+        TelegramClient("secret", http=http).edit_rich_message(1, 17, RichDocument((heading("最近任务"),)))
+        self.assertEqual(len(http.calls), 1)
+
+    def test_edit_rich_400_falls_back_to_edit_text_not_new_message(self):
+        http = SequenceHttp(
+            [
+                HttpRequestError("HTTP 400 from https://api.telegram.org/bot<redacted>/editMessageText: can't parse blocks", status_code=400),
+                {"ok": True},
+            ]
+        )
+        doc = RichDocument((heading("任务统计"),))
+        TelegramClient("secret", http=http).edit_rich_message(1, 17, doc, reply_markup={"inline_keyboard": []})
+        self.assertTrue(http.calls[1][0].endswith("/editMessageText"))
+        self.assertEqual(http.calls[1][1]["payload"]["text"], "任务统计")
+        self.assertNotIn("rich_message", http.calls[1][1]["payload"])
+        self.assertFalse(any(url.endswith("/sendMessage") for url, _kwargs in http.calls))
+
 
 if __name__ == "__main__":
     unittest.main()
