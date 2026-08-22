@@ -93,6 +93,19 @@ class IntakeIdentityDestTests(unittest.TestCase):
         self.assertEqual(dest, "dest-108978")
         self.assertNotEqual(dest, "season-3")
 
+    def test_file_parent_without_season_in_folder_hits_is_that_parent(self):
+        dest = dest_id_from_file_hits(
+            file_hits=[
+                {"fid": "ep-s3-e1", "cid": "season-3", "n": "Reacher.S03E01.mkv"},
+            ],
+            folder_hits=[
+                {"cid": "dest-108978", "n": "X-侠探杰克-2022-[tmdb=108978]", "pid": "tv-parent"},
+                {"cid": "old-dest-108978", "n": "侠探杰克 (2022) {tmdb-108978}", "pid": "tv-parent"},
+            ],
+            expected_ids=["ep-s3-e1"],
+        )
+        self.assertEqual(dest, "season-3")
+
     def test_missing_file_is_incomplete(self):
         dest = dest_id_from_file_hits(
             file_hits=[],

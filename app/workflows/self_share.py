@@ -1588,6 +1588,7 @@ class BridgeSelfShareTaskWorkflow:
                 except Exception:
                     LOG.debug("Failed to search intake tmdb_id=%s", tmdb_id, exc_info=True)
         receive_cid = str(receive_cid or "").strip()
+        tmdb_dest_ids = {p115_item_id(item) for item in folder_hits if p115_item_id(item)}
         if folder_hits and hasattr(self.p115, "list_files"):
             dest_children: list[dict[str, Any]] = []
             for item in list(folder_hits):
@@ -1610,6 +1611,8 @@ class BridgeSelfShareTaskWorkflow:
             return CONFLICT, None, None
         dest_hit = next((item for item in folder_hits if p115_item_id(item) == dest), None)
         if dest not in {INCOMPLETE, CONFLICT} and is_season_folder_name(p115_file_name(dest_hit) if dest_hit else ""):
+            return INCOMPLETE, None, None
+        if dest not in {INCOMPLETE, CONFLICT} and tmdb_dest_ids and dest not in tmdb_dest_ids:
             return INCOMPLETE, None, None
         if dest == receive_cid or dest in root_ids or self._dest_is_receive_child(dest, receive_cid) is not False:
             return INCOMPLETE, None, None
