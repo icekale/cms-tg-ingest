@@ -13,45 +13,58 @@ from app.models import TaskStage, TaskStatus
 from app.task_diagnostics import describe_task_wait, format_task_observability
 from app.task_actions import available_task_actions
 from app.task_engine import stage_display_name
+from app.telegram_rich import RichDocument, details, document, heading, paragraph, table
 from app.workflows.self_share import format_task_label
 
 
 _SERIES_UPDATE_CATEGORIES = {"国产电视", "外国电视", "番剧"}
 
 
-def format_history(rows: list[dict[str, Any]]) -> str:
+def format_history(rows: list[dict[str, Any]]) -> RichDocument:
     if not rows:
-        return "暂无历史记录。"
-    lines = ["最近历史："]
+        return document(paragraph("暂无历史记录。"))
+    table_rows = []
     for idx, row in enumerate(rows, 1):
-        label = format_task_label(row)
-        move = row.get("move_status") or "-"
-        emby = row.get("emby_status") or "-"
-        category = row.get("category_final") or row.get("category_choice") or row.get("category_status") or "-"
-        lines.append(f"{idx}. {label} | 分类:{category} | 移动:{move} | Emby:{emby}")
+        table_rows.append(
+            (
+                str(idx),
+                format_task_label(row),
+                str(row.get("category_final") or row.get("category_choice") or row.get("category_status") or "-"),
+                str(row.get("move_status") or "-"),
+                str(row.get("emby_status") or "-"),
+            )
+        )
+    blocks: list = [heading("最近历史"), table(("#", "任务", "分类", "移动", "Emby"), table_rows)]
     failure_summary = format_failure_summary(rows)
     if failure_summary:
-        lines.append(failure_summary)
+        blocks.append(paragraph(failure_summary))
     library_summary = format_library_summary(rows)
     if library_summary:
-        lines.append(library_summary)
-    return "\n".join(lines)
+        blocks.append(paragraph(library_summary))
+    return RichDocument(tuple(blocks))
 
 
-def format_taskstore_history(tasks: list[Any]) -> str:
+def format_taskstore_history(tasks: list[Any]) -> RichDocument:
     if not tasks:
-        return ""
-    lines = ["TaskStore 最近历史："]
+        return RichDocument()
+    table_rows = []
     for idx, task in enumerate(tasks, 1):
         title = task.title or task.metadata.get("received_title") or task.share_code
         category = task.category or task.metadata.get("category") or task.metadata.get("category_final") or "-"
         dest = task.metadata.get("dest_path") or "-"
         emby_parent = task.metadata.get("emby_parent") or task.metadata.get("emby_refresh_library") or "-"
-        lines.append(
-            f"{idx}. #{task.id} {title} | 阶段:{stage_display_name(task.current_stage)} | "
-            f"状态:{task.status.value} | 分类:{category} | 媒体库:{emby_parent} | 路径:{dest}"
+        table_rows.append(
+            (
+                f"#{task.id}",
+                str(title),
+                stage_display_name(task.current_stage),
+                task.status.value,
+                str(category),
+                str(emby_parent),
+                str(dest),
+            )
         )
-    return "\n".join(lines)
+    return document(heading("TaskStore 最近历史"), table(("#", "任务", "阶段", "状态", "分类", "媒体库", "路径"), table_rows))
 
 
 def format_failure_summary(rows: list[dict[str, Any]]) -> str:
@@ -102,18 +115,16 @@ def quality_issue_for_row(row: dict[str, Any]) -> str:
     return ""
 
 
-def format_quality_report(rows: list[dict[str, Any]]) -> str:
-    issues: list[str] = []
+def format_quality_report(rows: list[dict[str, Any]]) -> RichDocument:
+    table_rows = []
     for row in rows:
         issue = quality_issue_for_row(row)
         if not issue:
             continue
-        label = format_task_label(row)
-        emby_title = str(row.get("emby_title") or "-")
-        issues.append(f"{len(issues) + 1}. {label} -> {emby_title}：{issue}")
-    if not issues:
-        return "最近任务未发现明显错配。"
-    return "质量巡检：发现疑似错配\n" + "\n".join(issues)
+        table_rows.append((str(len(table_rows) + 1), format_task_label(row), str(row.get("emby_title") or "-"), issue))
+    if not table_rows:
+        return document(paragraph("最近任务未发现明显错配。"))
+    return document(heading("质量巡检：发现疑似错配"), table(("#", "任务", "Emby", "问题"), table_rows))
 
 
 def quality_issue_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -168,20 +179,29 @@ def format_quality_scan_summary(rows: list[dict[str, Any]]) -> str:
     return f"质量巡检：发现 {count} 个问题，请到 Web 质量页查看。"
 
 
-def format_quality_manual_report(rows: list[dict[str, Any]]) -> str:
+def format_quality_manual_report(rows: list[dict[str, Any]]) -> RichDocument:
     rows = quality_manual_rows(rows)
     if not rows:
-        return "质量巡检：当前没有需要人工处理的问题。"
-    lines = [f"质量巡检：{len(rows)} 项需要关注"]
-    for index, row in enumerate(rows, 1):
+        return document(paragraph("质量巡检：当前没有需要人工处理的问题。"))
+    table_rows = []
+    for row in rows:
         title = truncate_text(str(row.get("title") or f"任务 #{row.get('task_id')}"), 70)
         reason = truncate_text(str(row.get("rule_reason") or row.get("message") or "需要人工确认"), 120)
-        lines.append(
-            f"{index}. #{row.get('task_id')} {title}｜规则：{row.get('rule_id') or '-'}｜"
-            f"风险：{row.get('risk_level') or '-'}｜状态：{row.get('manual_status') or 'open'}"
+        table_rows.append(
+            (
+                f"#{row.get('task_id')}",
+                title,
+                str(row.get("rule_id") or "-"),
+                str(row.get("risk_level") or "-"),
+                str(row.get("manual_status") or "open"),
+                reason,
+                str(row.get("attempts", 0)),
+            )
         )
-        lines.append(f"   原因：{reason}｜尝试：{row.get('attempts', 0)}")
-    return "\n".join(lines)
+    return document(
+        heading(f"质量巡检：{len(rows)} 项需要关注"),
+        table(("#", "任务", "规则", "风险", "状态", "原因", "尝试"), table_rows),
+    )
 
 
 def quality_manual_keyboard(rows: list[dict[str, Any]], limit: int = 8) -> dict[str, Any] | None:
@@ -210,35 +230,31 @@ def format_counts(counts: dict[str, int]) -> str:
     return ", ".join(f"{key}={value}" for key, value in counts.items())
 
 
-def format_metrics(payload: dict[str, Any]) -> str:
-    return "\n".join(
-        [
-            "任务统计：",
-            f"生成时间：{payload.get('generated_at') or '-'}",
-            f"总数：{payload.get('total', 0)}",
-            f"任务：{format_counts(payload.get('status_counts') or {})}",
-            f"Emby：{format_counts(payload.get('emby_status_counts') or {})}",
-            f"移动：{format_counts(payload.get('move_status_counts') or {})}",
-            f"失败：{payload.get('failure_summary') or '-'}",
-            f"媒体库：{payload.get('library_summary') or '-'}",
-            f"Telegram瞬时错误：{payload.get('telegram_last_transient_error_at') or '-'}",
-        ]
+def format_metrics(payload: dict[str, Any]) -> RichDocument:
+    rows = (
+        ("生成时间", payload.get("generated_at") or "-"),
+        ("总数", payload.get("total", 0)),
+        ("任务", format_counts(payload.get("status_counts") or {})),
+        ("Emby", format_counts(payload.get("emby_status_counts") or {})),
+        ("移动", format_counts(payload.get("move_status_counts") or {})),
+        ("失败", payload.get("failure_summary") or "-"),
+        ("媒体库", payload.get("library_summary") or "-"),
+        ("Telegram瞬时错误", payload.get("telegram_last_transient_error_at") or "-"),
     )
+    return document(heading("任务统计"), table(("项", "值"), rows))
 
 
-def format_status(rows: list[dict[str, Any]]) -> str:
+def format_status(rows: list[dict[str, Any]]) -> RichDocument:
     if not rows:
-        return "暂无记录。直接发送 115 分享链接即可创建任务。"
-    lines = ["最近任务："]
-    for idx, row in enumerate(rows, 1):
-        status = row.get("status") or "unknown"
-        label = format_task_label(row)
-        err = f"，{row['last_error']}" if row.get("last_error") else ""
-        lines.append(f"{idx}. {label}：{status}{err}")
+        return document(paragraph("暂无记录。直接发送 115 分享链接即可创建任务。"))
+    table_rows = []
+    for row in rows:
+        table_rows.append((format_task_label(row), str(row.get("status") or "unknown"), str(row.get("last_error") or "")))
+    blocks: list = [heading("最近任务"), table(("任务", "状态", "错误"), table_rows)]
     failure_summary = format_failure_summary(rows)
     if failure_summary:
-        lines.append(failure_summary)
-    return "\n".join(lines)
+        blocks.append(paragraph(failure_summary))
+    return RichDocument(tuple(blocks))
 
 
 def truncate_text(text: str, limit: int) -> str:
@@ -268,21 +284,30 @@ def format_hdhive_candidate_label(candidate: dict[str, str] | None) -> str:
     return f"{title} ({year}) · {media_type} · TMDB {tmdb_id}"
 
 
-def format_taskstore_status(tasks: list[Any]) -> str:
+def format_taskstore_status(tasks: list[Any]) -> RichDocument:
     if not tasks:
-        return ""
-    lines = ["TaskStore 最近任务："]
-    for idx, task in enumerate(tasks, 1):
+        return RichDocument()
+    table_rows = []
+    extra = []
+    for task in tasks:
         title = truncate_text(str(task.title or task.metadata.get("received_title") or task.share_code), 80)
-        err = f"，{truncate_text(task.error_summary, 100)}" if task.error_summary else ""
-        lines.append(
-            f"{idx}. #{task.id} {title}：{stage_display_name(task.current_stage)} / {task.status.value}{err}"
+        table_rows.append(
+            (
+                f"#{task.id}",
+                title,
+                stage_display_name(task.current_stage),
+                task.status.value,
+                truncate_text(task.error_summary, 100) if task.error_summary else "",
+            )
         )
+        detail_lines = []
         if task.status in {TaskStatus.RUNNING, TaskStatus.PENDING}:
-            lines.append(f"   等待：{truncate_text(describe_task_wait(task, now=time.time()), 200)}")
+            detail_lines.append(paragraph(f"等待：{truncate_text(describe_task_wait(task, now=time.time()), 200)}"))
         for line in format_task_observability(task, now=time.time()):
-            lines.append(f"   {truncate_text(line, 200)}")
-    return "\n".join(lines)
+            detail_lines.append(paragraph(truncate_text(line, 200)))
+        if detail_lines:
+            extra.append(details(f"#{task.id} {title}", detail_lines))
+    return RichDocument((heading("TaskStore 最近任务"), table(("#", "任务", "阶段", "状态", "错误"), table_rows), *extra))
 
 
 def task_action_keyboard(tasks: list[Any], limit: int = 5, max_retries: int = 3) -> dict[str, Any] | None:

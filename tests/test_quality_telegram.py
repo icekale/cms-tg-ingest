@@ -109,7 +109,7 @@ class QualityTelegramTests(unittest.TestCase):
         self.assertTrue(data)
         self.assertTrue(all(len(value) <= 64 for value in data))
         self.assertTrue(all("/private/path" not in value for value in data))
-        self.assertIn("质量任务", format_quality_manual_report(rows))
+        self.assertIn("质量任务", format_quality_manual_report(rows).to_plain())
 
     def test_quality_command_shows_rule_queue_and_callbacks(self):
         with tempfile.TemporaryDirectory() as tmp:

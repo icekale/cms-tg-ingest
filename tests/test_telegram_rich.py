@@ -1,6 +1,16 @@
 import unittest
 
 from app.telegram_rich import RichDocument, bold, details, heading, paragraph, table
+from app.telegram_ui import (
+    format_history,
+    format_metrics,
+    format_quality_manual_report,
+    format_quality_report,
+    format_quality_scan_summary,
+    format_status,
+    format_taskstore_history,
+    format_taskstore_status,
+)
 
 
 class TelegramRichTests(unittest.TestCase):
@@ -62,6 +72,45 @@ class TelegramRichTests(unittest.TestCase):
         self.assertEqual(doc.to_blocks()[0]["type"], "paragraph")
         self.assertIn("已设置集数过滤：S01", doc.to_plain())
         self.assertEqual(RichDocument((heading("订阅"),)).with_leading_paragraph("").to_blocks()[0]["type"], "heading")
+
+
+class TelegramUiRichTests(unittest.TestCase):
+    def test_format_status_empty_is_paragraph(self):
+        doc = format_status([])
+        self.assertIn("暂无记录", doc.to_plain())
+        self.assertEqual(doc.to_blocks()[0]["type"], "paragraph")
+
+    def test_format_status_table(self):
+        doc = format_status([{"title": "海贼王", "status": "done", "last_error": ""}])
+        types = [block["type"] for block in doc.to_blocks()]
+        self.assertIn("heading", types)
+        self.assertIn("table", types)
+        self.assertIn("最近任务", doc.to_plain())
+        self.assertIn("海贼王", doc.to_plain())
+
+    def test_format_metrics_is_key_value_table(self):
+        doc = format_metrics({"generated_at": "t", "total": 2, "status_counts": {"done": 2}})
+        self.assertEqual(doc.to_blocks()[0]["text"], "任务统计")
+        self.assertEqual(doc.to_blocks()[1]["type"], "table")
+        self.assertIn("总数", doc.to_plain())
+
+    def test_quality_scan_summary_stays_str(self):
+        self.assertIsInstance(format_quality_scan_summary([]), str)
+
+    def test_quality_report_table(self):
+        rows = [
+            {
+                "id": 72,
+                "title": "航海王 (1999) {tmdb=37854}",
+                "emby_status": "confirmed",
+                "emby_title": "我是余欢水",
+                "emby_path": "/mnt/user/Unraid/strm/转存/TVCN/W-我是余欢水-2020-[tmdb=101588]",
+                "recognition_json": "{}",
+            }
+        ]
+        doc = format_quality_report(rows)
+        self.assertIn("疑似错配", doc.to_plain())
+        self.assertIn("table", [block["type"] for block in doc.to_blocks()])
 
 
 if __name__ == "__main__":
