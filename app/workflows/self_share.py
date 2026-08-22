@@ -1701,12 +1701,9 @@ class BridgeSelfShareTaskWorkflow:
                 folder = None
         if folder and is_unverified_received_source(folder, stage_metadata, receive_cid):
             folder = None
-        if folder and not self._folder_contains_received_items(folder, task):
-            rejected_id = str(folder.get("file_id") or "").strip()
-            if rejected_id:
-                rejected_file_ids.add(rejected_id)
-                find_kwargs["excluded_file_ids"] = set(rejected_file_ids)
-            folder = None
+        folder = self._reject_if_unrelated(folder, task, rejected_file_ids)
+        if rejected_file_ids:
+            find_kwargs["excluded_file_ids"] = rejected_file_ids
         if not folder:
             tmdb_resolved, tmdb_should_prompt = apply_tmdb_search_resolution(recognition, title, self.tmdb_resolver)
             if not tmdb_should_prompt and str(tmdb_resolved.get("tmdb_id") or "").strip() and lookup_budget > 0:
@@ -1723,11 +1720,7 @@ class BridgeSelfShareTaskWorkflow:
                     folder = None
                 if folder and has_tmdb_folder_mismatch(folder, recognition, row, title):
                     folder = None
-                if folder and not self._folder_contains_received_items(folder, task):
-                    rejected_id = str(folder.get("file_id") or "").strip()
-                    if rejected_id:
-                        rejected_file_ids.add(rejected_id)
-                    folder = None
+                folder = self._reject_if_unrelated(folder, task, rejected_file_ids)
                 category = str(recognition.get("category") or "").strip()
                 preserve_authoritative_category = (
                     direct_min_update_time > 0
@@ -2036,6 +2029,14 @@ class BridgeSelfShareTaskWorkflow:
         if not children:
             return True
         return bool(set(children) & ids)
+
+    def _reject_if_unrelated(self, folder, task, rejected_file_ids):
+        if not folder or self._folder_contains_received_items(folder, task):
+            return folder
+        rejected_id = str(folder.get("file_id") or "").strip()
+        if rejected_id:
+            rejected_file_ids.add(rejected_id)
+        return None
 
     def _is_library_dest_cleanup_target(self, task, row: dict[str, Any], file_id: str) -> bool:
         dest_id = str(row.get("own_share_file_id") or task.metadata.get("own_share_file_id") or "").strip()
@@ -2629,22 +2630,17 @@ class BridgeSelfShareTaskWorkflow:
         row = self._submission_row(task)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
-        if str(row.get("move_status") or "").lower() == "moved":
-            metadata = self._move_metadata(row, task.metadata)
-            dest_path = str(metadata.get("dest_path") or "").strip()
-            recognition = self._recognition_from_row(row)
-            share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
-            source = find_self_share_strm_source_dir(self.self_share_config, row, recognition, share_name)
-            if source and dest_path and dest_missing_source_strms(source, Path(dest_path)):
-                pass
-            elif self._strm_destination_ready(dest_path, row, task.metadata):
-                metadata.update(self._request_emby_refresh_once(task, dest_path))
-                return StageResult.complete("STRM 已移动到媒体库", metadata)
-            else:
-                return self._restore_missing_moved_destination(task, row, metadata)
         recognition = self._recognition_from_row(row)
         share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
         source = find_self_share_strm_source_dir(self.self_share_config, row, recognition, share_name)
+        if str(row.get("move_status") or "").lower() == "moved":
+            metadata = self._move_metadata(row, task.metadata)
+            dest_path = str(metadata.get("dest_path") or "").strip()
+            if not (source and dest_path and dest_missing_source_strms(source, Path(dest_path))):
+                if self._strm_destination_ready(dest_path, row, task.metadata):
+                    metadata.update(self._request_emby_refresh_once(task, dest_path))
+                    return StageResult.complete("STRM 已移动到媒体库", metadata)
+                return self._restore_missing_moved_destination(task, row, metadata)
         category = final_category_for_move(row, recognition)
         existing_category = "" if has_authoritative_category(row, recognition) else category_from_existing_library_match(self.move_config, row, recognition, share_name)
         if existing_category and existing_category != category:
