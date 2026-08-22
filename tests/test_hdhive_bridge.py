@@ -44,6 +44,9 @@ class FakeTelegram:
     def send_message(self, chat_id, text, reply_markup=None):
         self.messages.append((chat_id, text, reply_markup))
 
+    def send_rich_message(self, chat_id, document, reply_markup=None):
+        self.messages.append((chat_id, document.to_plain(), reply_markup))
+
     def answer_callback_query(self, callback_id, text="", show_alert=False):
         self.answers.append((callback_id, text, show_alert))
 

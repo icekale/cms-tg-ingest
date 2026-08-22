@@ -2347,6 +2347,8 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 self.messages = []
             def send_message(self, chat_id, text, reply_markup=None):
                 self.messages.append(text)
+            def send_rich_message(self, chat_id, document, reply_markup=None):
+                self.messages.append((chat_id, document.to_plain(), reply_markup))
 
         class FakeP115:
             def __init__(self):
@@ -2437,6 +2439,8 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 self.messages = []
             def send_message(self, chat_id, text, reply_markup=None):
                 self.messages.append(text)
+            def send_rich_message(self, chat_id, document, reply_markup=None):
+                self.messages.append((chat_id, document.to_plain(), reply_markup))
 
         moved_row = {"move_status": "moved", "dest_path": "/library/X-新·驯龙高手-2025-[tmdb=1087192]"}
         plan = bridge.MovePlan(

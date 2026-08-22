@@ -159,6 +159,9 @@ class FakeTelegram:
     def send_message(self, chat_id, text, reply_markup=None):
         self.messages.append((chat_id, text, reply_markup))
 
+    def send_rich_message(self, chat_id, document, reply_markup=None):
+        self.messages.append((chat_id, document.to_plain(), reply_markup))
+
 
 class FakeEmby:
     enabled = True
@@ -5483,10 +5486,13 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
 
         class FakeTelegramClient:
             def __init__(self, *_args, **_kwargs):
-                pass
+                self.messages = []
 
             def get_updates(self, **_kwargs):
                 return [{"update_id": 1}]
+
+            def send_rich_message(self, chat_id, document, reply_markup=None):
+                self.messages.append((chat_id, document.to_plain(), reply_markup))
 
         class FakeTaskRunner:
             def __init__(self, _store, workflow, **kwargs):

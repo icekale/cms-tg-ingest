@@ -128,6 +128,10 @@ class OpenAISuggestionMessageTests(unittest.TestCase):
                 self.text = text
                 self.reply_markup = reply_markup
 
+            def send_rich_message(self, chat_id, document, reply_markup=None):
+                self.messages = getattr(self, "messages", [])
+                self.messages.append((chat_id, document.to_plain(), reply_markup))
+
         store = FakeStore()
         telegram = FakeTelegram()
         bridge.maybe_request_category_confirmation(
@@ -603,6 +607,8 @@ class CmsFirstFallbackTests(unittest.TestCase):
                 self.messages = []
             def send_message(self, chat_id, text, reply_markup=None):
                 self.messages.append((text, reply_markup))
+            def send_rich_message(self, chat_id, document, reply_markup=None):
+                self.messages.append((chat_id, document.to_plain(), reply_markup))
 
         class FakeEmby:
             enabled = True
