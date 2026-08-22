@@ -1216,6 +1216,21 @@ class P115WebClient:
         path = resp.get("path") or []
         return [item for item in path if isinstance(item, dict)]
 
+    def file_info(self, file_id: str) -> dict[str, Any] | None:
+        file_id = str(file_id or "").strip()
+        if not file_id:
+            return None
+        resp = self._request(
+            "https://webapi.115.com/files/get_info",
+            params={"file_id": file_id},
+        )
+        self._ensure_state(resp, "115 file info failed")
+        data = resp.get("data")
+        items = iter_items(data)
+        if items:
+            return items[0]
+        return data if isinstance(data, dict) else None
+
     def file_exists_in_parent(self, file_id: str, parent_id: str) -> bool:
         expected_id = str(file_id or "").strip()
         offset = 0

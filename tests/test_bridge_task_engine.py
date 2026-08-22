@@ -58,6 +58,8 @@ class FakeP115:
         self.search_hits = {}
         self.search_calls = []
         self.folder_paths = {}
+        self.file_infos = {}
+        self.file_info_calls = []
 
     def receive_share_to_cid(self, share_code, receive_code, receive_cid):
         intent = self.prepare_share_receive(share_code, receive_code, receive_cid)
@@ -160,6 +162,11 @@ class FakeP115:
 
     def folder_path(self, folder_id):
         return list(self.folder_paths.get(str(folder_id), []))
+
+    def file_info(self, file_id):
+        self.file_info_calls.append(str(file_id))
+        info = self.file_infos.get(str(file_id))
+        return dict(info) if info else None
 
 
 class FakeTelegram:
@@ -1844,13 +1851,13 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                         "pid": "movie-parent",
                     },
                 ],
-                "ep-lucky-01": [
-                    {
-                        "fid": "ep-lucky-01",
-                        "cid": "season-01",
-                        "n": "幸运女神 (2026) - S01E01 - 第 1 集 - 2160p.mkv",
-                    },
-                ],
+            }
+            self.p115.file_infos = {
+                "ep-lucky-01": {
+                    "fid": "ep-lucky-01",
+                    "cid": "season-01",
+                    "n": "幸运女神 (2026) - S01E01 - 第 1 集 - 2160p.mkv",
+                },
             }
             self.p115.folder_paths["season-01"] = [
                 {"cid": "dest-x-278624", "n": "X-幸运女神-2026-[tmdb=278624]", "pid": "tv-parent"},
@@ -1910,7 +1917,8 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
             self.assertEqual(stored["own_share_file_id"], "dest-x-278624")
             self.assertEqual(result.metadata["intake_identity"]["dest_id"], "dest-x-278624")
-            self.assertIn("ep-lucky-01", self.p115.search_calls)
+            self.assertIn("ep-lucky-01", self.p115.file_info_calls)
+            self.assertNotIn("ep-lucky-01", self.p115.search_calls)
             self.assertNotEqual(stored["own_share_file_id"], "wrong-movie-606952")
             self.assertNotEqual(stored["own_share_file_id"], "season-01")
 

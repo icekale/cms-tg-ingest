@@ -1742,10 +1742,21 @@ class BridgeSelfShareTaskWorkflow:
             for file_id in expected_ids:
                 if dest != INCOMPLETE or file_id in found_ids:
                     continue
-                try:
-                    hits = self.p115.search_files(file_id) or []
-                except Exception:
-                    LOG.debug("Failed to search intake file id=%s", file_id, exc_info=True)
+                hits: list[dict[str, Any]] = []
+                info = None
+                if hasattr(self.p115, "file_info"):
+                    try:
+                        info = self.p115.file_info(file_id)
+                    except Exception:
+                        LOG.debug("Failed to read intake file info id=%s", file_id, exc_info=True)
+                if isinstance(info, dict):
+                    hits = [info]
+                else:
+                    try:
+                        hits = self.p115.search_files(file_id) or []
+                    except Exception:
+                        LOG.debug("Failed to search intake file id=%s", file_id, exc_info=True)
+                if not hits:
                     continue
                 file_hits.extend(hits)
                 found_ids.update(p115_item_id(item) for item in hits if p115_item_id(item))

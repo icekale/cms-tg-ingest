@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.clients import cms as cms_client
+from app.clients.p115 import p115_item_id, p115_item_parent_id
 
 spec = importlib.util.spec_from_file_location("bridge", Path(__file__).resolve().parents[1] / "bridge.py")
 bridge = importlib.util.module_from_spec(spec)
@@ -92,6 +93,32 @@ class P115WebClientTests(unittest.TestCase):
         self.assertTrue(status["available"])
         self.assertTrue(status["have_vio_file"])
         self.assertEqual(status["share_state"], "0")
+
+    def test_file_info_reads_parent_from_get_info(self):
+        class FakeHttp:
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.url = url
+                self.params = params
+                return {
+                    "state": True,
+                    "code": 0,
+                    "data": [
+                        {
+                            "fid": "3501280249943950567",
+                            "cid": "3501280595411994588",
+                            "n": "幸运女神 (2026) - S01E01 - 第 1 集 - 2160p.mkv",
+                        }
+                    ],
+                }
+
+        http = FakeHttp()
+        client = bridge.P115WebClient("UID=1", http=http, timeout=3)
+        info = client.file_info("3501280249943950567")
+
+        self.assertEqual(http.url, "https://webapi.115.com/files/get_info")
+        self.assertEqual(http.params, {"file_id": "3501280249943950567"})
+        self.assertEqual(p115_item_id(info), "3501280249943950567")
+        self.assertEqual(p115_item_parent_id(info), "3501280595411994588")
 
     def test_rename_file_uses_115_edit_endpoint(self):
         class FakeHttp:
