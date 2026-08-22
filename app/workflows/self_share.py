@@ -47,6 +47,7 @@ from app.media.strm import (
     category_from_existing_library_folder,
     category_from_existing_library_match,
     find_recent_direct_library_strm_source_dir,
+    dest_missing_source_strms,
     find_self_share_strm_source_dir,
     has_strm_file,
     merge_self_share_strm_folder,
@@ -1519,6 +1520,25 @@ class BridgeSelfShareTaskWorkflow:
                 )
             if recognition.get("title"):
                 title = str(recognition.get("title") or title)
+        if not expected_task_tmdb_id(recognition, row) and not row.get("own_share_file_id"):
+            identity_name = self._received_child_video_identity(task, row)
+            if identity_name:
+                resolved, should_prompt = apply_tmdb_search_resolution(
+                    recognition,
+                    identity_name,
+                    self.tmdb_resolver,
+                )
+                if not should_prompt and str(resolved.get("tmdb_id") or "").strip():
+                    recognition = dict(resolved)
+                    title = str(recognition.get("title") or identity_name)
+                    if recognition.get("category") and hasattr(self.store, "update_category"):
+                        row = self.store.update_category(int(row["id"]), str(recognition["category"]), "selected") or row
+                    if hasattr(self.store, "update_recognition"):
+                        row = self.store.update_recognition(
+                            int(row["id"]),
+                            recognition,
+                            str(recognition.get("category_status") or "tmdb_search_resolved"),
+                        ) or row
         folder = None
         persisted_folder = None
         if row.get("own_share_file_id") and row.get("own_share_file_name"):
@@ -1565,10 +1585,17 @@ class BridgeSelfShareTaskWorkflow:
         organized_scan_cursor = stage_metadata.get("organized_scan_cursor")
         if not isinstance(organized_scan_cursor, dict):
             organized_scan_cursor = None
+        rejected_file_ids = {
+            str(value).strip()
+            for value in (stage_metadata.get("rejected_organized_file_ids") or [])
+            if str(value).strip()
+        }
         find_kwargs = {
             "excluded_parent_ids": excluded_parent_ids,
             "min_update_time": min_update_time,
         }
+        if rejected_file_ids:
+            find_kwargs["excluded_file_ids"] = rejected_file_ids
         if self.self_share_config.organized_scan_parent_ids:
             find_kwargs.update(
                 {
@@ -1674,6 +1701,12 @@ class BridgeSelfShareTaskWorkflow:
                 folder = None
         if folder and is_unverified_received_source(folder, stage_metadata, receive_cid):
             folder = None
+        if folder and not self._folder_contains_received_items(folder, task):
+            rejected_id = str(folder.get("file_id") or "").strip()
+            if rejected_id:
+                rejected_file_ids.add(rejected_id)
+                find_kwargs["excluded_file_ids"] = set(rejected_file_ids)
+            folder = None
         if not folder:
             tmdb_resolved, tmdb_should_prompt = apply_tmdb_search_resolution(recognition, title, self.tmdb_resolver)
             if not tmdb_should_prompt and str(tmdb_resolved.get("tmdb_id") or "").strip() and lookup_budget > 0:
@@ -1689,6 +1722,11 @@ class BridgeSelfShareTaskWorkflow:
                 if folder and is_unverified_received_source(folder, stage_metadata, receive_cid):
                     folder = None
                 if folder and has_tmdb_folder_mismatch(folder, recognition, row, title):
+                    folder = None
+                if folder and not self._folder_contains_received_items(folder, task):
+                    rejected_id = str(folder.get("file_id") or "").strip()
+                    if rejected_id:
+                        rejected_file_ids.add(rejected_id)
                     folder = None
                 category = str(recognition.get("category") or "").strip()
                 preserve_authoritative_category = (
@@ -1723,6 +1761,7 @@ class BridgeSelfShareTaskWorkflow:
                 {
                     "submission_id": int(row["id"]),
                     "organized_scan_cursor": organized_scan_cursor or {},
+                    "rejected_organized_file_ids": sorted(rejected_file_ids),
                     **hint_metadata,
                 },
             )
@@ -1952,6 +1991,68 @@ class BridgeSelfShareTaskWorkflow:
                 return name
         return ""
 
+    def _received_child_video_identity(self, task, row: dict[str, Any]) -> str:
+        for item in self._received_item_candidates(task, row):
+            name = str(item.get("file_name") or "").strip()
+            if not bool(item.get("is_folder")):
+                if name.lower().endswith((".mkv", ".mp4", ".ts", ".iso", ".avi", ".mov", ".wmv", ".m2ts")):
+                    return name
+                continue
+            child = self._folder_child_video_name(str(item.get("file_id") or ""))
+            if child:
+                return child
+        return ""
+
+    def _received_file_ids(self, task) -> set[str]:
+        ids = {
+            str(value).strip()
+            for value in (task.metadata.get("received_file_ids") or [])
+            if str(value).strip()
+        }
+        for item in self._received_item_candidates(task, {}):
+            file_id = str(item.get("file_id") or "").strip()
+            if file_id:
+                ids.add(file_id)
+        return ids
+
+    def _folder_child_ids(self, file_id: str) -> list[str]:
+        if not file_id or not hasattr(self.p115, "list_files"):
+            return []
+        try:
+            items = self.p115.list_files(file_id, limit=500)
+        except Exception:
+            LOG.debug("Failed to list folder children", exc_info=True)
+            return []
+        return sorted({p115_item_id(item) for item in items if p115_item_id(item)})
+
+    def _folder_contains_received_items(self, folder, task) -> bool:
+        ids = self._received_file_ids(task)
+        if not ids:
+            return True
+        file_id = str((folder or {}).get("file_id") or "").strip()
+        if not file_id or file_id in ids:
+            return True
+        children = self._folder_child_ids(file_id)
+        if not children:
+            return True
+        return bool(set(children) & ids)
+
+    def _is_library_dest_cleanup_target(self, task, row: dict[str, Any], file_id: str) -> bool:
+        dest_id = str(row.get("own_share_file_id") or task.metadata.get("own_share_file_id") or "").strip()
+        if not file_id or file_id != dest_id:
+            return False
+        parent_id = source_delete_parent_id(task, row, file_id)
+        receive_cid = self._task_receive_cid(task)
+        inbox = set(self.self_share_config.source_cleanup_parent_ids or set())
+        if receive_cid:
+            inbox.add(receive_cid)
+        if parent_id and parent_id in inbox:
+            return False
+        recognition = self._recognition_from_row(row)
+        organized_parent = str(recognition.get("organized_parent_id") or recognition.get("parent_id") or "").strip()
+        dest_path = str(row.get("dest_path") or task.metadata.get("dest_path") or "").strip()
+        return bool(dest_path and parent_id and organized_parent and parent_id == organized_parent)
+
     def _stage_share_alias_prepared(self, task):
         row = self._submission_row(task)
         if not row:
@@ -2017,6 +2118,23 @@ class BridgeSelfShareTaskWorkflow:
                 "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享",
                 self._own_share_metadata(row) | {"own_share_file_id": ""},
             )
+        child_ids = self._folder_child_ids(file_id)
+        previous_child_ids = task.metadata.get("own_share_child_ids")
+        dest_changed = (
+            bool(row.get("own_share_code"))
+            and previous_child_ids is not None
+            and sorted(str(value) for value in previous_child_ids) != child_ids
+        )
+        if dest_changed:
+            task.metadata["operation_generation"] = max(0, int(task.metadata.get("operation_generation") or 0)) + 1
+            if hasattr(self.store, "update_self_share"):
+                row = self.store.update_self_share(
+                    int(row["id"]),
+                    own_share_code="",
+                    own_share_receive_code="",
+                    own_share_url="",
+                    share_sync_status="",
+                ) or row
         created = False
         direct_file_share = False
         direct_relative_path = ""
@@ -2153,6 +2271,10 @@ class BridgeSelfShareTaskWorkflow:
             share_created_at = self._now()
         if share_created_at:
             metadata["share_created_at"] = share_created_at
+        if child_ids:
+            metadata["own_share_child_ids"] = child_ids
+        if dest_changed:
+            metadata["operation_generation"] = task.metadata.get("operation_generation")
         if direct_file_share:
             metadata.update(direct_metadata)
         return StageResult.complete(message, metadata)
@@ -2484,10 +2606,12 @@ class BridgeSelfShareTaskWorkflow:
         row = self._submission_row(task)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
-        cleanup_file_id = str(row.get("cleanup_file_id") or row.get("own_share_file_id") or "").strip()
+        cleanup_file_id = str(row.get("cleanup_file_id") or "").strip()
+        dest_id = str(row.get("own_share_file_id") or task.metadata.get("own_share_file_id") or "").strip()
         if (
             str(row.get("cleanup_status") or "").lower() == "deleted"
             and cleanup_file_id
+            and cleanup_file_id != dest_id
             and self.cms_cloud_index
             and self.cms_cloud_index.has_file_id(cleanup_file_id)
         ):
@@ -2508,10 +2632,16 @@ class BridgeSelfShareTaskWorkflow:
         if str(row.get("move_status") or "").lower() == "moved":
             metadata = self._move_metadata(row, task.metadata)
             dest_path = str(metadata.get("dest_path") or "").strip()
-            if self._strm_destination_ready(dest_path, row, task.metadata):
+            recognition = self._recognition_from_row(row)
+            share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
+            source = find_self_share_strm_source_dir(self.self_share_config, row, recognition, share_name)
+            if source and dest_path and dest_missing_source_strms(source, Path(dest_path)):
+                pass
+            elif self._strm_destination_ready(dest_path, row, task.metadata):
                 metadata.update(self._request_emby_refresh_once(task, dest_path))
                 return StageResult.complete("STRM 已移动到媒体库", metadata)
-            return self._restore_missing_moved_destination(task, row, metadata)
+            else:
+                return self._restore_missing_moved_destination(task, row, metadata)
         recognition = self._recognition_from_row(row)
         share_name = str(row.get("title") or recognition.get("share_name") or task.title or task.share_code).strip()
         source = find_self_share_strm_source_dir(self.self_share_config, row, recognition, share_name)
@@ -2638,15 +2768,18 @@ class BridgeSelfShareTaskWorkflow:
                 metadata.update(review_metadata)
                 return StageResult.defer(review_message, review_delay, metadata)
             file_id = str(row.get("own_share_file_id") or "").strip()
-            parent_id = self._delete_source_parent_id(task, row, file_id)
-            if not parent_id:
-                metadata = self._cleanup_metadata(row)
-                metadata.update(review_metadata)
-                return StageResult.needs_action("缺少 115 转存源父目录，无法安全核对删除结果", metadata)
-            recovery = self._journaled_delete(task, file_id, parent_id, "delete_source")
-            if recovery is not None:
-                return recovery
-            row = self.store.update_cleanup(int(row["id"]), "deleted", file_id=file_id) or row
+            if self._is_library_dest_cleanup_target(task, row, file_id):
+                row = self.store.update_cleanup(int(row["id"]), "deleted", file_id="") or row
+            else:
+                parent_id = self._delete_source_parent_id(task, row, file_id)
+                if not parent_id:
+                    metadata = self._cleanup_metadata(row)
+                    metadata.update(review_metadata)
+                    return StageResult.needs_action("缺少 115 转存源父目录，无法安全核对删除结果", metadata)
+                recovery = self._journaled_delete(task, file_id, parent_id, "delete_source")
+                if recovery is not None:
+                    return recovery
+                row = self.store.update_cleanup(int(row["id"]), "deleted", file_id=file_id) or row
         residue_result, residue_count = self._cleanup_residue_operations(task, row)
         if residue_result is not None:
             return residue_result

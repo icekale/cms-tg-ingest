@@ -1055,6 +1055,16 @@ def reconcile_self_share_move(store: Any, move_config: MoveConfig, row: dict[str
     return "missing"
 
 
+def dest_missing_source_strms(source: Path, dest: Path) -> bool:
+    source = safe_resolve(source)
+    dest = safe_resolve(dest)
+    if not source.exists() or not source.is_dir() or not dest.exists() or not dest.is_dir():
+        return False
+    source_rels = {path.relative_to(source) for path in iter_strm_files(source)}
+    dest_rels = {path.relative_to(dest) for path in iter_strm_files(dest)}
+    return bool(source_rels - dest_rels)
+
+
 def find_self_share_strm_source_dir(
     config: SelfShareConfig,
     row: dict[str, Any],

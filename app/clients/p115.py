@@ -267,9 +267,11 @@ def select_organized_115_folder(
     share_name: str,
     excluded_parent_ids: set[str] | None = None,
     allowed_parent_ids: set[str] | None = None,
+    excluded_file_ids: set[str] | None = None,
 ) -> dict[str, str] | None:
     excluded = {str(value) for value in (excluded_parent_ids or set()) if str(value)}
     allowed = {str(value) for value in (allowed_parent_ids or set()) if str(value)}
+    excluded_ids = {str(value) for value in (excluded_file_ids or set()) if str(value)}
     tokens = candidate_tokens(recognition, share_name)
     tmdb_id = str(recognition.get("tmdb_id") or extract_tmdb_id_from_name(share_name) or "").strip()
     share_year = extract_year_from_name(share_name) or extract_year_from_name(str(recognition.get("title") or ""))
@@ -279,7 +281,7 @@ def select_organized_115_folder(
     for item in items:
         file_id = p115_file_id(item)
         name = p115_file_name(item)
-        if not file_id or not name:
+        if not file_id or not name or file_id in excluded_ids:
             continue
         if "fid" in item and "cid" in item:
             continue
@@ -1334,6 +1336,7 @@ class P115WebClient:
         organized_scan_cursor: dict[str, Any] | None = None,
         max_requests: int = 8,
         return_scan_state: bool = False,
+        excluded_file_ids: set[str] | None = None,
     ) -> dict[str, str] | dict[str, Any] | None:
         def result(folder: dict[str, str] | None, cursor: dict[str, Any] | None, complete: bool, requests: int):
             if return_scan_state:
@@ -1367,7 +1370,13 @@ class P115WebClient:
             seen.add(value)
             items.extend(self.search_files(value, limit=20))
             request_count += 1
-            selected = select_organized_115_folder(items, recognition, share_name, excluded_parent_ids=excluded_parent_ids)
+            selected = select_organized_115_folder(
+                items,
+                recognition,
+                share_name,
+                excluded_parent_ids=excluded_parent_ids,
+                excluded_file_ids=excluded_file_ids,
+            )
             if selected:
                 return result(selected, None, True, request_count)
         if scan_parent_ids and request_count < request_budget:
@@ -1400,6 +1409,7 @@ class P115WebClient:
                     share_name,
                     excluded_parent_ids=excluded_parent_ids,
                     allowed_parent_ids=scan_parent_ids,
+                    excluded_file_ids=excluded_file_ids,
                 )
                 if selected:
                     return result(selected, None, True, request_count)

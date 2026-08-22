@@ -265,6 +265,24 @@ class FakeTmdbHintResolver(FakeTmdbResolver):
         return {"ok": False}
 
 
+class FakeReacherTmdbResolver(FakeTmdbResolver):
+    def search(self, query, media_type):
+        self.searches.append((query, media_type))
+        if query == "Reacher" and media_type == "tv":
+            return {
+                "ok": True,
+                "title": "侠探杰克",
+                "type": "tv",
+                "tmdb_id": "108978",
+                "language": "en",
+                "countries": ["US"],
+                "genres": ["剧情", "动作"],
+                "category": "外国电视",
+                "source": "tmdb_api",
+            }
+        return {"ok": False}
+
+
 class FakeCmsCloudIndex:
     def __init__(self, folder=None, indexed_file_ids=None, cloud_output_folder=None):
         self.folder = folder
@@ -1417,6 +1435,151 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(recognition["category_status"], "tmdb_search_resolved")
             self.assertEqual(stored["category_status"], "organized_found")
 
+    def test_organizing_stage_uses_season_folder_child_video_to_find_dest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmdb = FakeReacherTmdbResolver()
+            workflow = self._workflow(tmp, tmdb_resolver=tmdb)
+            self.p115.files_by_parent["season-1"] = [
+                {
+                    "fid": "ep1",
+                    "pid": "season-1",
+                    "n": "Reacher.S01E01.2160p.UHD.BluRay.REMUX.mkv",
+                },
+            ]
+            self.p115.files_by_parent["dest-108978"] = [
+                {"cid": "season-1", "n": "Season 1", "pid": "dest-108978"},
+                {"cid": "season-2", "n": "Season 2", "pid": "dest-108978"},
+                {"cid": "season-3", "n": "Season 3", "pid": "dest-108978"},
+            ]
+            row = self._row()
+            row = self.submissions.update_status(
+                int(row["id"]),
+                "received",
+                title="Season 3等3个文件(夹)",
+            ) or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            calls = []
+
+            def find_organized_folder(recognition, title, excluded_parent_ids=None, min_update_time=0, **kwargs):
+                calls.append((dict(recognition), title, kwargs))
+                if recognition.get("tmdb_id") == "108978":
+                    return {
+                        "file_id": "dest-108978",
+                        "file_name": "X-侠探杰克-2022-[tmdb=108978]",
+                        "parent_id": "tv-parent",
+                        "category": "外国电视",
+                    }
+                return None
+
+            self.p115.find_organized_folder = find_organized_folder
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_title": "Season 3等3个文件(夹)",
+                    "received_file_ids": ["season-1", "season-2", "season-3"],
+                    "received_items": [
+                        {
+                            "file_id": "season-1",
+                            "file_name": "Season 1",
+                            "is_folder": True,
+                            "received_item_verified": True,
+                        },
+                        {
+                            "file_id": "season-2",
+                            "file_name": "Season 2",
+                            "is_folder": True,
+                            "received_item_verified": True,
+                        },
+                        {
+                            "file_id": "season-3",
+                            "file_name": "Season 3",
+                            "is_folder": True,
+                            "received_item_verified": True,
+                        },
+                    ],
+                    "received_items_complete": True,
+                    "received_expected_item_count": 3,
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            recognition = bridge.parse_recognition_json(stored)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(tmdb.searches, [("Reacher", "tv")])
+            self.assertTrue(any(call[0].get("tmdb_id") == "108978" for call in calls))
+            self.assertEqual(result.metadata["organized_folder"]["file_id"], "dest-108978")
+            self.assertEqual(recognition["tmdb_id"], "108978")
+            self.assertEqual(stored["own_share_file_id"], "dest-108978")
+            self.assertEqual(self.p115.renamed, [])
+
+    def test_organizing_stage_rejects_dest_that_does_not_contain_received_seasons(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmdb = FakeReacherTmdbResolver()
+            workflow = self._workflow(tmp, tmdb_resolver=tmdb)
+            self.p115.files_by_parent["season-1"] = [
+                {
+                    "fid": "ep1",
+                    "pid": "season-1",
+                    "n": "Reacher.S01E01.2160p.UHD.BluRay.REMUX.mkv",
+                },
+            ]
+            self.p115.files_by_parent["old-dest"] = [
+                {"cid": "old-s2", "n": "Season 2", "pid": "old-dest"},
+            ]
+            row = self._row()
+            row = self.submissions.update_status(
+                int(row["id"]),
+                "received",
+                title="Season 3等3个文件(夹)",
+            ) or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+
+            def find_organized_folder(recognition, title, excluded_parent_ids=None, min_update_time=0, **kwargs):
+                if recognition.get("tmdb_id") == "108978":
+                    return {
+                        "file_id": "old-dest",
+                        "file_name": "侠探杰克 (2022) {tmdb-108978}",
+                        "parent_id": "tv-parent",
+                        "category": "外国电视",
+                    }
+                return None
+
+            self.p115.find_organized_folder = find_organized_folder
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_file_ids": ["season-1", "season-2", "season-3"],
+                    "received_items": [
+                        {
+                            "file_id": "season-1",
+                            "file_name": "Season 1",
+                            "is_folder": True,
+                            "received_item_verified": True,
+                        },
+                    ],
+                    "received_items_complete": True,
+                    "received_expected_item_count": 3,
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIn("等待 CMS 整理", result.message)
+            self.assertIsNone(stored["own_share_file_id"])
+            self.assertIn("old-dest", result.metadata.get("rejected_organized_file_ids") or [])
+
     def test_organizing_stage_persists_and_reuses_organized_scan_cursor(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp, tmdb_resolver=FakeTmdbResolver())
@@ -2000,6 +2163,40 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.p115.created_shares, ["folder-id"])
             self.assertEqual(self.cms.share_sync_calls, [("owncode", "ownpwd", "0", "/media/share")])
             self.assertEqual(self.cms.plain_share_down_calls, [])
+
+    def test_own_share_stage_recreates_share_when_dest_children_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            self.p115.files_by_parent["folder-id"] = [
+                {"cid": "season-1", "n": "Season 01", "pid": "folder-id"},
+                {"cid": "season-2", "n": "Season 02", "pid": "folder-id"},
+                {"cid": "season-3", "n": "Season 03", "pid": "folder-id"},
+            ]
+            row = self._self_share_row()
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {
+                    "submission_id": row["id"],
+                    "own_share_file_id": "folder-id",
+                    "own_share_child_ids": ["season-2"],
+                    "operation_generation": 0,
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(self.p115.created_shares, ["folder-id"])
+            self.assertEqual(result.metadata["operation_generation"], 1)
+            self.assertEqual(
+                sorted(result.metadata["own_share_child_ids"]),
+                ["season-1", "season-2", "season-3"],
+            )
+            self.assertEqual(stored["own_share_code"], "owncode")
 
     def test_create_share_crash_recovers_by_saved_title_without_second_send(self):
         class RecoveringCreateP115(FakeP115):
@@ -3083,7 +3280,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(before_first.outcome, StageOutcome.DEFER)
             self.assertEqual(after_first.outcome, StageOutcome.DEFER)
             self.assertEqual(after_final.outcome, StageOutcome.COMPLETE)
-            self.assertEqual(cleanup.deleted, ["folder-id"])
+            self.assertEqual(cleanup.deleted, [])
 
     def test_delete_source_crash_reconciles_absence_without_second_delete(self):
         class AbsenceAwareCleanup(FakeCleanupClient):
@@ -3501,7 +3698,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
 
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
             self.assertEqual(result.metadata["share_review_status"], "passed")
-            self.assertEqual(cleanup.deleted, ["folder-id"])
+            self.assertEqual(cleanup.deleted, [])
 
     def test_cleaned_stage_uses_ten_minute_web_setting_over_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3541,7 +3738,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
 
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
             self.assertEqual(result.metadata["share_review_checks"], [600])
-            self.assertEqual(cleanup.deleted, ["folder-id"])
+            self.assertEqual(cleanup.deleted, [])
 
     def test_cleaned_stage_keeps_source_when_async_review_marks_share_invalid(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4622,20 +4819,20 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
     def test_cms_delete_settled_stage_waits_before_move_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
             library_root = Path(tmp) / "library" / "movies"
-            cms_index = FakeCmsCloudIndex(indexed_file_ids={"folder-id"})
+            cms_index = FakeCmsCloudIndex(indexed_file_ids={"leftover-id"})
             workflow = self._workflow(
                 tmp,
                 move_config=bridge.MoveConfig(source_roots=[], library_roots={"华语电影": library_root}),
                 cms_cloud_index=cms_index,
             )
             row = self._self_share_row()
-            row = self.submissions.update_cleanup(int(row["id"]), "deleted", file_id="folder-id") or row
+            row = self.submissions.update_cleanup(int(row["id"]), "deleted", file_id="leftover-id") or row
             source = self.config.strm_root / row["own_share_file_name"]
             self._write_strm(source)
             task = self._claim_task("abc", "1234", TaskStage.CMS_DELETE_SETTLED, {"submission_id": row["id"]}, row["id"])
 
             waiting = workflow.run_stage(task)
-            cms_index.indexed_file_ids.clear()
+            cms_index.indexed_file_ids.discard("leftover-id")
             settled = workflow.run_stage(task)
             self.tasks.enqueue_task(task.id, TaskStage.MOVED, next_run_at=1.0)
             move_task = self.tasks.claim_next_runnable("worker-2", now=1.0)
@@ -4647,6 +4844,53 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(moved.outcome, StageOutcome.COMPLETE)
             self.assertFalse(source.exists())
             self.assertTrue((library_root / row["own_share_file_name"] / "movie.strm").exists())
+
+    def test_cms_delete_settled_does_not_wait_for_library_dest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cms_index = FakeCmsCloudIndex(indexed_file_ids={"folder-id"})
+            workflow = self._workflow(tmp, cms_cloud_index=cms_index)
+            row = self._self_share_row()
+            row = self.submissions.update_cleanup(int(row["id"]), "deleted", file_id="folder-id") or row
+            task = self._claim_task("abc", "1234", TaskStage.CMS_DELETE_SETTLED, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertTrue(cms_index.has_file_id("folder-id"))
+
+    def test_moved_stage_merges_new_seasons_when_already_moved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            library_root = Path(tmp) / "library" / "tv"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"外国电视": library_root}),
+            )
+            row = self._self_share_row(
+                title="侠探杰克 (2022) {tmdb-108978}",
+                category="外国电视",
+                tmdb_id="108978",
+            )
+            source = self.config.strm_root / row["own_share_file_name"]
+            dest = library_root / row["own_share_file_name"]
+            self._write_strm(source / "Season 01", name="e01.strm")
+            self._write_strm(source / "Season 03", name="e01.strm")
+            self._write_strm(dest / "Season 02", name="e01.strm")
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(source),
+                dest_path=str(dest),
+                category_final="外国电视",
+            ) or row
+            task = self._claim_task("abc", "1234", TaskStage.MOVED, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertTrue((dest / "Season 01" / "e01.strm").exists())
+            self.assertTrue((dest / "Season 02" / "e01.strm").exists())
+            self.assertTrue((dest / "Season 03" / "e01.strm").exists())
+            self.assertFalse(source.exists())
 
     def test_alias_share_strm_moves_into_canonical_library_folder_after_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5426,9 +5670,43 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             stored = self.submissions.find_by_id(int(row["id"]))
 
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
-            self.assertEqual(cleanup.deleted, ["folder-id"])
+            self.assertEqual(cleanup.deleted, [])
             self.assertEqual(stored["cleanup_status"], "deleted")
             self.assertEqual(result.metadata["cleanup_status"], "deleted")
+
+    def test_cleaned_stage_does_not_delete_library_dest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = FakeCleanupClient()
+            workflow = self._workflow(tmp, cleanup_client=cleanup)
+            workflow.self_share_config.review_grace_seconds = 1
+            workflow.self_share_config.review_checkpoints_seconds = (1,)
+            row = self._self_share_row()
+            dest = Path(tmp) / "library" / row["own_share_file_name"]
+            self._write_strm(dest)
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path="/share/source",
+                dest_path=str(dest),
+                category_final="华语电影",
+            ) or row
+            row = self.submissions.update_emby(int(row["id"]), "confirmed") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.CLEANED,
+                {"submission_id": row["id"], "share_created_at": 100.0},
+                row["id"],
+            )
+            workflow._now = lambda: 101.0
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(cleanup.deleted, [])
+            self.assertEqual(stored["cleanup_status"], "deleted")
+            self.assertNotEqual(stored.get("cleanup_file_id"), "folder-id")
 
 
 class DirectTaskEngineBridgeTests(unittest.TestCase):

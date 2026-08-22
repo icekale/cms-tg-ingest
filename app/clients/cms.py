@@ -225,8 +225,11 @@ class CmsClient:
         )
         try:
             with urllib.request.urlopen(request, timeout=self.config.http_timeout) as response:
-                return int(getattr(response, "status", response.getcode())) in {200, 206}
+                return int(getattr(response, "status", response.getcode())) in {200, 206, 302}
         except urllib.error.HTTPError as exc:
+            if exc.code == 302:
+                exc.close()
+                return True
             body = exc.read().decode("utf-8", "replace")
             exc.close()
             if exc.code == 500 and "获取分享直连失败" in body:

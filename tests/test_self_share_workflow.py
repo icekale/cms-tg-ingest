@@ -314,6 +314,35 @@ class CmsPlaybackProbeTests(unittest.TestCase):
         self.assertIn("%E5%B9%BC%E5%A5%B3%E6%88%98%E8%AE%B0", captured[0][0])
         self.assertIn("%20%282017%29", captured[0][0])
 
+    def test_probe_treats_http_302_as_success(self):
+        class FakeResponse:
+            status = 302
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def getcode(self):
+                return self.status
+
+        with patch("app.clients.cms.urllib.request.urlopen", return_value=FakeResponse()):
+            self.assertTrue(self._client().probe_strm_url("http://cms/s/code_1212_file.mkv?/episode.mkv"))
+
+    def test_probe_treats_http_error_302_as_success(self):
+        def fake_urlopen(request, timeout):
+            raise urllib.error.HTTPError(
+                request.full_url,
+                302,
+                "Found",
+                {"Location": "http://115/file"},
+                io.BytesIO(b""),
+            )
+
+        with patch("app.clients.cms.urllib.request.urlopen", side_effect=fake_urlopen):
+            self.assertTrue(self._client().probe_strm_url("http://cms/s/code_1212_file.mkv?/episode.mkv"))
+
     def test_probe_classifies_cms_share_resolution_failure(self):
         def fake_urlopen(request, timeout):
             raise urllib.error.HTTPError(

@@ -74,6 +74,8 @@ REPROCESS_METADATA_DELETE_KEYS = (
     "own_share_receive_code",
     "own_share_url",
     "own_share_available",
+    "own_share_child_ids",
+    "rejected_organized_file_ids",
     "share_alias_name",
     "share_alias_level",
     "share_created_at",
