@@ -1829,6 +1829,141 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(stored["own_share_file_id"], "dest-j-271016")
             self.assertNotEqual(stored["own_share_file_id"], "season-01")
 
+    def test_organizing_binds_renamed_episodes_by_file_id_when_tmdb_search_is_wrong(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, tmdb_resolver=FakeTmdbResolver())
+            old_e01 = "Lucky.S01E01.2026.2160p.ATVP.WEB-DL.DDP5.1.Atmos.HDR10P.H.265-HiveWeb.mkv"
+            old_e02 = "Lucky.S01E02.2026.2160p.ATVP.WEB-DL.DDP5.1.Atmos.HDR10P.H.265-HiveWeb.mkv"
+            self.p115.search_hits = {
+                old_e01: [{"fid": "unrelated-lucky", "cid": "other-season", "n": "Lucky.2011.mkv"}],
+                old_e02: [],
+                "606952": [
+                    {
+                        "cid": "wrong-movie-606952",
+                        "n": "X-幸运女神-2019-[tmdb=606952]",
+                        "pid": "movie-parent",
+                    },
+                ],
+                "ep-lucky-01": [
+                    {
+                        "fid": "ep-lucky-01",
+                        "cid": "season-01",
+                        "n": "幸运女神 (2026) - S01E01 - 第 1 集 - 2160p.mkv",
+                    },
+                ],
+            }
+            self.p115.folder_paths["season-01"] = [
+                {"cid": "dest-x-278624", "n": "X-幸运女神-2026-[tmdb=278624]", "pid": "tv-parent"},
+                {"cid": "season-01", "n": "Season 01", "pid": "dest-x-278624"},
+            ]
+            self.p115.files_by_parent = {
+                "wrong-movie-606952": [],
+                "dest-x-278624": [
+                    {"cid": "season-01", "n": "Season 01", "pid": "dest-x-278624"},
+                ],
+                "season-01": [
+                    {
+                        "fid": "ep-lucky-01",
+                        "cid": "season-01",
+                        "n": "幸运女神 (2026) - S01E01 - 第 1 集 - 2160p.mkv",
+                    },
+                    {
+                        "fid": "ep-lucky-02",
+                        "cid": "season-01",
+                        "n": "幸运女神 (2026) - S01E02 - 第 2 集 - 2160p.mkv",
+                    },
+                ],
+            }
+            row = self._row()
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {
+                    "ok": True,
+                    "title": "幸运女神",
+                    "tmdb_id": "606952",
+                    "type": "movie",
+                    "category": "欧美电影",
+                    "category_status": "tmdb_search_resolved",
+                },
+                "tmdb_search_resolved",
+            ) or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_items_complete": True,
+                    "intake_identity": {
+                        "root_ids": ["recv-lucky"],
+                        "files": [
+                            {"id": "ep-lucky-01", "name": old_e01},
+                            {"id": "ep-lucky-02", "name": old_e02},
+                        ],
+                    },
+                },
+                row["id"],
+            )
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(stored["own_share_file_id"], "dest-x-278624")
+            self.assertEqual(result.metadata["intake_identity"]["dest_id"], "dest-x-278624")
+            self.assertIn("ep-lucky-01", self.p115.search_calls)
+            self.assertNotEqual(stored["own_share_file_id"], "wrong-movie-606952")
+            self.assertNotEqual(stored["own_share_file_id"], "season-01")
+
+    def test_recognizing_adopts_cms_dest_tmdb_after_wrong_title_search(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {
+                    "ok": True,
+                    "title": "幸运女神",
+                    "tmdb_id": "606952",
+                    "type": "movie",
+                    "category": "欧美电影",
+                    "category_status": "tmdb_search_resolved",
+                },
+                "tmdb_search_resolved",
+            ) or row
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="dest-x-278624",
+                own_share_file_name="X-幸运女神-2026-[tmdb=278624]",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECOGNIZING,
+                {
+                    "submission_id": row["id"],
+                    "intake_identity": {
+                        "root_ids": ["recv-lucky"],
+                        "files": [{"id": "ep-lucky-01", "name": "Lucky.S01E01.mkv"}],
+                        "dest_id": "dest-x-278624",
+                    },
+                    "organized_folder": {
+                        "file_id": "dest-x-278624",
+                        "file_name": "X-幸运女神-2026-[tmdb=278624]",
+                        "parent_id": "tv-parent",
+                        "category": "外国电视",
+                    },
+                },
+                row["id"],
+            )
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            recognition = json.loads(stored["recognition_json"] or "{}")
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(recognition["tmdb_id"], "278624")
+            self.assertEqual(recognition["category"], "外国电视")
+            self.assertEqual(result.metadata["tmdb_id"], "278624")
+
     def test_organizing_binds_dest_from_video_parent_without_tmdb_folder_hits(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp, tmdb_resolver=FakeTmdbResolver())

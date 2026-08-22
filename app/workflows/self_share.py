@@ -1738,6 +1738,29 @@ class BridgeSelfShareTaskWorkflow:
                     if self._intake_expected_files_located(dest, expected_ids, file_hits):
                         break
                     return INCOMPLETE, None, None
+            found_ids = {p115_item_id(item) for item in file_hits if p115_item_id(item)}
+            for file_id in expected_ids:
+                if dest != INCOMPLETE or file_id in found_ids:
+                    continue
+                try:
+                    hits = self.p115.search_files(file_id) or []
+                except Exception:
+                    LOG.debug("Failed to search intake file id=%s", file_id, exc_info=True)
+                    continue
+                file_hits.extend(hits)
+                found_ids.update(p115_item_id(item) for item in hits if p115_item_id(item))
+                self._enrich_folder_hits_from_file_parents(file_hits, folder_hits, expected_ids)
+                dest = dest_id_from_file_hits(
+                    file_hits=file_hits,
+                    folder_hits=folder_hits,
+                    expected_ids=expected_ids,
+                )
+                if dest == CONFLICT:
+                    return CONFLICT, None, None
+                if dest != INCOMPLETE:
+                    if self._intake_expected_files_located(dest, expected_ids, file_hits):
+                        break
+                    return INCOMPLETE, None, None
         if dest == CONFLICT:
             return CONFLICT, None, None
         if dest != INCOMPLETE:

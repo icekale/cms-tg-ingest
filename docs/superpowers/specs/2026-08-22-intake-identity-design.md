@@ -66,7 +66,7 @@
 
 仍触发 CMS `auto_organize`。然后：
 
-1. 对每个 `files[]`，用记下的 `name` 搜索或列出候选目录子项，**只认 `p115_item_id` 等于 `files[].id` 的记录**。该记录的 cid 是当前父目录。
+1. 对每个 `files[]`，用记下的 `name`、**`files[].id` 本身**搜索，或列出候选目录子项，**只认 `p115_item_id` 等于 `files[].id` 的记录**。该记录的 cid 是当前父目录。旧文件名或错误 TMDB 搜到的无关结果一律丢掉。
 2. 父目录名匹配 `Season ##` / `第.季` → 候选 dest 是再上一级；否则候选 dest 就是该父目录。
 3. 全部已定位的文件必须落到**同一个** dest。写入 `intake_identity.dest_id`，并照旧写入 submission 的 `own_share_file_id`（分享仍建在 dest 上）。
 4. `dest_id` 已存在且所有 `files[].id` 仍在其下（直接子项或季文件夹下）→ 不再搜索。
@@ -80,7 +80,7 @@
 
 不再用 `received_file_ids ∪ received_items` 做 containment。`rejected_organized_file_ids` 不再承担所有权；可留作调试。
 
-标题 / TMDB 解析仍可用于分类和展示，发生在 dest 绑定之后，或与绑定并行但不覆盖 `dest_id`。
+标题 / TMDB 解析仍可用于分类和展示，发生在 dest 绑定之后，或与绑定并行但不覆盖 `dest_id`。识别以 CMS 整理后的 dest 目录名为准（`[tmdb=…]`），不在整理前另调 CMS `file_recognize`，也不让我们自己的标题搜索覆盖 dest。
 
 ## 清理：只删接收根
 
