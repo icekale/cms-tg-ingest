@@ -43,7 +43,7 @@ from app.media.classify import (
     normalize_tmdb_hint_name,
     user_movie_category_bucket,
 )
-from app.media.intake_identity import CONFLICT, INCOMPLETE, dest_id_from_file_hits, snapshot_files
+from app.media.intake_identity import CONFLICT, INCOMPLETE, dest_id_from_file_hits, is_season_folder_name, snapshot_files
 from app.media.strm import (
     category_from_existing_library_folder,
     category_from_existing_library_match,
@@ -1587,11 +1587,30 @@ class BridgeSelfShareTaskWorkflow:
                     folder_hits.extend(self.p115.search_files(tmdb_id) or [])
                 except Exception:
                     LOG.debug("Failed to search intake tmdb_id=%s", tmdb_id, exc_info=True)
+        receive_cid = str(receive_cid or "").strip()
+        if folder_hits and hasattr(self.p115, "list_files"):
+            dest_children: list[dict[str, Any]] = []
+            for item in list(folder_hits):
+                folder_id = p115_item_id(item)
+                if not folder_id or folder_id == receive_cid:
+                    continue
+                try:
+                    try:
+                        children = self.p115.list_files(folder_id, limit=500)
+                    except TypeError:
+                        children = self.p115.list_files(folder_id)
+                except Exception:
+                    LOG.debug("Failed to list dest children dest=%s", folder_id, exc_info=True)
+                    continue
+                dest_children.extend(child for child in (children or []) if isinstance(child, dict))
+            folder_hits.extend(dest_children)
         dest = dest_id_from_file_hits(file_hits=file_hits, folder_hits=folder_hits, expected_ids=expected_ids)
         root_ids = {str(value) for value in (identity.get("root_ids") or []) if str(value)}
-        receive_cid = str(receive_cid or "").strip()
         if dest == CONFLICT:
             return CONFLICT, None, None
+        dest_hit = next((item for item in folder_hits if p115_item_id(item) == dest), None)
+        if dest not in {INCOMPLETE, CONFLICT} and is_season_folder_name(p115_file_name(dest_hit) if dest_hit else ""):
+            return INCOMPLETE, None, None
         if dest == receive_cid or dest in root_ids or self._dest_is_receive_child(dest, receive_cid) is not False:
             return INCOMPLETE, None, None
         persisted = str(own_share_file_id or "").strip()

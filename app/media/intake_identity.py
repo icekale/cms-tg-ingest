@@ -78,7 +78,7 @@ def dest_id_from_file_hits(
         parent = folders.get(parent_id) or {}
         parent_name = p115_file_name(parent)
         if is_season_folder_name(parent_name):
-            dest_id = str(parent.get("pid") or parent.get("parent_id") or "").strip()
+            dest_id = p115_item_parent_id(parent)
         else:
             dest_id = parent_id
         if dest_id:
