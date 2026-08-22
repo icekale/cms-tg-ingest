@@ -1052,7 +1052,7 @@ def render_quality_page(
 </section>
 <details class="diagnostic-details">
   <summary>查看完整原始报告（{len(issues)} 条）</summary>
-  <div class="details-content"><pre class="diagnostic">{html.escape(report)}</pre></div>
+  <div class="details-content"><pre class="diagnostic">{html.escape(report.to_plain())}</pre></div>
 </details>
 """
     return _page("质量巡检", body, active="quality")

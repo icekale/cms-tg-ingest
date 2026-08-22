@@ -349,13 +349,14 @@ class TaskQualityTests(unittest.TestCase):
 
             issues = scan_task_quality(store)
             report = format_task_quality_report(issues)
+            text = report.to_plain()
 
             self.assertEqual([issue.code for issue in issues], ["direct_strm", "missing_dest"])
-            self.assertIn("TaskStore 轻量巡检", report)
-            self.assertIn("直链电影", report)
-            self.assertIn("发现直链 STRM", report)
-            self.assertIn("缺目录电影", report)
-            self.assertIn("目标目录不存在", report)
+            self.assertIn("TaskStore 轻量巡检", text)
+            self.assertIn("直链电影", text)
+            self.assertIn("发现直链 STRM", text)
+            self.assertIn("缺目录电影", text)
+            self.assertIn("目标目录不存在", text)
 
 
 if __name__ == "__main__":
