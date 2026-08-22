@@ -1994,6 +1994,132 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.DEFER)
             self.assertNotEqual(stored["own_share_file_id"], "stale-dest")
 
+    def test_organizing_merges_season_files_into_existing_show_dest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, tmdb_resolver=FakeReacherTmdbResolver())
+            self.p115.search_hits = {
+                "Reacher.S03E01.mkv": [
+                    {"fid": "ep-s3-e1", "cid": "season-3", "n": "Reacher.S03E01.mkv"},
+                ],
+                "108978": [
+                    {"cid": "season-3", "n": "Season 3", "pid": "dest-108978"},
+                    {"cid": "dest-108978", "n": "X-侠探杰克-2022-[tmdb=108978]", "pid": "tv-parent"},
+                    {"cid": "old-dest-108978", "n": "侠探杰克 (2022) {tmdb-108978}", "pid": "tv-parent"},
+                ],
+            }
+            row = self._row()
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_file_ids": ["share-fid-399"],
+                    "received_items": [
+                        {
+                            "file_id": "recv-s3",
+                            "file_name": "Season 3",
+                            "is_folder": True,
+                            "parent_id": "pending-cid",
+                            "received_item_verified": True,
+                        }
+                    ],
+                    "received_items_complete": True,
+                    "tmdb_hint_normalized": True,
+                    "tmdb_hint_id": "108978",
+                    "intake_identity": {
+                        "root_ids": ["recv-s3"],
+                        "files": [{"id": "ep-s3-e1", "name": "Reacher.S03E01.mkv"}],
+                    },
+                },
+                row["id"],
+            )
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(stored["own_share_file_id"], "dest-108978")
+
+    def test_organizing_second_task_can_reuse_existing_dest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, tmdb_resolver=FakeReacherTmdbResolver())
+            self.p115.search_hits = {
+                "Reacher.S03E02.mkv": [
+                    {"fid": "ep-s3-e2", "cid": "season-3", "n": "Reacher.S03E02.mkv"},
+                ],
+                "108978": [
+                    {"cid": "season-3", "n": "Season 3", "pid": "dest-108978"},
+                    {"cid": "dest-108978", "n": "X-侠探杰克-2022-[tmdb=108978]", "pid": "tv-parent"},
+                ],
+            }
+            row = self._row("def", "5678")
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            task = self._claim_task(
+                "def",
+                "5678",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_items_complete": True,
+                    "tmdb_hint_normalized": True,
+                    "tmdb_hint_id": "108978",
+                    "intake_identity": {
+                        "root_ids": ["recv-s3-task-b"],
+                        "files": [{"id": "ep-s3-e2", "name": "Reacher.S03E02.mkv"}],
+                    },
+                },
+                row["id"],
+            )
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(stored["own_share_file_id"], "dest-108978")
+            self.assertEqual(result.metadata["intake_identity"]["dest_id"], "dest-108978")
+
+    def test_organizing_ignores_same_tmdb_dest_without_these_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, tmdb_resolver=FakeReacherTmdbResolver())
+            self.p115.search_hits = {"108978": [
+                {"cid": "old-dest-108978", "n": "侠探杰克 (2022) {tmdb-108978}", "pid": "tv-parent"},
+            ]}
+            row = self._row()
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_items_complete": True,
+                    "tmdb_hint_normalized": True,
+                    "tmdb_hint_id": "108978",
+                    "intake_identity": {
+                        "root_ids": ["recv-s3"],
+                        "files": [{"id": "ep-s3-e1", "name": "Reacher.S03E01.mkv"}],
+                    },
+                },
+                row["id"],
+            )
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIsNone(stored["own_share_file_id"])
+
+    def test_organizing_defers_when_intake_files_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {"submission_id": row["id"], "intake_identity": {"root_ids": ["recv-folder-402"], "files": []}},
+                row["id"],
+            )
+            result = workflow.run_stage(task)
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIn("等待 CMS 整理", result.message)
+
     def test_organizing_stage_persists_and_reuses_organized_scan_cursor(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp, tmdb_resolver=FakeTmdbResolver())
