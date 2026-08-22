@@ -1696,6 +1696,139 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(stored["own_share_file_id"], "dest-c-441531")
             self.assertEqual(result.metadata["intake_identity"]["dest_id"], "dest-c-441531")
 
+    def test_organizing_binds_renamed_movie_from_dest_children_not_old_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, tmdb_resolver=FakeTmdbResolver())
+            old_name = (
+                "The Mandalorian and Grogu.2026.2160p.Ultra HD BluRay.REMUX."
+                "DV.HDR.HEVC.TrueHD Dolby Atmos 7.1-WF.mkv"
+            )
+            self.p115.search_hits = {
+                old_name: [
+                    {
+                        "fid": "unrelated-mando-s02",
+                        "cid": "old-tv-season",
+                        "n": "The.Mandalorian.S02E07.2020.mkv",
+                    },
+                ],
+                "1228710": [
+                    {
+                        "cid": "dest-x-1228710",
+                        "n": "X-星球大战：曼达洛人与古古-2026-[tmdb=1228710]",
+                        "pid": "movie-parent",
+                    },
+                    {
+                        "cid": "recv-folder-405",
+                        "n": "星球大战：曼达洛人与古古 (2026) [tmdb=1228710]",
+                        "pid": "redundant-cid",
+                    },
+                    {
+                        "fid": "old-share-mkv",
+                        "n": "星球大战：曼达洛人与古古 (2026) [tmdb=1228710].mkv",
+                        "cid": "other-parent",
+                    },
+                ],
+            }
+            self.p115.files_by_parent = {
+                "dest-x-1228710": [
+                    {
+                        "fid": "video-mkv-405",
+                        "cid": "dest-x-1228710",
+                        "n": "星球大战：曼达洛人与古古.2026.2160p.BluRay.DV.HDR.REMUX.mkv",
+                    },
+                ],
+                "recv-folder-405": [],
+            }
+            row = self._row()
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_file_ids": ["share-fid-405"],
+                    "received_items": [
+                        {
+                            "file_id": "recv-folder-405",
+                            "file_name": "星球大战：曼达洛人与古古 (2026) {tmdb-1228710}",
+                            "is_folder": True,
+                            "parent_id": "pending-cid",
+                            "received_item_verified": True,
+                        }
+                    ],
+                    "received_items_complete": True,
+                    "tmdb_hint_normalized": True,
+                    "tmdb_hint_id": "1228710",
+                    "intake_identity": {
+                        "root_ids": ["recv-folder-405"],
+                        "files": [{"id": "video-mkv-405", "name": old_name}],
+                    },
+                },
+                row["id"],
+            )
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(stored["own_share_file_id"], "dest-x-1228710")
+            self.assertEqual(result.metadata["intake_identity"]["dest_id"], "dest-x-1228710")
+            self.assertNotEqual(stored["own_share_file_id"], "recv-folder-405")
+            self.assertEqual(
+                len({"share-fid-405", "recv-folder-405", "dest-x-1228710", "video-mkv-405", "pending-cid"}),
+                5,
+            )
+
+    def test_organizing_binds_renamed_episode_from_season_children(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, tmdb_resolver=FakeReacherTmdbResolver())
+            self.p115.search_hits = {
+                "Mystic.Nine.S01E01.mkv": [
+                    {"fid": "unrelated-ep", "cid": "other-season", "n": "Other.S01E01.mkv"},
+                ],
+                "271016": [
+                    {
+                        "cid": "dest-j-271016",
+                        "n": "J-九门-2026-[tmdb=271016]",
+                        "pid": "tv-parent",
+                    },
+                ],
+            }
+            self.p115.files_by_parent = {
+                "dest-j-271016": [
+                    {"cid": "season-01", "n": "Season 01", "pid": "dest-j-271016"},
+                ],
+                "season-01": [
+                    {
+                        "fid": "ep-jiumen-01",
+                        "cid": "season-01",
+                        "n": "九门 (2026) - S01E01 - 第 1 集 - 2160p.mp4",
+                    },
+                ],
+            }
+            row = self._row()
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_items_complete": True,
+                    "tmdb_hint_normalized": True,
+                    "tmdb_hint_id": "271016",
+                    "intake_identity": {
+                        "root_ids": ["recv-jiumen"],
+                        "files": [{"id": "ep-jiumen-01", "name": "Mystic.Nine.S01E01.mkv"}],
+                    },
+                },
+                row["id"],
+            )
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(stored["own_share_file_id"], "dest-j-271016")
+            self.assertNotEqual(stored["own_share_file_id"], "season-01")
+
     def test_organizing_binds_dest_from_video_parent_without_tmdb_folder_hits(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp, tmdb_resolver=FakeTmdbResolver())

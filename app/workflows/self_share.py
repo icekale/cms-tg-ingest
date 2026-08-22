@@ -1691,15 +1691,32 @@ class BridgeSelfShareTaskWorkflow:
                 folder_id = p115_item_id(item)
                 if not folder_id or folder_id == receive_cid or folder_id in root_ids:
                     continue
-                if is_season_folder_name(p115_file_name(item)):
+                if not p115_is_folder(item) or is_season_folder_name(p115_file_name(item)):
                     continue
                 try:
                     children = self._p115_list_files(folder_id)
                 except Exception:
                     LOG.debug("Failed to list dest children dest=%s", folder_id, exc_info=True)
                     continue
-                dest_children.extend(child for child in (children or []) if isinstance(child, dict))
+                for child in children or []:
+                    if not isinstance(child, dict):
+                        continue
+                    dest_children.append(child)
+                    if not (p115_is_folder(child) and is_season_folder_name(p115_file_name(child))):
+                        continue
+                    season_id = p115_item_id(child)
+                    if not season_id:
+                        continue
+                    try:
+                        dest_children.extend(
+                            episode
+                            for episode in (self._p115_list_files(season_id) or [])
+                            if isinstance(episode, dict)
+                        )
+                    except Exception:
+                        LOG.debug("Failed to list season children dest=%s", season_id, exc_info=True)
             folder_hits.extend(dest_children)
+            file_hits.extend(dest_children)
         dest = INCOMPLETE
         if hasattr(self.p115, "search_files"):
             for item in files:
