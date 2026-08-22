@@ -1853,6 +1853,58 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertIn("等待 CMS 整理", result.message)
             self.assertNotEqual(stored["own_share_file_id"], "inbox-c-folder")
 
+    def test_organizing_defers_when_receive_cid_list_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, tmdb_resolver=FakeTmdbResolver())
+            self.p115.search_hits = {
+                "拆弹专家.2017.mkv": [
+                    {"fid": "video-mkv-402", "cid": "inbox-c-folder", "n": "拆弹专家.2017.mkv"},
+                ],
+            }
+            original_list_files = self.p115.list_files
+
+            def list_files(parent_id, limit=100):
+                if str(parent_id) == "pending-cid":
+                    raise RuntimeError("115 risk control")
+                return original_list_files(parent_id, limit=limit)
+
+            self.p115.list_files = list_files
+            row = self._row()
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_file_ids": ["share-fid-402"],
+                    "received_items": [
+                        {
+                            "file_id": "recv-folder-402",
+                            "file_name": "拆弹专家 (2017) {tmdb-441531}",
+                            "is_folder": True,
+                            "parent_id": "pending-cid",
+                            "received_item_verified": True,
+                        }
+                    ],
+                    "received_items_complete": True,
+                    "tmdb_hint_normalized": True,
+                    "tmdb_hint_id": "441531",
+                    "tmdb_hint_title": "拆弹专家",
+                    "tmdb_hint_category": "华语电影",
+                    "intake_identity": {
+                        "root_ids": ["recv-folder-402"],
+                        "files": [{"id": "video-mkv-402", "name": "拆弹专家.2017.mkv"}],
+                    },
+                },
+                row["id"],
+            )
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertIn("等待 CMS 整理", result.message)
+            self.assertNotEqual(stored["own_share_file_id"], "inbox-c-folder")
+
     def test_organizing_does_not_title_bind_when_intake_files_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp, tmdb_resolver=FakeTmdbResolver())

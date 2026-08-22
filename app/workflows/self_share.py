@@ -1526,18 +1526,29 @@ class BridgeSelfShareTaskWorkflow:
             }
         return {"file_id": dest, "file_name": dest, "parent_id": ""}
 
-    def _dest_is_receive_child(self, dest: str, receive_cid: str) -> bool:
+    def _dest_is_receive_child(self, dest: str, receive_cid: str) -> bool | None:
         dest = str(dest or "").strip()
         receive_cid = str(receive_cid or "").strip()
-        if not dest or not receive_cid or dest == receive_cid:
+        if not dest or not receive_cid:
             return False
+        if dest == receive_cid:
+            return False
+        if hasattr(self.p115, "file_exists_in_parent"):
+            try:
+                return bool(self.p115.file_exists_in_parent(dest, receive_cid))
+            except Exception:
+                LOG.debug("Failed to check dest under receive_cid dest=%s", dest, exc_info=True)
+                return None
         if not hasattr(self.p115, "list_files"):
-            return False
+            return None
         try:
-            items = self.p115.list_files(receive_cid, limit=500)
+            try:
+                items = self.p115.list_files(receive_cid, limit=500, offset=0, use_cache=False)
+            except TypeError:
+                items = self.p115.list_files(receive_cid, limit=500)
         except Exception:
             LOG.debug("Failed to list receive_cid children dest=%s", dest, exc_info=True)
-            return False
+            return None
         return any(p115_item_id(item) == dest for item in items if isinstance(item, dict))
 
     def _intake_dest_skips_tmdb_mismatch(self, folder_id: str, metadata: dict[str, Any] | None) -> bool:
@@ -1581,7 +1592,7 @@ class BridgeSelfShareTaskWorkflow:
         receive_cid = str(receive_cid or "").strip()
         if dest == CONFLICT:
             return CONFLICT, None, None
-        if dest == receive_cid or dest in root_ids or self._dest_is_receive_child(dest, receive_cid):
+        if dest == receive_cid or dest in root_ids or self._dest_is_receive_child(dest, receive_cid) is not False:
             return INCOMPLETE, None, None
         persisted = str(own_share_file_id or "").strip()
         if dest == INCOMPLETE:
@@ -1589,7 +1600,7 @@ class BridgeSelfShareTaskWorkflow:
                 persisted
                 and persisted not in root_ids
                 and persisted != receive_cid
-                and not self._dest_is_receive_child(persisted, receive_cid)
+                and self._dest_is_receive_child(persisted, receive_cid) is False
             ):
                 folder = self._folder_record_for_dest(persisted, folder_hits)
                 if receive_cid and str(folder.get("parent_id") or "").strip() == receive_cid:
