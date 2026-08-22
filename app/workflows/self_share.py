@@ -1572,6 +1572,7 @@ class BridgeSelfShareTaskWorkflow:
             return "empty_files", None, None
         file_hits: list[dict[str, Any]] = []
         folder_hits: list[dict[str, Any]] = []
+        tmdb_search_failed = False
         if hasattr(self.p115, "search_files"):
             for item in files:
                 name = str(item.get("name") or "").strip()
@@ -1586,14 +1587,18 @@ class BridgeSelfShareTaskWorkflow:
                 try:
                     folder_hits.extend(self.p115.search_files(tmdb_id) or [])
                 except Exception:
+                    tmdb_search_failed = True
                     LOG.debug("Failed to search intake tmdb_id=%s", tmdb_id, exc_info=True)
         receive_cid = str(receive_cid or "").strip()
         tmdb_dest_ids = {p115_item_id(item) for item in folder_hits if p115_item_id(item)}
+        root_ids = {str(value) for value in (identity.get("root_ids") or []) if str(value)}
         if folder_hits and hasattr(self.p115, "list_files"):
             dest_children: list[dict[str, Any]] = []
             for item in list(folder_hits):
                 folder_id = p115_item_id(item)
-                if not folder_id or folder_id == receive_cid:
+                if not folder_id or folder_id == receive_cid or folder_id in root_ids:
+                    continue
+                if is_season_folder_name(p115_file_name(item)):
                     continue
                 try:
                     try:
@@ -1606,14 +1611,17 @@ class BridgeSelfShareTaskWorkflow:
                 dest_children.extend(child for child in (children or []) if isinstance(child, dict))
             folder_hits.extend(dest_children)
         dest = dest_id_from_file_hits(file_hits=file_hits, folder_hits=folder_hits, expected_ids=expected_ids)
-        root_ids = {str(value) for value in (identity.get("root_ids") or []) if str(value)}
         if dest == CONFLICT:
             return CONFLICT, None, None
-        dest_hit = next((item for item in folder_hits if p115_item_id(item) == dest), None)
-        if dest not in {INCOMPLETE, CONFLICT} and is_season_folder_name(p115_file_name(dest_hit) if dest_hit else ""):
-            return INCOMPLETE, None, None
-        if dest not in {INCOMPLETE, CONFLICT} and tmdb_dest_ids and dest not in tmdb_dest_ids:
-            return INCOMPLETE, None, None
+        if dest != INCOMPLETE:
+            folder = self._folder_record_for_dest(dest, folder_hits)
+            dest_name = str(folder.get("file_name") or dest).strip()
+            if is_season_folder_name(dest_name):
+                return INCOMPLETE, None, None
+            if tmdb_search_failed:
+                return INCOMPLETE, None, None
+            if dest_name == dest and tmdb_dest_ids and dest not in tmdb_dest_ids:
+                return INCOMPLETE, None, None
         if dest == receive_cid or dest in root_ids or self._dest_is_receive_child(dest, receive_cid) is not False:
             return INCOMPLETE, None, None
         persisted = str(own_share_file_id or "").strip()
