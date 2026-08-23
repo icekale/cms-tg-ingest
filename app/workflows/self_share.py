@@ -1543,15 +1543,28 @@ class BridgeSelfShareTaskWorkflow:
                 candidates.extend(self.p115.search_files(dest) or [])
             except Exception:
                 LOG.debug("Failed to search dest folder dest=%s", dest, exc_info=True)
-        folder_hit = next((item for item in candidates if p115_item_id(item) == dest), None)
+        folder_hit = next(
+            (
+                item
+                for item in candidates
+                if p115_item_id(item) == dest and (not require_real or p115_is_folder(item))
+            ),
+            None,
+        )
         if folder_hit:
             file_name = p115_file_name(folder_hit)
-            if require_real and (not p115_item_id(folder_hit) or not file_name):
+            parent_id = p115_item_parent_id(folder_hit)
+            if require_real and (
+                not p115_item_id(folder_hit)
+                or not file_name
+                or not parent_id
+                or parent_id in {"0", "1"}
+            ):
                 return None
             return {
                 "file_id": dest,
                 "file_name": file_name or dest,
-                "parent_id": p115_item_parent_id(folder_hit),
+                "parent_id": parent_id,
             }
         if require_real:
             return None
