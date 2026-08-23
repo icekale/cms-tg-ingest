@@ -4960,12 +4960,17 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 self.tasks.start_operation(task.id, key)
                 self.tasks.complete_operation(task.id, key, {"target_id": target_id, "file_id": target_id, "share_code": code})
 
+            self._write_strm(self.config.strm_root / targets[0]["folder"]["file_name"])
             first = workflow.run_stage(task)
             second_task = self._multi_target_task(workflow, TaskStage.SHARE_SYNC_SUBMITTED, targets=first.metadata["organized_targets"])
             second = workflow.run_stage(second_task)
+            self._write_strm(self.config.strm_root / targets[1]["folder"]["file_name"])
+            third_task = self._multi_target_task(workflow, TaskStage.SHARE_SYNC_SUBMITTED, targets=second.metadata["organized_targets"])
+            third = workflow.run_stage(third_task)
 
-            self.assertEqual(first.outcome, StageOutcome.COMPLETE, first.message)
-            self.assertEqual(second.outcome, StageOutcome.COMPLETE, second.message)
+            self.assertEqual(first.outcome, StageOutcome.DEFER, first.message)
+            self.assertEqual(second.outcome, StageOutcome.DEFER, second.message)
+            self.assertEqual(third.outcome, StageOutcome.COMPLETE, third.message)
             self.assertEqual(self.cms.share_sync_calls, [("share-a", "pwd-a", "0", "/media/share"), ("share-b", "pwd-b", "0", "/media/share")])
             operations = [op for op in self.tasks.list_operations(task.id) if op.operation_type == "cms_share_sync"]
             self.assertEqual(sorted(op.operation_key for op in operations), [
@@ -4997,9 +5002,10 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.tasks.start_operation(task.id, sync_key)
             self.tasks.complete_operation(task.id, sync_key, {"share_code": "share-a"})
 
+            self._write_strm(self.config.strm_root / targets[0]["folder"]["file_name"])
             result = workflow.run_stage(task)
 
-            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
             self.assertEqual(self.cms.share_sync_calls, [("share-b", "pwd-b", "0", "/media/share")])
 
     def test_multi_target_cms_sync_prevalidates_all_create_operations_before_posting(self):
@@ -5035,9 +5041,13 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 self.tasks.start_operation(task.id, key)
                 self.tasks.complete_operation(task.id, key, {"target_id": target_id, "file_id": target_id, "share_code": code})
 
-            result = workflow.run_stage(task)
+            first = workflow.run_stage(task)
+            self._write_strm(self.config.strm_root / targets[0]["folder"]["file_name"])
+            second_task = self._multi_target_task(workflow, TaskStage.SHARE_SYNC_SUBMITTED, targets=first.metadata["organized_targets"])
+            result = workflow.run_stage(second_task)
 
-            self.assertIn(result.outcome, {StageOutcome.DEFER, StageOutcome.NEEDS_ACTION})
+            self.assertEqual(first.outcome, StageOutcome.DEFER)
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
             saved = result.metadata["organized_targets"]
             self.assertEqual(saved[0]["share"]["sync_status"], "submitted")
             self.assertEqual(saved[1]["share"]["sync_status"], "uncertain")

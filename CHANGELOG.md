@@ -1,4 +1,7 @@
-## 0.4.23 - 2026-08-23
+## 0.4.24 - 2026-08-23
+
+- **串行化多目录 CMS 同步**：每个目标等待自己的 STRM 源目录生成后才提交下一个 `share115` 同步，避免 CMS 异步任务互相覆盖。
+
 
 - **补齐继续整理入口**：Telegram callback 和旧版 Web 任务详情页都可使用安全的 `resume_organizing`；legacy intake identity 也要求每个接收根和文件 ID 有效。
 

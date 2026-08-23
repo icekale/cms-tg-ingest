@@ -3820,8 +3820,36 @@ class BridgeSelfShareTaskWorkflow:
                 5,
                 self._multi_target_stage_metadata(row, targets, share_sync_wait_task_id=waiting_task.id),
             )
-        for target, operation, operation_key, share_code, receive_code, target_id in prepared or []:
+        for target, operation, operation_key, share_code, receive_code, target_id in sorted(
+            prepared or [], key=lambda item: item[-1]
+        ):
             share = dict(target.get("share") or {})
+            if operation is not None and operation.status == "succeeded":
+                target_row = self._row_for_target(row, target)
+                recognition = dict(target.get("recognition") or {})
+                share_name = str(
+                    target_row.get("own_share_file_name") or recognition.get("share_name") or target_id
+                ).strip()
+                if not find_self_share_strm_source_dir(
+                    self.self_share_config,
+                    target_row,
+                    recognition,
+                    share_name,
+                ):
+                    share["sync_status"] = "submitted"
+                    share["sync_error"] = ""
+                    target["share"] = share
+                    return StageResult.defer(
+                        f"等待目标 {target_id} 自有分享 STRM 源目录生成",
+                        min(self.self_share_config.auto_organize_retry_seconds or 30, 5),
+                        self._multi_target_stage_metadata(
+                            row,
+                            targets,
+                            share_sync_wait_target_id=target_id,
+                        ),
+                    )
+
+            submitted_now = False
             if operation is None:
                 operation = self.task_store.prepare_operation(
                     int(task.id),
@@ -3839,6 +3867,7 @@ class BridgeSelfShareTaskWorkflow:
                 started = self.task_store.start_operation(int(task.id), operation_key)
                 operation = started or self.task_store.find_operation(int(task.id), operation_key)
                 if started is not None:
+                    submitted_now = True
                     try:
                         response = self.cms.add_share115_sync_task(
                             str(operation.request.get("share_code") or share_code),
@@ -3880,6 +3909,16 @@ class BridgeSelfShareTaskWorkflow:
             share["sync_status"] = "submitted"
             share["sync_error"] = ""
             target["share"] = share
+            if submitted_now:
+                return StageResult.defer(
+                    f"等待目标 {target_id} 自有分享 STRM 源目录生成",
+                    min(self.self_share_config.auto_organize_retry_seconds or 30, 5),
+                    self._multi_target_stage_metadata(
+                        row,
+                        targets,
+                        share_sync_wait_target_id=target_id,
+                    ),
+                )
         targets.sort(key=lambda item: str(item.get("target_id") or ""))
         first_share = dict((targets[0].get("share") or {}) if targets else {})
         row = self.store.update_self_share(
