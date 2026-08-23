@@ -2498,7 +2498,8 @@ class BridgeSelfShareTaskWorkflow:
                 return f"多目录状态损坏：organized_targets[{index}].folder.file_name 无效"
             if not isinstance(parent_id, str) or not parent_id.strip():
                 return f"多目录状态损坏：organized_targets[{index}].folder.parent_id 无效"
-            if not isinstance(share_status, str) or not share_status.strip():
+            allowed_share_statuses = {"pending", "alias_prepared", "succeeded", "uncertain", "ambiguous"}
+            if not isinstance(share_status, str) or not share_status.strip() or share_status not in allowed_share_statuses:
                 return f"多目录状态损坏：organized_targets[{index}].share.status 无效"
             strm = target["strm"]
             for field in ("status", "move_status", "emby_status"):
@@ -3164,6 +3165,44 @@ class BridgeSelfShareTaskWorkflow:
             metadata.update(direct_metadata)
         return StageResult.complete(message, metadata)
 
+    def _multi_target_operations_validation_error(self, task, targets):
+        scope = operation_scope(task)
+        target_map = {str(target.get("target_id") or "").strip(): target for target in targets}
+        prefix = f"{scope}:create_share:"
+        allowed_statuses = {"prepared", "started", "uncertain", "succeeded"}
+        for operation in self.task_store.list_operations(int(task.id)):
+            if operation.operation_type != "create_share":
+                continue
+            if not operation.operation_key.startswith(prefix):
+                return f"多目录自有分享操作范围无效：{operation.operation_key}"
+            operation_target_id = operation.operation_key[len(prefix):].strip()
+            target = target_map.get(operation_target_id)
+            if target is None:
+                return f"多目录自有分享操作目标未知：{operation_target_id or '空'}"
+            folder = target.get("folder") or {}
+            file_id = str(folder.get("file_id") or "").strip()
+            request = operation.request if isinstance(operation.request, dict) else {}
+            request_target_id = str(request.get("target_id") or "").strip()
+            request_file_id = str(request.get("file_id") or "").strip()
+            if request_target_id != operation_target_id or request_file_id != file_id:
+                return "multi-target share operation identity mismatch: target_id/file_id request 不一致，已阻止继续处理"
+            if operation.status not in allowed_statuses:
+                return f"多目录自有分享操作状态不可恢复：{operation.status}"
+            if operation.status == "succeeded":
+                result = operation.result if isinstance(operation.result, dict) else {}
+                result_code = str(result.get("share_code") or result.get("code") or "").strip()
+                if not result_code:
+                    return "多目录自有分享成功操作缺少分享码，已阻止继续处理"
+                result_file_id = str(result.get("file_id") or "").strip()
+                if result_file_id and result_file_id != file_id:
+                    return "多目录自有分享成功操作文件身份不一致，已阻止继续处理"
+                share_state = target.get("share") or {}
+                if share_state.get("status") == "succeeded":
+                    state_code = str(share_state.get("code") or "").strip()
+                    if state_code != result_code:
+                        return "多目录已成功分享的分享码与操作结果不一致，已阻止继续处理"
+        return ""
+
     def _multi_target_share_validation_error(self, task, row, target):
         identity_error = self._target_identity_error(target)
         if identity_error:
@@ -3214,18 +3253,30 @@ class BridgeSelfShareTaskWorkflow:
                 {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
             )
         intake_identity = task.metadata.get("intake_identity")
-        if isinstance(intake_identity, dict) and isinstance(intake_identity.get("files"), list) and intake_identity.get("files"):
-            expected_ids = {
-                str(item.get("id") or "").strip()
-                for item in intake_identity["files"]
-                if isinstance(item, dict) and str(item.get("id") or "").strip()
-            }
-            owned_ids = {file_id for target in targets for file_id in (target.get("file_ids") or [])}
-            if owned_ids != expected_ids:
-                return StageResult.needs_action(
-                    "多目录文件归属与接收文件不一致，已阻止创建自有分享",
-                    {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
-                )
+        intake_files = intake_identity.get("files") if isinstance(intake_identity, dict) else None
+        if not isinstance(intake_files, list) or not intake_files:
+            return StageResult.needs_action(
+                "多目录状态缺少有效 intake_identity.files，已阻止创建自有分享",
+                {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+            )
+        if any(not isinstance(item, dict) or not str(item.get("id") or "").strip() for item in intake_files):
+            return StageResult.needs_action(
+                "多目录状态包含无效 intake 文件记录，已阻止创建自有分享",
+                {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+            )
+        expected_ids = {str(item["id"]).strip() for item in intake_files}
+        owned_ids = {file_id for target in targets for file_id in (target.get("file_ids") or [])}
+        if owned_ids != expected_ids:
+            return StageResult.needs_action(
+                "多目录文件归属与接收文件不一致，已阻止创建自有分享",
+                {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+            )
+        operation_error = self._multi_target_operations_validation_error(task, targets)
+        if operation_error:
+            return StageResult.needs_action(
+                operation_error,
+                {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+            )
         for target in targets:
             validation_error = self._multi_target_share_validation_error(task, row, target)
             if validation_error:
