@@ -185,7 +185,7 @@ Expected: both inspect successfully and the version image lists `linux/amd64` an
 
 - [ ] **Step 5: Back up only remote deployment metadata and update the container**
 
-Over SSH to `root@192.168.5.28`, in the existing compose directory, run the configured deployment commands without touching `.env`, `/data`, or media mounts:
+Over SSH to the configured Unraid host, in the existing compose directory, run the deployment commands without touching `.env`, `/data`, or media mounts:
 
 ```bash
 cp -a data "backups/data-before-v0.4.20-$(date +%Y%m%d-%H%M%S)"
