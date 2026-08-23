@@ -2465,6 +2465,7 @@ class BridgeSelfShareTaskWorkflow:
             return "多目录状态损坏：organized_targets 必须是列表"
         if not targets:
             return "多目录状态为空：organized_targets 没有可处理目标"
+        seen_file_ids = set()
         for index, target in enumerate(targets):
             if not isinstance(target, dict):
                 return f"多目录状态损坏：organized_targets[{index}] 必须是对象"
@@ -2481,8 +2482,28 @@ class BridgeSelfShareTaskWorkflow:
                 not isinstance(value, str) or not value.strip() for value in file_ids
             ):
                 return f"多目录状态损坏：organized_targets[{index}].file_ids 必须是非空字符串列表"
+            normalized_file_ids = [value.strip() for value in file_ids]
+            if len(set(normalized_file_ids)) != len(normalized_file_ids):
+                return f"多目录状态损坏：organized_targets[{index}] 文件归属重复"
+            overlap = seen_file_ids.intersection(normalized_file_ids)
+            if overlap:
+                return f"多目录状态损坏：文件归属重复：{sorted(overlap)[0]}"
+            seen_file_ids.update(normalized_file_ids)
             folder_id = folder.get("file_id")
+            folder_name = folder.get("file_name")
+            parent_id = folder.get("parent_id")
             share_file_id = share.get("file_id")
+            share_status = share.get("status")
+            if not isinstance(folder_name, str) or not folder_name.strip():
+                return f"多目录状态损坏：organized_targets[{index}].folder.file_name 无效"
+            if not isinstance(parent_id, str) or not parent_id.strip():
+                return f"多目录状态损坏：organized_targets[{index}].folder.parent_id 无效"
+            if not isinstance(share_status, str) or not share_status.strip():
+                return f"多目录状态损坏：organized_targets[{index}].share.status 无效"
+            strm = target["strm"]
+            for field in ("status", "move_status", "emby_status"):
+                if not isinstance(strm.get(field), str):
+                    return f"多目录状态损坏：organized_targets[{index}].strm.{field} 必须是字符串"
             if not isinstance(target_id, str) or not target_id.strip():
                 return f"多目录状态损坏：organized_targets[{index}].target_id 无效"
             if not isinstance(folder_id, str) or not folder_id.strip():
@@ -3313,7 +3334,14 @@ class BridgeSelfShareTaskWorkflow:
             }
             request.update(recovery_metadata or {})
             if target_id:
-                request["target_id"] = target_id
+                request_target_id = str(request.get("target_id") or target_id).strip()
+                request_file_id = str(request.get("file_id") or "").strip()
+                if request_target_id != target_id or request_file_id != target_id:
+                    raise RuntimeError(
+                        f"multi-target share operation identity mismatch: target_id={request_target_id or 'missing'} "
+                        f"file_id={request_file_id or 'missing'} expected target_id={target_id} file_id={file_id}"
+                    )
+                request["target_id"] = request_target_id
             operation = self.task_store.prepare_operation(
                 int(task.id),
                 operation_key,
