@@ -48,7 +48,7 @@ from app.media.intake_identity import (
     INCOMPLETE,
     cleanup_root_action,
     collect_file_ids_under_dest,
-    dest_id_from_file_hits,
+    dest_file_ids_from_hits,
     is_season_folder_name,
     snapshot_files,
 )
@@ -82,6 +82,7 @@ _RECEIVE_RECOVERY_RETRY_SECONDS = 30
 _RECEIVE_RECOVERY_WINDOW_SECONDS = 300
 _DELETE_RECOVERY_RETRY_SECONDS = 30
 _DELETE_RECOVERY_WINDOW_SECONDS = 300
+_MULTI_DESTINATIONS = "multiple"
 
 _post_organize_guard_lock = threading.Lock()
 _post_organize_guard_last_scheduled_at: float = 0.0
@@ -1629,20 +1630,40 @@ class BridgeSelfShareTaskWorkflow:
             return False
         return expected <= found
 
-    def _resolve_intake_dest_folder(
+    def _organized_target_for_dest(
+        self,
+        dest: str,
+        file_ids: list[str],
+        folder: dict[str, Any],
+        recognition: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "target_id": str(dest or "").strip(),
+            "file_ids": sorted({str(value).strip() for value in file_ids if str(value).strip()}),
+            "folder": {
+                "file_id": str(folder.get("file_id") or dest).strip(),
+                "file_name": str(folder.get("file_name") or dest).strip(),
+                "parent_id": str(folder.get("parent_id") or "").strip(),
+            },
+            "recognition": dict(recognition or {}),
+            "share": {"file_id": str(dest or "").strip(), "status": "pending"},
+            "strm": {"status": "pending", "move_status": "pending", "emby_status": "pending"},
+        }
+
+    def _resolve_intake_dest_folders(
         self,
         stage_metadata: dict[str, Any],
         recognition: dict[str, Any],
         own_share_file_id: str = "",
         receive_cid: str = "",
-    ) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
+    ) -> tuple[str, list[dict[str, Any]], dict[str, Any] | None]:
         identity = stage_metadata.get("intake_identity")
         if not isinstance(identity, dict):
-            return "", None, None
+            return "", [], None
         files = [item for item in (identity.get("files") or []) if isinstance(item, dict)]
         expected_ids = [str(item.get("id") or "").strip() for item in files if str(item.get("id") or "").strip()]
         if not expected_ids:
-            return "empty_files", None, None
+            return "empty_files", [], None
         receive_cid = str(receive_cid or "").strip()
         root_ids = {str(value) for value in (identity.get("root_ids") or []) if str(value)}
         persisted_dest = str(identity.get("dest_id") or "").strip()
@@ -1663,16 +1684,17 @@ class BridgeSelfShareTaskWorkflow:
                 folder["file_name"] = persisted_dest
             dest_name = str(folder.get("file_name") or persisted_dest).strip()
             if is_season_folder_name(dest_name):
-                return INCOMPLETE, None, None
+                return INCOMPLETE, [], None
             if (
                 persisted_dest == receive_cid
                 or persisted_dest in root_ids
                 or self._dest_is_receive_child(persisted_dest, receive_cid) is not False
             ):
-                return INCOMPLETE, None, None
+                return INCOMPLETE, [], None
             if receive_cid and str(folder.get("parent_id") or "").strip() == receive_cid:
-                return INCOMPLETE, None, None
-            return persisted_dest, folder, {**identity, "dest_id": persisted_dest}
+                return INCOMPLETE, [], None
+            target = self._organized_target_for_dest(persisted_dest, expected_ids, folder, recognition)
+            return persisted_dest, [target], {**identity, "dest_id": persisted_dest}
         file_hits: list[dict[str, Any]] = []
         folder_hits: list[dict[str, Any]] = []
         tmdb_search_failed = False
@@ -1717,7 +1739,52 @@ class BridgeSelfShareTaskWorkflow:
                         LOG.debug("Failed to list season children dest=%s", season_id, exc_info=True)
             folder_hits.extend(dest_children)
             file_hits.extend(dest_children)
-        dest = INCOMPLETE
+        def expand_candidate_destinations(current: dict[str, list[str]] | None) -> dict[str, list[str]] | None:
+            if current:
+                return current
+            folder_map = {p115_item_id(item): item for item in folder_hits if p115_item_id(item)}
+            expected_set = set(expected_ids)
+            candidate_dest_ids: set[str] = set()
+            for item in file_hits:
+                if p115_item_id(item) not in expected_set:
+                    continue
+                parent_id = p115_item_parent_id(item)
+                parent = folder_map.get(parent_id) or {}
+                candidate = p115_item_parent_id(parent) if is_season_folder_name(p115_file_name(parent)) else parent_id
+                if candidate:
+                    candidate_dest_ids.add(candidate)
+            for candidate in sorted(candidate_dest_ids):
+                if candidate in root_ids or candidate == receive_cid:
+                    continue
+                try:
+                    children = self._p115_list_files(candidate)
+                except Exception:
+                    LOG.debug("Failed to list candidate dest dest=%s", candidate, exc_info=True)
+                    continue
+                folder_hits.extend(item for item in children if isinstance(item, dict))
+                file_hits.extend(item for item in children if isinstance(item, dict))
+                for child in children:
+                    if not isinstance(child, dict) or not p115_is_folder(child):
+                        continue
+                    season_id = p115_item_id(child)
+                    if not season_id or not is_season_folder_name(p115_file_name(child)):
+                        continue
+                    try:
+                        episodes = self._p115_list_files(season_id)
+                    except Exception:
+                        LOG.debug("Failed to list candidate season dest=%s season=%s", candidate, season_id, exc_info=True)
+                        continue
+                    file_hits.extend(item for item in episodes if isinstance(item, dict))
+                current = dest_file_ids_from_hits(
+                    file_hits=file_hits,
+                    folder_hits=folder_hits,
+                    expected_ids=expected_ids,
+                )
+                if current is None or current:
+                    break
+            return current
+
+        grouped: dict[str, list[str]] | None = {}
         if hasattr(self.p115, "search_files"):
             for item in files:
                 name = str(item.get("name") or "").strip()
@@ -1727,20 +1794,17 @@ class BridgeSelfShareTaskWorkflow:
                     except Exception:
                         LOG.debug("Failed to search intake file name=%s", name, exc_info=True)
                 self._enrich_folder_hits_from_file_parents(file_hits, folder_hits, expected_ids)
-                dest = dest_id_from_file_hits(
+                grouped = dest_file_ids_from_hits(
                     file_hits=file_hits,
                     folder_hits=folder_hits,
                     expected_ids=expected_ids,
                 )
-                if dest == CONFLICT:
-                    return CONFLICT, None, None
-                if dest != INCOMPLETE:
-                    if self._intake_expected_files_located(dest, expected_ids, file_hits):
-                        break
-                    dest = INCOMPLETE
+                grouped = expand_candidate_destinations(grouped)
+                if grouped is None or grouped:
+                    break
             found_ids = {p115_item_id(item) for item in file_hits if p115_item_id(item)}
             for file_id in expected_ids:
-                if dest != INCOMPLETE or file_id in found_ids:
+                if grouped or file_id in found_ids:
                     continue
                 hits: list[dict[str, Any]] = []
                 info = None
@@ -1761,47 +1825,78 @@ class BridgeSelfShareTaskWorkflow:
                 file_hits.extend(hits)
                 found_ids.update(p115_item_id(item) for item in hits if p115_item_id(item))
                 self._enrich_folder_hits_from_file_parents(file_hits, folder_hits, expected_ids)
-                dest = dest_id_from_file_hits(
+                grouped = dest_file_ids_from_hits(
                     file_hits=file_hits,
                     folder_hits=folder_hits,
                     expected_ids=expected_ids,
                 )
-                if dest == CONFLICT:
-                    return CONFLICT, None, None
-                if dest != INCOMPLETE:
-                    if self._intake_expected_files_located(dest, expected_ids, file_hits):
-                        break
-                    dest = INCOMPLETE
-        if dest == CONFLICT:
-            return CONFLICT, None, None
-        if dest != INCOMPLETE:
-            folder = self._folder_record_for_dest(dest, folder_hits)
-            dest_name = str(folder.get("file_name") or dest).strip()
-            if is_season_folder_name(dest_name):
-                return INCOMPLETE, None, None
-            if tmdb_search_failed:
-                return INCOMPLETE, None, None
-            if dest_name == dest and tmdb_dest_ids and dest not in tmdb_dest_ids:
-                return INCOMPLETE, None, None
-        if dest == receive_cid or dest in root_ids or self._dest_is_receive_child(dest, receive_cid) is not False:
-            return INCOMPLETE, None, None
-        persisted = str(own_share_file_id or "").strip()
-        if dest == INCOMPLETE:
-            if (
-                persisted
-                and persisted not in root_ids
-                and persisted != receive_cid
-                and self._dest_is_receive_child(persisted, receive_cid) is False
-            ):
-                folder = self._folder_record_for_dest(persisted, folder_hits)
+                grouped = expand_candidate_destinations(grouped)
+                if grouped is None or grouped:
+                    break
+        grouped = expand_candidate_destinations(grouped)
+        if grouped is None:
+            return CONFLICT, [], None
+        if tmdb_search_failed and grouped:
+            return INCOMPLETE, [], None
+        if grouped:
+            targets: list[dict[str, Any]] = []
+            for dest, file_ids in grouped.items():
+                folder = self._folder_record_for_dest(dest, folder_hits)
+                dest_name = str(folder.get("file_name") or dest).strip()
+                if is_season_folder_name(dest_name):
+                    return INCOMPLETE, [], None
+                if dest_name == dest and tmdb_dest_ids and dest not in tmdb_dest_ids:
+                    return INCOMPLETE, [], None
+                if not self._intake_expected_files_located(dest, file_ids, file_hits):
+                    return INCOMPLETE, [], None
+                if (
+                    dest == receive_cid
+                    or dest in root_ids
+                    or self._dest_is_receive_child(dest, receive_cid) is not False
+                ):
+                    return INCOMPLETE, [], None
                 if receive_cid and str(folder.get("parent_id") or "").strip() == receive_cid:
-                    return INCOMPLETE, None, None
-                return persisted, folder, {**identity, "dest_id": persisted}
-            return INCOMPLETE, None, None
-        folder = self._folder_record_for_dest(dest, folder_hits)
-        if receive_cid and str(folder.get("parent_id") or "").strip() == receive_cid:
-            return INCOMPLETE, None, None
-        return dest, folder, {**identity, "dest_id": dest}
+                    return INCOMPLETE, [], None
+                targets.append(self._organized_target_for_dest(dest, file_ids, folder, recognition))
+            targets.sort(key=lambda item: str(item.get("target_id") or ""))
+            first_dest = str(targets[0].get("target_id") or "") if targets else ""
+            return (
+                _MULTI_DESTINATIONS if len(targets) > 1 else first_dest,
+                targets,
+                {**identity, "dest_id": first_dest},
+            )
+        persisted = str(own_share_file_id or "").strip()
+        if (
+            persisted
+            and persisted not in root_ids
+            and persisted != receive_cid
+            and self._dest_is_receive_child(persisted, receive_cid) is False
+        ):
+            folder = self._folder_record_for_dest(persisted, folder_hits)
+            if receive_cid and str(folder.get("parent_id") or "").strip() == receive_cid:
+                return INCOMPLETE, [], None
+            target = self._organized_target_for_dest(persisted, expected_ids, folder, recognition)
+            return persisted, [target], {**identity, "dest_id": persisted}
+        return INCOMPLETE, [], None
+
+    def _resolve_intake_dest_folder(
+        self,
+        stage_metadata: dict[str, Any],
+        recognition: dict[str, Any],
+        own_share_file_id: str = "",
+        receive_cid: str = "",
+    ) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
+        status, targets, identity = self._resolve_intake_dest_folders(
+            stage_metadata,
+            recognition,
+            own_share_file_id=own_share_file_id,
+            receive_cid=receive_cid,
+        )
+        if status == _MULTI_DESTINATIONS:
+            return CONFLICT, None, None
+        if not targets:
+            return status, None, None
+        return status, targets[0].get("folder"), identity
 
     def _complete_organized_folder(
         self,
@@ -1852,6 +1947,65 @@ class BridgeSelfShareTaskWorkflow:
             "已找到 CMS 整理后的 115 文件夹",
             complete_metadata,
         )
+
+    def _complete_organized_targets(
+        self,
+        task,
+        row: dict[str, Any],
+        targets: list[dict[str, Any]],
+        title: str,
+        stage_metadata: dict[str, Any],
+        hint_metadata: dict[str, Any],
+    ) -> StageResult:
+        normalized_targets: list[dict[str, Any]] = []
+        for raw_target in targets:
+            target = dict(raw_target)
+            folder = dict(target.get("folder") or {})
+            existing_library_category = category_from_existing_library_folder(self.move_config, folder)
+            target_recognition = dict(target.get("recognition") or {})
+            if existing_library_category and not str(folder.get("category") or "").strip():
+                folder["category"] = existing_library_category
+            target_recognition.update(
+                {
+                    "organized_parent_id": str(folder.get("parent_id") or ""),
+                    "parent_id": str(folder.get("parent_id") or ""),
+                    "category": str(folder.get("category") or target_recognition.get("category") or ""),
+                }
+            )
+            target["folder"] = folder
+            target["recognition"] = target_recognition
+            if self._conflicting_folder_owner(task, folder, target_recognition, row, title):
+                return StageResult.needs_action(
+                    "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享",
+                    {"submission_id": int(row["id"]), "own_share_file_id": ""},
+                )
+            normalized_targets.append(target)
+        normalized_targets.sort(key=lambda item: str(item.get("target_id") or ""))
+        first = normalized_targets[0] if normalized_targets else {}
+        first_folder = dict(first.get("folder") or {})
+        row = self.store.update_self_share(
+            int(row["id"]),
+            workflow_phase="organized_found",
+            own_share_file_id=first_folder.get("file_id"),
+            own_share_file_name=first_folder.get("file_name"),
+        ) or row
+        first_recognition = dict(first.get("recognition") or {})
+        if hasattr(self.store, "update_recognition") and first_recognition:
+            self.store.update_recognition(int(row["id"]), first_recognition, "organized_found")
+        complete_metadata = {
+            "submission_id": int(row["id"]),
+            "multi_target_version": 1,
+            "organized_targets": normalized_targets,
+            "organized_scan_cursor": {},
+            **hint_metadata,
+        }
+        identity = stage_metadata.get("intake_identity")
+        if isinstance(identity, dict):
+            complete_metadata["intake_identity"] = {
+                **identity,
+                "dest_id": str(first.get("target_id") or "").strip(),
+            }
+        return StageResult.complete("已找到 CMS 整理后的多个 115 文件夹", complete_metadata)
 
     def _stage_organizing(self, task):
         row = self._submission_row(task)
@@ -1953,7 +2107,7 @@ class BridgeSelfShareTaskWorkflow:
             for value in (stage_metadata.get("rejected_organized_file_ids") or [])
             if str(value).strip()
         }
-        dest_status, dest_folder, dest_identity = self._resolve_intake_dest_folder(
+        dest_status, dest_targets, dest_identity = self._resolve_intake_dest_folders(
             stage_metadata,
             recognition,
             own_share_file_id=str(row.get("own_share_file_id") or ""),
@@ -1972,16 +2126,25 @@ class BridgeSelfShareTaskWorkflow:
             )
         if dest_status == CONFLICT:
             return StageResult.needs_action(
-                "接收文件落到多个片库目录，已停止自动绑定",
+                "接收文件归属存在歧义，已停止自动绑定",
                 {"submission_id": int(row["id"])},
             )
-        if dest_folder:
+        if dest_targets:
             if dest_identity:
                 stage_metadata["intake_identity"] = dest_identity
+            if dest_status == _MULTI_DESTINATIONS:
+                return self._complete_organized_targets(
+                    task,
+                    row,
+                    dest_targets,
+                    title,
+                    stage_metadata,
+                    hint_metadata,
+                )
             return self._complete_organized_folder(
                 task,
                 row,
-                dest_folder,
+                dest_targets[0]["folder"],
                 recognition,
                 title,
                 stage_metadata,

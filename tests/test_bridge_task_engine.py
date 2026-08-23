@@ -1039,6 +1039,77 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertIsNone(folder)
             self.assertIsNone(identity)
 
+    def test_organizing_stage_persists_multiple_complete_destinations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="拆分剧集") or row
+            row = self.submissions.update_self_share(
+                int(row["id"]), workflow_phase="auto_organize_submitted"
+            ) or row
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {
+                    "title": "拆分剧集",
+                    "share_name": "拆分剧集",
+                    "tmdb_id": "123456",
+                    "category": "外国电视",
+                    "type": "tv",
+                },
+                "tmdb_hint_pending",
+            ) or row
+            self.p115.search_hits = {
+                "123456": [
+                    {"cid": "dest-b", "pid": "tv-parent", "n": "B-拆分剧集-[tmdb=123456]", "fc": 1},
+                    {"cid": "dest-a", "pid": "tv-parent", "n": "A-拆分剧集-[tmdb=123456]", "fc": 1},
+                ],
+            }
+            self.p115.files_by_parent = {
+                "dest-a": [{"cid": "season-a", "pid": "dest-a", "n": "Season 01", "fc": 1}],
+                "dest-b": [{"cid": "season-b", "pid": "dest-b", "n": "Season 02", "fc": 1}],
+                "season-a": [{"fid": "episode-a", "cid": "season-a", "n": "01.mkv"}],
+                "season-b": [{"fid": "episode-b", "cid": "season-b", "n": "02.mkv"}],
+            }
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "intake_identity": {
+                        "root_ids": ["received-root"],
+                        "files": [
+                            {"id": "episode-a", "name": "01.mkv"},
+                            {"id": "episode-b", "name": "02.mkv"},
+                        ],
+                    },
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["multi_target_version"], 1)
+            targets = result.metadata["organized_targets"]
+            self.assertEqual([target["target_id"] for target in targets], ["dest-a", "dest-b"])
+            self.assertEqual(targets[0]["file_ids"], ["episode-a"])
+            self.assertEqual(targets[1]["file_ids"], ["episode-b"])
+            for target in targets:
+                self.assertEqual(
+                    set(target),
+                    {"target_id", "file_ids", "folder", "recognition", "share", "strm"},
+                )
+                self.assertEqual(set(target["folder"]), {"file_id", "file_name", "parent_id"})
+                self.assertEqual(target["share"]["status"], "pending")
+                self.assertEqual(target["strm"]["status"], "pending")
+            self.assertEqual(result.metadata["intake_identity"]["root_ids"], ["received-root"])
+            self.assertEqual(
+                [item["id"] for item in result.metadata["intake_identity"]["files"]],
+                ["episode-a", "episode-b"],
+            )
+            self.assertEqual(result.metadata["intake_identity"]["dest_id"], "dest-a")
+
     def test_organizing_stage_rejects_folder_owned_by_different_tmdb_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
