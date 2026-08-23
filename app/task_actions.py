@@ -16,7 +16,7 @@ from .task_store import (
 )
 
 
-TASK_ACTIONS = frozenset({"retry", "emby", "restore", "reprocess", "terminate"})
+TASK_ACTIONS = frozenset({"retry", "emby", "restore", "reprocess", "resume_organizing", "terminate"})
 _DOWNSTREAM_RECOVERY_STAGES = frozenset({TaskStage.MOVED, TaskStage.EMBY_CONFIRMED, TaskStage.CLEANED})
 _TERMINAL_ACTION_STATUSES = frozenset({TaskStatus.FAILED, TaskStatus.NEEDS_ACTION, TaskStatus.SUCCEEDED})
 
@@ -52,7 +52,32 @@ def available_lifecycle_actions(task: TaskSnapshot) -> frozenset[str]:
     return frozenset()
 
 
-def available_task_actions(task: TaskSnapshot, max_retries: int) -> frozenset[str]:
+def can_resume_organizing(task: TaskSnapshot, store: TaskStore) -> bool:
+    if task.status != TaskStatus.NEEDS_ACTION or str(task.claimed_by or "").strip():
+        return False
+    if task.current_stage != TaskStage.NEEDS_ACTION:
+        return False
+    if str(task.metadata.get("_defer_stage") or "") != TaskStage.ORGANIZING.value:
+        return False
+    if not isinstance(task.metadata.get("intake_identity"), dict):
+        return False
+    if str(task.metadata.get("own_share_code") or "").strip():
+        return False
+    operations = store.list_operations(task.id)
+    if any(operation.operation_type == "create_share" for operation in operations):
+        return False
+    return any(
+        operation.operation_type == "receive_share" and operation.status == "succeeded"
+        for operation in operations
+    )
+
+
+def available_task_actions(
+    task: TaskSnapshot,
+    max_retries: int,
+    *,
+    store: TaskStore | None = None,
+) -> frozenset[str]:
     """Return actions valid for this snapshot without mutating the task."""
     actions: set[str] = set()
     if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING} and not task_termination_requested(task):
@@ -69,6 +94,8 @@ def available_task_actions(task: TaskSnapshot, max_retries: int) -> frozenset[st
         task.current_stage != TaskStage.RECEIVED and is_unscheduled_active_task(task)
     ):
         actions.add("reprocess")
+    if store is not None and can_resume_organizing(task, store):
+        actions.add("resume_organizing")
     return frozenset(actions)
 
 
@@ -80,6 +107,7 @@ def _messages(actor: str, action: str) -> tuple[str | None, str]:
             "emby": (None, "TG 按钮触发 Emby 检查"),
             "restore": ("TG 按钮触发 STRM 恢复", "TG 按钮 STRM 恢复已入队"),
             "reprocess": (None, "TG 按钮触发从头重跑"),
+            "resume_organizing": ("TG 按钮触发继续整理", "继续整理已入队"),
         }
     elif actor == "Web":
         labels = {
@@ -87,6 +115,7 @@ def _messages(actor: str, action: str) -> tuple[str | None, str]:
             "emby": (None, "Web 触发 Emby 检查"),
             "restore": ("Web 触发 STRM 恢复", "Web STRM 恢复已入队"),
             "reprocess": (None, "Web 触发从头重跑"),
+            "resume_organizing": ("手动触发继续整理", "继续整理已入队"),
         }
     else:
         labels = {
@@ -94,6 +123,7 @@ def _messages(actor: str, action: str) -> tuple[str | None, str]:
             "emby": (None, f"{actor} 触发 Emby 检查"),
             "restore": (f"{actor} 触发 STRM 恢复", f"{actor} STRM 恢复已入队"),
             "reprocess": (None, f"{actor} 触发从头重跑"),
+            "resume_organizing": (f"{actor} 触发继续整理", "继续整理已入队"),
         }
     return labels[action]
 
@@ -165,7 +195,7 @@ def apply_task_action(
         if updated is None:
             return _failed_result(task, "操作未执行，任务状态已变化")
         return TaskActionResult(True, updated, "任务终止已请求")
-    actions = available_task_actions(task, max_retries)
+    actions = available_task_actions(task, max_retries, store=store)
     if action not in actions:
         if str(task.claimed_by or "").strip():
             reason = "任务正在执行，请稍后再试"
@@ -173,6 +203,8 @@ def apply_task_action(
             reason = decide_retry(task, max_retries=max_retries).reason
         elif action == "reprocess":
             reason = "当前任务不支持从头重跑"
+        elif action == "resume_organizing":
+            reason = "当前任务不满足继续整理条件"
         else:
             reason = "当前任务不支持该操作"
         return TaskActionResult(False, task, reason)
@@ -196,6 +228,15 @@ def apply_task_action(
         metadata_patch = {
             "retry_from_stage": task.current_stage.value,
             "retry_stage": TaskStage.EMBY_CONFIRMED.value,
+        }
+    if action == "resume_organizing":
+        target_stage = TaskStage.ORGANIZING
+        metadata_patch = {
+            "resume_from_stage": task.current_stage.value,
+            "resume_stage": TaskStage.ORGANIZING.value,
+            "_defer_stage": "",
+            "_defer_message": "",
+            "_defer_count": 0,
         }
     elif action == "reprocess":
         target_stage = reprocess_stage_for(task)

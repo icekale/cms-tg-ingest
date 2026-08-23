@@ -53,6 +53,8 @@ REPROCESS_METADATA_DELETE_KEYS = (
     "_lock_reason",
     "organized_scan_cursor",
     "organized_folder",
+    "organized_targets",
+    "multi_target_version",
     "direct_strm_removed",
     "received_title",
     "received_file_ids",

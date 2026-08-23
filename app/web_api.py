@@ -284,6 +284,34 @@ def _safe_api_value(value: Any) -> Any:
     return value
 
 
+def _organized_target_summary(task: TaskSnapshot) -> list[dict[str, str]]:
+    raw_targets = task.metadata.get("organized_targets")
+    if not isinstance(raw_targets, list):
+        return []
+    summary = []
+    for raw in raw_targets:
+        if not isinstance(raw, dict):
+            continue
+        folder = raw.get("folder") if isinstance(raw.get("folder"), dict) else {}
+        recognition = raw.get("recognition") if isinstance(raw.get("recognition"), dict) else {}
+        share = raw.get("share") if isinstance(raw.get("share"), dict) else {}
+        strm = raw.get("strm") if isinstance(raw.get("strm"), dict) else {}
+        summary.append(
+            {
+                "target_id": str(raw.get("target_id") or ""),
+                "folder_name": str(folder.get("file_name") or ""),
+                "tmdb_id": str(recognition.get("tmdb_id") or ""),
+                "category": str(recognition.get("category") or ""),
+                "share_status": str(share.get("status") or ""),
+                "sync_status": str(share.get("sync_status") or ""),
+                "strm_status": str(strm.get("status") or ""),
+                "move_status": str(strm.get("move_status") or ""),
+                "emby_status": str(strm.get("emby_status") or ""),
+            }
+        )
+    return summary
+
+
 def serialize_task(
     task: TaskSnapshot,
     *,
@@ -291,13 +319,14 @@ def serialize_task(
     lifecycle_actions_enabled: bool = True,
     max_retries: int = 3,
     include_completion_drift: bool = False,
+    task_store: TaskStore | None = None,
 ) -> dict[str, Any]:
     current_time = time.time() if now is None else float(now)
     elapsed, p115_calls = format_stage_observability(task)
     termination_requested = task_termination_requested(task)
     if lifecycle_actions_enabled:
         available_actions = sorted(
-            available_lifecycle_actions(task) | available_task_actions(task, max_retries=max_retries)
+            available_lifecycle_actions(task) | available_task_actions(task, max_retries=max_retries, store=task_store)
         )
     else:
         available_actions = []
@@ -323,6 +352,7 @@ def serialize_task(
         "next_run_at": task.next_run_at,
         "claimed": bool(task.claimed_by),
         "available_actions": available_actions,
+        "organized_targets": _organized_target_summary(task),
         "termination_requested": termination_requested,
         "why_slow": explain_task_slowness(task, now=current_time),
         "stage_elapsed": elapsed,
@@ -588,6 +618,7 @@ def serialize_health(
                 summary.latest_problem,
                 now=current_time,
                 lifecycle_actions_enabled=enabled,
+                task_store=store,
             )
             if summary.latest_problem
             else None
@@ -597,6 +628,7 @@ def serialize_health(
                 summary.latest_lock_wait,
                 now=current_time,
                 lifecycle_actions_enabled=enabled,
+                task_store=store,
             )
             if summary.latest_lock_wait
             else None
@@ -815,6 +847,7 @@ def api_tasks(
             now=now,
             lifecycle_actions_enabled=lifecycle_actions_enabled,
             max_retries=max_retries,
+            task_store=store,
         )
         for task in tasks
     ]
@@ -843,6 +876,7 @@ def api_task_detail(
         lifecycle_actions_enabled=lifecycle_actions_enabled,
         max_retries=max_retries,
         include_completion_drift=True,
+        task_store=store,
     )
     result["events"] = [serialize_event(event) for event in store.list_events(task.id)]
     return result

@@ -310,10 +310,15 @@ def format_taskstore_status(tasks: list[Any]) -> RichDocument:
     return RichDocument((heading("TaskStore 最近任务"), table(("#", "任务", "阶段", "状态", "错误"), table_rows), *extra))
 
 
-def task_action_keyboard(tasks: list[Any], limit: int = 5, max_retries: int = 3) -> dict[str, Any] | None:
+def task_action_keyboard(
+    tasks: list[Any],
+    limit: int = 5,
+    max_retries: int = 3,
+    task_store: Any | None = None,
+) -> dict[str, Any] | None:
     buttons: list[list[dict[str, str]]] = []
     for task in tasks[:limit]:
-        actions = available_task_actions(task, max_retries=max_retries)
+        actions = available_task_actions(task, max_retries=max_retries, store=task_store)
         row = [
             {"text": f"详情 #{task.id}", "callback_data": f"task_detail:{task.id}"},
         ]
@@ -325,6 +330,8 @@ def task_action_keyboard(tasks: list[Any], limit: int = 5, max_retries: int = 3)
             row.append({"text": f"恢复 STRM #{task.id}", "callback_data": f"task_restore:{task.id}"})
         if "reprocess" in actions:
             row.append({"text": f"从头重跑 #{task.id}", "callback_data": f"task_reprocess:{task.id}"})
+        if "resume_organizing" in actions:
+            row.append({"text": f"继续整理 #{task.id}", "callback_data": f"task_resume_organizing:{task.id}"})
         category = str(task.category or task.metadata.get("category") or task.metadata.get("category_final") or "").strip()
         submission_id = task.submission_id or task.metadata.get("submission_id")
         if (

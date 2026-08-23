@@ -131,7 +131,40 @@ class WebApiTests(unittest.TestCase):
 
             drift.assert_not_called()
 
-    def test_task_api_exposes_backend_lifecycle_actions(self):
+    def test_task_api_exposes_resume_and_sanitized_target_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("resume-api", "", "https://115cdn.com/s/resume-api")
+            store.record_event(
+                task.id,
+                TaskStage.NEEDS_ACTION,
+                TaskStatus.NEEDS_ACTION,
+                "等待 CMS 整理完成",
+                metadata_patch={
+                    "_defer_stage": TaskStage.ORGANIZING.value,
+                    "intake_identity": {"root_ids": ["root"], "files": [{"id": "file"}]},
+                    "organized_targets": [
+                        {
+                            "target_id": "dest-a",
+                            "folder": {"file_name": "Show A"},
+                            "recognition": {"tmdb_id": "111", "category": "外国电视"},
+                            "share": {"status": "succeeded", "sync_status": "submitted", "receive_code": "1212"},
+                            "strm": {"status": "ready", "move_status": "moved", "emby_status": "confirmed"},
+                        }
+                    ],
+                },
+            )
+            operation = store.prepare_operation(task.id, "g0:u0:receive_share", "receive_share", {"share_code": "resume-api"})
+            store.start_operation(task.id, operation.operation_key)
+            store.complete_operation(task.id, operation.operation_key, {"received": True})
+
+            payload = json.loads(WebApp(store).handle_request("GET", f"/api/v1/tasks/{task.id}", {}, b"")[2])
+
+            self.assertIn("resume_organizing", payload["available_actions"])
+            self.assertEqual(payload["organized_targets"][0]["tmdb_id"], "111")
+            self.assertEqual(payload["organized_targets"][0]["folder_name"], "Show A")
+            self.assertNotIn("receive_code", json.dumps(payload["organized_targets"]))
+
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
             task = store.upsert_task("actions", "", "https://115cdn.com/s/actions")

@@ -3960,13 +3960,14 @@ def handle_task_action_callback(
         if event_lines:
             text += "\n最近事件：\n" + "\n".join(event_lines)
         telegram.answer_callback_query(callback_id, "已发送任务详情", show_alert=False)
-        telegram.send_message(chat_id, text, reply_markup=task_action_keyboard([task], max_retries=max_retries))
+        telegram.send_message(chat_id, text, reply_markup=task_action_keyboard([task], max_retries=max_retries, task_store=task_store))
         return True
     task_action = {
         "task_retry": "retry",
         "task_emby": "emby",
         "task_restore": "restore",
         "task_reprocess": "reprocess",
+        "task_resume_organizing": "resume_organizing",
     }.get(action)
     if task_action:
         result = apply_task_action(
@@ -4395,7 +4396,7 @@ def handle_update(
             tasks = task_store.list_recent_tasks(limit=8)
             taskstore_status = format_taskstore_status(tasks)
             if taskstore_status:
-                telegram.send_rich_message(chat_id, taskstore_status, reply_markup=task_action_keyboard(tasks, max_retries=max_retries))
+                telegram.send_rich_message(chat_id, taskstore_status, reply_markup=task_action_keyboard(tasks, max_retries=max_retries, task_store=task_store))
                 return
         telegram.send_rich_message(chat_id, format_status(store.recent(limit=8)))
         return

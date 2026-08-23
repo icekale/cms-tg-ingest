@@ -14,6 +14,69 @@ class TaskActionsTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         return TaskStore(Path(tmp.name) / "tasks.db")
 
+    def test_resume_organizing_requeues_without_new_receive_generation(self):
+        store = self.make_store()
+        task = store.upsert_task("resume", "", "https://115cdn.com/s/resume")
+        task = store.record_event(
+            task.id,
+            TaskStage.NEEDS_ACTION,
+            TaskStatus.NEEDS_ACTION,
+            "等待 CMS 整理完成",
+            metadata_patch={
+                "_defer_stage": TaskStage.ORGANIZING.value,
+                "intake_identity": {"root_ids": ["root"], "files": [{"id": "file"}]},
+            },
+        )
+        operation = store.prepare_operation(task.id, "g0:u0:receive_share", "receive_share", {"share_code": "resume"})
+        self.assertIsNotNone(operation)
+        store.start_operation(task.id, operation.operation_key)
+        store.complete_operation(task.id, operation.operation_key, {"received": True})
+
+        result = apply_task_action(store, task.id, "resume_organizing", max_retries=3, actor="Web")
+        self.assertTrue(result.applied)
+        resumed = store.find_task(task.id)
+        self.assertEqual(resumed.current_stage, TaskStage.ORGANIZING)
+        self.assertEqual(resumed.status, TaskStatus.PENDING)
+        self.assertEqual(resumed.metadata.get("_defer_stage"), "")
+        self.assertEqual(len([op for op in store.list_operations(task.id) if op.operation_type == "receive_share"]), 1)
+        self.assertNotIn("own_share_code", resumed.metadata)
+
+    def test_resume_organizing_rejects_existing_create_share_operation(self):
+        store = self.make_store()
+        task = store.upsert_task("resume-share", "", "https://115cdn.com/s/resume-share")
+        task = store.record_event(
+            task.id,
+            TaskStage.NEEDS_ACTION,
+            TaskStatus.NEEDS_ACTION,
+            "等待 CMS 整理完成",
+            metadata_patch={
+                "_defer_stage": TaskStage.ORGANIZING.value,
+                "intake_identity": {"root_ids": ["root"], "files": [{"id": "file"}]},
+            },
+        )
+        receive = store.prepare_operation(task.id, "g0:u0:receive_share", "receive_share", {})
+        store.start_operation(task.id, receive.operation_key)
+        store.complete_operation(task.id, receive.operation_key, {"received": True})
+        store.prepare_operation(task.id, "g0:u0:create_share:dest-a", "create_share", {})
+
+        self.assertNotIn("resume_organizing", available_task_actions(task, 3, store=store))
+        result = apply_task_action(store, task.id, "resume_organizing", max_retries=3, actor="Web")
+        self.assertFalse(result.applied)
+
+    def test_resume_organizing_requires_existing_receive_and_snapshot(self):
+        store = self.make_store()
+        task = store.upsert_task("resume-invalid", "", "https://115cdn.com/s/resume-invalid")
+        task = store.record_event(
+            task.id,
+            TaskStage.NEEDS_ACTION,
+            TaskStatus.NEEDS_ACTION,
+            "等待 CMS 整理完成",
+            metadata_patch={"_defer_stage": TaskStage.ORGANIZING.value},
+        )
+        self.assertNotIn("resume_organizing", available_task_actions(task, 3, store=store))
+        result = apply_task_action(store, task.id, "resume_organizing", max_retries=3, actor="Web")
+        self.assertFalse(result.applied)
+
     def test_claimed_running_task_allows_only_terminate(self):
         store = self.make_store()
         task = store.upsert_task("claimed", "", "https://115cdn.com/s/claimed")
