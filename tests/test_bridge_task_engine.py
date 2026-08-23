@@ -1305,6 +1305,74 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(targets, [])
             self.assertIsNone(identity)
 
+    def test_organizing_multi_targets_do_not_inherit_global_tmdb_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_status(int(row["id"]), "received", title="拆分剧集") or row
+            row = self.submissions.update_self_share(int(row["id"]), workflow_phase="auto_organize_submitted") or row
+            row = self.submissions.update_recognition(
+                int(row["id"]),
+                {"title": "拆分剧集", "tmdb_id": "111111", "category": "外国电视", "type": "tv"},
+                "tmdb_hint_pending",
+            ) or row
+            self.p115.search_hits = {
+                "111111": [
+                    {"cid": "dest-b", "pid": "tv-parent", "n": "B-拆分剧集-[tmdb=333333]", "fc": 1},
+                    {"cid": "dest-a", "pid": "tv-parent", "n": "A-拆分剧集-[tmdb=222222]", "fc": 1},
+                ],
+            }
+            self.p115.files_by_parent = {
+                "dest-a": [{"fid": "episode-a", "pid": "dest-a", "n": "01.mkv"}],
+                "dest-b": [{"fid": "episode-b", "pid": "dest-b", "n": "02.mkv"}],
+            }
+            task = self._claim_task(
+                "abc", "1234", TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "intake_identity": {
+                        "root_ids": ["received-root"],
+                        "files": [{"id": "episode-a", "name": "01.mkv"}, {"id": "episode-b", "name": "02.mkv"}],
+                    },
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            targets = result.metadata["organized_targets"]
+            self.assertEqual([target["recognition"].get("tmdb_id") for target in targets], ["222222", "333333"])
+
+    def test_organizing_stage_rejects_duplicate_multi_target_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            targets = self._multi_targets()
+            targets[1]["target_id"] = targets[0]["target_id"]
+            targets[1]["folder"]["file_id"] = targets[0]["folder"]["file_id"]
+            targets[1]["share"]["file_id"] = targets[0]["share"]["file_id"]
+            task = self._multi_target_task(workflow, TaskStage.SHARE_ALIAS_PREPARED, targets=targets, row=row)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("重复", result.message)
+
+    def test_organizing_stage_rejects_duplicate_folder_multi_target_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            targets = self._multi_targets()
+            targets[1]["folder"]["file_id"] = targets[0]["folder"]["file_id"]
+            targets[1]["share"]["file_id"] = targets[0]["share"]["file_id"]
+            task = self._multi_target_task(workflow, TaskStage.SHARE_ALIAS_PREPARED, targets=targets, row=row)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("重复", result.message)
+
     def test_organizing_stage_persists_multiple_complete_destinations(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)

@@ -1690,15 +1690,18 @@ class BridgeSelfShareTaskWorkflow:
         folder: dict[str, Any],
         recognition: dict[str, Any],
     ) -> dict[str, Any]:
+        folder_name = str(folder.get("file_name") or dest).strip()
+        folder_tmdb = str(extract_tmdb_id_from_name(folder_name) or "").strip()
+        target_recognition = {"tmdb_id": folder_tmdb} if folder_tmdb else {}
         return {
             "target_id": str(dest or "").strip(),
             "file_ids": sorted({str(value).strip() for value in file_ids if str(value).strip()}),
             "folder": {
                 "file_id": str(folder.get("file_id") or dest).strip(),
-                "file_name": str(folder.get("file_name") or dest).strip(),
+                "file_name": folder_name,
                 "parent_id": str(folder.get("parent_id") or "").strip(),
             },
-            "recognition": dict(recognition or {}),
+            "recognition": target_recognition,
             "share": {"file_id": str(dest or "").strip(), "status": "pending"},
             "strm": {"status": "pending", "move_status": "pending", "emby_status": "pending"},
         }
@@ -1917,7 +1920,7 @@ class BridgeSelfShareTaskWorkflow:
                     return INCOMPLETE, [], None
                 if receive_cid and str(folder.get("parent_id") or "").strip() == receive_cid:
                     return INCOMPLETE, [], None
-                targets.append(self._organized_target_for_dest(dest, file_ids, folder, recognition))
+                targets.append(self._organized_target_for_dest(dest, file_ids, folder, {}))
             targets.sort(key=lambda item: str(item.get("target_id") or ""))
             first_dest = str(targets[0].get("target_id") or "") if targets else ""
             return (
@@ -2021,6 +2024,12 @@ class BridgeSelfShareTaskWorkflow:
         stage_metadata: dict[str, Any],
         hint_metadata: dict[str, Any],
     ) -> StageResult:
+        duplicate_error = self._target_list_duplicate_error(targets)
+        if duplicate_error:
+            return StageResult.needs_action(
+                duplicate_error,
+                {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+            )
         normalized_targets: list[dict[str, Any]] = []
         for raw_target in targets:
             target = dict(raw_target)
@@ -2029,6 +2038,9 @@ class BridgeSelfShareTaskWorkflow:
             target_recognition = dict(target.get("recognition") or {})
             if existing_library_category and not str(folder.get("category") or "").strip():
                 folder["category"] = existing_library_category
+            folder_tmdb = str(extract_tmdb_id_from_name(str(folder.get("file_name") or "")) or "").strip()
+            if folder_tmdb:
+                target_recognition["tmdb_id"] = folder_tmdb
             target_recognition.update(
                 {
                     "organized_parent_id": str(folder.get("parent_id") or ""),
@@ -2038,7 +2050,7 @@ class BridgeSelfShareTaskWorkflow:
             )
             target["folder"] = folder
             target["recognition"] = target_recognition
-            if self._conflicting_folder_owner(task, folder, target_recognition, row, title):
+            if self._conflicting_folder_owner(task, folder, target_recognition, row, title, multi_target=True):
                 return StageResult.needs_action(
                     "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享",
                     {"submission_id": int(row["id"]), "own_share_file_id": ""},
@@ -2440,6 +2452,21 @@ class BridgeSelfShareTaskWorkflow:
         return int(task.metadata.get("multi_target_version") or 0) == 1 and isinstance(task.metadata.get("organized_targets"), list)
 
     @staticmethod
+    def _target_list_duplicate_error(targets):
+        target_ids = set()
+        folder_ids = set()
+        for target in targets or []:
+            target_id = str((target or {}).get("target_id") or "").strip()
+            folder_id = str(((target or {}).get("folder") or {}).get("file_id") or "").strip()
+            if target_id and target_id in target_ids:
+                return f"多目录目标重复：target_id={target_id}"
+            if folder_id and folder_id in folder_ids:
+                return f"多目录文件夹目标重复：folder.file_id={folder_id}"
+            target_ids.add(target_id)
+            folder_ids.add(folder_id)
+        return ""
+
+    @staticmethod
     def _target_identity_error(target):
         target_id = str((target or {}).get("target_id") or "").strip()
         folder = (target or {}).get("folder") or {}
@@ -2471,6 +2498,12 @@ class BridgeSelfShareTaskWorkflow:
 
     def _stage_recognizing_targets(self, task, row):
         targets = self._organized_targets(task)
+        duplicate_error = self._target_list_duplicate_error(targets)
+        if duplicate_error:
+            return StageResult.needs_action(
+                duplicate_error,
+                {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+            )
         for target in targets:
             identity_error = self._target_identity_error(target)
             if identity_error:
@@ -2659,11 +2692,11 @@ class BridgeSelfShareTaskWorkflow:
             return False
         return has_tmdb_folder_mismatch(folder, recognition, row, "")
 
-    def _conflicting_folder_owner(self, task, folder, recognition, row, share_name):
+    def _conflicting_folder_owner(self, task, folder, recognition, row, share_name, *, multi_target=False):
         file_id = str(folder.get("file_id") or "").strip()
         if not file_id:
             return None
-        if self._is_multi_target_task(task):
+        if multi_target or self._is_multi_target_task(task):
             expected = str((recognition or {}).get("tmdb_id") or "").strip()
             folder_name = str((folder or {}).get("file_name") or "").strip()
             expected = expected or extract_tmdb_id_from_name(folder_name) or extract_tmdb_id_from_name(share_name)
@@ -2793,6 +2826,12 @@ class BridgeSelfShareTaskWorkflow:
 
     def _stage_share_alias_prepared_targets(self, task, row):
         targets = self._organized_targets(task)
+        duplicate_error = self._target_list_duplicate_error(targets)
+        if duplicate_error:
+            return StageResult.needs_action(
+                duplicate_error,
+                {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+            )
         for target in targets:
             identity_error = self._target_identity_error(target)
             if identity_error:
@@ -3039,6 +3078,12 @@ class BridgeSelfShareTaskWorkflow:
 
     def _stage_own_share_created_targets(self, task, row):
         targets = self._organized_targets(task)
+        duplicate_error = self._target_list_duplicate_error(targets)
+        if duplicate_error:
+            return StageResult.needs_action(
+                duplicate_error,
+                {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+            )
         for target in targets:
             identity_error = self._target_identity_error(target)
             if identity_error:
