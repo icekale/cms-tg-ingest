@@ -62,8 +62,22 @@ def dest_file_ids_from_hits(
     folder_hits: list[dict[str, Any]],
     expected_ids: list[str],
 ) -> dict[str, list[str]] | None:
-    expected = {str(value) for value in expected_ids if str(value)}
-    folders = {p115_item_id(item): item for item in folder_hits if p115_item_id(item)}
+    expected = {
+        str(value).strip()
+        for value in expected_ids
+        if value is not None and str(value).strip()
+    }
+    folders: dict[str, dict[str, Any]] = {}
+    folder_identities: dict[str, tuple[str, str]] = {}
+    for item in folder_hits:
+        folder_id = p115_item_id(item)
+        if not folder_id:
+            continue
+        identity = (p115_item_parent_id(item), p115_file_name(item))
+        if folder_id in folder_identities and folder_identities[folder_id] != identity:
+            return None
+        folder_identities[folder_id] = identity
+        folders.setdefault(folder_id, item)
     by_file: dict[str, set[str]] = {}
     for item in file_hits:
         file_id = p115_item_id(item)

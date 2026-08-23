@@ -103,6 +103,14 @@ class IntakeIdentityDestTests(unittest.TestCase):
             {"dest-a": ["episode-a"], "dest-b": ["episode-b"]},
         )
 
+    def test_grouping_empty_expected_ids_is_incomplete(self):
+        result = dest_file_ids_from_hits(
+            file_hits=[{"fid": "episode-a", "cid": "dest-a"}],
+            folder_hits=[{"fid": "dest-a", "n": "Show A"}],
+            expected_ids=[None, "  "],
+        )
+        self.assertEqual(result, {})
+
     def test_grouping_missing_expected_file_is_incomplete(self):
         result = dest_file_ids_from_hits(
             file_hits=[{"fid": "episode-a", "cid": "dest-a"}],
@@ -110,6 +118,48 @@ class IntakeIdentityDestTests(unittest.TestCase):
             expected_ids=["episode-a", "episode-b"],
         )
         self.assertEqual(result, {})
+
+    def test_grouping_sorts_reversed_hits_deterministically(self):
+        result = dest_file_ids_from_hits(
+            file_hits=[
+                {"fid": "episode-b", "cid": "dest-b"},
+                {"fid": "episode-a", "cid": "dest-a"},
+            ],
+            folder_hits=[
+                {"fid": "dest-b", "n": "Show B"},
+                {"fid": "dest-a", "n": "Show A"},
+            ],
+            expected_ids=["episode-b", "episode-a"],
+        )
+        self.assertEqual(
+            result,
+            {"dest-a": ["episode-a"], "dest-b": ["episode-b"]},
+        )
+
+    def test_grouping_duplicate_file_hit_same_destination_is_stable(self):
+        result = dest_file_ids_from_hits(
+            file_hits=[
+                {"fid": "episode-a", "cid": "dest-a"},
+                {"fid": "episode-a", "cid": "dest-a"},
+            ],
+            folder_hits=[
+                {"fid": "dest-a", "n": "Show A"},
+                {"fid": "dest-a", "n": "Show A"},
+            ],
+            expected_ids=["episode-a"],
+        )
+        self.assertEqual(result, {"dest-a": ["episode-a"]})
+
+    def test_grouping_conflicting_duplicate_folder_hit_returns_none(self):
+        result = dest_file_ids_from_hits(
+            file_hits=[{"fid": "episode-a", "cid": "dest-a"}],
+            folder_hits=[
+                {"fid": "dest-a", "cid": "library-a", "n": "Show A"},
+                {"fid": "dest-a", "cid": "library-b", "n": "Show A"},
+            ],
+            expected_ids=["episode-a"],
+        )
+        self.assertIsNone(result)
 
     def test_grouping_ambiguous_file_destination_returns_none(self):
         result = dest_file_ids_from_hits(
