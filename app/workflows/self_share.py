@@ -3674,18 +3674,19 @@ class BridgeSelfShareTaskWorkflow:
             operation_key = f"{scope}:cms_share_sync:{target_id}:{share_code}"
             operation = self.task_store.find_operation(int(task.id), operation_key)
             if operation is not None:
-                request = operation.request if isinstance(operation.request, dict) else {}
-                if any(
-                    str(request.get(key) or "").strip() != expected
-                    for key, expected in {
+                identity_error = self._cms_sync_operation_identity_error(
+                    operation,
+                    {
                         "target_id": target_id,
                         "share_code": share_code,
                         "receive_code": receive_code,
                         "cid": cid,
                         "local_path": local_path,
-                    }.items()
-                ):
-                    return f"目标 {target_id} 的 CMS 分享同步操作身份不一致", None
+                    },
+                    target_id=target_id,
+                )
+                if identity_error:
+                    return f"目标 {target_id} 的 {identity_error}", None
                 if operation.status not in {"prepared", "succeeded"}:
                     return f"目标 {target_id} 的 CMS 分享同步结果无法安全重试：{operation.status}", None
             prepared.append((target, operation, operation_key, share_code, receive_code, target_id))
@@ -3720,9 +3721,10 @@ class BridgeSelfShareTaskWorkflow:
             metadata.update(self._share_review_metadata(task, row, "unknown", error=str(exc)))
             return StageResult.defer("115 分享状态暂时无法确认，源文件暂不清理", 60, metadata)
         have_vio_file = self._as_bool_flag(status.get("have_vio_file"))
+        share_available = status.get("available")
         share_state = str(status.get("share_state") or "").strip().lower()
-        if have_vio_file or (share_state and share_state not in {"0", "1", "true"}):
-            reason = "115 标记 have_vio_file" if have_vio_file else f"115 分享状态不可用：{share_state or '未知'}"
+        if share_available is False or have_vio_file or (share_state and share_state not in {"0", "1", "true"}):
+            reason = "115 分享不可用" if share_available is False else "115 标记 have_vio_file" if have_vio_file else f"115 分享状态不可用：{share_state or '未知'}"
             row = self.store.update_self_share(
                 int(row["id"]),
                 share_validation_status="invalid",
@@ -3744,6 +3746,27 @@ class BridgeSelfShareTaskWorkflow:
         metadata = self._own_share_metadata(row)
         metadata.update(self._share_review_metadata(task, row, "pending", error=""))
         return StageResult.complete("自有分享即时验证通过，进入 115 异步审核观察期；源文件暂不清理", metadata)
+
+    @staticmethod
+    def _cms_sync_operation_identity_error(operation, expected: dict[str, str], *, target_id: str = "") -> str:
+        if operation.operation_type != "cms_share_sync":
+            return "CMS 分享同步操作类型不匹配"
+        request = operation.request if isinstance(operation.request, dict) else {}
+        for key, value in expected.items():
+            if str(request.get(key) or "").strip() != value:
+                return f"CMS 分享同步操作请求 {key} 身份不匹配"
+        if operation.status == "succeeded":
+            result = operation.result if isinstance(operation.result, dict) else {}
+            result_share_code = str(result.get("share_code") or result.get("code") or "").strip()
+            if result_share_code != expected["share_code"]:
+                return "CMS 分享同步成功结果 share_code 身份不匹配"
+            if target_id and str(result.get("target_id") or "").strip() != target_id:
+                return "CMS 分享同步成功结果 target_id 身份不匹配"
+            if target_id:
+                for key in ("file_id", "target_file_id"):
+                    if key in result and str(result.get(key) or "").strip() != target_id:
+                        return f"CMS 分享同步成功结果 {key} 身份不匹配"
+        return ""
 
     @staticmethod
     def _canonical_manifest(row: dict[str, Any]) -> dict[str, Any]:
@@ -3794,21 +3817,35 @@ class BridgeSelfShareTaskWorkflow:
                             cid=str(operation.request.get("cid") or self.self_share_config.cms_cid),
                             local_path=str(operation.request.get("local_path") or self.self_share_config.cms_local_path),
                         )
+                        response_data = dict(response) if isinstance(response, dict) else {}
+                        response_data.setdefault("share_code", share_code)
+                        response_data.setdefault("target_id", target_id)
                         completed = self.task_store.complete_operation(
                             int(task.id),
                             operation_key,
-                            response if isinstance(response, dict) else {},
+                            response_data,
                         )
                         operation = completed or self.task_store.find_operation(int(task.id), operation_key)
                     except Exception as exc:
                         uncertain = self.task_store.mark_operation_uncertain(int(task.id), operation_key, str(exc))
                         operation = uncertain or self.task_store.find_operation(int(task.id), operation_key)
-            if operation is None or operation.status != "succeeded":
+            identity_error = self._cms_sync_operation_identity_error(
+                operation,
+                {
+                    "target_id": target_id,
+                    "share_code": share_code,
+                    "receive_code": receive_code,
+                    "cid": str(self.self_share_config.cms_cid),
+                    "local_path": str(self.self_share_config.cms_local_path),
+                },
+                target_id=target_id,
+            ) if operation is not None else "CMS 分享同步操作消失"
+            if operation is None or identity_error or operation.status != "succeeded":
                 share["sync_status"] = "uncertain" if operation and operation.status == "uncertain" else "failed"
                 share["sync_error"] = str(operation.last_error or "CMS 分享同步结果无法确认") if operation else "CMS 分享同步操作消失"
                 target["share"] = share
                 return StageResult.needs_action(
-                    f"目标 {target_id} 的 CMS 分享同步结果无法安全确认，源文件已保留",
+                    f"目标 {target_id} 的 CMS 分享同步结果无法安全确认，源文件已保留：{identity_error or '状态未成功'}",
                     self._multi_target_stage_metadata(row, targets, cms_share_sync_outcome="unknown"),
                 )
             share["sync_status"] = "submitted"
@@ -3843,6 +3880,21 @@ class BridgeSelfShareTaskWorkflow:
             return StageResult.failed("缺少自有分享码", error_type="own_share_missing")
         operation_key = f"{operation_scope(task)}:cms_share_sync:{own_code}"
         operation = self.task_store.find_operation(int(task.id), operation_key)
+        if operation is not None:
+            identity_error = self._cms_sync_operation_identity_error(
+                operation,
+                {
+                    "share_code": own_code,
+                    "receive_code": own_pwd,
+                    "cid": str(self.self_share_config.cms_cid),
+                    "local_path": str(self.self_share_config.cms_local_path),
+                },
+            )
+            if identity_error:
+                return StageResult.needs_action(
+                    f"{identity_error}，源文件已保留",
+                    {"submission_id": int(row["id"]), "cms_share_sync_outcome": "unknown"},
+                )
         if row.get("share_sync_status") != "submitted" or operation is not None:
             if operation is None:
                 waiting_task = self._pending_cms_share_sync_task(task)
@@ -3876,14 +3928,30 @@ class BridgeSelfShareTaskWorkflow:
                         cid=str(operation.request.get("cid") or self.self_share_config.cms_cid),
                         local_path=str(operation.request.get("local_path") or self.self_share_config.cms_local_path),
                     )
+                    response_data = dict(response) if isinstance(response, dict) else {}
+                    response_data.setdefault("share_code", own_code)
                     completed = self.task_store.complete_operation(
                         int(task.id),
                         operation_key,
-                        response if isinstance(response, dict) else {},
+                        response_data,
                     )
                     operation = completed or self.task_store.find_operation(int(task.id), operation_key)
             if operation is None:
                 raise RuntimeError("CMS share sync operation disappeared")
+            identity_error = self._cms_sync_operation_identity_error(
+                operation,
+                {
+                    "share_code": own_code,
+                    "receive_code": own_pwd,
+                    "cid": str(self.self_share_config.cms_cid),
+                    "local_path": str(self.self_share_config.cms_local_path),
+                },
+            )
+            if identity_error:
+                return StageResult.needs_action(
+                    f"{identity_error}，源文件已保留",
+                    {"submission_id": int(row["id"]), "cms_share_sync_outcome": "unknown"},
+                )
             if operation.status == "started":
                 uncertain = self.task_store.mark_operation_uncertain(
                     int(task.id),
