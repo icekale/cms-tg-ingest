@@ -1039,6 +1039,52 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertIsNone(folder)
             self.assertIsNone(identity)
 
+    def test_resolve_intake_dest_folder_does_not_bind_unrelated_persisted_own_share(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            workflow.p115.files_by_parent["stale-dest"] = []
+            task_metadata = {
+                "intake_identity": {
+                    "files": [{"id": "episode-a", "name": "episode-a.mkv"}],
+                    "root_ids": ["received-root"],
+                }
+            }
+
+            status, folder, identity = workflow._resolve_intake_dest_folder(
+                task_metadata,
+                {},
+                own_share_file_id="stale-dest",
+                receive_cid="pending-cid",
+            )
+
+            self.assertEqual(status, "incomplete")
+            self.assertIsNone(folder)
+            self.assertIsNone(identity)
+
+    def test_resolve_intake_dest_folder_rejects_persisted_season_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            workflow.p115.search_hits["season-1"] = [
+                {"cid": "season-1", "pid": "dest-a", "n": "Season 01"},
+            ]
+            task_metadata = {
+                "intake_identity": {
+                    "files": [{"id": "episode-a", "name": "episode-a.mkv"}],
+                    "root_ids": ["received-root"],
+                }
+            }
+
+            status, folder, identity = workflow._resolve_intake_dest_folder(
+                task_metadata,
+                {},
+                own_share_file_id="season-1",
+                receive_cid="pending-cid",
+            )
+
+            self.assertEqual(status, "incomplete")
+            self.assertIsNone(folder)
+            self.assertIsNone(identity)
+
     def test_organizing_stage_persists_multiple_complete_destinations(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)

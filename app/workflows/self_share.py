@@ -1872,7 +1872,11 @@ class BridgeSelfShareTaskWorkflow:
             and persisted != receive_cid
             and self._dest_is_receive_child(persisted, receive_cid) is False
         ):
+            if not self._intake_expected_files_located(persisted, expected_ids, []):
+                return INCOMPLETE, [], None
             folder = self._folder_record_for_dest(persisted, folder_hits)
+            if is_season_folder_name(str(folder.get("file_name") or persisted).strip()):
+                return INCOMPLETE, [], None
             if receive_cid and str(folder.get("parent_id") or "").strip() == receive_cid:
                 return INCOMPLETE, [], None
             target = self._organized_target_for_dest(persisted, expected_ids, folder, recognition)
