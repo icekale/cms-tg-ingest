@@ -1132,6 +1132,45 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertIsNone(folder)
             self.assertIsNone(identity)
 
+    def test_resolve_intake_dest_folders_defers_without_real_destination_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            workflow.p115.search_hits = {
+                "episode-a.mkv": [
+                    {"fid": "episode-a", "cid": "season-a", "n": "episode-a.mkv"},
+                ],
+                "episode-b.mkv": [
+                    {"fid": "episode-b", "cid": "season-b", "n": "episode-b.mkv"},
+                ],
+            }
+            workflow.p115.folder_paths = {
+                "season-a": [
+                    {"cid": "season-a", "pid": "dest-a", "n": "Season 01"},
+                ],
+                "season-b": [
+                    {"cid": "season-b", "pid": "dest-b", "n": "Season 02"},
+                ],
+            }
+            task_metadata = {
+                "intake_identity": {
+                    "files": [
+                        {"id": "episode-a", "name": "episode-a.mkv"},
+                        {"id": "episode-b", "name": "episode-b.mkv"},
+                    ],
+                    "root_ids": ["received-root"],
+                }
+            }
+
+            status, targets, identity = workflow._resolve_intake_dest_folders(
+                task_metadata,
+                {},
+                receive_cid="pending-cid",
+            )
+
+            self.assertEqual(status, "incomplete")
+            self.assertEqual(targets, [])
+            self.assertIsNone(identity)
+
     def test_organizing_stage_persists_multiple_complete_destinations(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)

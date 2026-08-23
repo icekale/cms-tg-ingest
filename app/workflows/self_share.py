@@ -1529,7 +1529,13 @@ class BridgeSelfShareTaskWorkflow:
         file_id = str(task.metadata.get("cloud_output_file_id") or "").strip()
         return [file_id] if file_id else []
 
-    def _folder_record_for_dest(self, dest: str, folder_hits: list[dict[str, Any]]) -> dict[str, Any]:
+    def _folder_record_for_dest(
+        self,
+        dest: str,
+        folder_hits: list[dict[str, Any]],
+        *,
+        require_real: bool = False,
+    ) -> dict[str, Any] | None:
         dest = str(dest or "").strip()
         candidates = [item for item in folder_hits if isinstance(item, dict)]
         if dest and hasattr(self.p115, "search_files"):
@@ -1539,11 +1545,16 @@ class BridgeSelfShareTaskWorkflow:
                 LOG.debug("Failed to search dest folder dest=%s", dest, exc_info=True)
         folder_hit = next((item for item in candidates if p115_item_id(item) == dest), None)
         if folder_hit:
+            file_name = p115_file_name(folder_hit)
+            if require_real and (not p115_item_id(folder_hit) or not file_name):
+                return None
             return {
                 "file_id": dest,
-                "file_name": p115_file_name(folder_hit) or dest,
+                "file_name": file_name or dest,
                 "parent_id": p115_item_parent_id(folder_hit),
             }
+        if require_real:
+            return None
         return {"file_id": dest, "file_name": dest, "parent_id": ""}
 
     def _dest_is_receive_child(self, dest: str, receive_cid: str) -> bool | None:
@@ -1865,8 +1876,15 @@ class BridgeSelfShareTaskWorkflow:
             return INCOMPLETE, [], None
         if grouped:
             targets: list[dict[str, Any]] = []
+            require_real_folder = len(grouped) > 1
             for dest, file_ids in grouped.items():
-                folder = self._folder_record_for_dest(dest, folder_hits)
+                folder = self._folder_record_for_dest(
+                    dest,
+                    folder_hits,
+                    require_real=require_real_folder,
+                )
+                if folder is None:
+                    return INCOMPLETE, [], None
                 dest_name = str(folder.get("file_name") or dest).strip()
                 if is_season_folder_name(dest_name):
                     return INCOMPLETE, [], None
