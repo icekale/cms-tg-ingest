@@ -732,21 +732,23 @@ def render_task_detail(
             f'<ul class="timeline">{older_event_items}</ul></details>'
         )
     decision = decide_retry(task, max_retries=max_retries)
-    actions = available_task_actions(task, max_retries=max_retries)
+    actions = available_task_actions(task, max_retries=max_retries, store=store)
     retry_eligible = "retry" in actions
     downstream_actions_eligible = "emby" in actions or "restore" in actions
+    resume_eligible = "resume_organizing" in actions
     reprocess_eligible = "reprocess" in actions
     retry_form = ""
     if retry_eligible:
         retry_form = f'<form method="post" action="/task/{task.id}/retry"><button class="button button-primary" type="submit">重试当前阶段</button></form>'
     secondary_actions = ""
-    if downstream_actions_eligible:
-        emby_form = f'<form method="post" action="/task/{task.id}/emby"><button class="button button-secondary" type="submit">查 Emby</button></form>'
-        restore_form = f'<form method="post" action="/task/{task.id}/restore"><button class="button button-secondary" type="submit">恢复 STRM</button></form>'
+    if downstream_actions_eligible or resume_eligible:
+        emby_form = f'<form method="post" action="/task/{task.id}/emby"><button class="button button-secondary" type="submit">查 Emby</button></form>' if downstream_actions_eligible else ""
+        restore_form = f'<form method="post" action="/task/{task.id}/restore"><button class="button button-secondary" type="submit">恢复 STRM</button></form>' if downstream_actions_eligible else ""
+        resume_form = f'<form method="post" action="/task/{task.id}/resume_organizing"><button class="button button-secondary" type="submit">继续整理</button></form>' if resume_eligible else ""
         secondary_actions = f"""
 <section class="panel">
   <div class="panel-header"><h2>其他操作</h2></div>
-  <div class="actions">{emby_form}{restore_form}</div>
+  <div class="actions">{emby_form}{restore_form}{resume_form}</div>
 </section>
 """
     danger_zone = ""

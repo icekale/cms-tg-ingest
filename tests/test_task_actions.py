@@ -97,6 +97,26 @@ class TaskActionsTest(unittest.TestCase):
         result = apply_task_action(store, task.id, "resume_organizing", max_retries=3, actor="Web")
         self.assertFalse(result.applied)
 
+    def test_resume_organizing_rejects_malformed_legacy_intake_identity(self):
+        store = self.make_store()
+        task = store.upsert_task("resume-malformed", "", "https://115cdn.com/s/resume-malformed")
+        task = store.record_event(
+            task.id,
+            TaskStage.NEEDS_ACTION,
+            TaskStatus.NEEDS_ACTION,
+            "CMS 整理等待超时",
+            metadata_patch={
+                "retry_from_stage": TaskStage.ORGANIZING.value,
+                "retry_stage": TaskStage.ORGANIZING.value,
+                "intake_identity": {"root_ids": [""], "files": [{}]},
+            },
+        )
+        operation = store.prepare_operation(task.id, "g0:u0:receive_share", "receive_share", {})
+        store.start_operation(task.id, operation.operation_key)
+        store.complete_operation(task.id, operation.operation_key, {"received": True})
+
+        self.assertNotIn("resume_organizing", available_task_actions(task, 3, store=store))
+
     def test_claimed_running_task_allows_only_terminate(self):
         store = self.make_store()
         task = store.upsert_task("claimed", "", "https://115cdn.com/s/claimed")

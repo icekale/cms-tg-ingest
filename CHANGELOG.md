@@ -1,4 +1,7 @@
-## 0.4.22 - 2026-08-23
+## 0.4.23 - 2026-08-23
+
+- **补齐继续整理入口**：Telegram callback 和旧版 Web 任务详情页都可使用安全的 `resume_organizing`；legacy intake identity 也要求每个接收根和文件 ID 有效。
+
 
 - **兼容旧整理超时 metadata**：即使旧版本的质量终态记录清除了 `_defer_stage`，只要仍有完整接收快照、成功 `receive_share` 且没有任何建分享 operation，也可安全继续整理。
 

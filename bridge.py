@@ -3355,7 +3355,7 @@ def sync_cleanup_task_event(task_store: TaskStore | None, row: dict[str, Any]):
     )
 def parse_task_action_callback(data: str) -> tuple[str, int] | None:
     parts = str(data or "").split(":")
-    if len(parts) != 2 or parts[0] not in {"task_detail", "task_retry", "task_emby", "task_restore", "task_reprocess", "task_update"}:
+    if len(parts) != 2 or parts[0] not in {"task_detail", "task_retry", "task_emby", "task_restore", "task_reprocess", "task_resume_organizing", "task_update"}:
         return None
     try:
         return parts[0], int(parts[1])

@@ -67,12 +67,21 @@ def can_resume_organizing(task: TaskSnapshot, store: TaskStore) -> bool:
     if defer_stage != TaskStage.ORGANIZING.value and not legacy_organizing_resume:
         return False
     identity = metadata.get("intake_identity")
+    root_ids = identity.get("root_ids") if isinstance(identity, dict) else None
+    files = identity.get("files") if isinstance(identity, dict) else None
     if (
         not isinstance(identity, dict)
-        or not isinstance(identity.get("root_ids"), list)
-        or not identity.get("root_ids")
-        or not isinstance(identity.get("files"), list)
-        or not identity.get("files")
+        or not isinstance(root_ids, list)
+        or not root_ids
+        or any(not isinstance(value, str) or not value.strip() for value in root_ids)
+        or not isinstance(files, list)
+        or not files
+        or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("id"), str)
+            or not item.get("id", "").strip()
+            for item in files
+        )
     ):
         return False
     if str(task.metadata.get("own_share_code") or "").strip():
