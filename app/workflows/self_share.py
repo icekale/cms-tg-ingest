@@ -2464,6 +2464,10 @@ class BridgeSelfShareTaskWorkflow:
                 persist_row=False,
             )
             if result.outcome != StageOutcome.COMPLETE:
+                target_recognition = dict(result.metadata.get("recognition") or target.get("recognition") or {})
+                target_recognition["recognition_stage_status"] = result.outcome.value
+                target_recognition["recognition_error"] = result.message
+                target["recognition"] = target_recognition
                 metadata = dict(result.metadata)
                 metadata["multi_target_version"] = 1
                 metadata["organized_targets"] = targets
@@ -2616,6 +2620,14 @@ class BridgeSelfShareTaskWorkflow:
             },
         )
 
+    @staticmethod
+    def _target_folder_tmdb_mismatch(folder, recognition, row):
+        target_tmdb = str((recognition or {}).get("tmdb_id") or "").strip()
+        actual_tmdb = extract_tmdb_id_from_name(str((folder or {}).get("file_name") or ""))
+        if target_tmdb:
+            return actual_tmdb != target_tmdb
+        return has_tmdb_folder_mismatch(folder, recognition, row, "")
+
     def _conflicting_folder_owner(self, task, folder, recognition, row, share_name):
         file_id = str(folder.get("file_id") or "").strip()
         if not file_id:
@@ -2750,6 +2762,18 @@ class BridgeSelfShareTaskWorkflow:
             recognition = dict(target.get("recognition") or {})
             if not target_id or not folder_name:
                 return StageResult.failed("缺少多目录整理目标", error_type="organized_folder_missing")
+            if not self._intake_dest_skips_tmdb_mismatch(target_id, task.metadata) and self._target_folder_tmdb_mismatch(
+                folder, recognition, row
+            ):
+                return StageResult.needs_action(
+                    "CMS 整理目录与源任务 TMDB 不一致或无法确认，已阻止创建自有分享",
+                    {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+                )
+            if is_unverified_received_source(folder, task.metadata, self._task_receive_cid(task)):
+                return StageResult.needs_action(
+                    "等待可验证的 CMS 整理后源目录，当前 115 ID 仍是接收/分享快照，拒绝继续创建自有分享",
+                    {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+                )
             if self._conflicting_folder_owner(task, folder, recognition, row, folder_name):
                 return StageResult.needs_action(
                     "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享",
@@ -2984,6 +3008,13 @@ class BridgeSelfShareTaskWorkflow:
                     error_type="own_share_file_missing",
                     metadata={"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
                 )
+            if not self._intake_dest_skips_tmdb_mismatch(file_id, task.metadata) and self._target_folder_tmdb_mismatch(
+                folder, recognition, row
+            ):
+                return StageResult.needs_action(
+                    "CMS 整理目录与源任务 TMDB 不一致或无法确认，已阻止创建自有分享",
+                    {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+                )
             if self._conflicting_folder_owner(task, folder, recognition, row, folder_name):
                 return StageResult.needs_action(
                     "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享",
@@ -3027,6 +3058,27 @@ class BridgeSelfShareTaskWorkflow:
                         "submission_id": int(row["id"]),
                         "multi_target_version": 1,
                         "organized_targets": targets,
+                    },
+                )
+            if share.get("recovery_status") == "ambiguous":
+                share_state.update(
+                    {
+                        "file_id": file_id,
+                        "status": "ambiguous",
+                        "operation_key": operation_key,
+                        "recovery_status": "ambiguous",
+                        "match_count": int(share.get("match_count") or 0),
+                    }
+                )
+                target["share"] = share_state
+                return StageResult.needs_action(
+                    "发现多个符合恢复条件的同名 115 分享，无法安全确认归属，请人工检查",
+                    {
+                        "submission_id": int(row["id"]),
+                        "multi_target_version": 1,
+                        "organized_targets": targets,
+                        "share_recovery_status": "ambiguous",
+                        "share_recovery_match_count": int(share.get("match_count") or 0),
                     },
                 )
             share_state.update(

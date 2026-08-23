@@ -1570,6 +1570,94 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             )
             self.assertEqual([target["share"]["status"] for target in targets], ["alias_prepared", "alias_prepared"])
 
+    def test_recognizing_stage_persists_deferred_target_recognition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(
+                tmp,
+                tmdb_resolver=FakeTmdbResolver(),
+                move_config=bridge.MoveConfig(
+                    source_roots=[],
+                    library_roots={"tv": Path(tmp) / "library"},
+                ),
+            )
+            row = self._row()
+            targets = self._multi_targets()
+            for target in targets:
+                target["folder"].pop("category", None)
+            task = self._multi_target_task(workflow, TaskStage.RECOGNIZING, targets=targets, row=row)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            recognition = result.metadata["organized_targets"][0]["recognition"]
+            self.assertEqual(recognition["category_status"], "waiting_cms_direct_strm")
+            self.assertEqual(recognition["recognition_stage_status"], "defer")
+            self.assertIn("等待 CMS 直链 STRM 分类", recognition["recognition_error"])
+
+    def test_multi_target_alias_rejects_target_tmdb_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            targets = self._multi_targets()
+            targets[0]["recognition"] = {"tmdb_id": "999999"}
+            task = self._multi_target_task(workflow, TaskStage.SHARE_ALIAS_PREPARED, targets=targets, row=row)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("TMDB", result.message)
+            self.assertEqual(workflow.p115.created_shares, [])
+
+    def test_multi_target_own_share_rejects_target_tmdb_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            targets = self._multi_targets()
+            targets[0]["recognition"] = {"tmdb_id": "999999"}
+            task = self._multi_target_task(workflow, TaskStage.OWN_SHARE_CREATED, targets=targets, row=row)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("TMDB", result.message)
+            self.assertEqual(workflow.p115.created_shares, [])
+
+    def test_multi_target_ambiguous_recovery_needs_action_without_marking_success(self):
+        class AmbiguousRecoveryP115(FakeP115):
+            def find_own_share_by_title(self, title, min_create_time=0):
+                return {"recovery_status": "ambiguous", "match_count": 2}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            workflow.p115 = AmbiguousRecoveryP115()
+            row = self._row()
+            targets = self._multi_targets()
+            targets[0]["share"].update({"status": "succeeded", "code": "existing-a"})
+            task = self._multi_target_task(workflow, TaskStage.OWN_SHARE_CREATED, targets=targets, row=row)
+            operation_key = f"{operation_scope(task)}:create_share:dest-b"
+            self.tasks.prepare_operation(
+                task.id,
+                operation_key,
+                "create_share",
+                {
+                    "file_id": "dest-b",
+                    "share_title": targets[1]["folder"]["file_name"],
+                    "receive_code": "1212",
+                    "requested_at": 1.0,
+                },
+            )
+            self.tasks.start_operation(task.id, operation_key)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(result.metadata["share_recovery_status"], "ambiguous")
+            self.assertEqual(result.metadata["share_recovery_match_count"], 2)
+            result_targets = result.metadata["organized_targets"]
+            self.assertEqual(result_targets[0]["share"]["status"], "succeeded")
+            self.assertEqual(result_targets[1]["share"]["status"], "ambiguous")
+            self.assertEqual(workflow.p115.created_shares, [])
+
     def test_own_share_stage_creates_and_reuses_one_journal_operation_per_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
