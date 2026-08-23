@@ -526,6 +526,150 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
         ) or row
         return self.submissions.update_emby(int(row["id"]), "confirmed") or row
 
+    def _multi_target_stage_fixture(self, root, *, stage=TaskStage.STRM_READY, overlap=False, emby=None, cleanup=None):
+        source_root = Path(root) / "share-strm"
+        library_root = Path(root) / "library"
+        config = bridge.SelfShareConfig(
+            enabled=True,
+            strm_root=source_root,
+            cms_cid="0",
+            cms_local_path="/media/share",
+            review_grace_seconds=0,
+            review_checkpoints_seconds=(),
+            auto_organize_retry_seconds=1,
+        )
+        workflow = self._workflow(
+            root,
+            self_share_config=config,
+            move_config=bridge.MoveConfig(
+                source_roots=[source_root],
+                library_roots={"外国电视": library_root},
+                stable_seconds=0,
+            ),
+            emby=emby,
+            cleanup_client=cleanup,
+        )
+        targets = []
+        for target_id, tmdb_id, code, season in (("dest-a", "111", "own-a", "A"), ("dest-b", "222", "own-b", "B")):
+            folder_name = f"{season}-Show-[tmdb={tmdb_id}]"
+            source = source_root / folder_name
+            source.mkdir(parents=True)
+            self._write_strm(source, content=f"https://115.com/s/{code}_ownpwd_/episode.mkv")
+            targets.append(
+                {
+                    "target_id": target_id,
+                    "file_ids": [f"episode-{season.lower()}"],
+                    "folder": {"file_id": target_id, "file_name": folder_name, "parent_id": "organized"},
+                    "recognition": {"title": f"Show {season}", "share_name": folder_name, "tmdb_id": tmdb_id, "category": "外国电视", "type": "tv"},
+                    "share": {"file_id": target_id, "code": code, "receive_code": "ownpwd", "status": "succeeded", "validation_status": "valid", "review": {"share_review_status": "passed"}},
+                    "strm": {"status": "pending", "move_status": "pending", "emby_status": "pending"},
+                }
+            )
+        if overlap:
+            targets[1]["folder"]["file_name"] = targets[0]["folder"]["file_name"]
+        if cleanup is not None:
+            cleanup.parents["receive-root"] = "pending-cid"
+        row = self._self_share_row()
+        task = self._claim_task(
+            "abc", "1234", stage,
+            metadata={
+                "submission_id": row["id"],
+                "multi_target_version": 1,
+                "organized_targets": targets,
+                "intake_identity": {"root_ids": ["receive-root"], "files": [{"id": "episode-a"}, {"id": "episode-b"}]},
+            },
+            submission_id=row["id"],
+        )
+        return workflow, task, row
+
+    def test_multi_target_strm_ready_tracks_sources_before_playback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow, task, _row = self._multi_target_stage_fixture(tmp)
+            result = workflow.run_stage(task)
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            targets = result.metadata["organized_targets"]
+            self.assertEqual({target["strm"]["status"] for target in targets}, {"ready"})
+            self.assertEqual({Path(target["strm"]["source_path"]).name for target in targets}, {"A-Show-[tmdb=111]", "B-Show-[tmdb=222]"})
+            self.assertEqual(len(workflow.cms.playback_calls), 2)
+
+    def test_multi_target_strm_ready_defers_missing_target_without_losing_found_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow, task, _row = self._multi_target_stage_fixture(tmp)
+            task.metadata["organized_targets"][1]["folder"]["file_name"] = "missing-target-[tmdb=222]"
+            result = workflow.run_stage(task)
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(result.metadata["organized_targets"][0]["strm"]["status"], "source_ready")
+            self.assertEqual(result.metadata["organized_targets"][1]["strm"]["status"], "pending")
+
+    def test_multi_target_moved_moves_each_non_overlapping_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow, task, _row = self._multi_target_stage_fixture(tmp, stage=TaskStage.MOVED)
+            result = workflow.run_stage(task)
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            targets = result.metadata["organized_targets"]
+            self.assertEqual({target["strm"]["move_status"] for target in targets}, {"moved"})
+            self.assertNotEqual(targets[0]["strm"]["dest_path"], targets[1]["strm"]["dest_path"])
+            self.assertEqual(len(list(Path(tmp, "library").glob("**/*.strm"))), 2)
+
+    def test_multi_target_moved_rejects_overlapping_destinations_before_move(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow, task, _row = self._multi_target_stage_fixture(tmp, stage=TaskStage.MOVED, overlap=True)
+            result = workflow.run_stage(task)
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(list(Path(tmp, "library").glob("**/*.strm")), [])
+
+    def test_multi_target_emby_waits_for_each_target_confirmation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            emby = FakeEmby()
+            workflow, task, _row = self._multi_target_stage_fixture(tmp, stage=TaskStage.EMBY_CONFIRMED, emby=emby)
+            targets = task.metadata["organized_targets"]
+            for target in targets:
+                source = Path(target["folder"]["file_name"])
+                target["strm"].update({"status": "ready", "move_status": "moved", "emby_status": "pending", "dest_path": str(Path(tmp) / "library" / source.name)})
+            emby.items_by_tmdb["111"] = {"Id": "item-a", "Name": "Show A", "Path": str(Path(tmp) / "library" / "A-Show-[tmdb=111]")}
+            result = workflow.run_stage(task)
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(result.metadata["organized_targets"][0]["strm"]["emby_status"], "confirmed")
+            self.assertEqual(result.metadata["organized_targets"][1]["strm"]["emby_status"], "pending")
+
+    def test_multi_target_cleaned_requires_all_reviews_and_statuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = FakeCleanupClient()
+            workflow, task, _row = self._multi_target_stage_fixture(tmp, stage=TaskStage.CLEANED, cleanup=cleanup)
+            for target in task.metadata["organized_targets"]:
+                target["strm"].update(
+                    {
+                        "status": "ready",
+                        "source_path": str(Path(tmp) / "share-strm" / target["folder"]["file_name"]),
+                        "move_status": "moved",
+                        "emby_status": "confirmed",
+                        "dest_path": str(Path(tmp) / "library" / target["folder"]["file_name"]),
+                    }
+                )
+            result = workflow.run_stage(task)
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(cleanup.deleted, ["receive-root"])
+
+    def test_multi_target_cleaned_preserves_sources_when_review_is_invalid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cleanup = FakeCleanupClient()
+            workflow, task, _row = self._multi_target_stage_fixture(tmp, stage=TaskStage.CLEANED, cleanup=cleanup)
+            targets = task.metadata["organized_targets"]
+            for target in targets:
+                target["strm"].update(
+                    {
+                        "status": "ready",
+                        "source_path": str(Path(tmp) / "share-strm" / target["folder"]["file_name"]),
+                        "move_status": "moved",
+                        "emby_status": "confirmed",
+                        "dest_path": str(Path(tmp) / "library" / target["folder"]["file_name"]),
+                    }
+                )
+            targets[1]["share"]["review"] = {"share_review_status": "invalid"}
+            result = workflow.run_stage(task)
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(cleanup.deleted, [])
+
     def test_receive_started_before_post_never_posts_and_times_out_to_needs_action(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp, receive_cid="pending-cid")

@@ -88,6 +88,35 @@ _post_organize_guard_lock = threading.Lock()
 _post_organize_guard_last_scheduled_at: float = 0.0
 
 
+class _TargetStageStore:
+    """In-memory row adapter so target stages do not overwrite scalar submission state."""
+
+    def __init__(self, row: dict[str, Any]):
+        self.row = dict(row)
+
+    def update_move(self, row_id: int, status: str, *, source_path=None, dest_path=None, category_final=None, error=""):
+        self.row.update({"move_status": status, "move_error": error})
+        if source_path is not None:
+            self.row["source_path"] = str(source_path)
+        if dest_path is not None:
+            self.row["dest_path"] = str(dest_path)
+        if category_final is not None:
+            self.row["category_final"] = str(category_final)
+        return dict(self.row)
+
+    def update_emby(self, row_id: int, status: str, *, item_id="", title="", path="", parent=""):
+        self.row.update(
+            {
+                "emby_status": status,
+                "emby_item_id": str(item_id or ""),
+                "emby_title": str(title or ""),
+                "emby_path": str(path or ""),
+                "emby_parent": str(parent or ""),
+            }
+        )
+        return dict(self.row)
+
+
 def schedule_post_organize_restore_guard(
     store: Any,
     cms: Any,
@@ -3990,8 +4019,136 @@ class BridgeSelfShareTaskWorkflow:
     def _pending_cms_share_sync_task(self, task):
         return self.task_store.find_pending_stage(TaskStage.STRM_READY, exclude_task_id=task.id)
 
+    @staticmethod
+    def _row_for_target(row: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+        folder = dict(target.get("folder") or {})
+        recognition = dict(target.get("recognition") or {})
+        share = dict(target.get("share") or {})
+        strm = dict(target.get("strm") or {})
+        overlay = dict(row)
+        overlay.update(
+            {
+                "own_share_file_id": str(share.get("file_id") or folder.get("file_id") or ""),
+                "own_share_file_name": str(folder.get("file_name") or ""),
+                "share_alias_name": str(folder.get("file_name") or ""),
+                "own_share_code": str(share.get("code") or ""),
+                "own_share_receive_code": str(share.get("receive_code") or ""),
+                "own_share_url": str(share.get("url") or ""),
+                "category": str(recognition.get("category") or row.get("category") or ""),
+                "category_choice": str(recognition.get("category") or row.get("category_choice") or ""),
+                "category_selected": str(recognition.get("category") or row.get("category_selected") or ""),
+                "category_final": str(recognition.get("category") or row.get("category_final") or ""),
+                "recognition_json": json.dumps(recognition, ensure_ascii=False),
+                "source_path": str(strm.get("source_path") or ""),
+                "dest_path": str(strm.get("dest_path") or ""),
+                "move_status": str(strm.get("move_status") or ""),
+                "emby_status": str(strm.get("emby_status") or ""),
+                "emby_item_id": str(strm.get("emby_item_id") or ""),
+                "emby_title": str(strm.get("emby_title") or ""),
+                "emby_path": str(strm.get("emby_path") or ""),
+                "emby_parent": str(strm.get("emby_parent") or ""),
+            }
+        )
+        return overlay
+
+    @staticmethod
+    def _multi_target_metadata(row: dict[str, Any], targets: list[dict[str, Any]], **extra: Any) -> dict[str, Any]:
+        return {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets, **extra}
+
+    @staticmethod
+    def _paths_overlap(left: Path, right: Path) -> bool:
+        left = safe_resolve(left)
+        right = safe_resolve(right)
+        return left == right or is_relative_to(left, right) or is_relative_to(right, left)
+
+    def _stage_strm_ready_targets(self, task, row):
+        targets = self._organized_targets(task)
+        state_error = self._multi_target_state_error(task)
+        if state_error:
+            return StageResult.needs_action(state_error, self._multi_target_metadata(row, targets))
+        prepared: list[tuple[dict[str, Any], dict[str, Any], Path]] = []
+        missing: list[str] = []
+        for target in targets:
+            target_row = self._row_for_target(row, target)
+            recognition = dict(target.get("recognition") or {})
+            target_id = str(target.get("target_id") or "").strip()
+            share_name = str(target_row.get("own_share_file_name") or recognition.get("share_name") or target_id).strip()
+            source = find_self_share_strm_source_dir(self.self_share_config, target_row, recognition, share_name)
+            if not source:
+                missing.append(target_id)
+                continue
+            source = safe_resolve(source)
+            issue = validate_self_share_strm_source(source, target_row)
+            if issue:
+                return StageResult.needs_action(
+                    f"目标 {target_id} 的 STRM 源校验失败：{issue}",
+                    self._multi_target_metadata(row, targets),
+                )
+            prepared.append((target, target_row, source))
+        for target, _target_row, source in prepared:
+            strm = dict(target.get("strm") or {})
+            strm["source_path"] = str(source)
+            strm["status"] = "source_ready"
+            target["strm"] = strm
+        if missing:
+            return StageResult.defer(
+                f"等待目标 STRM 源目录生成：{', '.join(sorted(missing))}",
+                min(self.self_share_config.auto_organize_retry_seconds or 30, 5),
+                self._multi_target_metadata(row, targets),
+            )
+        for target, target_row, source in prepared:
+            restored = restore_canonical_strm_paths(source, target_row)
+            strm = dict(target.get("strm") or {})
+            if restored:
+                strm["canonical_strm_paths_restored"] = restored
+            if not strm.get("playback_validated") and hasattr(self.cms, "probe_strm_url"):
+                strm_files = sorted(
+                    base_path / name
+                    for base, _dirs, filenames in os.walk(source, followlinks=False)
+                    for base_path in [Path(base)]
+                    for name in filenames
+                    if name.lower().endswith(".strm")
+                )
+                try:
+                    url = strm_files[0].read_text(encoding="utf-8", errors="replace").strip() if strm_files else ""
+                    if not url or not self.cms.probe_strm_url(url):
+                        target["strm"] = strm
+                        return StageResult.defer("等待目标自有分享 STRM 播放验证", 15, self._multi_target_metadata(row, targets))
+                except CmsSharePlaybackUnavailableError as exc:
+                    strm["playback_error"] = str(exc)
+                    target["strm"] = strm
+                    return StageResult.needs_action(
+                        "CMS 获取目标分享直连失败，已停止自动探测",
+                        self._multi_target_metadata(row, targets),
+                    )
+                except Exception:
+                    LOG.debug("Multi-target STRM playback probe failed", exc_info=True)
+                    target["strm"] = strm
+                    return StageResult.defer("等待目标自有分享 STRM 播放验证", 15, self._multi_target_metadata(row, targets))
+                strm["playback_validated"] = True
+            strm["status"] = "ready"
+            target["strm"] = strm
+        first = targets[0] if targets else {}
+        first_strm = dict(first.get("strm") or {})
+        return StageResult.complete(
+            "已找到并验证全部目标自有分享 STRM 源目录",
+            self._multi_target_metadata(
+                row,
+                targets,
+                source_path=first_strm.get("source_path") or "",
+                category=(first.get("recognition") or {}).get("category") or "",
+            ),
+        )
+
     def _stage_strm_ready(self, task):
         row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        state_error = self._multi_target_state_error(task)
+        if state_error:
+            return StageResult.needs_action(state_error, self._multi_target_metadata(row, task.metadata.get("organized_targets") or []))
+        if self._is_multi_target_task(task):
+            return self._stage_strm_ready_targets(task, row)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
         recognition = self._recognition_from_row(row)
@@ -4102,8 +4259,101 @@ class BridgeSelfShareTaskWorkflow:
             {"submission_id": int(row["id"]), "cleanup_file_id": cleanup_file_id, "cms_delete_settled": True},
         )
 
+    def _stage_moved_targets(self, task, row):
+        targets = self._organized_targets(task)
+        plans: list[tuple[dict[str, Any], dict[str, Any], Path, Any]] = []
+        destinations: list[tuple[str, Path]] = []
+        for target in targets:
+            target_id = str(target.get("target_id") or "").strip()
+            target_row = self._row_for_target(row, target)
+            strm = dict(target.get("strm") or {})
+            dest_path = str(strm.get("dest_path") or "").strip()
+            if str(strm.get("move_status") or "").lower() == "moved" and dest_path and self._strm_destination_ready(dest_path, target_row, strm):
+                destination = safe_resolve(Path(dest_path))
+                if any(self._paths_overlap(destination, existing) for _other_id, existing in destinations):
+                    return StageResult.needs_action(
+                        f"目标 {target_id} 的已移动 STRM 目标路径与其他目标重叠，已停止处理",
+                        self._multi_target_metadata(row, targets),
+                    )
+                destinations.append((target_id, destination))
+                continue
+            source_value = str(strm.get("source_path") or "").strip()
+            source = safe_resolve(Path(source_value)) if source_value else find_self_share_strm_source_dir(
+                self.self_share_config,
+                target_row,
+                dict(target.get("recognition") or {}),
+                str(target_row.get("own_share_file_name") or target_id),
+            )
+            if not source:
+                return StageResult.defer(
+                    f"等待目标 {target_id} STRM 源目录生成",
+                    min(self.self_share_config.auto_organize_retry_seconds or 30, 5),
+                    self._multi_target_metadata(row, targets),
+                )
+            category = final_category_for_move(target_row, dict(target.get("recognition") or {}))
+            move_config = move_config_for_workflow_source(self.move_config, source, self.self_share_config)
+            canonical_name = str((target.get("folder") or {}).get("file_name") or target_id).strip()
+            plan = plan_strm_move(source, category, move_config, destination_name=canonical_name)
+            plans.append((target, target_row, safe_resolve(source), plan))
+        for target, _target_row, _source, plan in plans:
+            if plan.dest_path:
+                target_id = str(target.get("target_id") or "").strip()
+                destination = safe_resolve(plan.dest_path)
+                if any(self._paths_overlap(destination, existing) for _other_id, existing in destinations):
+                    return StageResult.needs_action(
+                        f"目标 {target_id} 的 STRM 目标路径与其他目标重叠，已停止移动",
+                        self._multi_target_metadata(row, targets),
+                    )
+                destinations.append((target_id, destination))
+        for target, target_row, source, plan in plans:
+            target_id = str(target.get("target_id") or "").strip()
+            if is_move_plan_retryable(plan):
+                return StageResult.defer(
+                    f"目标 {target_id}：{plan.reason}",
+                    self.self_share_config.auto_organize_retry_seconds or 30,
+                    self._multi_target_metadata(row, targets),
+                )
+            adapter = _TargetStageStore(target_row)
+            moved_row = merge_self_share_strm_folder(plan, adapter, target_row, move_config_for_workflow_source(self.move_config, source, self.self_share_config))
+            strm = dict(target.get("strm") or {})
+            strm.update(
+                {
+                    "source_path": str(moved_row.get("source_path") or plan.source_path or ""),
+                    "dest_path": str(moved_row.get("dest_path") or plan.dest_path or ""),
+                    "category": str(moved_row.get("category_final") or plan.category or ""),
+                    "move_status": str(moved_row.get("move_status") or "").lower(),
+                    "move_error": str(moved_row.get("move_error") or ""),
+                }
+            )
+            target["strm"] = strm
+            if strm["move_status"] != "moved":
+                return StageResult.failed(
+                    f"目标 {target_id} STRM 移动失败：{strm.get('move_error') or plan.reason}",
+                    error_type="strm_move_failed",
+                    metadata=self._multi_target_metadata(row, targets),
+                )
+            send_move_result(self.telegram, self.chat_id, plan, moved_row)
+        if plans:
+            first = targets[0]
+            first_strm = dict(first.get("strm") or {})
+            self.store.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=first_strm.get("source_path") or "",
+                dest_path=first_strm.get("dest_path") or "",
+                category_final=first_strm.get("category") or "",
+            )
+        return StageResult.complete("全部目标 STRM 已移动到媒体库", self._multi_target_metadata(row, targets, move_status="moved"))
+
     def _stage_moved(self, task):
         row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        state_error = self._multi_target_state_error(task)
+        if state_error:
+            return StageResult.needs_action(state_error, self._multi_target_metadata(row, task.metadata.get("organized_targets") or []))
+        if self._is_multi_target_task(task):
+            return self._stage_moved_targets(task, row)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
         recognition = self._recognition_from_row(row)
@@ -4155,8 +4405,69 @@ class BridgeSelfShareTaskWorkflow:
         error = str(moved_row.get("move_error") or plan.reason or "STRM 移动失败")
         return StageResult.failed(error, error_type="strm_move_failed", metadata=metadata)
 
+    def _stage_emby_confirmed_targets(self, task, row):
+        targets = self._organized_targets(task)
+        if not self.emby or not getattr(self.emby, "enabled", False):
+            return StageResult.needs_action("多目录任务需要逐目标 Emby 确认，当前未启用 Emby", self._multi_target_metadata(row, targets))
+        for target in targets:
+            target_id = str(target.get("target_id") or "").strip()
+            strm = dict(target.get("strm") or {})
+            if str(strm.get("move_status") or "").lower() != "moved":
+                return StageResult.needs_action(
+                    f"目标 {target_id} 尚未完成 STRM 移动，禁止 Emby 确认",
+                    self._multi_target_metadata(row, targets),
+                )
+            dest_path = str(strm.get("dest_path") or "").strip()
+            if not dest_path:
+                return StageResult.needs_action(
+                    f"目标 {target_id} 缺少 STRM 目标路径，禁止 Emby 确认",
+                    self._multi_target_metadata(row, targets),
+                )
+            target_row = self._row_for_target(row, target)
+            recognition = dict(target.get("recognition") or {})
+            match = self._find_emby_match_for_moved_dest(recognition, target_row, strm)
+            if not match:
+                strm["emby_status"] = "pending"
+                target["strm"] = strm
+                return StageResult.defer(
+                    f"等待目标 {target_id} Emby 确认入库",
+                    self._emby_confirmation_retry_seconds(task),
+                    self._multi_target_metadata(row, targets),
+                )
+            adapter = _TargetStageStore(target_row)
+            send_emby_confirmed(self.telegram, self.chat_id, adapter, target_row, match, self.emby, cleanup_client=None)
+            updated = adapter.row
+            strm.update(
+                {
+                    "emby_status": "confirmed",
+                    "emby_item_id": str(updated.get("emby_item_id") or match.get("Id") or ""),
+                    "emby_title": str(updated.get("emby_title") or match.get("Name") or ""),
+                    "emby_path": str(updated.get("emby_path") or match.get("Path") or ""),
+                    "emby_parent": str(updated.get("emby_parent") or ""),
+                }
+            )
+            target["strm"] = strm
+        first = targets[0] if targets else {}
+        first_strm = dict(first.get("strm") or {})
+        self.store.update_emby(
+            int(row["id"]),
+            "confirmed",
+            item_id=first_strm.get("emby_item_id") or "",
+            title=first_strm.get("emby_title") or "",
+            path=first_strm.get("emby_path") or "",
+            parent=first_strm.get("emby_parent") or "",
+        )
+        return StageResult.complete("全部目标已确认 Emby 入库", self._multi_target_metadata(row, targets, emby_status="confirmed"))
+
     def _stage_emby_confirmed(self, task):
         row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        state_error = self._multi_target_state_error(task)
+        if state_error:
+            return StageResult.needs_action(state_error, self._multi_target_metadata(row, task.metadata.get("organized_targets") or []))
+        if self._is_multi_target_task(task):
+            return self._stage_emby_confirmed_targets(task, row)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
         if str(row.get("emby_status") or "").lower() == "confirmed":
@@ -4195,8 +4506,87 @@ class BridgeSelfShareTaskWorkflow:
         updated = self.store.find_by_id(int(row["id"])) or row
         return StageResult.complete("Emby 已确认入库", self._emby_metadata(updated))
 
+    def _advance_target_review(self, task, row, target):
+        share = dict(target.get("share") or {})
+        review = dict(share.get("review") or {})
+        metadata = dict(task.metadata)
+        for key in ("share_review_checks", "share_review_last_at", "share_review_next_at", "share_review_error"):
+            if key in review:
+                metadata[key] = review[key]
+        operation_key = f"{operation_scope(task)}:create_share:{str(target.get('target_id') or '').strip()}"
+        operation = self.task_store.find_operation(int(task.id), operation_key)
+        if operation is not None:
+            result = operation.result if isinstance(operation.result, dict) else {}
+            request = operation.request if isinstance(operation.request, dict) else {}
+            metadata["share_created_at"] = result.get("create_time") or request.get("requested_at") or metadata.get("share_created_at")
+        shadow_task = type("TargetReviewTask", (), {"metadata": metadata})()
+        status, review_metadata, message, delay = self._advance_share_review(shadow_task, row)
+        share["review"] = review_metadata
+        target["share"] = share
+        return status, message, delay
+
+    def _stage_cleaned_targets(self, task, row):
+        targets = self._organized_targets(task)
+        if not self.cleanup_client:
+            statuses = [dict(target.get("strm") or {}) for target in targets]
+            if any(str(item.get("move_status") or "").lower() != "moved" or str(item.get("emby_status") or "").lower() != "confirmed" for item in statuses):
+                return StageResult.needs_action("等待全部目标完成 STRM 移动和 Emby 确认后再清理", self._multi_target_metadata(row, targets))
+            updated = self.store.update_cleanup(int(row["id"]), "skipped", error="disabled") or row
+            return StageResult.complete("清理已跳过（未启用）", self._multi_target_metadata(row, targets, cleanup_status="skipped", cleanup_error="disabled"))
+        identity = task.metadata.get("intake_identity")
+        if not isinstance(identity, dict) or not isinstance(identity.get("root_ids"), list) or not identity.get("root_ids"):
+            return StageResult.needs_action("多目录状态缺少完整接收根，已停止清理", self._multi_target_metadata(row, targets))
+        if not isinstance(identity.get("files"), list) or not identity.get("files"):
+            return StageResult.needs_action("多目录状态缺少接收文件快照，已停止清理", self._multi_target_metadata(row, targets))
+        for target in targets:
+            target_id = str(target.get("target_id") or "").strip()
+            share = dict(target.get("share") or {})
+            strm = dict(target.get("strm") or {})
+            if (
+                share.get("status") != "succeeded"
+                or share.get("validation_status") != "valid"
+                or not str(share.get("code") or "").strip()
+            ):
+                return StageResult.needs_action(f"目标 {target_id} 自有分享未完成或未通过即时验证，已停止清理", self._multi_target_metadata(row, targets))
+            review = dict(share.get("review") or {})
+            review_status = str(review.get("share_review_status") or share.get("review_status") or "").strip().lower()
+            if review_status != "passed":
+                review_status, review_message, review_delay = self._advance_target_review(task, row, target)
+                if review_status == "invalid":
+                    return StageResult.needs_action(f"目标 {target_id} 自有分享审核失败，源文件已保留", self._multi_target_metadata(row, targets))
+                if review_status != "passed":
+                    return StageResult.defer(review_message, review_delay, self._multi_target_metadata(row, targets))
+            if str(strm.get("source_path") or "").strip() == "":
+                return StageResult.needs_action(f"目标 {target_id} 缺少 STRM 源路径，已停止清理", self._multi_target_metadata(row, targets))
+            if str(strm.get("move_status") or "").lower() != "moved":
+                return StageResult.needs_action(f"目标 {target_id} 尚未完成 STRM 移动，已停止清理", self._multi_target_metadata(row, targets))
+            if str(strm.get("emby_status") or "").lower() != "confirmed":
+                return StageResult.needs_action(f"目标 {target_id} 尚未确认 Emby 入库，已停止清理", self._multi_target_metadata(row, targets))
+            if not str(strm.get("dest_path") or "").strip():
+                return StageResult.needs_action(f"目标 {target_id} 缺少 STRM 目标路径，已停止清理", self._multi_target_metadata(row, targets))
+        if not all(str((target.get("share") or {}).get("receive_code") or "").strip() for target in targets):
+            return StageResult.needs_action("多目录状态缺少目标分享接收码，已停止清理", self._multi_target_metadata(row, targets))
+        review_metadata = {"share_review_status": "passed"}
+        cleanup_result = self._cleanup_intake_roots(task, row, review_metadata)
+        if isinstance(cleanup_result, StageResult):
+            return cleanup_result
+        residue_result, residue_count = self._cleanup_residue_operations(task, cleanup_result)
+        if residue_result is not None:
+            return residue_result
+        metadata = self._multi_target_metadata(row, targets, cleanup_status="deleted", share_review_status="passed")
+        if residue_count:
+            metadata["residue_deleted_count"] = residue_count
+        return StageResult.complete("全部目标审核、移动和 Emby 确认完成，115 接收源已统一清理", metadata)
+
     def _stage_cleaned(self, task):
         row = self._submission_row(task)
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        state_error = self._multi_target_state_error(task)
+        if state_error:
+            return StageResult.needs_action(state_error, self._multi_target_metadata(row, task.metadata.get("organized_targets") or []))
+        if self._is_multi_target_task(task):
+            return self._stage_cleaned_targets(task, row)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
         if str(row.get("move_status") or "").lower() != "moved":
@@ -4317,6 +4707,16 @@ class BridgeSelfShareTaskWorkflow:
         dest_id = str(identity.get("dest_id") or row.get("own_share_file_id") or "").strip()
         own_share_id = str(row.get("own_share_file_id") or "").strip()
         protected = {value for value in (dest_id, own_share_id) if value}
+        for target in self._organized_targets(task):
+            folder = target.get("folder") or {}
+            share = target.get("share") or {}
+            protected.update(
+                value for value in (
+                    str(target.get("target_id") or "").strip(),
+                    str(folder.get("file_id") or "").strip(),
+                    str(share.get("file_id") or "").strip(),
+                ) if value
+            )
         cleanup_parents = self._cleanup_parent_ids(task)
         deleted_id = ""
         for raw_root in identity.get("root_ids") or []:
@@ -4352,6 +4752,16 @@ class BridgeSelfShareTaskWorkflow:
         dest_id = str(identity.get("dest_id") or "").strip()
         if dest_id:
             excluded.add(dest_id)
+        for target in self._organized_targets(task):
+            folder = target.get("folder") or {}
+            share = target.get("share") or {}
+            excluded.update(
+                value for value in (
+                    str(target.get("target_id") or "").strip(),
+                    str(folder.get("file_id") or "").strip(),
+                    str(share.get("file_id") or "").strip(),
+                ) if value
+            )
         for item in identity.get("files") or []:
             if not isinstance(item, dict):
                 continue
