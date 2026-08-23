@@ -2432,6 +2432,8 @@ class BridgeSelfShareTaskWorkflow:
                 targets.append(target)
             if targets:
                 return targets
+        if task.metadata.get("multi_target_version") == 1:
+            return []
         folder = task.metadata.get("organized_folder")
         if not isinstance(folder, dict):
             return []
@@ -2449,7 +2451,18 @@ class BridgeSelfShareTaskWorkflow:
 
     @staticmethod
     def _is_multi_target_task(task):
-        return int(task.metadata.get("multi_target_version") or 0) == 1 and isinstance(task.metadata.get("organized_targets"), list)
+        return int(task.metadata.get("multi_target_version") or 0) == 1
+
+    @staticmethod
+    def _multi_target_state_error(task):
+        if int(task.metadata.get("multi_target_version") or 0) != 1:
+            return ""
+        targets = task.metadata.get("organized_targets")
+        if not isinstance(targets, list):
+            return "多目录状态损坏：organized_targets 必须是列表"
+        if not targets:
+            return "多目录状态为空：organized_targets 没有可处理目标"
+        return ""
 
     @staticmethod
     def _target_list_duplicate_error(targets):
@@ -2497,6 +2510,12 @@ class BridgeSelfShareTaskWorkflow:
         return self._recognize_target(task, row, folder, recognition, persist_row=True)
 
     def _stage_recognizing_targets(self, task, row):
+        state_error = self._multi_target_state_error(task)
+        if state_error:
+            return StageResult.needs_action(
+                state_error,
+                {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": task.metadata.get("organized_targets")},
+            )
         targets = self._organized_targets(task)
         duplicate_error = self._target_list_duplicate_error(targets)
         if duplicate_error:
@@ -2825,6 +2844,12 @@ class BridgeSelfShareTaskWorkflow:
         return StageResult.complete("已保留 CMS 整理目录名", self._own_share_metadata(row))
 
     def _stage_share_alias_prepared_targets(self, task, row):
+        state_error = self._multi_target_state_error(task)
+        if state_error:
+            return StageResult.needs_action(
+                state_error,
+                {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": task.metadata.get("organized_targets")},
+            )
         targets = self._organized_targets(task)
         duplicate_error = self._target_list_duplicate_error(targets)
         if duplicate_error:
@@ -3077,6 +3102,12 @@ class BridgeSelfShareTaskWorkflow:
         return StageResult.complete(message, metadata)
 
     def _stage_own_share_created_targets(self, task, row):
+        state_error = self._multi_target_state_error(task)
+        if state_error:
+            return StageResult.needs_action(
+                state_error,
+                {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": task.metadata.get("organized_targets")},
+            )
         targets = self._organized_targets(task)
         duplicate_error = self._target_list_duplicate_error(targets)
         if duplicate_error:
@@ -3131,6 +3162,7 @@ class BridgeSelfShareTaskWorkflow:
                     folder_name,
                     receive_code,
                     operation_key=operation_key,
+                    target_id=target_id,
                 )
             except P115SharePendingError:
                 share_state.update({"file_id": file_id, "status": "pending", "operation_key": operation_key})
@@ -3221,8 +3253,10 @@ class BridgeSelfShareTaskWorkflow:
         *,
         recovery_metadata: dict[str, Any] | None = None,
         operation_key: str | None = None,
+        target_id: str | None = None,
     ) -> dict[str, str]:
         operation_key = operation_key or f"{operation_scope(task)}:create_share:{file_id}"
+        target_id = str(target_id or "").strip()
         operation = self.task_store.find_operation(int(task.id), operation_key)
         if operation is None:
             request = {
@@ -3232,6 +3266,8 @@ class BridgeSelfShareTaskWorkflow:
                 "requested_at": float(int(max(0.0, self._now()))),
             }
             request.update(recovery_metadata or {})
+            if target_id:
+                request["target_id"] = target_id
             operation = self.task_store.prepare_operation(
                 int(task.id),
                 operation_key,
@@ -3256,6 +3292,14 @@ class BridgeSelfShareTaskWorkflow:
                 operation = completed or self.task_store.find_operation(int(task.id), operation_key)
         if operation is None:
             raise RuntimeError("115 share creation operation disappeared")
+        if target_id:
+            request_target_id = str(operation.request.get("target_id") or "").strip()
+            request_file_id = str(operation.request.get("file_id") or "").strip()
+            if request_target_id != target_id or request_file_id != str(file_id or "").strip():
+                raise RuntimeError(
+                    f"multi-target share operation identity mismatch: target_id={request_target_id or 'missing'} "
+                    f"file_id={request_file_id or 'missing'} expected target_id={target_id} file_id={file_id}"
+                )
         if operation.status == "succeeded":
             created = operation.result
         elif operation.status in {"started", "uncertain"}:

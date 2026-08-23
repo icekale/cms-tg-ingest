@@ -1668,6 +1668,38 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
             self.assertIn("TMDB", result.message)
 
+    def test_multi_target_empty_state_needs_action_in_all_target_stages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for stage in (TaskStage.RECOGNIZING, TaskStage.SHARE_ALIAS_PREPARED, TaskStage.OWN_SHARE_CREATED):
+                workflow = self._workflow(tmp)
+                row = self._row()
+                task = self._claim_task(
+                    "abc", "1234", stage,
+                    {"submission_id": row["id"], "multi_target_version": 1, "organized_targets": []},
+                    row["id"],
+                )
+
+                result = workflow.run_stage(task)
+
+                self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+                self.assertIn("多目录状态", result.message)
+
+    def test_multi_target_non_list_state_needs_action_in_all_target_stages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for stage in (TaskStage.RECOGNIZING, TaskStage.SHARE_ALIAS_PREPARED, TaskStage.OWN_SHARE_CREATED):
+                workflow = self._workflow(tmp)
+                row = self._row()
+                task = self._claim_task(
+                    "abc", "1234", stage,
+                    {"submission_id": row["id"], "multi_target_version": 1, "organized_targets": {"dest-a": {}}},
+                    row["id"],
+                )
+
+                result = workflow.run_stage(task)
+
+                self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+                self.assertIn("多目录状态", result.message)
+
     def test_recognizing_stage_preserves_target_specific_tmdb_and_category(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
@@ -1772,6 +1804,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 "create_share",
                 {
                     "file_id": "dest-b",
+                    "target_id": "dest-b",
                     "share_title": targets[1]["folder"]["file_name"],
                     "receive_code": "1212",
                     "requested_at": 1.0,
@@ -1814,6 +1847,8 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 },
             )
             self.assertEqual(self.p115.created_shares, ["dest-a", "dest-b"])
+            for operation in operations:
+                self.assertEqual(operation.request["target_id"], operation.request["file_id"])
 
             for target in targets:
                 share = workflow._journaled_create_share(
@@ -1824,6 +1859,34 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 )
                 self.assertEqual(share["share_code"], target["share"]["code"])
             self.assertEqual(self.p115.created_shares, ["dest-a", "dest-b"])
+
+    def test_multi_target_share_recovery_rejects_target_file_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            targets = self._multi_targets()
+            targets[0]["share"]["status"] = "pending"
+            task = self._multi_target_task(workflow, TaskStage.OWN_SHARE_CREATED, targets=targets, row=row)
+            operation_key = f"{operation_scope(task)}:create_share:dest-a"
+            self.tasks.prepare_operation(
+                task.id,
+                operation_key,
+                "create_share",
+                {
+                    "file_id": "dest-a",
+                    "target_id": "dest-b",
+                    "share_title": targets[0]["folder"]["file_name"],
+                    "receive_code": "1212",
+                    "requested_at": 1.0,
+                },
+            )
+            self.tasks.start_operation(task.id, operation_key)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("target_id", result.message)
+            self.assertEqual(workflow.p115.created_shares, [])
 
     def test_own_share_stage_preserves_completed_target_when_later_target_is_pending(self):
         from app.clients.p115 import P115SharePendingError
