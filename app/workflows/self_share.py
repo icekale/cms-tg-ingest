@@ -3164,6 +3164,41 @@ class BridgeSelfShareTaskWorkflow:
             metadata.update(direct_metadata)
         return StageResult.complete(message, metadata)
 
+    def _multi_target_share_validation_error(self, task, row, target):
+        identity_error = self._target_identity_error(target)
+        if identity_error:
+            return identity_error
+        target_id = str(target.get("target_id") or "").strip()
+        folder = dict(target.get("folder") or {})
+        file_id = str(folder.get("file_id") or "").strip()
+        folder_name = str(folder.get("file_name") or "").strip()
+        recognition = dict(target.get("recognition") or {})
+        share_state = dict(target.get("share") or {})
+        if not file_id or not folder_name:
+            return "缺少多目录自有分享文件夹"
+        if not self._intake_dest_skips_tmdb_mismatch(file_id, task.metadata) and self._target_folder_tmdb_mismatch(
+            folder, recognition, row, multi_target=True
+        ):
+            return "CMS 整理目录与源任务 TMDB 不一致或无法确认，已阻止创建自有分享"
+        if self._conflicting_folder_owner(task, folder, recognition, row, folder_name):
+            return "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享"
+        if is_unverified_received_source(folder, task.metadata, self._task_receive_cid(task)):
+            return "等待可验证的 CMS 整理后源目录，当前 115 ID 仍是接收/分享快照，拒绝创建自有分享"
+        if share_state.get("status") == "succeeded":
+            operation_key = f"{operation_scope(task)}:create_share:{target_id}"
+            operation = self.task_store.find_operation(int(task.id), operation_key)
+            request = operation.request if operation is not None else {}
+            result = operation.result if operation is not None else {}
+            if (
+                operation is None
+                or operation.status != "succeeded"
+                or str(request.get("target_id") or "").strip() != target_id
+                or str(request.get("file_id") or "").strip() != file_id
+                or str(result.get("share_code") or result.get("code") or "").strip() == ""
+            ):
+                return "多目录自有分享状态缺少可信的目标操作记录，拒绝跳过创建"
+        return ""
+
     def _stage_own_share_created_targets(self, task, row):
         state_error = self._multi_target_state_error(task)
         if state_error:
@@ -3178,6 +3213,26 @@ class BridgeSelfShareTaskWorkflow:
                 duplicate_error,
                 {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
             )
+        intake_identity = task.metadata.get("intake_identity")
+        if isinstance(intake_identity, dict) and isinstance(intake_identity.get("files"), list) and intake_identity.get("files"):
+            expected_ids = {
+                str(item.get("id") or "").strip()
+                for item in intake_identity["files"]
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            }
+            owned_ids = {file_id for target in targets for file_id in (target.get("file_ids") or [])}
+            if owned_ids != expected_ids:
+                return StageResult.needs_action(
+                    "多目录文件归属与接收文件不一致，已阻止创建自有分享",
+                    {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+                )
+        for target in targets:
+            validation_error = self._multi_target_share_validation_error(task, row, target)
+            if validation_error:
+                return StageResult.needs_action(
+                    validation_error,
+                    {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+                )
         for target in targets:
             identity_error = self._target_identity_error(target)
             if identity_error:

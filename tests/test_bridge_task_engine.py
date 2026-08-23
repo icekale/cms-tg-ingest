@@ -1924,6 +1924,19 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             targets = self._multi_targets()
             targets[0]["share"].update({"status": "succeeded", "code": "existing-a"})
             task = self._multi_target_task(workflow, TaskStage.OWN_SHARE_CREATED, targets=targets, row=row)
+            existing_operation_key = f"{operation_scope(task)}:create_share:dest-a"
+            self.tasks.prepare_operation(
+                task.id,
+                existing_operation_key,
+                "create_share",
+                {"file_id": "dest-a", "target_id": "dest-a", "share_title": targets[0]["folder"]["file_name"], "receive_code": "1212", "requested_at": 1.0},
+            )
+            self.tasks.start_operation(task.id, existing_operation_key)
+            self.tasks.complete_operation(
+                task.id,
+                existing_operation_key,
+                {"share_code": "existing-a", "receive_code": "ownpwd", "share_url": "https://115.com/s/existing-a"},
+            )
             operation_key = f"{operation_scope(task)}:create_share:dest-b"
             self.tasks.prepare_operation(
                 task.id,
@@ -1986,6 +1999,48 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 )
                 self.assertEqual(share["share_code"], target["share"]["code"])
             self.assertEqual(self.p115.created_shares, ["dest-a", "dest-b"])
+
+    def test_multi_target_later_target_mismatch_prevents_all_share_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            targets = self._multi_targets()
+            targets[1]["recognition"] = {"tmdb_id": "999999"}
+            task = self._multi_target_task(workflow, TaskStage.OWN_SHARE_CREATED, targets=targets, row=row)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(workflow.p115.created_shares, [])
+
+    def test_multi_target_forged_succeeded_target_requires_succeeded_operation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            targets = self._multi_targets()
+            for target in targets:
+                target["share"].update({"status": "succeeded", "code": "forged"})
+            task = self._multi_target_task(workflow, TaskStage.OWN_SHARE_CREATED, targets=targets, row=row)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("可信", result.message)
+            self.assertEqual(workflow.p115.created_shares, [])
+
+    def test_multi_target_missing_received_file_ownership_needs_action_before_share(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            targets = self._multi_targets()
+            targets[1]["file_ids"] = ["unowned-file"]
+            task = self._multi_target_task(workflow, TaskStage.OWN_SHARE_CREATED, targets=targets, row=row)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("接收文件", result.message)
+            self.assertEqual(workflow.p115.created_shares, [])
 
     def test_multi_target_fresh_share_request_identity_mismatch_has_no_operation_or_external_call(self):
         with tempfile.TemporaryDirectory() as tmp:
