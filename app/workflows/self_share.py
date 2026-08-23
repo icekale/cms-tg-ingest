@@ -2451,13 +2451,16 @@ class BridgeSelfShareTaskWorkflow:
 
     @staticmethod
     def _is_multi_target_task(task):
-        return int(task.metadata.get("multi_target_version") or 0) == 1
+        return type(task.metadata.get("multi_target_version")) is int and task.metadata.get("multi_target_version") == 1
 
     @staticmethod
     def _multi_target_state_error(task):
-        if int(task.metadata.get("multi_target_version") or 0) != 1:
+        metadata = task.metadata or {}
+        if "multi_target_version" not in metadata:
             return ""
-        targets = task.metadata.get("organized_targets")
+        if type(metadata.get("multi_target_version")) is not int or metadata.get("multi_target_version") != 1:
+            return "多目录状态损坏：multi_target_version 必须是整数 1"
+        targets = metadata.get("organized_targets")
         if not isinstance(targets, list):
             return "多目录状态损坏：organized_targets 必须是列表"
         if not targets:
@@ -2466,7 +2469,7 @@ class BridgeSelfShareTaskWorkflow:
             if not isinstance(target, dict):
                 return f"多目录状态损坏：organized_targets[{index}] 必须是对象"
             for field in ("folder", "recognition", "share", "strm"):
-                if field in target and not isinstance(target[field], dict):
+                if field not in target or not isinstance(target[field], dict):
                     return f"多目录状态损坏：organized_targets[{index}].{field} 必须是对象"
             folder = target.get("folder")
             share = target.get("share")
@@ -2474,7 +2477,7 @@ class BridgeSelfShareTaskWorkflow:
             target_id = target.get("target_id")
             if not isinstance(folder, dict) or not isinstance(share, dict):
                 return f"多目录状态损坏：organized_targets[{index}] 缺少有效 folder/share"
-            if not isinstance(file_ids, list) or any(
+            if not isinstance(file_ids, list) or not file_ids or any(
                 not isinstance(value, str) or not value.strip() for value in file_ids
             ):
                 return f"多目录状态损坏：organized_targets[{index}].file_ids 必须是非空字符串列表"
@@ -2524,6 +2527,9 @@ class BridgeSelfShareTaskWorkflow:
         row = self._submission_row(task)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        state_error = self._multi_target_state_error(task)
+        if state_error:
+            return StageResult.needs_action(state_error, {"submission_id": int(row["id"]), "organized_targets": task.metadata.get("organized_targets")})
         if self._is_multi_target_task(task):
             return self._stage_recognizing_targets(task, row)
         recognition = self._recognition_from_row(row)
@@ -2844,7 +2850,12 @@ class BridgeSelfShareTaskWorkflow:
 
     def _stage_share_alias_prepared(self, task):
         row = self._submission_row(task)
-        if row and self._is_multi_target_task(task):
+        if not row:
+            return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        state_error = self._multi_target_state_error(task)
+        if state_error:
+            return StageResult.needs_action(state_error, {"submission_id": int(row["id"]), "organized_targets": task.metadata.get("organized_targets")})
+        if self._is_multi_target_task(task):
             return self._stage_share_alias_prepared_targets(task, row)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
@@ -2933,10 +2944,13 @@ class BridgeSelfShareTaskWorkflow:
 
     def _stage_own_share_created(self, task):
         row = self._submission_row(task)
-        if row and self._is_multi_target_task(task):
-            return self._stage_own_share_created_targets(task, row)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        state_error = self._multi_target_state_error(task)
+        if state_error:
+            return StageResult.needs_action(state_error, {"submission_id": int(row["id"]), "organized_targets": task.metadata.get("organized_targets")})
+        if self._is_multi_target_task(task):
+            return self._stage_own_share_created_targets(task, row)
         file_id = str(task.metadata.get("own_share_file_id") or row.get("own_share_file_id") or "").strip()
         if not file_id:
             return StageResult.failed("缺少自有分享文件夹 ID", error_type="own_share_file_missing")
@@ -3285,6 +3299,10 @@ class BridgeSelfShareTaskWorkflow:
     ) -> dict[str, str]:
         operation_key = operation_key or f"{operation_scope(task)}:create_share:{file_id}"
         target_id = str(target_id or "").strip()
+        if target_id and target_id != str(file_id or "").strip():
+            raise RuntimeError(
+                f"multi-target share operation identity mismatch: target_id={target_id} file_id={file_id}"
+            )
         operation = self.task_store.find_operation(int(task.id), operation_key)
         if operation is None:
             request = {

@@ -1723,6 +1723,23 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
                 self.assertIn("多目录状态", result.message)
 
+    def test_multi_target_version_must_be_exact_integer_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for version in (True, "1", 1.0, 0, 2):
+                for stage in (TaskStage.RECOGNIZING, TaskStage.SHARE_ALIAS_PREPARED, TaskStage.OWN_SHARE_CREATED):
+                    workflow = self._workflow(tmp)
+                    row = self._row()
+                    task = self._claim_task(
+                        "abc", "1234", stage,
+                        {"submission_id": row["id"], "multi_target_version": version, "organized_targets": self._multi_targets()},
+                        row["id"],
+                    )
+
+                    result = workflow.run_stage(task)
+
+                    self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+                    self.assertIn("multi_target_version", result.message)
+
     def test_multi_target_invalid_nested_fields_need_action_in_all_target_stages(self):
         malformed_fields = ("folder", "share", "file_ids")
         with tempfile.TemporaryDirectory() as tmp:
@@ -1935,6 +1952,29 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 )
                 self.assertEqual(share["share_code"], target["share"]["code"])
             self.assertEqual(self.p115.created_shares, ["dest-a", "dest-b"])
+
+    def test_multi_target_fresh_share_identity_mismatch_has_no_operation_or_external_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            recovery = Mock(return_value=None)
+            workflow.p115.find_own_share_by_title = recovery
+            row = self._row()
+            task = self._multi_target_task(workflow, TaskStage.OWN_SHARE_CREATED, row=row)
+            operation_key = f"{operation_scope(task)}:create_share:dest-a"
+
+            with self.assertRaises(RuntimeError):
+                workflow._journaled_create_share(
+                    task,
+                    "dest-a",
+                    "wrong target",
+                    "1212",
+                    operation_key=operation_key,
+                    target_id="dest-b",
+                )
+
+            self.assertIsNone(self.tasks.find_operation(task.id, operation_key))
+            self.assertEqual(workflow.p115.created_shares, [])
+            recovery.assert_not_called()
 
     def test_multi_target_prepared_share_identity_mismatch_does_not_start_operation(self):
         with tempfile.TemporaryDirectory() as tmp:
