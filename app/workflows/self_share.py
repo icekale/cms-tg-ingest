@@ -2465,6 +2465,29 @@ class BridgeSelfShareTaskWorkflow:
         for index, target in enumerate(targets):
             if not isinstance(target, dict):
                 return f"多目录状态损坏：organized_targets[{index}] 必须是对象"
+            for field in ("folder", "recognition", "share", "strm"):
+                if field in target and not isinstance(target[field], dict):
+                    return f"多目录状态损坏：organized_targets[{index}].{field} 必须是对象"
+            folder = target.get("folder")
+            share = target.get("share")
+            file_ids = target.get("file_ids")
+            target_id = target.get("target_id")
+            if not isinstance(folder, dict) or not isinstance(share, dict):
+                return f"多目录状态损坏：organized_targets[{index}] 缺少有效 folder/share"
+            if not isinstance(file_ids, list) or any(
+                not isinstance(value, str) or not value.strip() for value in file_ids
+            ):
+                return f"多目录状态损坏：organized_targets[{index}].file_ids 必须是非空字符串列表"
+            folder_id = folder.get("file_id")
+            share_file_id = share.get("file_id")
+            if not isinstance(target_id, str) or not target_id.strip():
+                return f"多目录状态损坏：organized_targets[{index}].target_id 无效"
+            if not isinstance(folder_id, str) or not folder_id.strip():
+                return f"多目录状态损坏：organized_targets[{index}].folder.file_id 无效"
+            if not isinstance(share_file_id, str) or not share_file_id.strip():
+                return f"多目录状态损坏：organized_targets[{index}].share.file_id 无效"
+            if target_id.strip() != folder_id.strip() or folder_id.strip() != share_file_id.strip():
+                return f"多目录状态损坏：organized_targets[{index}] 目标文件身份不一致"
         return ""
 
     @staticmethod
@@ -2491,7 +2514,9 @@ class BridgeSelfShareTaskWorkflow:
         share_file_id = str(share.get("file_id") or "").strip()
         if not target_id or target_id != folder_id:
             return f"多目录目标身份不一致：target_id={target_id or '空'} folder.file_id={folder_id or '空'}"
-        if share_file_id and share_file_id != folder_id:
+        if not share_file_id:
+            return f"多目录分享文件身份不一致：share.file_id=空 folder.file_id={folder_id or '空'}"
+        if share_file_id != folder_id:
             return f"多目录分享文件身份不一致：share.file_id={share_file_id} folder.file_id={folder_id}"
         return ""
 
@@ -2722,11 +2747,11 @@ class BridgeSelfShareTaskWorkflow:
             expected = str((recognition or {}).get("tmdb_id") or "").strip()
             folder_name = str((folder or {}).get("file_name") or "").strip()
             expected = expected or extract_tmdb_id_from_name(folder_name) or extract_tmdb_id_from_name(share_name)
-            if not expected:
-                return None
         else:
             expected = expected_task_tmdb_id(recognition, row) or task_tmdb_identity(task)
         owners = self.task_store.list_tasks_by_own_share_file_id(file_id, exclude_task_id=task.id)
+        if not expected:
+            return owners[0] if owners else None
         for owner in owners:
             owner_identity = task_tmdb_identity(owner)
             if not expected or not owner_identity or owner_identity != expected:
@@ -3277,6 +3302,16 @@ class BridgeSelfShareTaskWorkflow:
                 "create_share",
                 request,
             )
+        if operation is None:
+            raise RuntimeError("115 share creation operation disappeared")
+        if target_id:
+            request_target_id = str(operation.request.get("target_id") or "").strip()
+            request_file_id = str(operation.request.get("file_id") or "").strip()
+            if request_target_id != target_id or request_file_id != str(file_id or "").strip():
+                raise RuntimeError(
+                    f"multi-target share operation identity mismatch: target_id={request_target_id or 'missing'} "
+                    f"file_id={request_file_id or 'missing'} expected target_id={target_id} file_id={file_id}"
+                )
         if operation.status == "prepared":
             started = self.task_store.start_operation(int(task.id), operation_key)
             operation = started or self.task_store.find_operation(int(task.id), operation_key)
@@ -3293,16 +3328,6 @@ class BridgeSelfShareTaskWorkflow:
                     raise
                 completed = self.task_store.complete_operation(int(task.id), operation_key, created)
                 operation = completed or self.task_store.find_operation(int(task.id), operation_key)
-        if operation is None:
-            raise RuntimeError("115 share creation operation disappeared")
-        if target_id:
-            request_target_id = str(operation.request.get("target_id") or "").strip()
-            request_file_id = str(operation.request.get("file_id") or "").strip()
-            if request_target_id != target_id or request_file_id != str(file_id or "").strip():
-                raise RuntimeError(
-                    f"multi-target share operation identity mismatch: target_id={request_target_id or 'missing'} "
-                    f"file_id={request_file_id or 'missing'} expected target_id={target_id} file_id={file_id}"
-                )
         if operation.status == "succeeded":
             created = operation.result
         elif operation.status in {"started", "uncertain"}:
