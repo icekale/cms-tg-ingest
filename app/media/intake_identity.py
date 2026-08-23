@@ -56,34 +56,59 @@ INCOMPLETE = "incomplete"
 CONFLICT = "conflict"
 
 
+def dest_file_ids_from_hits(
+    *,
+    file_hits: list[dict[str, Any]],
+    folder_hits: list[dict[str, Any]],
+    expected_ids: list[str],
+) -> dict[str, list[str]] | None:
+    expected = {str(value) for value in expected_ids if str(value)}
+    folders = {p115_item_id(item): item for item in folder_hits if p115_item_id(item)}
+    by_file: dict[str, set[str]] = {}
+    for item in file_hits:
+        file_id = p115_item_id(item)
+        if file_id not in expected:
+            continue
+        parent_id = p115_item_parent_id(item)
+        parent = folders.get(parent_id) or {}
+        if is_season_folder_name(p115_file_name(parent)):
+            dest_id = p115_item_parent_id(parent)
+        else:
+            dest_id = parent_id
+        if dest_id:
+            by_file.setdefault(file_id, set()).add(dest_id)
+    if set(by_file) != expected:
+        return {}
+    if any(len(destinations) != 1 for destinations in by_file.values()):
+        return None
+    grouped: dict[str, list[str]] = {}
+    for file_id, destinations in by_file.items():
+        dest_id = next(iter(destinations))
+        grouped.setdefault(dest_id, []).append(file_id)
+    return {
+        dest_id: sorted(file_ids)
+        for dest_id, file_ids in sorted(grouped.items())
+    }
+
+
 def dest_id_from_file_hits(
     *,
     file_hits: list[dict[str, Any]],
     folder_hits: list[dict[str, Any]],
     expected_ids: list[str],
 ) -> str:
-    folders = {p115_item_id(item): item for item in folder_hits if p115_item_id(item)}
-    found: dict[str, str] = {}
-    for item in file_hits:
-        file_id = p115_item_id(item)
-        if file_id not in {str(value) for value in expected_ids}:
-            continue
-        parent_id = p115_item_parent_id(item)
-        parent = folders.get(parent_id) or {}
-        parent_name = p115_file_name(parent)
-        if is_season_folder_name(parent_name):
-            dest_id = p115_item_parent_id(parent)
-        else:
-            dest_id = parent_id
-        if dest_id:
-            found[file_id] = dest_id
-    expected = [str(value) for value in expected_ids if str(value)]
-    if not expected or not found:
-        return INCOMPLETE
-    dests = set(found.values())
-    if len(dests) != 1:
+    grouped = dest_file_ids_from_hits(
+        file_hits=file_hits,
+        folder_hits=folder_hits,
+        expected_ids=expected_ids,
+    )
+    if grouped is None:
         return CONFLICT
-    return dests.pop()
+    if not grouped:
+        return INCOMPLETE
+    if len(grouped) != 1:
+        return CONFLICT
+    return next(iter(grouped))
 
 
 def collect_file_ids_under_dest(dest_id: str, list_files: ListFiles) -> set[str]:

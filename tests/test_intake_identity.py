@@ -3,6 +3,7 @@ import unittest
 from app.media.intake_identity import (
     cleanup_root_action,
     collect_file_ids_under_dest,
+    dest_file_ids_from_hits,
     dest_id_from_file_hits,
     is_season_folder_name,
     is_video_name,
@@ -83,6 +84,47 @@ class IntakeIdentitySnapshotTests(unittest.TestCase):
 
 
 class IntakeIdentityDestTests(unittest.TestCase):
+    def test_groups_files_by_destination_and_walks_up_season_parents(self):
+        result = dest_file_ids_from_hits(
+            file_hits=[
+                {"fid": "episode-a", "cid": "season-a"},
+                {"fid": "episode-b", "cid": "season-b"},
+            ],
+            folder_hits=[
+                {"fid": "season-a", "cid": "dest-a", "n": "Season 1"},
+                {"fid": "season-b", "cid": "dest-b", "n": "Season 2"},
+                {"fid": "dest-a", "cid": "library", "n": "Show A"},
+                {"fid": "dest-b", "cid": "library", "n": "Show B"},
+            ],
+            expected_ids=["episode-a", "episode-b"],
+        )
+        self.assertEqual(
+            result,
+            {"dest-a": ["episode-a"], "dest-b": ["episode-b"]},
+        )
+
+    def test_grouping_missing_expected_file_is_incomplete(self):
+        result = dest_file_ids_from_hits(
+            file_hits=[{"fid": "episode-a", "cid": "dest-a"}],
+            folder_hits=[{"fid": "dest-a", "n": "Show A"}],
+            expected_ids=["episode-a", "episode-b"],
+        )
+        self.assertEqual(result, {})
+
+    def test_grouping_ambiguous_file_destination_returns_none(self):
+        result = dest_file_ids_from_hits(
+            file_hits=[
+                {"fid": "episode-a", "cid": "dest-a"},
+                {"fid": "episode-a", "cid": "dest-b"},
+            ],
+            folder_hits=[
+                {"fid": "dest-a", "n": "Show A"},
+                {"fid": "dest-b", "n": "Show B"},
+            ],
+            expected_ids=["episode-a"],
+        )
+        self.assertIsNone(result)
+
     def test_movie_parent_is_dest(self):
         dest = dest_id_from_file_hits(
             file_hits=[
@@ -144,7 +186,7 @@ class IntakeIdentityDestTests(unittest.TestCase):
         )
         self.assertEqual(dest, "incomplete")
 
-    def test_located_subset_same_dest_is_enough(self):
+    def test_located_subset_is_incomplete_until_all_expected_files_are_found(self):
         dest = dest_id_from_file_hits(
             file_hits=[
                 {"fid": "ep-a", "cid": "dest-a", "n": "A.mkv"},
@@ -154,7 +196,7 @@ class IntakeIdentityDestTests(unittest.TestCase):
             ],
             expected_ids=["ep-a", "ep-b"],
         )
-        self.assertEqual(dest, "dest-a")
+        self.assertEqual(dest, "incomplete")
 
     def test_collect_file_ids_under_dest_includes_season_children(self):
         listed = {
