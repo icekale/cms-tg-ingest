@@ -2462,6 +2462,9 @@ class BridgeSelfShareTaskWorkflow:
             return "多目录状态损坏：organized_targets 必须是列表"
         if not targets:
             return "多目录状态为空：organized_targets 没有可处理目标"
+        for index, target in enumerate(targets):
+            if not isinstance(target, dict):
+                return f"多目录状态损坏：organized_targets[{index}] 必须是对象"
         return ""
 
     @staticmethod

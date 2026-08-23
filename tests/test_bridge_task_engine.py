@@ -1700,6 +1700,24 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
                 self.assertIn("多目录状态", result.message)
 
+    def test_multi_target_invalid_target_elements_need_action_in_all_target_stages(self):
+        invalid_target_lists = ([None], ["bad"], [self._multi_targets()[0], None])
+        with tempfile.TemporaryDirectory() as tmp:
+            for invalid_targets in invalid_target_lists:
+                for stage in (TaskStage.RECOGNIZING, TaskStage.SHARE_ALIAS_PREPARED, TaskStage.OWN_SHARE_CREATED):
+                    workflow = self._workflow(tmp)
+                    row = self._row()
+                    task = self._claim_task(
+                        "abc", "1234", stage,
+                        {"submission_id": row["id"], "multi_target_version": 1, "organized_targets": invalid_targets},
+                        row["id"],
+                    )
+
+                    result = workflow.run_stage(task)
+
+                    self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+                    self.assertIn("多目录状态", result.message)
+
     def test_recognizing_stage_preserves_target_specific_tmdb_and_category(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
