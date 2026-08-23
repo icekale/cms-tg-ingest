@@ -4428,6 +4428,65 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertIn("不可用", stored["share_validation_error"])
             self.assertEqual(result.metadata["share_review_status"], "invalid")
 
+    def test_multi_target_create_share_ignores_previous_generation_operations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {
+                    "submission_id": row["id"],
+                    "operation_generation": 1,
+                    "update_requested_run": 2,
+                    "multi_target_version": 1,
+                    "organized_targets": self._multi_targets(),
+                    "intake_identity": {
+                        "root_ids": ["received-root"],
+                        "files": [{"id": "episode-a"}, {"id": "episode-b"}],
+                    },
+                },
+                row["id"],
+            )
+            old_generation_key = "g0:u2:create_share:dest-a"
+            old_update_key = "g1:u1:create_share:dest-b"
+            for old_key, target_id in ((old_generation_key, "dest-a"), (old_update_key, "dest-b")):
+                self.tasks.prepare_operation(task.id, old_key, "create_share", {"target_id": target_id, "file_id": target_id})
+                self.tasks.start_operation(task.id, old_key)
+                self.tasks.complete_operation(task.id, old_key, {"target_id": target_id, "file_id": target_id, "share_code": "old-share"})
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(self.p115.created_shares, ["dest-a", "dest-b"])
+            self.assertEqual(
+                {operation.operation_key for operation in self.tasks.list_operations(task.id) if operation.operation_type == "create_share"},
+                {old_generation_key, old_update_key, "g1:u2:create_share:dest-a", "g1:u2:create_share:dest-b"},
+            )
+
+    def test_multi_target_create_share_rejects_succeeded_result_target_identity_before_posting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            targets = self._multi_targets()
+            for target, code in ((targets[0], "share-a"), (targets[1], "share-b")):
+                target["share"].update({"status": "succeeded", "code": code, "receive_code": "pwd", "validation_status": "valid"})
+            task = self._multi_target_task(workflow, TaskStage.OWN_SHARE_CREATED, targets=targets)
+            for target in targets:
+                target_id = target["target_id"]
+                key = f"{operation_scope(task)}:create_share:{target_id}"
+                self.tasks.prepare_operation(task.id, key, "create_share", {"target_id": target_id, "file_id": target_id})
+                self.tasks.start_operation(task.id, key)
+                result = {"share_code": target["share"]["code"], "target_id": target_id}
+                if target_id == "dest-a":
+                    result["target_id"] = "wrong-target"
+                self.tasks.complete_operation(task.id, key, result)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(self.p115.created_shares, [])
+
     def test_multi_target_cms_sync_rejects_existing_operation_with_wrong_type_before_posting(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
@@ -4515,6 +4574,23 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
 
                 self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
                 self.assertEqual(self.cms.share_sync_calls, [])
+
+    def test_single_target_cms_sync_uses_default_receive_code_when_history_is_blank(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_code="owncode",
+                own_share_receive_code="",
+            ) or row
+            task = self._claim_task("abc", "1234", TaskStage.SHARE_SYNC_SUBMITTED, {"submission_id": row["id"]}, row["id"])
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(self.cms.share_sync_calls, [("owncode", "1212", "0", "/media/share")])
 
     def test_single_target_cms_sync_rejects_mismatched_request_and_succeeded_result(self):
         for field, value in (("share_code", "other-share"), ("receive_code", "other-pwd"), ("cid", "other-cid"), ("local_path", "/other/path")):
@@ -4666,6 +4742,35 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 f"{operation_scope(task)}:cms_share_sync:dest-a:share-a",
                 f"{operation_scope(task)}:cms_share_sync:dest-b:share-b",
             ])
+
+    def test_multi_target_cms_sync_accepts_historical_result_without_target_identity_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            targets = self._multi_targets()
+            for target, code, pwd in ((targets[0], "share-a", "pwd-a"), (targets[1], "share-b", "pwd-b")):
+                target["share"].update({"status": "succeeded", "code": code, "receive_code": pwd, "validation_status": "valid"})
+            task = self._multi_target_task(workflow, TaskStage.SHARE_SYNC_SUBMITTED, targets=targets)
+            for target in targets:
+                target_id = target["target_id"]
+                code = target["share"]["code"]
+                create_key = f"{operation_scope(task)}:create_share:{target_id}"
+                self.tasks.prepare_operation(task.id, create_key, "create_share", {"target_id": target_id, "file_id": target_id})
+                self.tasks.start_operation(task.id, create_key)
+                self.tasks.complete_operation(task.id, create_key, {"target_id": target_id, "file_id": target_id, "share_code": code})
+            sync_key = f"{operation_scope(task)}:cms_share_sync:dest-a:share-a"
+            self.tasks.prepare_operation(
+                task.id,
+                sync_key,
+                "cms_share_sync",
+                {"target_id": "dest-a", "share_code": "share-a", "receive_code": "pwd-a", "cid": "0", "local_path": "/media/share"},
+            )
+            self.tasks.start_operation(task.id, sync_key)
+            self.tasks.complete_operation(task.id, sync_key, {"share_code": "share-a"})
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(self.cms.share_sync_calls, [("share-b", "pwd-b", "0", "/media/share")])
 
     def test_multi_target_cms_sync_prevalidates_all_create_operations_before_posting(self):
         with tempfile.TemporaryDirectory() as tmp:

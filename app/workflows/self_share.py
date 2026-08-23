@@ -3174,7 +3174,7 @@ class BridgeSelfShareTaskWorkflow:
             if operation.operation_type != "create_share":
                 continue
             if not operation.operation_key.startswith(prefix):
-                return f"多目录自有分享操作范围无效：{operation.operation_key}"
+                continue
             operation_target_id = operation.operation_key[len(prefix):].strip()
             target = target_map.get(operation_target_id)
             if target is None:
@@ -3193,9 +3193,10 @@ class BridgeSelfShareTaskWorkflow:
                 result_code = str(result.get("share_code") or result.get("code") or "").strip()
                 if not result_code:
                     return "多目录自有分享成功操作缺少分享码，已阻止继续处理"
-                result_file_id = str(result.get("file_id") or "").strip()
-                if result_file_id and result_file_id != file_id:
-                    return "多目录自有分享成功操作文件身份不一致，已阻止继续处理"
+                for result_key in ("target_id", "target_file_id", "file_id"):
+                    result_file_id = str(result.get(result_key) or "").strip()
+                    if result_file_id and result_file_id != file_id:
+                        return f"多目录自有分享成功操作 {result_key} 身份不一致，已阻止继续处理"
                 share_state = target.get("share") or {}
                 if share_state.get("status") == "succeeded":
                     state_code = str(share_state.get("code") or "").strip()
@@ -3760,11 +3761,10 @@ class BridgeSelfShareTaskWorkflow:
             result_share_code = str(result.get("share_code") or result.get("code") or "").strip()
             if result_share_code != expected["share_code"]:
                 return "CMS 分享同步成功结果 share_code 身份不匹配"
-            if target_id and str(result.get("target_id") or "").strip() != target_id:
-                return "CMS 分享同步成功结果 target_id 身份不匹配"
             if target_id:
-                for key in ("file_id", "target_file_id"):
-                    if key in result and str(result.get(key) or "").strip() != target_id:
+                for key in ("target_id", "file_id", "target_file_id"):
+                    result_file_id = str(result.get(key) or "").strip()
+                    if result_file_id and result_file_id != target_id:
                         return f"CMS 分享同步成功结果 {key} 身份不匹配"
         return ""
 
@@ -3876,6 +3876,8 @@ class BridgeSelfShareTaskWorkflow:
             return self._stage_share_sync_submitted_targets(task, row)
         own_code = str(task.metadata.get("own_share_code") or row.get("own_share_code") or "").strip()
         own_pwd = str(task.metadata.get("own_share_receive_code") or row.get("own_share_receive_code") or "").strip()
+        if not own_pwd:
+            own_pwd = str(resolve_own_share_receive_code(self.task_store, self.self_share_config).value or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
         if not own_code:
             return StageResult.failed("缺少自有分享码", error_type="own_share_missing")
         operation_key = f"{operation_scope(task)}:cms_share_sync:{own_code}"
