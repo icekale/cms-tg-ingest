@@ -41,6 +41,26 @@ class TaskActionsTest(unittest.TestCase):
         self.assertEqual(len([op for op in store.list_operations(task.id) if op.operation_type == "receive_share"]), 1)
         self.assertNotIn("own_share_code", resumed.metadata)
 
+    def test_resume_organizing_accepts_legacy_retry_stage_marker(self):
+        store = self.make_store()
+        task = store.upsert_task("resume-legacy", "", "https://115cdn.com/s/resume-legacy")
+        task = store.record_event(
+            task.id,
+            TaskStage.NEEDS_ACTION,
+            TaskStatus.NEEDS_ACTION,
+            "CMS 整理等待超时",
+            metadata_patch={
+                "retry_from_stage": TaskStage.ORGANIZING.value,
+                "retry_stage": TaskStage.ORGANIZING.value,
+                "intake_identity": {"root_ids": ["root"], "files": [{"id": "file"}]},
+            },
+        )
+        operation = store.prepare_operation(task.id, "g0:u0:receive_share", "receive_share", {})
+        store.start_operation(task.id, operation.operation_key)
+        store.complete_operation(task.id, operation.operation_key, {"received": True})
+
+        self.assertIn("resume_organizing", available_task_actions(task, 3, store=store))
+
     def test_resume_organizing_rejects_existing_create_share_operation(self):
         store = self.make_store()
         task = store.upsert_task("resume-share", "", "https://115cdn.com/s/resume-share")

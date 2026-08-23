@@ -57,9 +57,23 @@ def can_resume_organizing(task: TaskSnapshot, store: TaskStore) -> bool:
         return False
     if task.current_stage != TaskStage.NEEDS_ACTION:
         return False
-    if str(task.metadata.get("_defer_stage") or "") != TaskStage.ORGANIZING.value:
+    metadata = task.metadata or {}
+    defer_stage = str(metadata.get("_defer_stage") or "").strip()
+    legacy_organizing_resume = (
+        not defer_stage
+        and str(metadata.get("retry_from_stage") or "").strip() == TaskStage.ORGANIZING.value
+        and str(metadata.get("retry_stage") or "").strip() == TaskStage.ORGANIZING.value
+    )
+    if defer_stage != TaskStage.ORGANIZING.value and not legacy_organizing_resume:
         return False
-    if not isinstance(task.metadata.get("intake_identity"), dict):
+    identity = metadata.get("intake_identity")
+    if (
+        not isinstance(identity, dict)
+        or not isinstance(identity.get("root_ids"), list)
+        or not identity.get("root_ids")
+        or not isinstance(identity.get("files"), list)
+        or not identity.get("files")
+    ):
         return False
     if str(task.metadata.get("own_share_code") or "").strip():
         return False
