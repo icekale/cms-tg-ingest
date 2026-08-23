@@ -2399,10 +2399,49 @@ class BridgeSelfShareTaskWorkflow:
             hint_metadata,
         )
 
+    def _organized_targets(self, task):
+        raw_targets = task.metadata.get("organized_targets")
+        if isinstance(raw_targets, list) and raw_targets:
+            targets = []
+            for raw in raw_targets:
+                if not isinstance(raw, dict):
+                    continue
+                target = dict(raw)
+                target["folder"] = dict(target.get("folder") or {})
+                target["recognition"] = dict(target.get("recognition") or {})
+                target["share"] = dict(target.get("share") or {})
+                target["strm"] = dict(target.get("strm") or {})
+                target["target_id"] = str(target.get("target_id") or target["folder"].get("file_id") or "").strip()
+                target["file_ids"] = sorted({str(value).strip() for value in (target.get("file_ids") or []) if str(value).strip()})
+                if target["target_id"]:
+                    targets.append(target)
+            if targets:
+                return targets
+        folder = task.metadata.get("organized_folder")
+        if not isinstance(folder, dict):
+            return []
+        target_id = str(folder.get("file_id") or "").strip()
+        if not target_id:
+            return []
+        return [{
+            "target_id": target_id,
+            "file_ids": [],
+            "folder": dict(folder),
+            "recognition": {},
+            "share": {"file_id": target_id, "status": "pending"},
+            "strm": {"status": "pending", "move_status": "pending", "emby_status": "pending"},
+        }]
+
+    @staticmethod
+    def _is_multi_target_task(task):
+        return int(task.metadata.get("multi_target_version") or 0) == 1 and isinstance(task.metadata.get("organized_targets"), list)
+
     def _stage_recognizing(self, task):
         row = self._submission_row(task)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        if self._is_multi_target_task(task):
+            return self._stage_recognizing_targets(task, row)
         recognition = self._recognition_from_row(row)
         folder = task.metadata.get("organized_folder")
         if not isinstance(folder, dict):
@@ -2412,6 +2451,59 @@ class BridgeSelfShareTaskWorkflow:
                 "file_name": row.get("own_share_file_name"),
                 "parent_id": parent_id,
             }
+        return self._recognize_target(task, row, folder, recognition, persist_row=True)
+
+    def _stage_recognizing_targets(self, task, row):
+        targets = self._organized_targets(task)
+        for target in targets:
+            result = self._recognize_target(
+                task,
+                row,
+                target.get("folder") or {},
+                dict(target.get("recognition") or {}),
+                persist_row=False,
+            )
+            if result.outcome != StageOutcome.COMPLETE:
+                metadata = dict(result.metadata)
+                metadata["multi_target_version"] = 1
+                metadata["organized_targets"] = targets
+                return StageResult(
+                    result.outcome,
+                    result.message,
+                    metadata,
+                    result.delay_seconds,
+                    result.error_type,
+                    result.error_detail,
+                )
+            target["recognition"] = dict(result.metadata.get("recognition") or target.get("recognition") or {})
+            target["folder"] = {
+                **dict(target.get("folder") or {}),
+                "category": str(result.metadata.get("category") or "").strip(),
+            }
+        targets.sort(key=lambda item: str(item.get("target_id") or ""))
+        first = targets[0] if targets else {}
+        first_recognition = dict(first.get("recognition") or {})
+        first_folder = dict(first.get("folder") or {})
+        if hasattr(self.store, "update_category") and first_recognition.get("category"):
+            row = self.store.update_category(int(row["id"]), first_recognition["category"], "selected") or row
+        if hasattr(self.store, "update_recognition") and first_recognition:
+            self.store.update_recognition(int(row["id"]), first_recognition, "self_share_resolved")
+        return StageResult.complete(
+            "已独立识别多个整理后的 115 文件夹",
+            {
+                "submission_id": int(row["id"]),
+                "multi_target_version": 1,
+                "organized_targets": targets,
+                "recognition": first_recognition,
+                "category": first_recognition.get("category") or "",
+                "tmdb_id": first_recognition.get("tmdb_id") or "",
+                "own_share_file_id": first_folder.get("file_id") or first.get("target_id") or "",
+            },
+        )
+
+    def _recognize_target(self, task, row, folder, recognition, *, persist_row):
+        folder = dict(folder or {})
+        recognition = dict(recognition or {})
         if self._conflicting_folder_owner(
             task,
             folder,
@@ -2423,17 +2515,13 @@ class BridgeSelfShareTaskWorkflow:
                 "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享",
                 {"submission_id": int(row["id"]), "own_share_file_id": ""},
             )
-        if not self._intake_dest_skips_tmdb_mismatch(folder.get("file_id"), task.metadata):
-            if has_tmdb_folder_mismatch(
-                folder,
-                recognition,
-                row,
-                str(folder.get("file_name") or task.title or task.share_code),
-            ):
-                return StageResult.needs_action(
-                    "CMS 整理目录与源任务 TMDB 不一致或无法确认，已阻止创建自有分享",
-                    {"submission_id": int(row["id"]), "own_share_file_id": ""},
-                )
+        if not self._intake_dest_skips_tmdb_mismatch(folder.get("file_id"), task.metadata) and has_tmdb_folder_mismatch(
+            folder, recognition, row, str(folder.get("file_name") or task.title or task.share_code)
+        ):
+            return StageResult.needs_action(
+                "CMS 整理目录与源任务 TMDB 不一致或无法确认，已阻止创建自有分享",
+                {"submission_id": int(row["id"]), "own_share_file_id": ""},
+            )
         file_id = str(folder.get("file_id") or "").strip()
         folder_name = str(folder.get("file_name") or row.get("own_share_file_name") or task.title or "").strip()
         share_name = str(row.get("title") or task.title or folder_name or task.share_code).strip()
@@ -2445,34 +2533,23 @@ class BridgeSelfShareTaskWorkflow:
         child_video_name = self._folder_child_video_name(file_id)
         recognition_share_name = child_video_name or share_name
         parent_id = self._organized_parent_id(task, recognition, folder)
-        category = str(folder.get("category") or "").strip() or category_for_115_parent_id(
-            parent_id,
-            self.self_share_config.parent_cid_category_map,
-        )
+        category = str(folder.get("category") or "").strip() or category_for_115_parent_id(parent_id, self.self_share_config.parent_cid_category_map)
         if not category and hasattr(self.store, "category_for_parent_id"):
             category = self.store.category_for_parent_id(parent_id)
-        manual_category = ""
-        if str(row.get("category_status") or "").strip() == "selected":
-            manual_category = str(row.get("category_choice") or "").strip()
+        manual_category = str(row.get("category_choice") or "").strip() if str(row.get("category_status") or "").strip() == "selected" else ""
         if manual_category:
             category = manual_category
-        tmdb_id = str(
-            extract_tmdb_id_from_name(folder_name)
-            or extract_tmdb_id_from_name(share_name)
-            or recognition.get("tmdb_id")
-            or ""
-        ).strip()
-        recognition.update(
-            {
-                "title": recognition.get("title") or folder_name or share_name,
-                "share_name": recognition.get("share_name") or recognition_share_name,
-                "tmdb_id": tmdb_id,
-                "category": category,
-                "organized_parent_id": parent_id,
-                "parent_id": parent_id,
-            }
-        )
+        tmdb_id = str(extract_tmdb_id_from_name(folder_name) or extract_tmdb_id_from_name(share_name) or recognition.get("tmdb_id") or "").strip()
+        recognition.update({
+            "title": recognition.get("title") or folder_name or share_name,
+            "share_name": recognition.get("share_name") or recognition_share_name,
+            "tmdb_id": tmdb_id,
+            "category": category,
+            "organized_parent_id": parent_id,
+            "parent_id": parent_id,
+        })
         category = str(category or "").strip()
+        recognition_status = "self_share_resolved"
         if category:
             recognition = enrich_recognition_from_self_share_folder(recognition, folder, category, share_name)
             recognition["organized_parent_id"] = parent_id
@@ -2482,11 +2559,7 @@ class BridgeSelfShareTaskWorkflow:
             tmdb_resolved, tmdb_should_prompt = apply_tmdb_hint_resolution(recognition, recognition_share_name, self.tmdb_resolver)
             tmdb_category = str(tmdb_resolved.get("category") or "").strip()
             if tmdb_should_prompt and child_video_name:
-                tmdb_resolved, tmdb_should_prompt = apply_tmdb_search_resolution(
-                    recognition,
-                    child_video_name,
-                    self.tmdb_resolver,
-                )
+                tmdb_resolved, tmdb_should_prompt = apply_tmdb_search_resolution(recognition, child_video_name, self.tmdb_resolver)
                 tmdb_category = str(tmdb_resolved.get("category") or "").strip()
             if not tmdb_should_prompt and tmdb_category:
                 category = tmdb_category
@@ -2494,67 +2567,44 @@ class BridgeSelfShareTaskWorkflow:
                 recognition["organized_parent_id"] = parent_id
                 recognition["parent_id"] = parent_id
                 tmdb_id = str(recognition.get("tmdb_id") or tmdb_id).strip()
-                if hasattr(self.store, "update_category"):
-                    row = self.store.update_category(int(row["id"]), category, "selected") or row
-                if hasattr(self.store, "update_recognition"):
-                    row = self.store.update_recognition(int(row["id"]), recognition, str(recognition.get("category_status") or "tmdb_resolved")) or row
-                return StageResult.complete(
-                    "已通过 TMDB 识别分类",
-                    {
-                        "submission_id": int(row["id"]),
-                        "recognition": recognition,
-                        "category": category,
-                        "tmdb_id": tmdb_id,
-                        "own_share_file_id": file_id,
-                    },
-                )
-            cms_category = category_from_existing_library_folder(self.move_config, {"file_name": folder_name})
-            if cms_category:
-                category = cms_category
-                recognition = enrich_recognition_from_self_share_folder(recognition, folder, category, share_name)
-                recognition["organized_parent_id"] = parent_id
-                recognition["parent_id"] = parent_id
-                tmdb_id = str(recognition.get("tmdb_id") or tmdb_id).strip()
-                if hasattr(self.store, "update_category"):
-                    row = self.store.update_category(int(row["id"]), category, "selected") or row
-                if hasattr(self.store, "update_recognition"):
-                    row = self.store.update_recognition(int(row["id"]), recognition, "self_share_resolved") or row
-                return StageResult.complete(
-                    "已通过 CMS 直链 STRM 媒体库识别分类",
-                    {
-                        "submission_id": int(row["id"]),
-                        "recognition": recognition,
-                        "category": category,
-                        "tmdb_id": tmdb_id,
-                        "own_share_file_id": file_id,
-                    },
-                )
-            previous_count = 0
-            if task.metadata.get("_defer_stage") == TaskStage.RECOGNIZING.value and task.metadata.get("_defer_message") == "等待 CMS 直链 STRM 分类":
-                try:
-                    previous_count = int(task.metadata.get("_defer_count") or 0)
-                except (TypeError, ValueError):
+                recognition_status = "tmdb_resolved"
+            else:
+                cms_category = category_from_existing_library_folder(self.move_config, {"file_name": folder_name})
+                if cms_category:
+                    category = cms_category
+                    recognition = enrich_recognition_from_self_share_folder(recognition, folder, category, share_name)
+                    recognition["organized_parent_id"] = parent_id
+                    recognition["parent_id"] = parent_id
+                    tmdb_id = str(recognition.get("tmdb_id") or tmdb_id).strip()
+                else:
                     previous_count = 0
-            if self.move_config.library_roots and previous_count < 4:
-                recognition["category"] = ""
-                recognition["category_status"] = "waiting_cms_direct_strm"
-                if hasattr(self.store, "update_recognition"):
-                    row = self.store.update_recognition(int(row["id"]), recognition, "waiting_cms_direct_strm") or row
-                return StageResult.defer(
-                    "等待 CMS 直链 STRM 分类",
-                    5,
-                    {"submission_id": int(row["id"]), "recognition": recognition, "own_share_file_id": file_id},
-                )
-            recognition["category"] = ""
-            recognition["category_status"] = "needs_action"
-            recognition.pop("category_suggestion", None)
-            recognition.pop("openai_confidence", None)
-            recognition.pop("openai_reason", None)
-            return self._needs_action_recognition_result(row, recognition)
-        if category and hasattr(self.store, "update_category"):
+                    if task.metadata.get("_defer_stage") == TaskStage.RECOGNIZING.value and task.metadata.get("_defer_message") == "等待 CMS 直链 STRM 分类":
+                        try:
+                            previous_count = int(task.metadata.get("_defer_count") or 0)
+                        except (TypeError, ValueError):
+                            previous_count = 0
+                    if self.move_config.library_roots and previous_count < 4:
+                        recognition["category"] = ""
+                        recognition["category_status"] = "waiting_cms_direct_strm"
+                        if persist_row and hasattr(self.store, "update_recognition"):
+                            row = self.store.update_recognition(int(row["id"]), recognition, "waiting_cms_direct_strm") or row
+                        return StageResult.defer(
+                            "等待 CMS 直链 STRM 分类",
+                            5,
+                            {"submission_id": int(row["id"]), "recognition": recognition, "own_share_file_id": file_id},
+                        )
+                    recognition["category"] = ""
+                    recognition["category_status"] = "needs_action"
+                    recognition.pop("category_suggestion", None)
+                    recognition.pop("openai_confidence", None)
+                    recognition.pop("openai_reason", None)
+                    if persist_row:
+                        return self._needs_action_recognition_result(row, recognition)
+                    return StageResult.needs_action("等待人工确认分类", {"submission_id": int(row["id"]), "recognition": recognition})
+        if persist_row and category and hasattr(self.store, "update_category"):
             row = self.store.update_category(int(row["id"]), category, "selected") or row
-        if hasattr(self.store, "update_recognition"):
-            row = self.store.update_recognition(int(row["id"]), recognition, "self_share_resolved") or row
+        if persist_row and hasattr(self.store, "update_recognition"):
+            row = self.store.update_recognition(int(row["id"]), recognition, recognition_status) or row
         return StageResult.complete(
             "已识别整理后的 115 文件夹",
             {
@@ -2664,6 +2714,8 @@ class BridgeSelfShareTaskWorkflow:
 
     def _stage_share_alias_prepared(self, task):
         row = self._submission_row(task)
+        if row and self._is_multi_target_task(task):
+            return self._stage_share_alias_prepared_targets(task, row)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
         file_id = str(task.metadata.get("own_share_file_id") or row.get("own_share_file_id") or "").strip()
@@ -2689,8 +2741,40 @@ class BridgeSelfShareTaskWorkflow:
         ) or row
         return StageResult.complete("已保留 CMS 整理目录名", self._own_share_metadata(row))
 
+    def _stage_share_alias_prepared_targets(self, task, row):
+        targets = self._organized_targets(task)
+        for target in targets:
+            folder = dict(target.get("folder") or {})
+            target_id = str(target.get("target_id") or folder.get("file_id") or "").strip()
+            folder_name = str(folder.get("file_name") or "").strip()
+            recognition = dict(target.get("recognition") or {})
+            if not target_id or not folder_name:
+                return StageResult.failed("缺少多目录整理目标", error_type="organized_folder_missing")
+            if self._conflicting_folder_owner(task, folder, recognition, row, folder_name):
+                return StageResult.needs_action(
+                    "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享",
+                    {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+                )
+            share = dict(target.get("share") or {})
+            share["file_id"] = target_id
+            share["alias_name"] = str(share.get("alias_name") or folder_name).strip()
+            share["status"] = "alias_prepared"
+            target["share"] = share
+        targets.sort(key=lambda item: str(item.get("target_id") or ""))
+        self.store.update_self_share(int(row["id"]), workflow_phase="share_alias_prepared")
+        return StageResult.complete(
+            "已保留多个 CMS 整理目录名",
+            {
+                "submission_id": int(row["id"]),
+                "multi_target_version": 1,
+                "organized_targets": targets,
+            },
+        )
+
     def _stage_own_share_created(self, task):
         row = self._submission_row(task)
+        if row and self._is_multi_target_task(task):
+            return self._stage_own_share_created_targets(task, row)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
         file_id = str(task.metadata.get("own_share_file_id") or row.get("own_share_file_id") or "").strip()
@@ -2885,6 +2969,102 @@ class BridgeSelfShareTaskWorkflow:
             metadata.update(direct_metadata)
         return StageResult.complete(message, metadata)
 
+    def _stage_own_share_created_targets(self, task, row):
+        targets = self._organized_targets(task)
+        for target in targets:
+            target_id = str(target.get("target_id") or "").strip()
+            folder = dict(target.get("folder") or {})
+            file_id = str(folder.get("file_id") or target_id).strip()
+            folder_name = str(folder.get("file_name") or target_id).strip()
+            recognition = dict(target.get("recognition") or {})
+            share_state = dict(target.get("share") or {})
+            if not file_id or not folder_name:
+                return StageResult.failed(
+                    "缺少多目录自有分享文件夹",
+                    error_type="own_share_file_missing",
+                    metadata={"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+                )
+            if self._conflicting_folder_owner(task, folder, recognition, row, folder_name):
+                return StageResult.needs_action(
+                    "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享",
+                    {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+                )
+            if is_unverified_received_source(folder, task.metadata, self._task_receive_cid(task)):
+                return StageResult.needs_action(
+                    "等待可验证的 CMS 整理后源目录，当前 115 ID 仍是接收/分享快照，拒绝创建自有分享",
+                    {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+                )
+            operation_key = f"{operation_scope(task)}:create_share:{target_id or file_id}"
+            if share_state.get("status") == "succeeded" and str(share_state.get("code") or "").strip():
+                continue
+            receive_code = resolve_own_share_receive_code(self.task_store, self.self_share_config).value
+            try:
+                share = self._journaled_create_share(
+                    task,
+                    file_id,
+                    folder_name,
+                    receive_code,
+                    operation_key=operation_key,
+                )
+            except P115SharePendingError:
+                share_state.update({"file_id": file_id, "status": "pending", "operation_key": operation_key})
+                target["share"] = share_state
+                return StageResult.defer(
+                    "等待 115 完成多个自有分享创建",
+                    1800,
+                    {
+                        "submission_id": int(row["id"]),
+                        "multi_target_version": 1,
+                        "organized_targets": targets,
+                    },
+                )
+            except RuntimeError as exc:
+                share_state.update({"file_id": file_id, "status": "uncertain", "operation_key": operation_key})
+                target["share"] = share_state
+                return StageResult.needs_action(
+                    f"多个自有分享创建结果无法确认：{exc}",
+                    {
+                        "submission_id": int(row["id"]),
+                        "multi_target_version": 1,
+                        "organized_targets": targets,
+                    },
+                )
+            share_state.update(
+                {
+                    "file_id": file_id,
+                    "code": str(share.get("share_code") or "").strip(),
+                    "receive_code": str(share.get("receive_code") or receive_code).strip(),
+                    "url": str(share.get("share_url") or "").strip(),
+                    "status": "succeeded",
+                    "operation_key": operation_key,
+                }
+            )
+            target["share"] = share_state
+        targets.sort(key=lambda item: str(item.get("target_id") or ""))
+        first = targets[0] if targets else {}
+        first_share = dict(first.get("share") or {})
+        self.store.update_self_share(
+            int(row["id"]),
+            workflow_phase="own_share_created",
+            own_share_file_id=first_share.get("file_id"),
+            own_share_file_name=(first.get("folder") or {}).get("file_name"),
+            own_share_code=first_share.get("code"),
+            own_share_receive_code=first_share.get("receive_code"),
+            own_share_url=first_share.get("url"),
+        )
+        return StageResult.complete(
+            "已创建多个自有 115 分享",
+            {
+                "submission_id": int(row["id"]),
+                "multi_target_version": 1,
+                "organized_targets": targets,
+                "own_share_file_id": first_share.get("file_id") or "",
+                "own_share_code": first_share.get("code") or "",
+                "own_share_receive_code": first_share.get("receive_code") or "",
+                "own_share_url": first_share.get("url") or "",
+            },
+        )
+
     def _journaled_create_share(
         self,
         task,
@@ -2893,8 +3073,9 @@ class BridgeSelfShareTaskWorkflow:
         receive_code: str,
         *,
         recovery_metadata: dict[str, Any] | None = None,
+        operation_key: str | None = None,
     ) -> dict[str, str]:
-        operation_key = f"{operation_scope(task)}:create_share:{file_id}"
+        operation_key = operation_key or f"{operation_scope(task)}:create_share:{file_id}"
         operation = self.task_store.find_operation(int(task.id), operation_key)
         if operation is None:
             request = {

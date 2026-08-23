@@ -456,6 +456,58 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
         return f"{operation_scope(task)}:cms_share_sync:{share_code}"
 
     @staticmethod
+    def _multi_targets():
+        return [
+            {
+                "target_id": "dest-a",
+                "file_ids": ["episode-a"],
+                "folder": {
+                    "file_id": "dest-a",
+                    "file_name": "A-拆分剧集-[tmdb=259231]",
+                    "parent_id": "movie-parent-a",
+                    "category": "外国电视",
+                },
+                "recognition": {},
+                "share": {"file_id": "dest-a", "status": "pending"},
+                "strm": {"status": "pending", "move_status": "pending", "emby_status": "pending"},
+            },
+            {
+                "target_id": "dest-b",
+                "file_ids": ["episode-b"],
+                "folder": {
+                    "file_id": "dest-b",
+                    "file_name": "B-拆分剧集-[tmdb=326917]",
+                    "parent_id": "movie-parent-b",
+                    "category": "番剧",
+                },
+                "recognition": {},
+                "share": {"file_id": "dest-b", "status": "pending"},
+                "strm": {"status": "pending", "move_status": "pending", "emby_status": "pending"},
+            },
+        ]
+
+    def _multi_target_task(self, workflow, stage, *, targets=None, row=None):
+        row = row or self._row()
+        return self._claim_task(
+            "abc",
+            "1234",
+            stage,
+            {
+                "submission_id": row["id"],
+                "multi_target_version": 1,
+                "organized_targets": targets or self._multi_targets(),
+                "intake_identity": {
+                    "root_ids": ["received-root"],
+                    "files": [
+                        {"id": "episode-a", "name": "01.mkv"},
+                        {"id": "episode-b", "name": "02.mkv"},
+                    ],
+                },
+            },
+            row["id"],
+        )
+
+    @staticmethod
     def _delete_operation_key(task, operation_type, file_id):
         return f"{operation_scope(task)}:{operation_type}:{file_id}"
 
@@ -1484,6 +1536,103 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
             self.assertIn("其他 TMDB 任务", result.message)
             self.assertFalse(stored["own_share_file_id"])
+
+    def test_recognizing_stage_preserves_target_specific_tmdb_and_category(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            task = self._multi_target_task(workflow, TaskStage.RECOGNIZING, row=row)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            targets = result.metadata["organized_targets"]
+            self.assertEqual(targets[0]["recognition"]["tmdb_id"], "259231")
+            self.assertEqual(targets[0]["recognition"]["category"], "外国电视")
+            self.assertEqual(targets[1]["recognition"]["tmdb_id"], "326917")
+            self.assertEqual(targets[1]["recognition"]["category"], "番剧")
+            self.assertEqual(targets[0]["recognition"]["parent_id"], "movie-parent-a")
+            self.assertEqual(targets[1]["recognition"]["parent_id"], "movie-parent-b")
+
+    def test_share_alias_stage_keeps_alias_state_per_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            task = self._multi_target_task(workflow, TaskStage.SHARE_ALIAS_PREPARED, row=row)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            targets = result.metadata["organized_targets"]
+            self.assertEqual(
+                [target["share"]["alias_name"] for target in targets],
+                ["A-拆分剧集-[tmdb=259231]", "B-拆分剧集-[tmdb=326917]"],
+            )
+            self.assertEqual([target["share"]["status"] for target in targets], ["alias_prepared", "alias_prepared"])
+
+    def test_own_share_stage_creates_and_reuses_one_journal_operation_per_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            task = self._multi_target_task(workflow, TaskStage.OWN_SHARE_CREATED, row=row)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            targets = result.metadata["organized_targets"]
+            self.assertEqual([target["share"]["file_id"] for target in targets], ["dest-a", "dest-b"])
+            self.assertEqual([target["share"]["status"] for target in targets], ["succeeded", "succeeded"])
+            operations = self.tasks.list_operations(task.id)
+            self.assertEqual(
+                {
+                    operation.operation_key
+                    for operation in operations
+                    if operation.operation_type == "create_share"
+                },
+                {
+                    f"{operation_scope(task)}:create_share:dest-a",
+                    f"{operation_scope(task)}:create_share:dest-b",
+                },
+            )
+            self.assertEqual(self.p115.created_shares, ["dest-a", "dest-b"])
+
+            for target in targets:
+                share = workflow._journaled_create_share(
+                    task,
+                    target["share"]["file_id"],
+                    target["folder"]["file_name"],
+                    "ownpwd",
+                )
+                self.assertEqual(share["share_code"], target["share"]["code"])
+            self.assertEqual(self.p115.created_shares, ["dest-a", "dest-b"])
+
+    def test_own_share_stage_preserves_completed_target_when_later_target_is_pending(self):
+        from app.clients.p115 import P115SharePendingError
+
+        class PendingSecondTargetP115(FakeP115):
+            def create_share(self, file_id):
+                if file_id == "dest-b":
+                    raise P115SharePendingError("processing")
+                return super().create_share(file_id)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            workflow.p115 = PendingSecondTargetP115()
+            row = self._row()
+            task = self._multi_target_task(workflow, TaskStage.OWN_SHARE_CREATED, row=row)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            targets = result.metadata["organized_targets"]
+            self.assertEqual(targets[0]["share"]["status"], "succeeded")
+            self.assertEqual(targets[0]["share"]["file_id"], "dest-a")
+            self.assertEqual(targets[1]["share"]["status"], "pending")
+            self.assertEqual(workflow.p115.created_shares, ["dest-a"])
+            self.assertEqual(
+                self.tasks.find_operation(task.id, f"{operation_scope(task)}:create_share:dest-a").status,
+                "succeeded",
+            )
 
     def test_recognizing_stage_stops_legacy_cross_tmdb_folder_before_share(self):
         with tempfile.TemporaryDirectory() as tmp:
