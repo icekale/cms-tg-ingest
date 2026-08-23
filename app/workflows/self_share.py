@@ -1737,7 +1737,7 @@ class BridgeSelfShareTaskWorkflow:
                 if dest != INCOMPLETE:
                     if self._intake_expected_files_located(dest, expected_ids, file_hits):
                         break
-                    return INCOMPLETE, None, None
+                    dest = INCOMPLETE
             found_ids = {p115_item_id(item) for item in file_hits if p115_item_id(item)}
             for file_id in expected_ids:
                 if dest != INCOMPLETE or file_id in found_ids:
@@ -1771,7 +1771,7 @@ class BridgeSelfShareTaskWorkflow:
                 if dest != INCOMPLETE:
                     if self._intake_expected_files_located(dest, expected_ids, file_hits):
                         break
-                    return INCOMPLETE, None, None
+                    dest = INCOMPLETE
         if dest == CONFLICT:
             return CONFLICT, None, None
         if dest != INCOMPLETE:

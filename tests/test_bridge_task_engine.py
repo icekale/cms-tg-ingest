@@ -998,6 +998,47 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.cms.auto_organize_calls, 1)
             self.assertIn("等待 CMS 整理", result.message)
 
+    def test_resolve_intake_dest_folder_collects_all_hits_before_declaring_incomplete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            workflow.p115.search_hits = {
+                "episode-a.mkv": [
+                    {"fid": "episode-a", "cid": "season-a", "n": "episode-a.mkv"},
+                ],
+                "episode-b.mkv": [
+                    {"fid": "episode-b", "cid": "season-b", "n": "episode-b.mkv"},
+                ],
+            }
+            workflow.p115.folder_paths = {
+                "season-a": [
+                    {"cid": "season-a", "n": "Season 01", "pid": "dest-a"},
+                    {"cid": "dest-a", "n": "Show A", "pid": "tv-parent"},
+                ],
+                "season-b": [
+                    {"cid": "season-b", "n": "Season 02", "pid": "dest-b"},
+                    {"cid": "dest-b", "n": "Show B", "pid": "tv-parent"},
+                ],
+            }
+            task_metadata = {
+                "intake_identity": {
+                    "files": [
+                        {"id": "episode-a", "name": "episode-a.mkv"},
+                        {"id": "episode-b", "name": "episode-b.mkv"},
+                    ],
+                    "root_ids": ["received-root"],
+                }
+            }
+
+            status, folder, identity = workflow._resolve_intake_dest_folder(
+                task_metadata,
+                {},
+                receive_cid="pending-cid",
+            )
+
+            self.assertEqual(status, "conflict")
+            self.assertIsNone(folder)
+            self.assertIsNone(identity)
+
     def test_organizing_stage_rejects_folder_owned_by_different_tmdb_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
