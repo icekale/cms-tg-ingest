@@ -4430,6 +4430,39 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertTrue(saved[1]["share"]["validation_error"])
             self.assertEqual(saved[0]["share"]["review"]["share_review_status"], "valid")
 
+    def test_multi_target_share_validation_available_false_is_invalid_even_with_zero_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            self.p115.share_statuses = [
+                {"available": False, "share_state": "0", "have_vio_file": False},
+                {"available": True, "share_state": "0", "have_vio_file": False},
+            ]
+            targets = self._multi_targets()
+            targets[0]["share"].update({"status": "succeeded", "code": "share-a", "receive_code": "pwd-a"})
+            targets[1]["share"].update({"status": "succeeded", "code": "share-b", "receive_code": "pwd-b"})
+            task = self._multi_target_task(workflow, TaskStage.SHARE_VALIDATED, targets=targets)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(result.metadata["organized_targets"][0]["share"]["validation_status"], "invalid")
+            self.assertIn("不可用", result.metadata["organized_targets"][0]["share"]["validation_error"])
+
+    def test_multi_target_share_validation_requires_trusted_succeeded_credentials_before_inspect(self):
+        for missing_field in ("receive_code", "status"):
+            with self.subTest(missing_field=missing_field), tempfile.TemporaryDirectory() as tmp:
+                workflow = self._workflow(tmp)
+                targets = self._multi_targets()
+                targets[0]["share"].update({"status": "succeeded", "code": "share-a", "receive_code": "pwd-a"})
+                targets[1]["share"].update({"status": "succeeded", "code": "share-b", "receive_code": "pwd-b"})
+                targets[0]["share"].pop(missing_field)
+                task = self._multi_target_task(workflow, TaskStage.SHARE_VALIDATED, targets=targets)
+
+                result = workflow.run_stage(task)
+
+                self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+                self.assertEqual(self.p115.inspect_calls, [])
+
     def test_multi_target_share_validation_completes_when_all_targets_are_valid(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)

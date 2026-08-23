@@ -3550,20 +3550,36 @@ class BridgeSelfShareTaskWorkflow:
                     identity_error,
                     self._multi_target_stage_metadata(row, targets),
                 )
+        preflight_error = ""
+        for target in targets:
+            share = dict(target.get("share") or {})
+            target_id = str(target.get("target_id") or "").strip()
+            missing = []
+            if share.get("status") != "succeeded":
+                missing.append("状态不是 succeeded")
+            if not str(share.get("code") or "").strip():
+                missing.append("缺少目标自有分享码")
+            if not str(share.get("receive_code") or "").strip():
+                missing.append("缺少目标自有分享接收码")
+            if missing:
+                error = "；".join(missing)
+                share["validation_status"] = "invalid"
+                share["validation_error"] = error
+                share["review"] = self._share_review_metadata(task, row, "invalid", error=error)
+                target["share"] = share
+                preflight_error = preflight_error or f"目标 {target_id} {error}"
+        if preflight_error:
+            return StageResult.needs_action(
+                f"多个自有分享凭据不可信，源文件已保留：{preflight_error}",
+                self._multi_target_stage_metadata(row, targets),
+            )
         invalid_error = ""
         unknown_error = ""
         for target in targets:
             share = dict(target.get("share") or {})
-            share_code = str(share.get("code") or "").strip()
-            receive_code = str(share.get("receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
             target_id = str(target.get("target_id") or "").strip()
-            if not share_code:
-                share["validation_status"] = "invalid"
-                share["validation_error"] = "缺少目标自有分享码"
-                share["review"] = self._share_review_metadata(task, row, "invalid", error=share["validation_error"])
-                target["share"] = share
-                invalid_error = invalid_error or f"目标 {target_id} 缺少自有分享码"
-                continue
+            share_code = str(share.get("code") or "").strip()
+            receive_code = str(share.get("receive_code") or "").strip()
             try:
                 status = self.p115.inspect_share(share_code, receive_code)
             except P115ShareUnavailableError as exc:
@@ -3584,10 +3600,13 @@ class BridgeSelfShareTaskWorkflow:
                 continue
             status = status if isinstance(status, dict) else {}
             have_vio_file = self._as_bool_flag(status.get("have_vio_file"))
+            share_available = status.get("available")
             share_state = str(status.get("share_state") or "").strip().lower()
-            if have_vio_file or (share_state and share_state not in {"0", "1", "true"}) or not share_state:
+            if share_available is False or have_vio_file or (share_state and share_state not in {"0", "1", "true"}) or not share_state:
                 error = (
-                    "115 标记 have_vio_file"
+                    "115 分享不可用"
+                    if share_available is False
+                    else "115 标记 have_vio_file"
                     if have_vio_file
                     else f"115 分享状态不可用：{share_state or '未知'}"
                 )
