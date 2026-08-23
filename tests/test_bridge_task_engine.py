@@ -1085,6 +1085,53 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertIsNone(folder)
             self.assertIsNone(identity)
 
+    def test_dest_is_receive_child_accepts_direct_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            workflow.p115.files_by_parent["receive-root"] = [
+                {"cid": "destination", "pid": "receive-root", "n": "Destination"},
+            ]
+
+            self.assertIs(workflow._dest_is_receive_child("destination", "receive-root"), True)
+
+    def test_dest_is_receive_child_rejects_nested_receive_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            workflow.p115.folder_paths["destination"] = [
+                {"cid": "receive-root", "pid": "0", "n": "Receive"},
+                {"cid": "intermediate", "pid": "receive-root", "n": "Intermediate"},
+                {"cid": "destination", "pid": "intermediate", "n": "Destination"},
+            ]
+
+            self.assertIs(workflow._dest_is_receive_child("destination", "receive-root"), True)
+
+    def test_resolve_intake_dest_folder_does_not_bind_incomplete_legacy_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            workflow.p115.files_by_parent["legacy-dest"] = [
+                {"fid": "episode-a", "cid": "legacy-dest", "n": "episode-a.mkv"},
+            ]
+            task_metadata = {
+                "intake_identity": {
+                    "files": [
+                        {"id": "episode-a", "name": "episode-a.mkv"},
+                        {"id": "episode-b", "name": "episode-b.mkv"},
+                    ],
+                    "root_ids": ["received-root"],
+                }
+            }
+
+            status, folder, identity = workflow._resolve_intake_dest_folder(
+                task_metadata,
+                {},
+                own_share_file_id="legacy-dest",
+                receive_cid="pending-cid",
+            )
+
+            self.assertEqual(status, "incomplete")
+            self.assertIsNone(folder)
+            self.assertIsNone(identity)
+
     def test_organizing_stage_persists_multiple_complete_destinations(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)

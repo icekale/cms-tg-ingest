@@ -1553,23 +1553,48 @@ class BridgeSelfShareTaskWorkflow:
             return False
         if dest == receive_cid:
             return False
+        if hasattr(self.p115, "folder_path"):
+            try:
+                path = self.p115.folder_path(dest) or []
+            except Exception:
+                LOG.debug("Failed to read dest folder path dest=%s", dest, exc_info=True)
+                path = None
+            if path:
+                path_ids = {p115_item_id(item) for item in path if isinstance(item, dict)}
+                return receive_cid in path_ids
+        direct_result: bool | None = None
         if hasattr(self.p115, "file_exists_in_parent"):
             try:
-                return bool(self.p115.file_exists_in_parent(dest, receive_cid))
+                direct_result = bool(self.p115.file_exists_in_parent(dest, receive_cid))
             except Exception:
                 LOG.debug("Failed to check dest under receive_cid dest=%s", dest, exc_info=True)
-                return None
+        if direct_result is True:
+            return True
         if not hasattr(self.p115, "list_files"):
-            return None
-        try:
+            return True if direct_result is True else None
+        queue = [receive_cid]
+        seen = {receive_cid}
+        index = 0
+        while index < len(queue):
+            parent_id = queue[index]
+            index += 1
             try:
-                items = self.p115.list_files(receive_cid, limit=500, offset=0, use_cache=False)
-            except TypeError:
-                items = self.p115.list_files(receive_cid, limit=500)
-        except Exception:
-            LOG.debug("Failed to list receive_cid children dest=%s", dest, exc_info=True)
-            return None
-        return any(p115_item_id(item) == dest for item in items if isinstance(item, dict))
+                items = self._p115_list_files(parent_id, limit=500)
+            except Exception:
+                LOG.debug("Failed to list receive descendants dest=%s parent=%s", dest, parent_id, exc_info=True)
+                return None
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item_id = p115_item_id(item)
+                if item_id == dest:
+                    return True
+                if item_id and p115_is_folder(item) and item_id not in seen:
+                    seen.add(item_id)
+                    queue.append(item_id)
+            if len(items) >= 500:
+                return None
+        return False
 
     def _intake_dest_skips_tmdb_mismatch(self, folder_id: str, metadata: dict[str, Any] | None) -> bool:
         identity = metadata.get("intake_identity") if isinstance(metadata, dict) else None
