@@ -12,6 +12,8 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 - CMS 优先完成整理、改名、TMDB 匹配和分类。
 - 支持 `shared` 共享 STRM 和 `direct` 直链 STRM；任务锁定后不允许切换，避免混用。
 - 自有分享保留 CMS 的标准目录名，历史 `asset-*` 分享继续兼容，不自动改名。
+- 支持一个任务包含多个 CMS 整理目标；每个目标独立维护自有分享、CMS 同步、STRM 和 Emby 状态，所有目标成功后才统一清理接收源，失败目标会保留源文件。
+- 整理冲突任务支持安全的 `resume_organizing`，只恢复已有接收结果，不重复接收或创建分享。
 - TaskStore 记录每个阶段、等待原因、失败、重试和耗时。
 - 115 调用有频率限制、扫描预算和风控冷却。
 - 支持磁力、ED2K 云下载，随后按 STRM 模式进入对应流程；direct 模式不会创建分享或清理源文件。
@@ -28,7 +30,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 固定版本镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.4.20
+docker pull icekale/cms-tg-ingest:0.4.21
 ```
 
 ### 完整 Docker Compose
@@ -38,7 +40,7 @@ docker pull icekale/cms-tg-ingest:0.4.20
 ```yaml
 services:
   cms-tg-ingest:
-    image: icekale/cms-tg-ingest:0.4.20
+    image: icekale/cms-tg-ingest:0.4.21
     container_name: cms-tg-ingest
     restart: unless-stopped
     env_file:

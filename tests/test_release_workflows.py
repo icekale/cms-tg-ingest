@@ -19,6 +19,14 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}", content)
         self.assertIn("platforms: linux/amd64,linux/arm64", content)
 
+    def test_release_metadata_describes_multi_directory_resume(self):
+        from app import __version__
+
+        self.assertEqual(__version__, "0.4.21")
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertIn("多目录", changelog)
+        self.assertIn("继续整理", changelog)
+
     def test_release_workflow_syncs_dockerhub_description(self):
         content = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 

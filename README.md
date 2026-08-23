@@ -16,6 +16,8 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 - **保留 CMS 目录名**：新建分享直接使用 CMS 整理后的规范目录名；历史 `asset-*` 别名任务继续兼容。
 - **审核观察可配置**：Web 设置可选择推荐的 10 分钟单检查点、关闭观察或使用环境配置；观察通过后才删除转存源，不取消永久分享。
 - **违规保留源文件**：确认分享不可用或命中风险标记时进入人工处理，不自动改名、重建或重复分享，避免误删源文件和触发风控。
+- **多目录任务**：一个任务可以包含多个 CMS 整理目标；每个目标独立维护 TMDB、分类、自有分享、CMS 同步、STRM 和 Emby 状态，全部目标完成后才清理 115 接收源，任一目标失败都保留源文件。
+- **安全继续整理**：整理冲突任务可在已有接收成功记录的前提下继续整理，不重复接收或创建自有分享。
 - **Emby 结果确认**：刷新后检查媒体是否入库，并返回命中的媒体库名称。
 - **任务可追踪**：TaskStore 记录接收、整理、识别、建分享、STRM、移动、Emby、清理等阶段。
 - **低频和风控保护**：低频 115 调用，限制扫描预算和重试频率；检测到风控后进入冷却，不连续轰击 115。
@@ -36,7 +38,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.4.20`。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.4.21`。
 4. 拉取固定版本并启动：
 
 ```sh
@@ -505,7 +507,7 @@ git push origin v0.2.90
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.4.20
+docker pull icekale/cms-tg-ingest:0.4.21
 docker pull icekale/cms-tg-ingest:latest
 ```
 
