@@ -3527,10 +3527,160 @@ class BridgeSelfShareTaskWorkflow:
                     metadata[key] = value
         return metadata
 
+    def _multi_target_stage_metadata(self, row, targets, **extra):
+        return {
+            "submission_id": int(row["id"]),
+            "multi_target_version": 1,
+            "organized_targets": targets,
+            **extra,
+        }
+
+    def _stage_share_validated_targets(self, task, row):
+        targets = self._organized_targets(task)
+        duplicate_error = self._target_list_duplicate_error(targets)
+        if duplicate_error:
+            return StageResult.needs_action(
+                duplicate_error,
+                self._multi_target_stage_metadata(row, targets),
+            )
+        for target in targets:
+            identity_error = self._target_identity_error(target)
+            if identity_error:
+                return StageResult.needs_action(
+                    identity_error,
+                    self._multi_target_stage_metadata(row, targets),
+                )
+        invalid_error = ""
+        unknown_error = ""
+        for target in targets:
+            share = dict(target.get("share") or {})
+            share_code = str(share.get("code") or "").strip()
+            receive_code = str(share.get("receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
+            target_id = str(target.get("target_id") or "").strip()
+            if not share_code:
+                share["validation_status"] = "invalid"
+                share["validation_error"] = "缺少目标自有分享码"
+                share["review"] = self._share_review_metadata(task, row, "invalid", error=share["validation_error"])
+                target["share"] = share
+                invalid_error = invalid_error or f"目标 {target_id} 缺少自有分享码"
+                continue
+            try:
+                status = self.p115.inspect_share(share_code, receive_code)
+            except P115ShareUnavailableError as exc:
+                error = str(exc)[:200]
+                share["validation_status"] = "invalid"
+                share["validation_error"] = error
+                share["review"] = self._share_review_metadata(task, row, "invalid", error=error)
+                target["share"] = share
+                invalid_error = invalid_error or f"目标 {target_id} 自有分享不可用：{error}"
+                continue
+            except Exception as exc:
+                error = str(exc)[:200]
+                share["validation_status"] = "unknown"
+                share["validation_error"] = error
+                share["review"] = self._share_review_metadata(task, row, "unknown", error=error)
+                target["share"] = share
+                unknown_error = unknown_error or f"目标 {target_id} 分享状态暂时无法确认：{error}"
+                continue
+            status = status if isinstance(status, dict) else {}
+            have_vio_file = self._as_bool_flag(status.get("have_vio_file"))
+            share_state = str(status.get("share_state") or "").strip().lower()
+            if have_vio_file or (share_state and share_state not in {"0", "1", "true"}) or not share_state:
+                error = (
+                    "115 标记 have_vio_file"
+                    if have_vio_file
+                    else f"115 分享状态不可用：{share_state or '未知'}"
+                )
+                share["validation_status"] = "invalid"
+                share["validation_error"] = error
+                share["review"] = self._share_review_metadata(task, row, "invalid", error=error)
+                target["share"] = share
+                invalid_error = invalid_error or f"目标 {target_id} 分享验证失败：{error}"
+                continue
+            share["validation_status"] = "valid"
+            share["validation_error"] = ""
+            share["review"] = self._share_review_metadata(task, row, "valid", error="")
+            target["share"] = share
+        metadata = self._multi_target_stage_metadata(row, targets)
+        if invalid_error:
+            return StageResult.needs_action(
+                f"多个自有分享中存在不可用目标，源文件已保留：{invalid_error}",
+                metadata,
+            )
+        if unknown_error:
+            return StageResult.defer(
+                f"多个自有分享状态暂时无法确认，源文件暂不清理：{unknown_error}",
+                60,
+                metadata,
+            )
+        return StageResult.complete("所有目标自有分享即时验证通过，进入 115 异步审核观察期", metadata)
+
+    def _multi_target_sync_prevalidation(self, task, row, targets):
+        duplicate_error = self._target_list_duplicate_error(targets)
+        if duplicate_error:
+            return duplicate_error, None
+        operation_error = self._multi_target_operations_validation_error(task, targets)
+        if operation_error:
+            return operation_error, None
+        prepared: list[tuple[dict[str, Any], Any | None, str, str, str, str]] = []
+        scope = operation_scope(task)
+        cid = str(self.self_share_config.cms_cid)
+        local_path = str(self.self_share_config.cms_local_path)
+        for target in targets:
+            identity_error = self._target_identity_error(target)
+            if identity_error:
+                return identity_error, None
+            share = target.get("share") or {}
+            target_id = str(target.get("target_id") or "").strip()
+            share_code = str(share.get("code") or "").strip()
+            receive_code = str(share.get("receive_code") or "").strip()
+            if share.get("status") != "succeeded" or not share_code or not receive_code:
+                return f"目标 {target_id} 缺少已成功且已验证的自有分享", None
+            if share.get("validation_status") != "valid":
+                return f"目标 {target_id} 尚未通过自有分享即时验证", None
+            create_operation = self.task_store.find_operation(
+                int(task.id),
+                f"{scope}:create_share:{target_id}",
+            )
+            if create_operation is None or create_operation.status != "succeeded":
+                return f"目标 {target_id} 缺少已成功的自有分享操作记录", None
+            create_request = create_operation.request if isinstance(create_operation.request, dict) else {}
+            create_result = create_operation.result if isinstance(create_operation.result, dict) else {}
+            if (
+                str(create_request.get("target_id") or "").strip() != target_id
+                or str(create_request.get("file_id") or "").strip() != target_id
+                or str(create_result.get("share_code") or create_result.get("code") or "").strip() != share_code
+            ):
+                return f"目标 {target_id} 的自有分享操作身份不一致", None
+            operation_key = f"{scope}:cms_share_sync:{target_id}:{share_code}"
+            operation = self.task_store.find_operation(int(task.id), operation_key)
+            if operation is not None:
+                request = operation.request if isinstance(operation.request, dict) else {}
+                if any(
+                    str(request.get(key) or "").strip() != expected
+                    for key, expected in {
+                        "target_id": target_id,
+                        "share_code": share_code,
+                        "receive_code": receive_code,
+                        "cid": cid,
+                        "local_path": local_path,
+                    }.items()
+                ):
+                    return f"目标 {target_id} 的 CMS 分享同步操作身份不一致", None
+                if operation.status not in {"prepared", "succeeded"}:
+                    return f"目标 {target_id} 的 CMS 分享同步结果无法安全重试：{operation.status}", None
+            prepared.append((target, operation, operation_key, share_code, receive_code, target_id))
+        return "", prepared
+
     def _stage_share_validated(self, task):
         row = self._submission_row(task)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        state_error = self._multi_target_state_error(task)
+        if state_error:
+            return StageResult.needs_action(state_error, self._multi_target_stage_metadata(row, task.metadata.get("organized_targets") or []))
+        if self._is_multi_target_task(task):
+            return self._stage_share_validated_targets(task, row)
         own_code = str(row.get("own_share_code") or "").strip()
         own_pwd = str(row.get("own_share_receive_code") or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
         if not own_code:
@@ -3584,10 +3734,90 @@ class BridgeSelfShareTaskWorkflow:
             manifest = {}
         return manifest if isinstance(manifest, dict) else {}
 
+    def _stage_share_sync_submitted_targets(self, task, row):
+        targets = self._organized_targets(task)
+        state_error, prepared = self._multi_target_sync_prevalidation(task, row, targets)
+        if state_error:
+            return StageResult.needs_action(
+                state_error,
+                self._multi_target_stage_metadata(row, targets, cms_share_sync_outcome="unknown"),
+            )
+        waiting_task = self._pending_cms_share_sync_task(task)
+        if waiting_task:
+            return StageResult.defer(
+                "等待上一条 CMS 分享同步完成",
+                5,
+                self._multi_target_stage_metadata(row, targets, share_sync_wait_task_id=waiting_task.id),
+            )
+        for target, operation, operation_key, share_code, receive_code, target_id in prepared or []:
+            share = dict(target.get("share") or {})
+            if operation is None:
+                operation = self.task_store.prepare_operation(
+                    int(task.id),
+                    operation_key,
+                    "cms_share_sync",
+                    {
+                        "target_id": target_id,
+                        "share_code": share_code,
+                        "receive_code": receive_code,
+                        "cid": str(self.self_share_config.cms_cid),
+                        "local_path": str(self.self_share_config.cms_local_path),
+                    },
+                )
+            if operation.status == "prepared":
+                started = self.task_store.start_operation(int(task.id), operation_key)
+                operation = started or self.task_store.find_operation(int(task.id), operation_key)
+                if started is not None:
+                    try:
+                        response = self.cms.add_share115_sync_task(
+                            str(operation.request.get("share_code") or share_code),
+                            str(operation.request.get("receive_code") or receive_code),
+                            cid=str(operation.request.get("cid") or self.self_share_config.cms_cid),
+                            local_path=str(operation.request.get("local_path") or self.self_share_config.cms_local_path),
+                        )
+                        completed = self.task_store.complete_operation(
+                            int(task.id),
+                            operation_key,
+                            response if isinstance(response, dict) else {},
+                        )
+                        operation = completed or self.task_store.find_operation(int(task.id), operation_key)
+                    except Exception as exc:
+                        uncertain = self.task_store.mark_operation_uncertain(int(task.id), operation_key, str(exc))
+                        operation = uncertain or self.task_store.find_operation(int(task.id), operation_key)
+            if operation is None or operation.status != "succeeded":
+                share["sync_status"] = "uncertain" if operation and operation.status == "uncertain" else "failed"
+                share["sync_error"] = str(operation.last_error or "CMS 分享同步结果无法确认") if operation else "CMS 分享同步操作消失"
+                target["share"] = share
+                return StageResult.needs_action(
+                    f"目标 {target_id} 的 CMS 分享同步结果无法安全确认，源文件已保留",
+                    self._multi_target_stage_metadata(row, targets, cms_share_sync_outcome="unknown"),
+                )
+            share["sync_status"] = "submitted"
+            share["sync_error"] = ""
+            target["share"] = share
+        targets.sort(key=lambda item: str(item.get("target_id") or ""))
+        first_share = dict((targets[0].get("share") or {}) if targets else {})
+        row = self.store.update_self_share(
+            int(row["id"]),
+            workflow_phase="share_sync_submitted",
+            share_sync_status="submitted",
+            own_share_code=first_share.get("code") or row.get("own_share_code"),
+            own_share_receive_code=first_share.get("receive_code") or row.get("own_share_receive_code"),
+        ) or row
+        return StageResult.complete(
+            "已提交全部目标的 CMS 分享同步",
+            self._multi_target_stage_metadata(row, targets, share_sync_status="submitted", cms_share_sync_outcome="submitted"),
+        )
+
     def _stage_share_sync_submitted(self, task):
         row = self._submission_row(task)
         if not row:
             return StageResult.failed("找不到提交记录", error_type="submission_missing")
+        state_error = self._multi_target_state_error(task)
+        if state_error:
+            return StageResult.needs_action(state_error, self._multi_target_stage_metadata(row, task.metadata.get("organized_targets") or []))
+        if self._is_multi_target_task(task):
+            return self._stage_share_sync_submitted_targets(task, row)
         own_code = str(task.metadata.get("own_share_code") or row.get("own_share_code") or "").strip()
         own_pwd = str(task.metadata.get("own_share_receive_code") or row.get("own_share_receive_code") or "").strip()
         if not own_code:

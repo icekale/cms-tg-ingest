@@ -52,6 +52,7 @@ class FakeP115:
         self.find_organized_calls = []
         self.renamed = []
         self.share_statuses = []
+        self.inspect_calls = []
         self.share_list_states = {}
         self.files_by_parent = {}
         self.list_file_calls = []
@@ -143,6 +144,7 @@ class FakeP115:
         return {"state": True}
 
     def inspect_share(self, share_code, receive_code):
+        self.inspect_calls.append((share_code, receive_code))
         if self.share_statuses:
             return self.share_statuses.pop(0)
         return {"available": True, "share_state": "0", "have_vio_file": False}
@@ -4404,6 +4406,115 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.p115.created_shares, ["folder-id"])
             self.assertEqual(self.cms.share_sync_calls, [("owncode", "ownpwd", "0", "/media/share")])
             self.assertEqual(self.cms.plain_share_down_calls, [])
+
+    def test_multi_target_share_validation_inspects_each_target_and_preserves_first_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            self.p115.share_statuses = [
+                {"available": True, "share_state": "0", "have_vio_file": False},
+                {"available": False, "share_state": "2", "have_vio_file": True},
+            ]
+            targets = self._multi_targets()
+            targets[0]["share"].update({"status": "succeeded", "code": "share-a", "receive_code": "pwd-a"})
+            targets[1]["share"].update({"status": "succeeded", "code": "share-b", "receive_code": "pwd-b"})
+            task = self._multi_target_task(workflow, TaskStage.SHARE_VALIDATED, targets=targets)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(self.p115.inspect_calls, [("share-a", "pwd-a"), ("share-b", "pwd-b")])
+            saved = result.metadata["organized_targets"]
+            self.assertEqual(saved[0]["share"]["validation_status"], "valid")
+            self.assertEqual(saved[0]["share"]["validation_error"], "")
+            self.assertEqual(saved[1]["share"]["validation_status"], "invalid")
+            self.assertTrue(saved[1]["share"]["validation_error"])
+            self.assertEqual(saved[0]["share"]["review"]["share_review_status"], "valid")
+
+    def test_multi_target_share_validation_completes_when_all_targets_are_valid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            self.p115.share_statuses = [
+                {"available": True, "share_state": "0", "have_vio_file": False},
+                {"available": True, "share_state": "1", "have_vio_file": False},
+            ]
+            targets = self._multi_targets()
+            targets[0]["share"].update({"status": "succeeded", "code": "share-a", "receive_code": "pwd-a"})
+            targets[1]["share"].update({"status": "succeeded", "code": "share-b", "receive_code": "pwd-b"})
+            task = self._multi_target_task(workflow, TaskStage.SHARE_VALIDATED, targets=targets)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual([target["share"]["validation_status"] for target in result.metadata["organized_targets"]], ["valid", "valid"])
+
+    def test_multi_target_cms_sync_is_journaled_per_target_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            targets = self._multi_targets()
+            for target, code, pwd in ((targets[0], "share-a", "pwd-a"), (targets[1], "share-b", "pwd-b")):
+                target["share"].update({"status": "succeeded", "code": code, "receive_code": pwd, "validation_status": "valid"})
+            task = self._multi_target_task(workflow, TaskStage.SHARE_SYNC_SUBMITTED, targets=targets)
+            for target in targets:
+                target_id = target["target_id"]
+                code = target["share"]["code"]
+                key = f"{operation_scope(task)}:create_share:{target_id}"
+                self.tasks.prepare_operation(task.id, key, "create_share", {"target_id": target_id, "file_id": target_id})
+                self.tasks.start_operation(task.id, key)
+                self.tasks.complete_operation(task.id, key, {"target_id": target_id, "file_id": target_id, "share_code": code})
+
+            first = workflow.run_stage(task)
+            second_task = self._multi_target_task(workflow, TaskStage.SHARE_SYNC_SUBMITTED, targets=first.metadata["organized_targets"])
+            second = workflow.run_stage(second_task)
+
+            self.assertEqual(first.outcome, StageOutcome.COMPLETE, first.message)
+            self.assertEqual(second.outcome, StageOutcome.COMPLETE, second.message)
+            self.assertEqual(self.cms.share_sync_calls, [("share-a", "pwd-a", "0", "/media/share"), ("share-b", "pwd-b", "0", "/media/share")])
+            operations = [op for op in self.tasks.list_operations(task.id) if op.operation_type == "cms_share_sync"]
+            self.assertEqual(sorted(op.operation_key for op in operations), [
+                f"{operation_scope(task)}:cms_share_sync:dest-a:share-a",
+                f"{operation_scope(task)}:cms_share_sync:dest-b:share-b",
+            ])
+
+    def test_multi_target_cms_sync_prevalidates_all_create_operations_before_posting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            targets = self._multi_targets()
+            for target, code, pwd in ((targets[0], "share-a", "pwd-a"), (targets[1], "share-b", "pwd-b")):
+                target["share"].update({"status": "succeeded", "code": code, "receive_code": pwd, "validation_status": "valid"})
+            task = self._multi_target_task(workflow, TaskStage.SHARE_SYNC_SUBMITTED, targets=targets)
+            key = f"{operation_scope(task)}:create_share:dest-a"
+            self.tasks.prepare_operation(task.id, key, "create_share", {"target_id": "dest-a", "file_id": "dest-a"})
+            self.tasks.start_operation(task.id, key)
+            self.tasks.complete_operation(task.id, key, {"target_id": "dest-a", "file_id": "dest-a", "share_code": "share-a"})
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(self.cms.share_sync_calls, [])
+
+    def test_multi_target_cms_sync_stops_safely_after_later_uncertain_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            workflow.cms.add_share115_sync_task = Mock(side_effect=[None, RuntimeError("cms unavailable")])
+            targets = self._multi_targets()
+            for target, code, pwd in ((targets[0], "share-a", "pwd-a"), (targets[1], "share-b", "pwd-b")):
+                target["share"].update({"status": "succeeded", "code": code, "receive_code": pwd, "validation_status": "valid"})
+            task = self._multi_target_task(workflow, TaskStage.SHARE_SYNC_SUBMITTED, targets=targets)
+            for target in targets:
+                target_id = target["target_id"]
+                code = target["share"]["code"]
+                key = f"{operation_scope(task)}:create_share:{target_id}"
+                self.tasks.prepare_operation(task.id, key, "create_share", {"target_id": target_id, "file_id": target_id})
+                self.tasks.start_operation(task.id, key)
+                self.tasks.complete_operation(task.id, key, {"target_id": target_id, "file_id": target_id, "share_code": code})
+
+            result = workflow.run_stage(task)
+
+            self.assertIn(result.outcome, {StageOutcome.DEFER, StageOutcome.NEEDS_ACTION})
+            saved = result.metadata["organized_targets"]
+            self.assertEqual(saved[0]["share"]["sync_status"], "submitted")
+            self.assertEqual(saved[1]["share"]["sync_status"], "uncertain")
+            self.assertEqual(workflow.cms.add_share115_sync_task.call_count, 2)
 
     def test_own_share_stage_recreates_share_when_dest_children_change(self):
         with tempfile.TemporaryDirectory() as tmp:
