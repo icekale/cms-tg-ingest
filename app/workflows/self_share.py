@@ -4068,10 +4068,25 @@ class BridgeSelfShareTaskWorkflow:
             return StageResult.needs_action(state_error, self._multi_target_metadata(row, targets))
         prepared: list[tuple[dict[str, Any], dict[str, Any], Path]] = []
         missing: list[str] = []
+        completed_target_ids = set()
         for target in targets:
             target_row = self._row_for_target(row, target)
-            recognition = dict(target.get("recognition") or {})
+            strm = dict(target.get("strm") or {})
             target_id = str(target.get("target_id") or "").strip()
+            existing_status = str(strm.get("status") or "").strip().lower()
+            existing_source = str(strm.get("source_path") or "").strip()
+            if existing_status == "ready" and existing_source:
+                source = safe_resolve(Path(existing_source))
+                issue = validate_self_share_strm_source(source, target_row)
+                if issue:
+                    return StageResult.needs_action(
+                        f"目标 {target_id} 的 STRM 源校验失败：{issue}",
+                        self._multi_target_metadata(row, targets),
+                    )
+                prepared.append((target, target_row, source))
+                completed_target_ids.add(target_id)
+                continue
+            recognition = dict(target.get("recognition") or {})
             share_name = str(target_row.get("own_share_file_name") or recognition.get("share_name") or target_id).strip()
             source = find_self_share_strm_source_dir(self.self_share_config, target_row, recognition, share_name)
             if not source:
@@ -4088,7 +4103,8 @@ class BridgeSelfShareTaskWorkflow:
         for target, _target_row, source in prepared:
             strm = dict(target.get("strm") or {})
             strm["source_path"] = str(source)
-            strm["status"] = "source_ready"
+            if str(target.get("target_id") or "").strip() not in completed_target_ids:
+                strm["status"] = "source_ready"
             target["strm"] = strm
         if missing:
             return StageResult.defer(
@@ -4097,6 +4113,8 @@ class BridgeSelfShareTaskWorkflow:
                 self._multi_target_metadata(row, targets),
             )
         for target, target_row, source in prepared:
+            if str(target.get("target_id") or "").strip() in completed_target_ids:
+                continue
             restored = restore_canonical_strm_paths(source, target_row)
             strm = dict(target.get("strm") or {})
             if restored:
@@ -4293,7 +4311,13 @@ class BridgeSelfShareTaskWorkflow:
             category = final_category_for_move(target_row, dict(target.get("recognition") or {}))
             move_config = move_config_for_workflow_source(self.move_config, source, self.self_share_config)
             canonical_name = str((target.get("folder") or {}).get("file_name") or target_id).strip()
-            plan = plan_strm_move(source, category, move_config, destination_name=canonical_name)
+            try:
+                plan = plan_strm_move(source, category, move_config, destination_name=canonical_name)
+            except Exception as exc:
+                return StageResult.needs_action(
+                    f"目标 {target_id} STRM 目标规划失败，已停止移动：{exc}",
+                    self._multi_target_metadata(row, targets),
+                )
             plans.append((target, target_row, safe_resolve(source), plan))
         for target, _target_row, _source, plan in plans:
             if plan.dest_path:
@@ -4412,6 +4436,8 @@ class BridgeSelfShareTaskWorkflow:
         for target in targets:
             target_id = str(target.get("target_id") or "").strip()
             strm = dict(target.get("strm") or {})
+            if str(strm.get("emby_status") or "").lower() == "confirmed":
+                continue
             if str(strm.get("move_status") or "").lower() != "moved":
                 return StageResult.needs_action(
                     f"目标 {target_id} 尚未完成 STRM 移动，禁止 Emby 确认",
@@ -4520,19 +4546,41 @@ class BridgeSelfShareTaskWorkflow:
             request = operation.request if isinstance(operation.request, dict) else {}
             metadata["share_created_at"] = result.get("create_time") or request.get("requested_at") or metadata.get("share_created_at")
         shadow_task = type("TargetReviewTask", (), {"metadata": metadata})()
-        status, review_metadata, message, delay = self._advance_share_review(shadow_task, row)
+        target_row = self._row_for_target(row, target)
+        status, review_metadata, message, delay = self._advance_share_review(shadow_task, target_row)
         share["review"] = review_metadata
         target["share"] = share
         return status, message, delay
 
+    def _multi_target_intake_state_error(self, task, targets):
+        identity = task.metadata.get("intake_identity")
+        if not isinstance(identity, dict) or not isinstance(identity.get("root_ids"), list) or not identity.get("root_ids"):
+            return "多目录状态缺少完整接收根，已停止清理"
+        files = identity.get("files")
+        if not isinstance(files, list) or not files:
+            return "多目录状态缺少接收文件快照，已停止清理"
+        actual = []
+        for item in files:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].strip():
+                return "多目录状态包含无效接收文件归属，已停止清理"
+            actual.append(item["id"].strip())
+        if len(set(actual)) != len(actual):
+            return "多目录状态包含重复接收文件归属，已停止清理"
+        expected = [
+            str(file_id).strip()
+            for target in targets
+            for file_id in (target.get("file_ids") or [])
+            if isinstance(file_id, str) and file_id.strip()
+        ]
+        if set(actual) != set(expected) or len(actual) != len(expected):
+            return "多目录接收文件归属与快照不一致，已停止清理"
+        return ""
+
     def _stage_cleaned_targets(self, task, row):
         targets = self._organized_targets(task)
-        if not self.cleanup_client:
-            statuses = [dict(target.get("strm") or {}) for target in targets]
-            if any(str(item.get("move_status") or "").lower() != "moved" or str(item.get("emby_status") or "").lower() != "confirmed" for item in statuses):
-                return StageResult.needs_action("等待全部目标完成 STRM 移动和 Emby 确认后再清理", self._multi_target_metadata(row, targets))
-            updated = self.store.update_cleanup(int(row["id"]), "skipped", error="disabled") or row
-            return StageResult.complete("清理已跳过（未启用）", self._multi_target_metadata(row, targets, cleanup_status="skipped", cleanup_error="disabled"))
+        intake_error = self._multi_target_intake_state_error(task, targets)
+        if intake_error:
+            return StageResult.needs_action(intake_error, self._multi_target_metadata(row, targets))
         identity = task.metadata.get("intake_identity")
         if not isinstance(identity, dict) or not isinstance(identity.get("root_ids"), list) or not identity.get("root_ids"):
             return StageResult.needs_action("多目录状态缺少完整接收根，已停止清理", self._multi_target_metadata(row, targets))
@@ -4566,6 +4614,12 @@ class BridgeSelfShareTaskWorkflow:
                 return StageResult.needs_action(f"目标 {target_id} 缺少 STRM 目标路径，已停止清理", self._multi_target_metadata(row, targets))
         if not all(str((target.get("share") or {}).get("receive_code") or "").strip() for target in targets):
             return StageResult.needs_action("多目录状态缺少目标分享接收码，已停止清理", self._multi_target_metadata(row, targets))
+        if not self.cleanup_client:
+            self.store.update_cleanup(int(row["id"]), "skipped", error="disabled")
+            return StageResult.complete(
+                "清理已跳过（未启用）",
+                self._multi_target_metadata(row, targets, cleanup_status="skipped", cleanup_error="disabled", share_review_status="passed"),
+            )
         review_metadata = {"share_review_status": "passed"}
         cleanup_result = self._cleanup_intake_roots(task, row, review_metadata)
         if isinstance(cleanup_result, StageResult):
