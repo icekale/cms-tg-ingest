@@ -1537,6 +1537,69 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertIn("其他 TMDB 任务", result.message)
             self.assertFalse(stored["own_share_file_id"])
 
+    def test_multi_target_alias_rejects_target_id_folder_id_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            targets = self._multi_targets()
+            targets[0]["target_id"] = "different-target"
+            task = self._multi_target_task(workflow, TaskStage.SHARE_ALIAS_PREPARED, targets=targets, row=row)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("目标", result.message)
+
+    def test_multi_target_alias_rejects_persisted_share_file_id_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            targets = self._multi_targets()
+            targets[0]["share"]["file_id"] = "different-share-file"
+            task = self._multi_target_task(workflow, TaskStage.SHARE_ALIAS_PREPARED, targets=targets, row=row)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("身份", result.message)
+
+    def test_recognizing_stage_uses_target_folder_identity_for_owner_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            task = self._multi_target_task(workflow, TaskStage.RECOGNIZING, row=row)
+            task.metadata["recognition"] = {"tmdb_id": "111111"}
+            owner = self.tasks.upsert_task("owner", "", "https://115cdn.com/s/owner")
+            self.tasks.record_event(
+                owner.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "owner",
+                metadata_patch={
+                    "own_share_file_id": "dest-a",
+                    "recognition": {"tmdb_id": "259231"},
+                },
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["organized_targets"][0]["recognition"]["tmdb_id"], "259231")
+
+    def test_recognizing_stage_rejects_first_target_tmdb_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            targets = self._multi_targets()
+            targets[0]["recognition"] = {"tmdb_id": "999999"}
+            task = self._multi_target_task(workflow, TaskStage.RECOGNIZING, targets=targets, row=row)
+            task.metadata["intake_identity"]["dest_id"] = "dest-a"
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("TMDB", result.message)
+
     def test_recognizing_stage_preserves_target_specific_tmdb_and_category(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)

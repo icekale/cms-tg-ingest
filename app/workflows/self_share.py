@@ -1621,6 +1621,10 @@ class BridgeSelfShareTaskWorkflow:
         return False
 
     def _intake_dest_skips_tmdb_mismatch(self, folder_id: str, metadata: dict[str, Any] | None) -> bool:
+        if isinstance(metadata, dict) and metadata.get("multi_target_version") == 1 and isinstance(
+            metadata.get("organized_targets"), list
+        ):
+            return False
         identity = metadata.get("intake_identity") if isinstance(metadata, dict) else None
         dest_id = str(identity.get("dest_id") or "").strip() if isinstance(identity, dict) else ""
         return bool(dest_id and str(folder_id or "").strip() == dest_id)
@@ -2411,10 +2415,9 @@ class BridgeSelfShareTaskWorkflow:
                 target["recognition"] = dict(target.get("recognition") or {})
                 target["share"] = dict(target.get("share") or {})
                 target["strm"] = dict(target.get("strm") or {})
-                target["target_id"] = str(target.get("target_id") or target["folder"].get("file_id") or "").strip()
+                target["target_id"] = str(target.get("target_id") or "").strip()
                 target["file_ids"] = sorted({str(value).strip() for value in (target.get("file_ids") or []) if str(value).strip()})
-                if target["target_id"]:
-                    targets.append(target)
+                targets.append(target)
             if targets:
                 return targets
         folder = task.metadata.get("organized_folder")
@@ -2436,6 +2439,19 @@ class BridgeSelfShareTaskWorkflow:
     def _is_multi_target_task(task):
         return int(task.metadata.get("multi_target_version") or 0) == 1 and isinstance(task.metadata.get("organized_targets"), list)
 
+    @staticmethod
+    def _target_identity_error(target):
+        target_id = str((target or {}).get("target_id") or "").strip()
+        folder = (target or {}).get("folder") or {}
+        folder_id = str(folder.get("file_id") or "").strip()
+        share = (target or {}).get("share") or {}
+        share_file_id = str(share.get("file_id") or "").strip()
+        if not target_id or target_id != folder_id:
+            return f"多目录目标身份不一致：target_id={target_id or '空'} folder.file_id={folder_id or '空'}"
+        if share_file_id and share_file_id != folder_id:
+            return f"多目录分享文件身份不一致：share.file_id={share_file_id} folder.file_id={folder_id}"
+        return ""
+
     def _stage_recognizing(self, task):
         row = self._submission_row(task)
         if not row:
@@ -2456,6 +2472,12 @@ class BridgeSelfShareTaskWorkflow:
     def _stage_recognizing_targets(self, task, row):
         targets = self._organized_targets(task)
         for target in targets:
+            identity_error = self._target_identity_error(target)
+            if identity_error:
+                return StageResult.needs_action(
+                    identity_error,
+                    {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+                )
             result = self._recognize_target(
                 task,
                 row,
@@ -2519,8 +2541,15 @@ class BridgeSelfShareTaskWorkflow:
                 "CMS 整理目录已被其他 TMDB 任务占用，已阻止创建自有分享",
                 {"submission_id": int(row["id"]), "own_share_file_id": ""},
             )
-        if not self._intake_dest_skips_tmdb_mismatch(folder.get("file_id"), task.metadata) and has_tmdb_folder_mismatch(
-            folder, recognition, row, str(folder.get("file_name") or task.title or task.share_code)
+        if not self._intake_dest_skips_tmdb_mismatch(folder.get("file_id"), task.metadata) and (
+            self._target_folder_tmdb_mismatch(
+                folder,
+                recognition,
+                row,
+                multi_target=self._is_multi_target_task(task),
+            )
+            if self._is_multi_target_task(task)
+            else has_tmdb_folder_mismatch(folder, recognition, row, str(folder.get("file_name") or task.title or task.share_code))
         ):
             return StageResult.needs_action(
                 "CMS 整理目录与源任务 TMDB 不一致或无法确认，已阻止创建自有分享",
@@ -2621,18 +2650,27 @@ class BridgeSelfShareTaskWorkflow:
         )
 
     @staticmethod
-    def _target_folder_tmdb_mismatch(folder, recognition, row):
+    def _target_folder_tmdb_mismatch(folder, recognition, row, *, multi_target=False):
         target_tmdb = str((recognition or {}).get("tmdb_id") or "").strip()
         actual_tmdb = extract_tmdb_id_from_name(str((folder or {}).get("file_name") or ""))
         if target_tmdb:
             return actual_tmdb != target_tmdb
+        if multi_target and actual_tmdb:
+            return False
         return has_tmdb_folder_mismatch(folder, recognition, row, "")
 
     def _conflicting_folder_owner(self, task, folder, recognition, row, share_name):
         file_id = str(folder.get("file_id") or "").strip()
         if not file_id:
             return None
-        expected = expected_task_tmdb_id(recognition, row) or task_tmdb_identity(task)
+        if self._is_multi_target_task(task):
+            expected = str((recognition or {}).get("tmdb_id") or "").strip()
+            folder_name = str((folder or {}).get("file_name") or "").strip()
+            expected = expected or extract_tmdb_id_from_name(folder_name) or extract_tmdb_id_from_name(share_name)
+            if not expected:
+                return None
+        else:
+            expected = expected_task_tmdb_id(recognition, row) or task_tmdb_identity(task)
         owners = self.task_store.list_tasks_by_own_share_file_id(file_id, exclude_task_id=task.id)
         for owner in owners:
             owner_identity = task_tmdb_identity(owner)
@@ -2756,14 +2794,20 @@ class BridgeSelfShareTaskWorkflow:
     def _stage_share_alias_prepared_targets(self, task, row):
         targets = self._organized_targets(task)
         for target in targets:
+            identity_error = self._target_identity_error(target)
+            if identity_error:
+                return StageResult.needs_action(
+                    identity_error,
+                    {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+                )
             folder = dict(target.get("folder") or {})
-            target_id = str(target.get("target_id") or folder.get("file_id") or "").strip()
+            target_id = str(target.get("target_id") or "").strip()
             folder_name = str(folder.get("file_name") or "").strip()
             recognition = dict(target.get("recognition") or {})
-            if not target_id or not folder_name:
+            if not folder_name:
                 return StageResult.failed("缺少多目录整理目标", error_type="organized_folder_missing")
             if not self._intake_dest_skips_tmdb_mismatch(target_id, task.metadata) and self._target_folder_tmdb_mismatch(
-                folder, recognition, row
+                folder, recognition, row, multi_target=True
             ):
                 return StageResult.needs_action(
                     "CMS 整理目录与源任务 TMDB 不一致或无法确认，已阻止创建自有分享",
@@ -2996,6 +3040,12 @@ class BridgeSelfShareTaskWorkflow:
     def _stage_own_share_created_targets(self, task, row):
         targets = self._organized_targets(task)
         for target in targets:
+            identity_error = self._target_identity_error(target)
+            if identity_error:
+                return StageResult.needs_action(
+                    identity_error,
+                    {"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
+                )
             target_id = str(target.get("target_id") or "").strip()
             folder = dict(target.get("folder") or {})
             file_id = str(folder.get("file_id") or target_id).strip()
@@ -3009,7 +3059,7 @@ class BridgeSelfShareTaskWorkflow:
                     metadata={"submission_id": int(row["id"]), "multi_target_version": 1, "organized_targets": targets},
                 )
             if not self._intake_dest_skips_tmdb_mismatch(file_id, task.metadata) and self._target_folder_tmdb_mismatch(
-                folder, recognition, row
+                folder, recognition, row, multi_target=True
             ):
                 return StageResult.needs_action(
                     "CMS 整理目录与源任务 TMDB 不一致或无法确认，已阻止创建自有分享",
