@@ -37,7 +37,7 @@ _HANDLER_MARKER = "_cms_tg_ingest_logging_handler"
 _TRUNCATION_MARKER = " [TRUNCATED]"
 
 _URL_SECRET_RE = re.compile(
-    r"([?&](?:password|passwd|pwd|code|receive_code|access_code|share_password|share_pwd|cms_password|self_share_own_share_password|token|access_token|refresh_token|auth_token|bearer_token|csrf_token|hdhive_token|session_token|web_token|emby_token|tmdb_bearer_token|p115_cookie|sessdata|api_key|apikey|emby_api_key|openai_api_key|tmdb_api_key|key|secret)=)[^&#\s]+",
+    r"([?&](?:password|passwd|pwd|code|share_code|receive_code|access_code|share_password|share_pwd|cms_password|self_share_own_share_password|token|access_token|refresh_token|auth_token|bearer_token|csrf_token|hdhive_token|session_token|web_token|emby_token|tmdb_bearer_token|p115_cookie|sessdata|api_key|apikey|emby_api_key|openai_api_key|tmdb_api_key|key|secret)=)[^&#\s]+",
     re.IGNORECASE,
 )
 _HTTP_URL_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
@@ -57,6 +57,7 @@ _SENSITIVE_MAPPING_KEYS = (
     "passwd",
     "pwd",
     "receive_code",
+    "share_code",
     "access_code",
     "token",
     "api_key",
@@ -104,12 +105,12 @@ _MAPPING_SECRET_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 _VALUE_SECRET_RE = re.compile(
-    r"\b(password|passwd|pwd|receive_code|access_code|share_password|share_pwd|cms_password|self_share_own_share_password|token|api_key|apikey|emby_api_key|openai_api_key|tmdb_api_key|access_token|refresh_token|auth_token|bearer_token|tmdb_bearer_token|csrf_token|hdhive_token|session_token|web_token|emby_token|p115_cookie|sessdata|secret)\b\s*[:=]\s*"
+    r"\b(password|passwd|pwd|receive_code|share_code|access_code|share_password|share_pwd|cms_password|self_share_own_share_password|token|api_key|apikey|emby_api_key|openai_api_key|tmdb_api_key|access_token|refresh_token|auth_token|bearer_token|tmdb_bearer_token|csrf_token|hdhive_token|session_token|web_token|emby_token|p115_cookie|sessdata|secret)\b\s*[:=]\s*"
     r"(.*?)(?=(?:\s+https?://)|[,;&\r\n]|$)",
     re.IGNORECASE,
 )
 _QUOTED_VALUE_SECRET_RE = re.compile(
-    r"""((?:["'])(?:password|passwd|pwd|receive_code|access_code|share_password|share_pwd|cms_password|self_share_own_share_password|token|api_key|apikey|emby_api_key|openai_api_key|tmdb_api_key|access_token|refresh_token|auth_token|bearer_token|tmdb_bearer_token|csrf_token|hdhive_token|session_token|web_token|emby_token|p115_cookie|sessdata|secret)(?:["'])\s*[:=]\s*["'])([^"'\r\n]*)(["'])""",
+    r"""((?:["'])(?:password|passwd|pwd|receive_code|share_code|access_code|share_password|share_pwd|cms_password|self_share_own_share_password|token|api_key|apikey|emby_api_key|openai_api_key|tmdb_api_key|access_token|refresh_token|auth_token|bearer_token|tmdb_bearer_token|csrf_token|hdhive_token|session_token|web_token|emby_token|p115_cookie|sessdata|secret)(?:["'])\s*[:=]\s*["'])([^"'\r\n]*)(["'])""",
     re.IGNORECASE,
 )
 _BOT_TOKEN_RE = re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{20,}\b")

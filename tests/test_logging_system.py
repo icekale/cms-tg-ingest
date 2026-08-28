@@ -56,6 +56,15 @@ class LoggingSystemTests(unittest.TestCase):
             self.assertNotIn(secret, redacted)
         self.assertIn("[REDACTED]", redacted)
 
+    def test_redact_text_removes_share_code_assignment_mapping_and_url_values(self):
+        source = 'share_code=plain-share {"share_code": "json-share"} {\'share_code\': \'quoted-share\'} https://115.com/s/item?share_code=query-share'
+
+        redacted = redact_text(source)
+
+        for secret in ("plain-share", "json-share", "quoted-share", "query-share"):
+            self.assertNotIn(secret, redacted)
+        self.assertIn("[REDACTED]", redacted)
+
     def test_project_credential_aliases_are_redacted_from_every_log_sink(self):
         secrets = (
             "query-code-leak",

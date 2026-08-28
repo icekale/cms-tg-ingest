@@ -2626,7 +2626,7 @@ def execute_hdhive_unlock(
         return
     except HdhiveProxyError as exc:
         telegram.answer_callback_query(callback_id, "HDHive 请求失败", show_alert=True)
-        telegram.send_message(chat_id, f"HDHive 请求失败：{exc.message}")
+        telegram.send_message(chat_id, f"HDHive 请求失败：{safe_telegram_text(exc.message, 160)}")
         return
     success_urls: list[str] = []
     enqueue_error = ""
@@ -2780,7 +2780,7 @@ def handle_hdhive_callback(
         return True
     except HdhiveProxyError as exc:
         telegram.answer_callback_query(callback_id, "HDHive 请求失败", show_alert=True)
-        telegram.send_message(chat_id, f"HDHive 请求失败：{exc.message}")
+        telegram.send_message(chat_id, f"HDHive 请求失败：{safe_telegram_text(exc.message, 160)}")
         return True
     return True
 def remember_manual_parent_category(store: SubmissionStore, row: dict[str, Any], category: str) -> None:
@@ -3212,10 +3212,10 @@ def format_task_intake_reply(task) -> str:
     if task.metadata.get("retry_from_stage") == TaskStage.CLEANED.value and task.metadata.get("retry_stage"):
         return f"任务已重新检查入库状态：{format_task_snapshot(task)}"
     if task.status == TaskStatus.SUCCEEDED and task.current_stage == TaskStage.CLEANED:
-        dest = task.metadata.get("dest_path") or ""
-        parent = task.metadata.get("emby_parent") or ""
+        parent = safe_telegram_text(task.metadata.get("emby_parent") or "", 160)
+        dest = safe_telegram_text(task.metadata.get("dest_path") or "", 240)
         suffix = f"\n媒体库：{parent}\n路径：{dest}" if parent or dest else ""
-        return f"任务已完成：{format_task_snapshot(task)}{suffix}"
+        return safe_telegram_text(f"任务已完成：{format_task_snapshot(task)}{suffix}", 600)
     if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION}:
         return f"任务需要处理：{format_task_snapshot(task)}\n原因：{safe_telegram_text(task.error_summary or '无详细错误', 200)}"
     if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
@@ -4520,7 +4520,7 @@ def handle_update(
                     reply_markup=hdhive_candidate_keyboard(pending.session_id, candidates),
                 )
             except (HdhiveSelectionError, HdhiveProxyError) as exc:
-                telegram.send_message(chat_id, f"HDHive 搜索失败：{getattr(exc, 'message', str(exc))}")
+                telegram.send_message(chat_id, f"HDHive 搜索失败：{safe_telegram_text(getattr(exc, 'message', str(exc)), 160)}")
             return
 
     explicit_series_update, explicit_target_task_id, series_update_payload = parse_explicit_series_update_command(text)
@@ -4578,7 +4578,7 @@ def handle_update(
     display_rows = []
 
     def add_display_row(index: int, source, summary: str) -> None:
-        display_rows.append((str(index), source.source_type, truncate_text(summary, 180)))
+        display_rows.append((str(index), source.source_type, safe_telegram_text(summary, 180)))
 
     for index, source in enumerate(sources, 1):
         link = source.raw_url

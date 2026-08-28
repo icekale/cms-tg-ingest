@@ -1521,6 +1521,52 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertNotIn("magnet:?", plain)
             self.assertNotIn("ed2k://", plain)
 
+    def test_task_intake_success_metadata_is_redacted_and_bounded(self):
+        secret_url = "https://evil.test/library?share_code=parent-share&password=parent-password"
+        task = SimpleNamespace(
+            id=11,
+            title="正常任务",
+            metadata={
+                "emby_parent": f"媒体库 {secret_url} token=parent-token",
+                "dest_path": f"/library/{secret_url} token=path-token",
+            },
+            current_stage=TaskStage.CLEANED,
+            status=TaskStatus.SUCCEEDED,
+            error_summary="",
+        )
+
+        reply = bridge.format_task_intake_reply(task)
+
+        self.assertIn("任务已完成：#11 正常任务", reply)
+        for secret in (secret_url, "evil.test", "parent-share", "parent-password", "parent-token", "path-token"):
+            self.assertNotIn(secret, reply)
+        self.assertLessEqual(len(reply), 600)
+
+    def test_multi_source_intake_summary_redacts_persisted_task_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            telegram = FakeTelegram()
+            secret_url = "https://evil.test/intake?share_code=intake-share&password=intake-password"
+            with patch.object(bridge, "format_task_intake_reply", return_value=f"收到任务 {secret_url} token=intake-token"):
+                bridge.handle_update(
+                    self.update("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"),
+                    FakeCmsSubmit(),
+                    telegram,
+                    "464100862",
+                    submission_store,
+                    poll_status=False,
+                    task_store=task_store,
+                    task_engine_enabled=True,
+                    self_share_workflow=object(),
+                )
+
+            plain = telegram.rich_messages[-1][1].to_plain()
+            self.assertIn("收到 1 个链接", plain)
+            self.assertIn("收到任务", plain)
+            for secret in (secret_url, "evil.test", "intake-share", "intake-password", "intake-token"):
+                self.assertNotIn(secret, plain)
+
     def test_start_series_update_task_requeues_completed_series(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")

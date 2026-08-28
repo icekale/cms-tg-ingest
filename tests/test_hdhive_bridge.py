@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import bridge
 from app.background_jobs import BackgroundJobCoordinator
-from app.clients.hdhive import HdhiveAccount, HdhiveResource, HdhiveUnlockItem
+from app.clients.hdhive import HdhiveProxyError, HdhiveAccount, HdhiveResource, HdhiveUnlockItem
 from app.hdhive import HdhiveSessionStore, HdhiveWorkflow
 from app.hdhive_subscriptions import HdhiveSubscriptionService
 from app.models import TaskStage, TaskStatus
@@ -546,6 +546,63 @@ class HdhiveBridgeTests(unittest.TestCase):
         self.assertEqual(len(label), 64)
         self.assertNotIn("2026", label)
         self.assertNotIn("...", label)
+
+    def test_hdhive_proxy_errors_are_redacted_on_unlock_resource_and_search_paths(self):
+        secret_url = "https://evil.test/hdhive?share_code=proxy-share&password=proxy-password"
+
+        class ErrorProxy(FakeProxy):
+            def resources(self, _media_type, _tmdb_id):
+                raise HdhiveProxyError("HDHIVE_RESOURCES_FAILED", f"资源失败 {secret_url} token=proxy-token")
+
+            def unlock(self, _slugs):
+                raise HdhiveProxyError("HDHIVE_UNLOCK_FAILED", f"解锁失败 {secret_url} token=unlock-token")
+
+        resource_workflow = HdhiveWorkflow(object(), ErrorProxy(), HdhiveSessionStore())
+        session_id = resource_workflow.sessions.begin("464100862", "Example")
+        resource_workflow.set_candidates(session_id, [{"media_type": "movie", "tmdb_id": "550", "title": "Example", "year": "1999"}])
+        telegram = FakeTelegram()
+        bridge.handle_hdhive_callback(
+            f"hive:candidate:{session_id}:0", "callback-resource-error", "464100862", telegram, resource_workflow, None
+        )
+        resource_message = telegram.messages[-1][1]
+        self.assertIn("HDHive 请求失败", resource_message)
+        for secret in (secret_url, "evil.test", "proxy-share", "proxy-password", "proxy-token"):
+            self.assertNotIn(secret, resource_message)
+
+        unlock_workflow = HdhiveWorkflow(object(), ErrorProxy(), HdhiveSessionStore())
+        unlock_session = unlock_workflow.sessions.begin("464100862", "Example")
+        unlock_workflow.load_resources = lambda _session_id, _media_type, _tmdb_id: None
+        session = unlock_workflow.sessions.get(unlock_session)
+        session.resources = [resource("unlock-item")]
+        unlock_workflow.toggle_selection(unlock_session, 0)
+        telegram = FakeTelegram()
+        bridge.execute_hdhive_unlock(unlock_workflow, unlock_session, "464100862", "callback-unlock-error", telegram, None, False)
+        unlock_message = telegram.messages[-1][1]
+        self.assertIn("HDHive 请求失败", unlock_message)
+        for secret in (secret_url, "evil.test", "proxy-share", "proxy-password", "unlock-token"):
+            self.assertNotIn(secret, unlock_message)
+
+        pending_workflow = HdhiveWorkflow(object(), FakeProxy(), HdhiveSessionStore())
+        pending_workflow.sessions.begin("464100862", "pending")
+
+        def fail_search(_query):
+            raise HdhiveProxyError("HDHIVE_SEARCH_FAILED", f"搜索失败 {secret_url} token=search-token")
+
+        pending_workflow.search_candidates = fail_search
+        telegram = FakeTelegram()
+        bridge.handle_update(
+            {"message": {"chat": {"id": "464100862"}, "from": {"id": "464100862"}, "text": "搜索词"}},
+            object(),
+            telegram,
+            "464100862",
+            object(),
+            poll_status=False,
+            hdhive_workflow=pending_workflow,
+        )
+        search_message = telegram.messages[-1][1]
+        self.assertIn("HDHive 搜索失败", search_message)
+        for secret in (secret_url, "evil.test", "proxy-share", "proxy-password", "search-token"):
+            self.assertNotIn(secret, search_message)
 
     def test_unlock_callback_enqueues_only_successful_115_links(self):
         proxy = FakeProxy()

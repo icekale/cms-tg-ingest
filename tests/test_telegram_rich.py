@@ -15,6 +15,7 @@ from app.telegram_ui import (
     format_status,
     format_taskstore_history,
     format_taskstore_status,
+    safe_telegram_text,
 )
 from app.workflows.self_share import format_task_label
 from app.clients.hdhive import HdhiveUnlockItem
@@ -208,6 +209,7 @@ class TelegramUiRichTests(unittest.TestCase):
         self.assertNotIn("secret", format_taskstore_status([task]).to_plain())
 
     def test_status_and_history_redact_persisted_error_urls_and_credentials(self):
+        self.assertNotIn("secret", safe_telegram_text("share_code=secret"))
         secret_url = "https://115cdn.com/s/legacy?password=legacy-password"
         row = {
             "title": "正常任务",
@@ -256,6 +258,49 @@ class TelegramUiRichTests(unittest.TestCase):
         self.assertNotIn("task-code", plain)
         self.assertNotIn("wait-token", plain)
         self.assertNotIn("error-token", plain)
+
+    def test_history_fields_and_unlock_enqueue_error_are_redacted(self):
+        secret_url = "https://evil.test/history?password=history-password"
+        row = {
+            "title": "正常任务",
+            "status": "failed",
+            "category_final": f"分类 {secret_url} token=category-token",
+            "move_status": f"移动 {secret_url} token=move-token",
+            "emby_status": f"Emby {secret_url} token=emby-token",
+            "emby_parent": f"媒体库 {secret_url} token=library-token",
+            "last_error": f"错误 {secret_url} token=error-token",
+        }
+        history = format_history([row]).to_plain()
+        unlock = format_hdhive_unlock_result(
+            [HdhiveUnlockItem("resource", False, "", "失败", "FAIL", False)],
+            {},
+            enqueue_error=f"提交失败 {secret_url} token=enqueue-token",
+        ).to_plain()
+
+        for plain in (history, unlock):
+            self.assertNotIn(secret_url, plain)
+            for secret in ("history-password", "category-token", "move-token", "emby-token", "library-token", "error-token", "enqueue-token"):
+                self.assertNotIn(secret, plain)
+
+    def test_taskstore_history_fields_are_redacted(self):
+        secret_url = "https://evil.test/task-history?share_code=history-share"
+        task = SimpleNamespace(
+            id=10,
+            title="正常任务",
+            metadata={
+                "category": f"分类 {secret_url} token=category-token",
+                "emby_parent": f"媒体库 {secret_url} token=library-token",
+                "dest_path": f"/library/{secret_url} token=path-token",
+            },
+            category="",
+            current_stage=TaskStage.CLEANED,
+            status=TaskStatus.SUCCEEDED,
+        )
+
+        plain = format_taskstore_history([task]).to_plain()
+
+        for secret in (secret_url, "history-share", "category-token", "library-token", "path-token", "evil.test"):
+            self.assertNotIn(secret, plain)
 
     def test_format_hdhive_unlock_result_uses_unknown_reason_when_failure_has_no_details(self):
         doc = format_hdhive_unlock_result(

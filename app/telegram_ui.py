@@ -36,9 +36,9 @@ def format_history(rows: list[dict[str, Any]]) -> RichDocument:
             (
                 str(idx),
                 safe_telegram_text(format_task_label(row), 120),
-                str(row.get("category_final") or row.get("category_choice") or row.get("category_status") or "-"),
-                str(row.get("move_status") or "-"),
-                str(row.get("emby_status") or "-"),
+                safe_telegram_text(row.get("category_final") or row.get("category_choice") or row.get("category_status") or "-", 120),
+                safe_telegram_text(row.get("move_status") or "-", 120),
+                safe_telegram_text(row.get("emby_status") or "-", 120),
             )
         )
     blocks: list = [heading("最近历史"), table(("#", "任务", "分类", "移动", "Emby"), table_rows)]
@@ -57,9 +57,9 @@ def format_taskstore_history(tasks: list[Any]) -> RichDocument:
     table_rows = []
     for idx, task in enumerate(tasks, 1):
         title = safe_telegram_text(task.title or task.metadata.get("received_title") or f"任务 #{task.id}", 80)
-        category = task.category or task.metadata.get("category") or task.metadata.get("category_final") or "-"
-        dest = safe_telegram_text(task.metadata.get("dest_path") or "-", 200)
-        emby_parent = task.metadata.get("emby_parent") or task.metadata.get("emby_refresh_library") or "-"
+        category = safe_telegram_text(task.category or task.metadata.get("category") or task.metadata.get("category_final") or "-", 120)
+        dest = safe_telegram_text(task.metadata.get("dest_path") or "-", 240)
+        emby_parent = safe_telegram_text(task.metadata.get("emby_parent") or task.metadata.get("emby_refresh_library") or "-", 160)
         table_rows.append(
             (
                 f"#{task.id}",
@@ -94,7 +94,7 @@ def format_library_summary(rows: list[dict[str, Any]]) -> str:
     for row in rows:
         if str(row.get("emby_status") or "").lower() != "confirmed":
             continue
-        parent = str(row.get("emby_parent") or "").strip()
+        parent = safe_telegram_text(row.get("emby_parent") or "", 160).strip()
         if not parent:
             continue
         counts[parent] = counts.get(parent, 0) + 1
@@ -337,14 +337,14 @@ def format_hdhive_unlock_result(
             failed_count += 1
             status = "失败"
         reason = _safe_hdhive_failure_reason(item.message or item.error_code or "未知原因") if not item.success else "-"
-        rows.append((truncate_text(str(item.slug), 80), status, reason))
+        rows.append((safe_telegram_text(str(item.slug), 80), status, reason))
     blocks: list = [
         heading("HDHive 解锁结果"),
         table(("资源", "状态", "原因"), rows),
         paragraph(f"成功 {success_count} 个，失败 {failed_count} 个。"),
     ]
     if enqueue_error:
-        blocks.append(paragraph(f"115 入库提交失败：{truncate_text(enqueue_error, 160)}。解锁链接未丢失，请稍后重试。"))
+        blocks.append(paragraph(f"115 入库提交失败：{safe_telegram_text(enqueue_error, 160)}。解锁链接未丢失，请稍后重试。"))
     elif enqueued_count:
         blocks.append(paragraph(f"115 入库：已入队 {enqueued_count} 个。"))
     else:
