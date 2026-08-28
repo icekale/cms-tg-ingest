@@ -6,6 +6,7 @@ from app.quality_automation import QualityRepairPlan, QualityRunSummary
 from app.telegram_rich import RichDocument, bold, details, heading, paragraph, table
 from app.telegram_ui import (
     format_hdhive_candidates,
+    format_hdhive_subscriptions,
     format_hdhive_unlock_result,
     format_history,
     format_metrics,
@@ -300,6 +301,25 @@ class TelegramUiRichTests(unittest.TestCase):
         plain = format_taskstore_history([task]).to_plain()
 
         for secret in (secret_url, "history-share", "category-token", "library-token", "path-token", "evil.test"):
+            self.assertNotIn(secret, plain)
+
+    def test_format_hdhive_subscriptions_redacts_last_error(self):
+        secret_url = "https://evil.test/subscription?password=subscription-password"
+        subscription = SimpleNamespace(
+            id=1,
+            title="剧集",
+            tmdb_id="1416",
+            source_url="",
+            status="error",
+            last_error=f"检查失败 {secret_url} token=subscription-token",
+            episode_filter="",
+            last_summary_json="{}",
+        )
+
+        plain = format_hdhive_subscriptions([subscription]).to_plain()
+
+        self.assertIn("最近错误：检查失败", plain)
+        for secret in (secret_url, "evil.test", "subscription-password", "subscription-token"):
             self.assertNotIn(secret, plain)
 
     def test_format_hdhive_unlock_result_uses_unknown_reason_when_failure_has_no_details(self):

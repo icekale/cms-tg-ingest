@@ -2592,7 +2592,7 @@ def handle_hdhive_filter_input(
         telegram.send_message(chat_id, f"集数过滤格式不正确。\n{_HDHIVE_FILTER_PROMPT}")
         return True
     except Exception as exc:
-        telegram.send_message(chat_id, f"集数过滤设置失败：{str(exc)[:160]}")
+        telegram.send_message(chat_id, f"集数过滤设置失败：{safe_telegram_text(str(exc), 160)}")
         return True
     with _HDHIVE_PENDING_FILTERS_LOCK:
         _HDHIVE_PENDING_FILTERS.pop(key, None)

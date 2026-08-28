@@ -482,7 +482,7 @@ def format_hdhive_subscriptions(
             if diagnosis.reasons:
                 detail_blocks.append(paragraph("原因：" + "；".join(diagnosis.reasons)))
         if subscription.last_error:
-            detail_blocks.append(paragraph(f"最近错误：{truncate_text(subscription.last_error, 120)}"))
+            detail_blocks.append(paragraph(f"最近错误：{safe_telegram_text(subscription.last_error, 120)}"))
         if detail_blocks:
             extras.append(details(f"#{subscription.id} {title}", detail_blocks))
     blocks.append(table(("#", "剧名", "状态", "来源"), table_rows))

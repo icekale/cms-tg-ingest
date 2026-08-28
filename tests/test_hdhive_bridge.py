@@ -291,6 +291,48 @@ class HdhiveBridgeTests(unittest.TestCase):
         self.assertIn("格式不正确", telegram.messages[-1][1])
         self.assertEqual(service.filters, [])
 
+    def test_subscription_filter_exception_redacts_error_and_keeps_pending_state(self):
+        telegram = FakeTelegram()
+        service = FakeSubscriptionService()
+
+        def fail_set_filter(_subscription_id, _value):
+            raise RuntimeError("filter failed https://evil.test/filter?password=filter-password&share_code=filter-share token=filter-token receive_code=filter-code")
+
+        service.set_episode_filter = fail_set_filter
+        bridge.handle_callback_query(
+            {
+                "id": "callback-filter",
+                "from": {"id": "464100862"},
+                "message": {"chat": {"id": "464100862"}},
+                "data": "hsub:filter:1",
+            },
+            telegram,
+            "464100862",
+            object(),
+            hdhive_subscription_service=service,
+        )
+        bridge.handle_update(
+            {
+                "message": {
+                    "chat": {"id": "464100862"},
+                    "from": {"id": "464100862"},
+                    "text": "S01E01-S01E02",
+                }
+            },
+            object(),
+            telegram,
+            "464100862",
+            object(),
+            poll_status=False,
+            hdhive_subscription_service=service,
+        )
+
+        message = telegram.messages[-1][1]
+        self.assertIn("集数过滤设置失败：", message)
+        for secret in ("https://evil.test/filter?password=filter-password&share_code=filter-share", "evil.test", "filter-password", "filter-share", "filter-token", "filter-code"):
+            self.assertNotIn(secret, message)
+        self.assertEqual(service.subscription.episode_filter, "")
+
     def test_clear_subscription_filter_consumes_pending_input(self):
         telegram = FakeTelegram()
         service = FakeSubscriptionService()

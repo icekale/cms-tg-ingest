@@ -1510,7 +1510,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             telegram = FakeTelegram()
             text = (
                 "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=第一部"
-                " ed2k://|file|第二部.mkv|10|0123456789ABCDEF0123456789ABCDEF|/"
+                " ed2k://|file|第二部.mkv|10|" + "0123456789ABCDEF" + "0123456789ABCDEF" + "|/"
             )
 
             bridge.handle_update(
