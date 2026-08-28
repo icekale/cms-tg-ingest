@@ -165,8 +165,12 @@ class TelegramRichClientTests(unittest.TestCase):
 
         TelegramClient("secret", http=http).send_rich_message(9, doc, reply_markup=keyboard)
 
+        self.assertEqual(len(http.calls), 2)
         self.assertTrue(http.calls[0][0].endswith("/sendRichMessage"))
-        self.assertTrue(http.calls[1][0].endswith("/sendMessage"))
+        self.assertEqual(
+            sum(url.endswith("/sendMessage") for url, _kwargs in http.calls),
+            1,
+        )
         self.assertEqual(http.calls[1][1]["payload"]["text"], doc.to_plain())
         self.assertEqual(http.calls[1][1]["payload"]["reply_markup"], keyboard)
 
@@ -177,10 +181,19 @@ class TelegramRichClientTests(unittest.TestCase):
                 {"ok": True},
             ]
         )
-        doc = RichDocument((heading("最近任务"),))
-        TelegramClient("secret", http=http).send_rich_message(1, doc)
-        self.assertTrue(http.calls[1][0].endswith("/sendMessage"))
-        self.assertEqual(http.calls[1][1]["payload"]["text"], "最近任务")
+        doc = RichDocument((heading("最近任务"), table(("状态", "结果"), (("任务", "等待"),))))
+        keyboard = {"inline_keyboard": [[{"text": "刷新", "callback_data": "refresh"}]]}
+
+        TelegramClient("secret", http=http).send_rich_message(1, doc, reply_markup=keyboard)
+
+        self.assertEqual(len(http.calls), 2)
+        self.assertTrue(http.calls[0][0].endswith("/sendRichMessage"))
+        self.assertEqual(
+            sum(url.endswith("/sendMessage") for url, _kwargs in http.calls),
+            1,
+        )
+        self.assertEqual(http.calls[1][1]["payload"]["text"], doc.to_plain())
+        self.assertEqual(http.calls[1][1]["payload"]["reply_markup"], keyboard)
 
     def test_unknown_method_falls_back(self):
         http = SequenceHttp(
@@ -189,8 +202,19 @@ class TelegramRichClientTests(unittest.TestCase):
                 {"ok": True},
             ]
         )
-        TelegramClient("secret", http=http).send_rich_message(1, RichDocument((heading("最近历史"),)))
-        self.assertTrue(http.calls[1][0].endswith("/sendMessage"))
+        doc = RichDocument((heading("最近历史"),))
+        keyboard = {"inline_keyboard": [[{"text": "详情", "callback_data": "detail"}]]}
+
+        TelegramClient("secret", http=http).send_rich_message(1, doc, reply_markup=keyboard)
+
+        self.assertEqual(len(http.calls), 2)
+        self.assertTrue(http.calls[0][0].endswith("/sendRichMessage"))
+        self.assertEqual(
+            sum(url.endswith("/sendMessage") for url, _kwargs in http.calls),
+            1,
+        )
+        self.assertEqual(http.calls[1][1]["payload"]["text"], doc.to_plain())
+        self.assertEqual(http.calls[1][1]["payload"]["reply_markup"], keyboard)
 
     def test_network_error_does_not_fall_back(self):
         http = SequenceHttp(
@@ -200,6 +224,7 @@ class TelegramRichClientTests(unittest.TestCase):
             TelegramClient("secret", http=http).send_rich_message(1, RichDocument((heading("健康检查"),)))
         self.assertEqual(len(http.calls), 1)
         self.assertTrue(http.calls[0][0].endswith("/sendRichMessage"))
+        self.assertFalse(any(url.endswith("/sendMessage") for url, _kwargs in http.calls))
 
     def test_edit_rich_message_posts_rich_message(self):
         http = SequenceHttp([{"ok": True}])
@@ -225,10 +250,17 @@ class TelegramRichClientTests(unittest.TestCase):
             ]
         )
         doc = RichDocument((heading("任务统计"),))
-        TelegramClient("secret", http=http).edit_rich_message(1, 17, doc, reply_markup={"inline_keyboard": []})
+        keyboard = {"inline_keyboard": [[{"text": "重试", "callback_data": "retry"}]]}
+        TelegramClient("secret", http=http).edit_rich_message(1, 17, doc, reply_markup=keyboard)
+
+        self.assertEqual(len(http.calls), 2)
+        self.assertTrue(http.calls[0][0].endswith("/editMessageText"))
         self.assertTrue(http.calls[1][0].endswith("/editMessageText"))
-        self.assertEqual(http.calls[1][1]["payload"]["text"], "任务统计")
-        self.assertNotIn("rich_message", http.calls[1][1]["payload"])
+        fallback_payload = http.calls[1][1]["payload"]
+        self.assertEqual(fallback_payload["message_id"], 17)
+        self.assertEqual(fallback_payload["text"], doc.to_plain())
+        self.assertEqual(fallback_payload["reply_markup"], keyboard)
+        self.assertNotIn("rich_message", fallback_payload)
         self.assertFalse(any(url.endswith("/sendMessage") for url, _kwargs in http.calls))
 
 

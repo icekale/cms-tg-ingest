@@ -340,6 +340,10 @@ class QualityTelegramTests(unittest.TestCase):
 
             self.assertEqual(len(telegram.messages), 1)
             self.assertIn("质量", telegram.messages[0][1])
+            self.assertEqual(len(telegram.rich_messages), 1)
+            document = telegram.rich_messages[0][1]
+            self.assertIn("run-y", document.to_plain())
+            self.assertIn("质量巡检需要关注", document.to_plain())
 
     def test_quality_scan_summary_is_count_only(self):
         empty = format_quality_scan_summary([])
