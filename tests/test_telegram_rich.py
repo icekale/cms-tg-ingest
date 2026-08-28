@@ -248,6 +248,28 @@ class TelegramUiRichTests(unittest.TestCase):
         self.assertNotIn("secret", format_taskstore_history([task]).to_plain())
         self.assertNotIn("secret", format_taskstore_status([task]).to_plain())
 
+    def test_taskstore_titles_matching_share_code_are_hidden(self):
+        secret = "task-title-share"
+        common = dict(
+            id=21,
+            share_code=secret,
+            category="",
+            current_stage=TaskStage.RECEIVED,
+            status=TaskStatus.PENDING,
+            error_summary="",
+            next_run_at=0,
+            claimed_by="",
+            claimed_at=None,
+            updated_at=0,
+            created_at=0,
+        )
+        tasks = [
+            SimpleNamespace(title=secret, metadata={"received_title": ""}, **common),
+            SimpleNamespace(title="", metadata={"received_title": secret}, **common),
+        ]
+        for formatter in (format_taskstore_history, format_taskstore_status):
+            self.assertNotIn(secret, formatter(tasks).to_plain())
+
     def test_status_and_history_redact_persisted_error_urls_and_credentials(self):
         self.assertNotIn("secret", safe_telegram_text("share_code=secret"))
         secret_url = "https://115cdn.com/s/legacy?password=legacy-password"
@@ -395,6 +417,10 @@ class TelegramUiRichTests(unittest.TestCase):
         self.assertIn("最近错误：检查失败", plain)
         for secret in (secret_url, "evil.test", "subscription-password", "subscription-token"):
             self.assertNotIn(secret, plain)
+
+    def test_format_hdhive_unlock_result_empty_results_explains_no_results(self):
+        doc = format_hdhive_unlock_result([], {})
+        self.assertIn("没有返回解锁结果。", doc.to_plain())
 
     def test_format_hdhive_unlock_result_uses_unknown_reason_when_failure_has_no_details(self):
         doc = format_hdhive_unlock_result(

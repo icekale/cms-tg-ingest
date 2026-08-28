@@ -19,6 +19,18 @@ from app.workflows.self_share import format_task_label
 
 
 _SERIES_UPDATE_CATEGORIES = {"国产电视", "外国电视", "番剧"}
+
+
+def task_display_title(task: Any, limit: int = 160) -> str:
+    share_code = str(getattr(task, "share_code", "") or "").strip()
+    metadata = getattr(task, "metadata", {}) or {}
+    for value in (getattr(task, "title", ""), metadata.get("received_title")):
+        title = str(value or "").strip()
+        if title and title != share_code:
+            return safe_telegram_text(title, limit)
+    return safe_telegram_text(f"任务 #{getattr(task, 'id', '?')}", limit)
+
+
 def format_history(rows: list[dict[str, Any]]) -> RichDocument:
     if not rows:
         return document(paragraph("暂无历史记录。"))
@@ -48,7 +60,7 @@ def format_taskstore_history(tasks: list[Any]) -> RichDocument:
         return RichDocument()
     table_rows = []
     for idx, task in enumerate(tasks, 1):
-        title = safe_telegram_text(task.title or task.metadata.get("received_title") or f"任务 #{task.id}", 80)
+        title = task_display_title(task, 80)
         category = safe_telegram_text(task.category or task.metadata.get("category") or task.metadata.get("category_final") or "-", 120)
         dest = safe_telegram_text(task.metadata.get("dest_path") or "-", 240)
         emby_parent = safe_telegram_text(task.metadata.get("emby_parent") or task.metadata.get("emby_refresh_library") or "-", 160)
@@ -357,8 +369,10 @@ def format_hdhive_unlock_result(
     blocks: list = [
         heading("HDHive 解锁结果"),
         table(("资源", "状态", "原因"), rows),
-        paragraph(f"成功 {success_count} 个，失败 {failed_count} 个。"),
     ]
+    if not rows:
+        blocks.append(paragraph("没有返回解锁结果。"))
+    blocks.append(paragraph(f"成功 {success_count} 个，失败 {failed_count} 个。"))
     if enqueue_error:
         blocks.append(paragraph(f"115 入库提交失败：{safe_telegram_text(enqueue_error, 160)}。解锁链接未丢失，请稍后重试。"))
     elif enqueued_count:
@@ -375,7 +389,7 @@ def format_taskstore_status(tasks: list[Any]) -> RichDocument:
     table_rows = []
     extra = []
     for task in tasks:
-        title = safe_telegram_text(str(task.title or task.metadata.get("received_title") or f"任务 #{task.id}"), 80)
+        title = task_display_title(task, 80)
         table_rows.append(
             (
                 f"#{task.id}",

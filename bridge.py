@@ -173,6 +173,7 @@ from app.telegram_ui import (
     format_status,
     format_taskstore_history,
     format_taskstore_status,
+    task_display_title,
     format_hdhive_candidate_label,
     format_hdhive_candidates,
     format_hdhive_unlock_result,
@@ -2630,7 +2631,7 @@ def execute_hdhive_unlock(
         }
         results = workflow.unlock(session_id, confirmed=confirmed)
     except HdhiveSelectionError as exc:
-        telegram.answer_callback_query(callback_id, str(exc), show_alert=True)
+        telegram.answer_callback_query(callback_id, safe_telegram_text(str(exc), 160), show_alert=True)
         return
     except HdhiveProxyError as exc:
         telegram.answer_callback_query(callback_id, "HDHive 请求失败", show_alert=True)
@@ -2784,7 +2785,7 @@ def handle_hdhive_callback(
             execute_hdhive_unlock(workflow, session_id, chat_id, callback_id, telegram, enqueue_unlocked_links, True)
             return True
     except (ValueError, IndexError, HdhiveSelectionError) as exc:
-        telegram.answer_callback_query(callback_id, str(exc), show_alert=True)
+        telegram.answer_callback_query(callback_id, safe_telegram_text(str(exc), 160), show_alert=True)
         return True
     except HdhiveProxyError as exc:
         telegram.answer_callback_query(callback_id, "HDHive 请求失败", show_alert=True)
@@ -3211,8 +3212,7 @@ def completion_drift_retry_stage(task, submission: dict[str, Any] | None = None)
 
 
 def format_task_snapshot(task) -> str:
-    title = task.title or task.metadata.get("received_title") or f"任务 #{task.id}"
-    title = safe_telegram_text(title, 160)
+    title = task_display_title(task, 160)
     return f"#{task.id} {title}｜{stage_display_name(task.current_stage)}｜{task.status.value}"
 
 

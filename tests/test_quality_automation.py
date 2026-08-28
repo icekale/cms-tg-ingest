@@ -25,6 +25,7 @@ from app.quality_automation import (
 )
 from app.quality_rules import QualityRuleMatch
 from app.task_store import TaskStore
+from bridge import _quality_attention_message
 
 
 class QualityAutomationConfigTests(unittest.TestCase):
@@ -633,6 +634,35 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertEqual(plans[unexpected.id].reason, "unexpected_strm")
             self.assertEqual(summary.planned_count, 1)
             self.assertTrue(all(isinstance(plan, QualityRepairPlan) for plan in summary.plans))
+
+    def test_quality_plan_notification_hides_share_code_title(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            task = self.add_task(service.store, "quality-share", library / "missing")
+            task = service.store.record_event(
+                task.id,
+                TaskStage.MOVED,
+                TaskStatus.SUCCEEDED,
+                "moved",
+                title="quality-share",
+            )
+
+            plans = service._plan(
+                [task],
+                [QualityIssue("missing_destination", "missing", task_id=task.id, title="quality-share")],
+                now=100.0,
+            )
+            document = _quality_attention_message(
+                QualityRunSummary(
+                    run_id="quality-run",
+                    status="succeeded",
+                    plans=tuple(plans),
+                )
+            )
+
+            self.assertEqual(plans[0].title, "任务 #1")
+            self.assertNotIn("quality-share", document.to_plain())
+            self.assertIn("任务 #1", document.to_plain())
 
     def test_scan_only_run_does_not_execute_repair_or_probe(self):
         with tempfile.TemporaryDirectory() as tmp:

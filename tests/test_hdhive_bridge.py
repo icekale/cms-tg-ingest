@@ -695,6 +695,26 @@ class HdhiveBridgeTests(unittest.TestCase):
         for secret in (secret_url, "evil.test", "proxy-share", "proxy-password", "search-token"):
             self.assertNotIn(secret, search_message)
 
+    def test_forged_filter_callback_redacts_dynamic_selection_alert(self):
+        workflow = HdhiveWorkflow(object(), FakeProxy(), HdhiveSessionStore())
+        session_id = workflow.sessions.begin("464100862", "Example")
+        telegram = FakeTelegram()
+        forged_argument = "password=callback-secret@evil.test"
+
+        handled = bridge.handle_hdhive_callback(
+            f"hive:filter:{session_id}:{forged_argument}",
+            "callback-forged-filter",
+            "464100862",
+            telegram,
+            workflow,
+            None,
+        )
+
+        self.assertTrue(handled)
+        self.assertTrue(telegram.answers[-1][2])
+        self.assertNotIn("callback-secret", telegram.answers[-1][1])
+        self.assertNotIn("evil.test", telegram.answers[-1][1])
+
     def test_unlock_callback_enqueues_only_successful_115_links(self):
         proxy = FakeProxy()
         workflow = HdhiveWorkflow(
@@ -1027,6 +1047,23 @@ class HdhiveBridgeTests(unittest.TestCase):
         snapshot = bridge.format_task_snapshot(task)
         self.assertEqual(snapshot, "#42 任务 #42｜收到链接｜pending")
         self.assertNotIn("secret-share-code", snapshot)
+
+    def test_task_snapshot_hides_title_or_received_title_matching_share_code(self):
+        secret = "snapshot-share-code"
+        common = dict(
+            id=43,
+            share_code=secret,
+            current_stage=TaskStage.RECEIVED,
+            status=TaskStatus.PENDING,
+        )
+        tasks = [
+            SimpleNamespace(title=secret, metadata={"received_title": ""}, **common),
+            SimpleNamespace(title="", metadata={"received_title": secret}, **common),
+        ]
+        for task in tasks:
+            snapshot = bridge.format_task_snapshot(task)
+            self.assertNotIn(secret, snapshot)
+            self.assertIn("任务 #43", snapshot)
 
 
 if __name__ == "__main__":

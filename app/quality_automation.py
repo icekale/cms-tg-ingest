@@ -41,6 +41,15 @@ LOG = logging.getLogger("cms-tg-ingest")
 _STRM_SHARE_MARKER_RE = re.compile(r"/s/([A-Za-z0-9]+)_([A-Za-z0-9]*)_")
 
 
+def _quality_plan_title(task: TaskSnapshot) -> str:
+    share_code = str(task.share_code or "").strip()
+    for value in (task.title, task.metadata.get("received_title")):
+        title = str(value or "").strip()
+        if title and title != share_code:
+            return title
+    return f"任务 #{task.id}"
+
+
 @dataclass(frozen=True)
 class QualityRepairPlan:
     task_id: int
@@ -958,7 +967,7 @@ class QualityAutomation:
             task_id=task.id,
             action="requeue",
             reason="auto_recheck_recovered",
-            title=task.title,
+            title=_quality_plan_title(task),
             rule_id="auto_recheck",
             risk_level="medium",
             planned_updated_at=task.updated_at,
@@ -1804,7 +1813,7 @@ class QualityAutomation:
         base = {
             "task_id": task.id,
             "issue_codes": match.issue_codes,
-            "title": task.title,
+            "title": _quality_plan_title(task),
             "rule_id": match.rule_id,
             "risk_level": match.risk_level,
             "rule_version": QUALITY_RULE_VERSION,
@@ -2444,6 +2453,6 @@ class QualityAutomation:
             action="skip",
             reason=reason,
             issue_codes=tuple(sorted({issue.code for issue in issues or []})),
-            title=task.title,
+            title=_quality_plan_title(task),
             execution_status="skipped",
         )
