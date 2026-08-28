@@ -3113,8 +3113,28 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 task_engine_enabled=True,
             )
 
-            buttons = [button for button_row in telegram.messages[-1][2]["inline_keyboard"] for button in button_row]
-            self.assertIn({"text": f"追更 #{task.id}", "callback_data": f"task_update:{task.id}"}, buttons)
+            self.assertEqual(len(telegram.rich_messages), 1)
+            buttons = [
+                button
+                for button_row in telegram.rich_messages[-1][2]["inline_keyboard"]
+                for button in button_row
+            ]
+            self.assertIn({"text": f"追更 #{task.id}", "callback_data": "task_update:1"}, buttons)
+            callbacks = {
+                button["callback_data"]
+                for button_row in telegram.rich_messages[-1][2]["inline_keyboard"]
+                for button in button_row
+            }
+            self.assertEqual(
+                callbacks,
+                {
+                    "task_detail:1",
+                    "task_emby:1",
+                    "task_restore:1",
+                    "task_reprocess:1",
+                    "task_update:1",
+                },
+            )
 
             bridge.handle_update(
                 {

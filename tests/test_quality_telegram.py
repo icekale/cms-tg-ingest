@@ -111,7 +111,14 @@ class QualityTelegramTests(unittest.TestCase):
         data = [button["callback_data"] for line in keyboard["inline_keyboard"] for button in line]
 
         self.assertEqual(len(selected), 1)
-        self.assertTrue(data)
+        self.assertEqual(
+            data,
+            [
+                "quality:reprocess:12:missing_destination:1",
+                "quality:snooze:12:missing_destination:1",
+                "quality:ignore:12:missing_destination:1",
+            ],
+        )
         self.assertTrue(all(len(value) <= 64 for value in data))
         self.assertTrue(all("/private/path" not in value for value in data))
         self.assertIn("质量任务", format_quality_manual_report(rows).to_plain())
