@@ -47,6 +47,18 @@ class TaskStoreWorkflowEventTests(unittest.TestCase):
             self.assertIn("own_share_created", stages)
             self.assertIn("share_sync_submitted", stages)
 
+    def test_record_emby_event_fallback_never_uses_share_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            row = dict(self.make_row(), title="", share_code="secret-share")
+
+            bridge.sync_emby_task_event(task_store, dict(row, emby_status="confirmed", emby_title=""))
+            task = task_store.list_recent_tasks(limit=1)[0]
+            event = task_store.list_events(task.id)[-1]
+
+            self.assertIn("Emby 已确认：任务", event["message"])
+            self.assertNotIn("secret-share", event["message"])
+
     def test_record_move_event_handles_success_and_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             task_store = TaskStore(Path(tmp) / "tasks.db")

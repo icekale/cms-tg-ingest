@@ -309,6 +309,31 @@ class EmbyProviderSearchTests(unittest.TestCase):
         self.assertEqual(emby.calls[0][1]["AnyProviderIdEquals"], "tmdb.37854")
         self.assertEqual(emby.calls[0][1]["Recursive"], "true")
 
+    def test_recheck_emby_row_redacts_dynamic_title_and_library(self):
+        class FakeStore:
+            def update_emby(self, row_id, status, item_id=None, title=None, path=None, parent=None):
+                return {"id": row_id, "emby_parent": parent}
+
+        class FakeEmby:
+            enabled = True
+            def find_item_by_tmdb(self, _tmdb_id):
+                return {
+                    "Id": "good",
+                    "Name": "电影 https://evil.test/item?password=movie-password token=movie-token",
+                    "Path": "/x/movie",
+                }
+            def library_name_for_item(self, _item):
+                return "媒体库 https://evil.test/library?share_code=library-share token=library-token"
+            def recent_items(self, limit=100):
+                return []
+
+        row = {"id": 72, "title": "电影 {tmdb=37854}", "recognition_json": "{}"}
+        _updated, message = bridge.recheck_emby_row(FakeStore(), row, FakeEmby())
+
+        self.assertIn("已重新确认 Emby：电影", message)
+        for secret in ("evil.test", "movie-password", "movie-token", "library-share", "library-token"):
+            self.assertNotIn(secret, message)
+
     def test_recheck_emby_row_prefers_full_library_tmdb_search_before_recent_items(self):
         class FakeStore:
             def update_emby(self, row_id, status, item_id=None, title=None, path=None, parent=None):

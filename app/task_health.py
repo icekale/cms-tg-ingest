@@ -181,13 +181,13 @@ def format_task_health(summary: TaskHealthSummary, *, now: float | None = None) 
         lines.append(f"等待详情: 另有 {summary.wait_overflow_count} 个任务等待中")
     if summary.latest_lock_wait:
         task = summary.latest_lock_wait
-        title = str(task.title or task.metadata.get("received_title") or task.share_code)
+        title = str(task.title or task.metadata.get("received_title") or f"任务 #{task.id}")
         reason = str(task.metadata.get("_lock_reason") or "-")
         holder = str(task.metadata.get("_lock_owner_task_id") or "-")
         lines.append(f"最近锁等待: #{task.id} {title} / {reason} / holder #{holder}")
     if summary.latest_problem:
         task = summary.latest_problem
-        title = str(task.title or task.metadata.get("received_title") or task.share_code)
+        title = str(task.title or task.metadata.get("received_title") or f"任务 #{task.id}")
         suffix = f"，{task.error_summary}" if task.error_summary else ""
         lines.append(f"最近问题: #{task.id} {title} / {stage_display_name(task.current_stage)}{suffix}")
     return "\n".join(lines)

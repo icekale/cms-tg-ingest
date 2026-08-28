@@ -1,3 +1,4 @@
+import json
 import unittest
 from types import SimpleNamespace
 
@@ -301,6 +302,26 @@ class TelegramUiRichTests(unittest.TestCase):
         plain = format_taskstore_history([task]).to_plain()
 
         for secret in (secret_url, "history-share", "category-token", "library-token", "path-token", "evil.test"):
+            self.assertNotIn(secret, plain)
+
+    def test_subscription_view_redacts_persisted_dynamic_fields(self):
+        secret_url = "https://evil.test/subscription?password=view-password&share_code=view-share"
+        subscription = SimpleNamespace(
+            id=1,
+            title=f"剧集 {secret_url} token=view-token",
+            tmdb_id="1416",
+            source_url=secret_url,
+            status="error",
+            last_error=f"错误 {secret_url} token=error-token",
+            episode_filter=f"S01E01 {secret_url} receive_code=view-code",
+            last_summary_json=json.dumps({"discovered": 1, "enqueued": 0, "blocked": 1}),
+        )
+        items = [SimpleNamespace(status="failed", skip_reason=f"原因 {secret_url} token=reason-token", last_error="")]
+
+        plain = format_hdhive_subscriptions([subscription], items_by_subscription_id={1: items}).to_plain()
+
+        self.assertIn("HDHive 剧集订阅", plain)
+        for secret in (secret_url, "evil.test", "view-password", "view-share", "view-token", "error-token", "view-code", "reason-token"):
             self.assertNotIn(secret, plain)
 
     def test_format_hdhive_subscriptions_redacts_last_error(self):

@@ -184,6 +184,49 @@ class HdhiveBridgeTests(unittest.TestCase):
         self.assertIn("检查完成：已入队 1 个", telegram.messages[-1][1])
         self.assertIn("发现 1", telegram.messages[-1][1])
 
+    def test_subscription_callback_and_creation_errors_are_redacted(self):
+        secret_url = "https://evil.test/subscription?password=callback-password&share_code=callback-share"
+        telegram = FakeTelegram()
+        service = FakeSubscriptionService()
+        service.check = lambda _subscription_id: (_ for _ in ()).throw(RuntimeError(f"检查失败 {secret_url} token=callback-token"))
+
+        bridge.handle_hdhive_subscription_callback(
+            "hsub:check:1",
+            "callback-check-error",
+            "464100862",
+            telegram,
+            service,
+            None,
+        )
+        callback_message = telegram.messages[-1][1]
+        self.assertIn("HDHive 订阅操作失败：", callback_message)
+        for secret in (secret_url, "evil.test", "callback-password", "callback-share", "callback-token"):
+            self.assertNotIn(secret, callback_message)
+
+        def fail_create(_chat_id, _url):
+            raise RuntimeError(f"创建失败 {secret_url} token=create-token")
+
+        service.create_from_url = fail_create
+        bridge.handle_update(
+            {
+                "message": {
+                    "chat": {"id": "464100862"},
+                    "from": {"id": "464100862"},
+                    "text": "/订阅 https://hdhive.com/tv/" + "a" * 32,
+                }
+            },
+            object(),
+            telegram,
+            "464100862",
+            object(),
+            poll_status=False,
+            hdhive_subscription_service=service,
+        )
+        creation_message = telegram.messages[-1][1]
+        self.assertIn("订阅失败：", creation_message)
+        for secret in (secret_url, "evil.test", "callback-password", "callback-share", "create-token"):
+            self.assertNotIn(secret, creation_message)
+
     def test_completed_subscription_renders_status_filter_and_summary(self):
         subscription = SimpleNamespace(
             id=1,

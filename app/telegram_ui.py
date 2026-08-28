@@ -447,12 +447,12 @@ def format_hdhive_subscriptions(
     extras = []
     status_map = {"active": "运行中", "paused": "已暂停", "error": "异常", "completed": "已完结"}
     for subscription in subscriptions:
-        status = status_map.get(subscription.status, subscription.status)
-        source = subscription.source_url or f"TMDB:{subscription.tmdb_id}"
-        title = subscription.title or subscription.tmdb_id
-        table_rows.append((f"#{subscription.id}", str(title), str(status), str(source)))
+        status = safe_telegram_text(status_map.get(subscription.status, subscription.status), 40)
+        source = safe_telegram_text(subscription.source_url or f"TMDB:{subscription.tmdb_id}", 180)
+        title = safe_telegram_text(subscription.title or subscription.tmdb_id, 120)
+        table_rows.append((f"#{subscription.id}", title, status, source))
         detail_blocks = []
-        episode_filter = str(getattr(subscription, "episode_filter", "") or "").strip()
+        episode_filter = safe_telegram_text(getattr(subscription, "episode_filter", "") or "", 120).strip()
         if episode_filter:
             detail_blocks.append(paragraph(f"集数过滤：{episode_filter}"))
         try:
@@ -478,9 +478,9 @@ def format_hdhive_subscriptions(
             if counters:
                 detail_blocks.append(paragraph("最近检查：" + "，".join(counters)))
             if diagnosis.conclusion:
-                detail_blocks.append(paragraph(diagnosis.conclusion))
+                detail_blocks.append(paragraph(safe_telegram_text(diagnosis.conclusion, 160)))
             if diagnosis.reasons:
-                detail_blocks.append(paragraph("原因：" + "；".join(diagnosis.reasons)))
+                detail_blocks.append(paragraph("原因：" + "；".join(safe_telegram_text(reason, 120) for reason in diagnosis.reasons)))
         if subscription.last_error:
             detail_blocks.append(paragraph(f"最近错误：{safe_telegram_text(subscription.last_error, 120)}"))
         if detail_blocks:

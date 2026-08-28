@@ -4,12 +4,53 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import bridge
 from app.models import TaskStage, TaskStatus
 from app.task_health import build_task_health, format_task_health, format_taskstore_health
 from app.task_store import TaskStore
 
 
 class TaskHealthTests(unittest.TestCase):
+    def test_health_fallback_title_and_bridge_details_redact_persisted_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            lock = store.upsert_task(
+                "secret-share",
+                "",
+                "https://evil.test/share?password=share-password",
+            )
+            store.record_event(
+                lock.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "lock",
+                metadata_patch={
+                    "_lock_waiting": True,
+                    "_lock_reason": "lock https://evil.test/lock?token=lock-token",
+                },
+            )
+            problem = store.upsert_task(
+                "problem-share",
+                "",
+                "https://evil.test/problem?password=problem-password",
+            )
+            store.record_event(
+                problem.id,
+                TaskStage.FAILED,
+                TaskStatus.FAILED,
+                "failed",
+                error_summary="failed https://evil.test/error?receive_code=error-code token=error-token",
+            )
+            summary = build_task_health(store, enabled=True, now=100.0)
+            report = format_task_health(summary, now=100.0)
+            move_config = bridge.MoveConfig(source_roots=[Path(tmp)], library_roots={"测试": Path(tmp)}, stable_seconds=0)
+            document = bridge.format_health(move_config, True, True, task_health=report)
+            plain = document.to_plain()
+
+            self.assertIn(f"最近锁等待: #{lock.id} 任务 #{lock.id}", report)
+            for secret in ("share-password", "lock-token", "error-code", "error-token", "evil.test"):
+                self.assertNotIn(secret, plain)
+
     def test_health_reports_fresh_task_runner_error_as_problem(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

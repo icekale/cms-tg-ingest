@@ -1644,9 +1644,9 @@ def recheck_emby_row(store: Any, row: dict[str, Any], emby: Any | None) -> tuple
         path=str(match.get("Path") or ""),
         parent=library_name or emby_parent_label(match),
     )
-    title = str(match.get("Name") or format_task_label(row))
-    library = str((updated or {}).get("emby_parent") or library_name or "未知")
-    return updated, f"已重新确认 Emby：{title}\n媒体库：{library}"
+    title = safe_telegram_text(str(match.get("Name") or format_task_label(row)), 160)
+    library = safe_telegram_text(str((updated or {}).get("emby_parent") or library_name or "未知"), 160)
+    return updated, safe_telegram_text(f"已重新确认 Emby：{title}\n媒体库：{library}", 360)
 
 
 def count_field_values(rows: list[dict[str, Any]], field: str) -> dict[str, int]:
@@ -1740,7 +1740,7 @@ def format_health(
     )
     blocks = [heading("健康检查"), table(("组件", "状态", "说明"), rows)]
     if task_health:
-        health_lines = [paragraph(line) for line in str(task_health).splitlines() if line]
+        health_lines = [paragraph(safe_telegram_text(line, 240)) for line in str(task_health).splitlines() if line]
         blocks.append(details("TaskStore", health_lines))
     return RichDocument(tuple(blocks))
 
@@ -2284,7 +2284,7 @@ def maybe_request_category_confirmation(
         message += "请选择建议分类："
         telegram.send_message(
             chat_id,
-            message,
+            safe_telegram_text(message, 320),
             reply_markup=category_keyboard(int(row["id"])),
         )
     return result
@@ -2525,7 +2525,7 @@ def handle_hdhive_subscription_callback(
 
             def send_completion(snapshot: Any) -> None:
                 if snapshot.status == "failed":
-                    telegram.send_message(chat_id, f"HDHive 订阅操作失败：{snapshot.error}")
+                    telegram.send_message(chat_id, f"HDHive 订阅操作失败：{safe_telegram_text(snapshot.error, 160)}")
                     return
                 result = result_holder["result"]
                 items = service.store.list_items(target_id) if action == "check" else []
@@ -2535,7 +2535,7 @@ def handle_hdhive_subscription_callback(
                         items = service.store.list_items(confirmed.subscription_id)
                 message = format_subscription_check_message(result, items, action=action)
                 text, keyboard = format_hdhive_subscription_view(service, scheduler, chat_id)
-                telegram.send_rich_message(chat_id, text.with_leading_paragraph(message), reply_markup=keyboard)
+                telegram.send_rich_message(chat_id, text.with_leading_paragraph(safe_telegram_text(message, 320)), reply_markup=keyboard)
 
             key = f"hdhive:subscription:{target_id}" if action == "check" else f"hdhive:item:{target_id}"
             description = f"检查 HDHive 订阅 #{target_id}" if action == "check" else f"确认 HDHive 资源 #{target_id}"
@@ -2558,10 +2558,10 @@ def handle_hdhive_subscription_callback(
             message = format_subscription_check_message(result, items, action="confirm")
         safe_answer_callback_query(telegram, callback_id, "操作完成", show_alert=False)
         text, keyboard = format_hdhive_subscription_view(service, scheduler, chat_id)
-        telegram.send_rich_message(chat_id, text.with_leading_paragraph(message), reply_markup=keyboard)
+        telegram.send_rich_message(chat_id, text.with_leading_paragraph(safe_telegram_text(message, 320)), reply_markup=keyboard)
     except Exception as exc:
         safe_answer_callback_query(telegram, callback_id, "操作失败", show_alert=True)
-        telegram.send_message(chat_id, f"HDHive 订阅操作失败：{_redact_telegram_error(exc)[:160]}")
+        telegram.send_message(chat_id, f"HDHive 订阅操作失败：{safe_telegram_text(str(exc), 160)}")
     return True
 
 
@@ -2703,7 +2703,7 @@ def handle_hdhive_callback(
             )
             telegram.answer_callback_query(callback_id, "已创建订阅", show_alert=False)
             text, keyboard = format_hdhive_subscription_view(subscription_service, subscription_scheduler, chat_id)
-            telegram.send_rich_message(chat_id, text.with_leading_paragraph(f"已订阅：{subscription.title}"), reply_markup=keyboard)
+            telegram.send_rich_message(chat_id, text.with_leading_paragraph(safe_telegram_text(f"已订阅：{subscription.title}", 160)), reply_markup=keyboard)
             return True
         if action == "filter":
             if argument == "all":
@@ -2934,7 +2934,7 @@ def handle_callback_query(
         )
     telegram.answer_callback_query(callback_id, f"已记录分类：{label}", show_alert=False)
     if updated:
-        telegram.send_message(chat_id, f"已记录分类：{label}\n{format_task_label(updated)}")
+        telegram.send_message(chat_id, safe_telegram_text(f"已记录分类：{label}\n{format_task_label(updated)}", 240))
 
 
 def repair_stale_submission(store: Any, row: dict[str, Any], emby: Any | None, move_config: MoveConfig | None = None) -> bool:
@@ -3150,7 +3150,7 @@ def send_emby_timeout(telegram: TelegramClient, chat_id: int | str, store: Submi
     updated = store.update_emby(int(row["id"]), "timeout") or row
     telegram.send_message(
         chat_id,
-        f"CMS 已提交，但暂未在 Emby 确认入库：{format_task_label(updated)}\n可以稍后用 /status 查看，或到 Emby/CMS 后台确认。",
+        f"CMS 已提交，但暂未在 Emby 确认入库：{safe_telegram_text(format_task_label(updated), 160)}\n可以稍后用 /status 查看，或到 Emby/CMS 后台确认。",
     )
 
 RUNNABLE_TASK_STAGES = {
@@ -3344,7 +3344,7 @@ def sync_emby_task_event(task_store: TaskStore | None, row: dict[str, Any]):
             row,
             TaskStage.EMBY_CONFIRMED,
             TaskStatus.SUCCEEDED,
-            f"Emby 已确认：{row.get('emby_title') or row.get('title') or row.get('share_code')}",
+            f"Emby 已确认：{safe_telegram_text(format_task_label(row), 160)}",
         )
     if emby_status == "timeout":
         return best_effort_task_sync(
@@ -4292,7 +4292,7 @@ def _start_status_poll_impl(
                     except Exception:
                         LOG.debug("Emby confirmation probe failed", exc_info=True)
                 if updated and status != last_status and is_terminal_status(status):
-                    telegram.send_message(chat_id, f"CMS 任务状态更新：{format_task_label(updated)}：{status}")
+                    telegram.send_message(chat_id, safe_telegram_text(f"CMS 任务状态更新：{format_task_label(updated)}：{status}", 240))
                 last_status = status
             except Exception:
                 LOG.debug("Status poll failed", exc_info=True)
@@ -4303,7 +4303,7 @@ def _start_status_poll_impl(
         else:
             disabled_row = store.update_emby(int(row["id"]), "disabled") or row
             sync_emby_task_event(task_store, disabled_row)
-            telegram.send_message(chat_id, f"CMS 已提交：{format_task_label(updated)}。Emby 确认未启用，后续请看 CMS/Emby 后台状态。")
+            telegram.send_message(chat_id, safe_telegram_text(f"CMS 已提交：{format_task_label(updated)}。Emby 确认未启用，后续请看 CMS/Emby 后台状态。", 280))
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -4396,9 +4396,9 @@ def handle_update(
         for url in hdhive_urls:
             try:
                 subscription = hdhive_subscription_service.create_from_url(str(chat_id), url)
-                lines.append(f"已订阅：{subscription.title or subscription.tmdb_id}（#{subscription.id}）")
+                lines.append(safe_telegram_text(f"已订阅：{subscription.title or subscription.tmdb_id}（#{subscription.id}）", 180))
             except Exception as exc:
-                lines.append(f"订阅失败：{str(exc)[:160]}")
+                lines.append(safe_telegram_text(f"订阅失败：{str(exc)}", 160))
         text, keyboard = format_hdhive_subscription_view(
             hdhive_subscription_service,
             hdhive_subscription_scheduler,
@@ -4496,9 +4496,9 @@ def handle_update(
             for url in hdhive_urls:
                 try:
                     subscription = hdhive_subscription_service.create_from_url(str(chat_id), url)
-                    lines.append(f"已订阅：{subscription.title or subscription.tmdb_id}（#{subscription.id}）")
+                    lines.append(safe_telegram_text(f"已订阅：{subscription.title or subscription.tmdb_id}（#{subscription.id}）", 180))
                 except Exception as exc:
-                    lines.append(f"订阅失败：{str(exc)[:160]}")
+                    lines.append(safe_telegram_text(f"订阅失败：{str(exc)}", 160))
             text, keyboard = format_hdhive_subscription_view(
                 hdhive_subscription_service,
                 hdhive_subscription_scheduler,
@@ -5083,6 +5083,7 @@ def run_forever(
             except Exception:
                 LOG.warning("Failed to attach HDHive subscription TMDB hint task_id=%s", task_id, exc_info=True)
         caption, poster_url = build_hdhive_unlock_card(subscription, item, tmdb_details=details)
+        caption = safe_telegram_text(caption, 900)
         if poster_url and hasattr(telegram, "send_photo"):
             telegram.send_photo(subscription.chat_id, poster_url, caption)
         else:
@@ -5092,7 +5093,7 @@ def run_forever(
         chat_id = str(getattr(subscription, "chat_id", "") or "")
         if not chat_id or not hasattr(telegram, "send_message"):
             return
-        telegram.send_message(chat_id, format_hdhive_subscription_completed(subscription, summary if isinstance(summary, dict) else {}))
+        telegram.send_message(chat_id, safe_telegram_text(format_hdhive_subscription_completed(subscription, summary if isinstance(summary, dict) else {}), 600))
 
     hdhive_subscription_service = create_hdhive_subscription_service(
         config,
