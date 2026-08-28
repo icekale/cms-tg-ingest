@@ -565,9 +565,12 @@ class HdhiveBridgeTests(unittest.TestCase):
             f"hive:candidate:{session_id}:0", "callback-resource-error", "464100862", telegram, resource_workflow, None
         )
         resource_message = telegram.messages[-1][1]
+        resource_alert = telegram.answers[-1][1]
         self.assertIn("HDHive 请求失败", resource_message)
+        self.assertEqual(resource_alert, "HDHive 请求失败")
         for secret in (secret_url, "evil.test", "proxy-share", "proxy-password", "proxy-token"):
             self.assertNotIn(secret, resource_message)
+            self.assertNotIn(secret, resource_alert)
 
         unlock_workflow = HdhiveWorkflow(object(), ErrorProxy(), HdhiveSessionStore())
         unlock_session = unlock_workflow.sessions.begin("464100862", "Example")
@@ -578,9 +581,12 @@ class HdhiveBridgeTests(unittest.TestCase):
         telegram = FakeTelegram()
         bridge.execute_hdhive_unlock(unlock_workflow, unlock_session, "464100862", "callback-unlock-error", telegram, None, False)
         unlock_message = telegram.messages[-1][1]
+        unlock_alert = telegram.answers[-1][1]
         self.assertIn("HDHive 请求失败", unlock_message)
+        self.assertEqual(unlock_alert, "HDHive 请求失败")
         for secret in (secret_url, "evil.test", "proxy-share", "proxy-password", "unlock-token"):
             self.assertNotIn(secret, unlock_message)
+            self.assertNotIn(secret, unlock_alert)
 
         pending_workflow = HdhiveWorkflow(object(), FakeProxy(), HdhiveSessionStore())
         pending_workflow.sessions.begin("464100862", "pending")
