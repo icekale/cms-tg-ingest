@@ -316,13 +316,13 @@ def _quality_attention_message(summary: QualityRunSummary) -> RichDocument:
     plans = [plan for plan in summary.plans if plan.execution_status in {"failed", "skipped"}]
     rows = []
     for plan in plans[:10]:
-        title = plan.title or f"任务 #{plan.task_id}"
-        rows.append((f"#{plan.task_id}", title, plan.reason))
+        title = safe_telegram_text(plan.title or f"任务 #{plan.task_id}", 120)
+        rows.append((f"#{plan.task_id}", title, safe_telegram_text(plan.reason, 160)))
     blocks = [
         heading("质量巡检需要关注"),
         paragraph(
-            f"{summary.run_id}：扫描 {summary.scanned_count} 个任务，发现 {summary.issue_count} 个问题，"
-            f"失败 {summary.failed_count} 个，跳过 {len(plans)} 个。"
+            f"{safe_telegram_text(summary.run_id, 100)}：扫描 {safe_telegram_text(summary.scanned_count, 40)} 个任务，发现 {safe_telegram_text(summary.issue_count, 40)} 个问题，"
+            f"失败 {safe_telegram_text(summary.failed_count, 40)} 个，跳过 {safe_telegram_text(len(plans), 40)} 个。"
         ),
     ]
     if rows:
@@ -2387,8 +2387,14 @@ def parse_hdhive_subscription_callback(data: str) -> tuple[str, int] | None:
 
 
 def format_hdhive_account(account: Any) -> str:
-    quota = "无限制" if account.weekly_free_quota_unlimited else str(account.weekly_free_quota_remaining)
-    return f"账号：{account.nickname}\n等级：{account.level}\n积分：{account.points}\n本周免费次数：{quota}"
+    nickname = safe_telegram_text(account.nickname, 100)
+    level = safe_telegram_text(account.level, 60)
+    points = safe_telegram_text(account.points, 40)
+    quota = "无限制" if account.weekly_free_quota_unlimited else safe_telegram_text(account.weekly_free_quota_remaining, 40)
+    return safe_telegram_text(
+        f"账号：{nickname}\n等级：{level}\n积分：{points}\n本周免费次数：{quota}",
+        360,
+    )
 
 
 def format_hdhive_resources(workflow: HdhiveWorkflow, session_id: str) -> tuple[RichDocument, dict[str, Any]]:
@@ -2406,7 +2412,7 @@ def format_hdhive_resources(workflow: HdhiveWorkflow, session_id: str) -> tuple[
         ),
         {"media_type": session.media_type, "tmdb_id": session.tmdb_id},
     )
-    blocks: list = [heading(f"HDHive 资源：{format_hdhive_candidate_label(candidate)}")]
+    blocks: list = [heading(f"HDHive 资源：{safe_telegram_text(format_hdhive_candidate_label(candidate), 240)}")]
     if not visible_indexes:
         blocks.append(paragraph("当前网盘筛选没有资源。"))
     rows = []
@@ -2422,11 +2428,11 @@ def format_hdhive_resources(workflow: HdhiveWorkflow, session_id: str) -> tuple[
         rows.append(
             (
                 str(index + 1),
-                truncate_text(item.title or "未命名", 80),
-                truncate_text(item.pan_type or "未知", 24),
-                truncate_text(item.share_size or "大小未知", 24),
-                truncate_text("/".join(item.video_resolution) or "分辨率未知", 32),
-                truncate_text(cost, 24),
+                safe_telegram_text(item.title or "未命名", 80),
+                safe_telegram_text(item.pan_type or "未知", 40),
+                safe_telegram_text(item.share_size or "大小未知", 40),
+                safe_telegram_text("/".join(item.video_resolution) or "分辨率未知", 50),
+                safe_telegram_text(cost, 40),
                 f"{status}/{selection}",
             )
         )
@@ -2598,7 +2604,7 @@ def handle_hdhive_filter_input(
         _HDHIVE_PENDING_FILTERS.pop(key, None)
     message = "已清除集数过滤。" if not value else f"已设置集数过滤：{value}"
     text, keyboard = format_hdhive_subscription_view(service, scheduler, chat_id)
-    telegram.send_rich_message(chat_id, text.with_leading_paragraph(message), reply_markup=keyboard)
+    telegram.send_rich_message(chat_id, text.with_leading_paragraph(safe_telegram_text(message, 320)), reply_markup=keyboard)
     return True
 
 
@@ -2716,7 +2722,7 @@ def handle_hdhive_callback(
                 pan_type = pan_types[pan_index]
             workflow.set_filter(session_id, pan_type)
             document, keyboard = format_hdhive_resources(workflow, session_id)
-            telegram.answer_callback_query(callback_id, f"已筛选：{pan_type}", show_alert=False)
+            telegram.answer_callback_query(callback_id, f"已筛选：{safe_telegram_text(pan_type, 120)}", show_alert=False)
             telegram.send_rich_message(chat_id, document, reply_markup=keyboard)
             return True
         if action in {"toggle", "single"}:

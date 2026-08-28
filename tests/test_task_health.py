@@ -11,6 +11,23 @@ from app.task_store import TaskStore
 
 
 class TaskHealthTests(unittest.TestCase):
+    def test_health_blank_title_uses_task_number_and_hides_share_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("secret-share", "", "https://115cdn.com/s/secret-share?password=health-password")
+            store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "waiting password=health-error",
+                next_run_at=200.0,
+            )
+            report = format_task_health(build_task_health(store, enabled=True, now=100.0), now=100.0)
+            self.assertIn(f"#{task.id} 任务 #{task.id}", report)
+            self.assertNotIn("secret-share", report)
+            self.assertNotIn("health-password", report)
+            self.assertNotIn("health-error", report)
+
     def test_health_fallback_title_and_bridge_details_redact_persisted_values(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

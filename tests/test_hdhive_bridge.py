@@ -970,7 +970,32 @@ class HdhiveBridgeTests(unittest.TestCase):
         self.assertTrue(text.startswith("HDHive 资源：未命名 (年份未知) · 电影 · TMDB 550"))
         self.assertIn("# | 资源 | 网盘 | 大小 | 分辨率 | 费用 | 状态", text)
 
-    def test_task_snapshot_missing_title_never_exposes_share_code(self):
+    def test_hdhive_resource_account_and_filter_feedback_redact_dynamic_fields(self):
+        secret = "https://evil.test/s/raw?password=resource-password&share_code=resource-share token=resource-token"
+        proxy = FakeProxy()
+        proxy.items = [HdhiveResource(**{**resource(secret, secret).__dict__, "share_size": secret, "video_resolution": (secret,)})]
+        workflow = HdhiveWorkflow(object(), proxy, HdhiveSessionStore())
+        session_id = workflow.sessions.begin("464100862", "Example")
+        workflow.load_resources(session_id, "movie", "550")
+        document, keyboard = bridge.format_hdhive_resources(workflow, session_id)
+        account = bridge.format_hdhive_account(SimpleNamespace(
+            nickname=secret, level=secret, points=8,
+            weekly_free_quota_remaining=2, weekly_free_quota_unlimited=False,
+        ))
+        text = document.to_plain() + account + repr(keyboard)
+        for value in ("evil.test", "resource-password", "resource-share", "resource-token"):
+            self.assertNotIn(value, text)
+        filter_data = next(
+            button["callback_data"]
+            for row in keyboard["inline_keyboard"]
+            for button in row
+            if button["callback_data"].startswith("hive:filter:") and not button["callback_data"].endswith(":all")
+        )
+        telegram = FakeTelegram()
+        bridge.handle_hdhive_callback(filter_data, "callback", "464100862", telegram, workflow, None)
+        self.assertNotIn("evil.test", telegram.answers[-1][1])
+        self.assertNotIn("resource-password", telegram.answers[-1][1])
+
         task = SimpleNamespace(
             id=42,
             title="",

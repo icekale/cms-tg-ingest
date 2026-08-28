@@ -4850,6 +4850,23 @@ class SelfShareWorkflowTests(unittest.TestCase):
         self.assertEqual(bridge.extract_tmdb_id_from_name(source_name), "94997")
 
 
+class SelfSharePresentationSafetyTests(unittest.TestCase):
+    def test_legacy_notifications_redact_dynamic_values(self):
+        class Telegram:
+            def __init__(self):
+                self.messages = []
+
+            def send_message(self, chat_id, text, reply_markup=None):
+                self.messages.append(text)
+
+        telegram = Telegram()
+        secret = "https://evil.test/s/raw?password=move-password&share_code=move-share token=move-token"
+        plan = bridge.MovePlan("conflict", f"reason {secret}", secret, secret, None)
+        bridge.send_move_result(telegram, 1, plan, {"move_status": "error"})
+        self.assertNotIn("evil.test", telegram.messages[-1])
+        self.assertNotIn("move-password", telegram.messages[-1])
+
+
 if __name__ == "__main__":
     unittest.main()
 

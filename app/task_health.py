@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 
 from .models import TaskSnapshot
 from .task_diagnostics import _duration, describe_task_wait
+from .logging_system import safe_telegram_text
 from .task_engine import stage_display_name
 from .task_store import TaskStore
 
@@ -43,12 +44,12 @@ def _truncate(value: object, limit: int) -> str:
 
 
 def _format_wait_detail(task: TaskSnapshot, *, now: float) -> str:
-    title = _truncate(task.title or task.metadata.get("received_title") or task.share_code, 40)
+    title = safe_telegram_text(task.title or task.metadata.get("received_title") or f"任务 #{task.id}", 40)
     metadata = dict(task.metadata)
     if "_defer_message" in metadata:
-        metadata["_defer_message"] = _truncate(metadata.get("_defer_message"), 90)
-    safe_task = replace(task, title=title, error_summary=_truncate(task.error_summary, 90), metadata=metadata)
-    return _truncate(f"#{task.id} {title}: {describe_task_wait(safe_task, now=now)}", 200)
+        metadata["_defer_message"] = safe_telegram_text(metadata.get("_defer_message"), 90)
+    safe_task = replace(task, title=title, error_summary=safe_telegram_text(task.error_summary, 90), metadata=metadata)
+    return safe_telegram_text(f"#{task.id} {title}: {describe_task_wait(safe_task, now=now)}", 200)
 
 
 def build_task_health(
@@ -163,7 +164,7 @@ def format_task_health(summary: TaskHealthSummary, *, now: float | None = None) 
         since = _duration(max(0.0, current_time - summary.runner_active_since))
         lines.append(
             f"Runner当前: 处理任务 #{summary.runner_active_task_id} "
-            f"({summary.runner_active_stage or '?'}，已 {since})"
+            f"({safe_telegram_text(summary.runner_active_stage or '?', 60)}，已 {since})"
         )
     elif summary.runner_last_claim_attempt_at > 0:
         idle = _duration(max(0.0, current_time - summary.runner_last_claim_attempt_at))
@@ -181,14 +182,14 @@ def format_task_health(summary: TaskHealthSummary, *, now: float | None = None) 
         lines.append(f"等待详情: 另有 {summary.wait_overflow_count} 个任务等待中")
     if summary.latest_lock_wait:
         task = summary.latest_lock_wait
-        title = str(task.title or task.metadata.get("received_title") or f"任务 #{task.id}")
-        reason = str(task.metadata.get("_lock_reason") or "-")
-        holder = str(task.metadata.get("_lock_owner_task_id") or "-")
+        title = safe_telegram_text(task.title or task.metadata.get("received_title") or f"任务 #{task.id}", 80)
+        reason = safe_telegram_text(task.metadata.get("_lock_reason") or "-", 100)
+        holder = safe_telegram_text(task.metadata.get("_lock_owner_task_id") or "-", 40)
         lines.append(f"最近锁等待: #{task.id} {title} / {reason} / holder #{holder}")
     if summary.latest_problem:
         task = summary.latest_problem
-        title = str(task.title or task.metadata.get("received_title") or f"任务 #{task.id}")
-        suffix = f"，{task.error_summary}" if task.error_summary else ""
+        title = safe_telegram_text(task.title or task.metadata.get("received_title") or f"任务 #{task.id}", 80)
+        suffix = f"，{safe_telegram_text(task.error_summary, 120)}" if task.error_summary else ""
         lines.append(f"最近问题: #{task.id} {title} / {stage_display_name(task.current_stage)}{suffix}")
     return "\n".join(lines)
 
@@ -212,8 +213,8 @@ def format_taskstore_health(
             except (TypeError, ValueError, json.JSONDecodeError):
                 payload = {}
             if isinstance(payload, dict):
-                backup_line = f"数据库备份: {str(payload.get('status') or 'unknown')}"
-                error = str(payload.get("error") or "").strip()
+                backup_line = f"数据库备份: {safe_telegram_text(payload.get('status') or 'unknown', 60)}"
+                error = safe_telegram_text(payload.get("error") or "", 160).strip()
                 if error:
                     backup_line += f" ({error[:160]})"
     return report + "\n" + backup_line

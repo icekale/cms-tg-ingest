@@ -28,6 +28,7 @@ from app.clients.p115 import (
     p115_item_parent_id,
 )
 from app.config import DEFAULT_OWN_SHARE_RECEIVE_CODE, MovePlan, SelfShareConfig, default_library_roots, is_relative_to, safe_resolve
+from app.logging_system import safe_telegram_text
 from app.media.classify import (
     apply_tmdb_hint_resolution,
     apply_tmdb_search_resolution,
@@ -478,9 +479,14 @@ def emby_parent_label(item: dict) -> str:
 
 def send_move_result(telegram: Any, chat_id: int | str, move_plan: MovePlan, moved_row: dict[str, Any]) -> None:
     if str(moved_row.get("move_status") or "").lower() == "moved":
-        telegram.send_message(chat_id, f"STRM 已移动：{moved_row.get('dest_path')}")
+        telegram.send_message(chat_id, safe_telegram_text(f"STRM 已移动：{moved_row.get('dest_path')}", 240))
     elif move_plan.status in {"conflict", "error"}:
-        telegram.send_message(chat_id, f"STRM 未移动：{move_plan.reason}\n源：{move_plan.source_path or '-'}\n目标：{move_plan.dest_path or '-'}")
+        message = (
+            f"STRM 未移动：{safe_telegram_text(move_plan.reason, 160)}\n"
+            f"源：{safe_telegram_text(move_plan.source_path or '-', 240)}\n"
+            f"目标：{safe_telegram_text(move_plan.dest_path or '-', 240)}"
+        )
+        telegram.send_message(chat_id, safe_telegram_text(message, 600))
 
 
 def match_emby_item(items: list[dict], recognition: dict[str, Any], row: dict[str, Any] | None = None) -> dict | None:
@@ -5373,18 +5379,18 @@ class BridgeSelfShareTaskWorkflow:
         status = str(recognition.get("category_status") or "needs_action").strip()
         if hasattr(self.store, "update_recognition"):
             row = self.store.update_recognition(int(row["id"]), recognition, status) or row
-        message = f"CMS 未能确定分类：{format_task_label(row)}\n"
+        message = safe_telegram_text(f"CMS 未能确定分类：{format_task_label(row)}\n", 180)
         suggestion = str(recognition.get("category_suggestion") or "").strip()
         if suggestion:
             confidence = as_float(recognition.get("openai_confidence"), 0.0)
-            message += f"OpenAI建议：{suggestion}（置信度 {confidence:.2f}）\n"
+            message += safe_telegram_text(f"OpenAI建议：{suggestion}（置信度 {confidence:.2f}）\n", 180)
         reason = str(recognition.get("openai_reason") or "").strip()
         if reason:
-            message += f"理由：{reason[:80]}\n"
+            message += safe_telegram_text(f"理由：{reason[:80]}\n", 160)
         message += "请选择分类："
         self.telegram.send_message(
             self.chat_id,
-            message,
+            safe_telegram_text(message, 320),
             reply_markup=category_keyboard(int(row["id"])),
         )
         return StageResult.needs_action(
@@ -5726,12 +5732,12 @@ def send_emby_confirmed(
         parent=parent_label,
     ) or row
     library_line = (
-        f"媒体库：{updated.get('emby_parent') or library_name}"
+        f"媒体库：{safe_telegram_text(updated.get('emby_parent') or library_name, 160)}"
         if library_name
-        else f"媒体库未解析，父级/类型：{updated.get('emby_parent') or '未知'}"
+        else f"媒体库未解析，父级/类型：{safe_telegram_text(updated.get('emby_parent') or '未知', 160)}"
     )
     lines = [
-        f"Emby 已确认入库：{updated.get('emby_title') or item.get('Name') or format_task_label(updated)}",
+        f"Emby 已确认入库：{safe_telegram_text(updated.get('emby_title') or item.get('Name') or format_task_label(updated), 180)}",
         library_line,
     ]
     if cleanup_client:
@@ -5739,13 +5745,13 @@ def send_emby_confirmed(
     if debug_details or not library_name:
         lines.extend(
             [
-                f"ItemId：{updated.get('emby_item_id') or item.get('Id') or '-'}",
-                f"路径：{updated.get('emby_path') or item.get('Path') or '-'}",
+                f"ItemId：{safe_telegram_text(updated.get('emby_item_id') or item.get('Id') or '-', 100)}",
+                f"路径：{safe_telegram_text(updated.get('emby_path') or item.get('Path') or '-', 240)}",
             ]
         )
     telegram.send_message(
         chat_id,
-        "\n".join(lines),
+        safe_telegram_text("\n".join(lines), 600),
     )
 
 

@@ -7,7 +7,7 @@ import re
 import time
 from typing import Any
 
-from app.logging_system import redact_text
+from app.logging_system import safe_telegram_text
 from app.hdhive_subscriptions import diagnose_subscription_check
 from app.media.classify import expected_task_tmdb_id, extract_tmdb_id_from_name, normalize_text, parse_recognition_json
 from app.models import TaskStage, TaskStatus
@@ -19,14 +19,6 @@ from app.workflows.self_share import format_task_label
 
 
 _SERIES_UPDATE_CATEGORIES = {"国产电视", "外国电视", "番剧"}
-_TELEGRAM_URL_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
-
-
-def safe_telegram_text(value: object, limit: int = 200) -> str:
-    text = redact_text("" if value is None else value)
-    return truncate_text(_TELEGRAM_URL_RE.sub("<redacted-url>", text), limit)
-
-
 def format_history(rows: list[dict[str, Any]]) -> RichDocument:
     if not rows:
         return document(paragraph("暂无历史记录。"))
@@ -118,7 +110,7 @@ def quality_issue_for_row(row: dict[str, Any]) -> str:
     emby_norm = normalize_text(emby_title)
     has_cjk_task_title = bool(re.search(r"[\u4e00-\u9fff]", task_title))
     if has_cjk_task_title and task_norm and emby_norm and emby_norm not in task_norm and task_norm not in emby_norm:
-        return f"疑似错配：任务 {task_title}，Emby {emby_title}"
+        return f"疑似错配：任务 {safe_telegram_text(task_title, 120)}，Emby {safe_telegram_text(emby_title, 120)}"
     return ""
 
 
@@ -128,7 +120,14 @@ def format_quality_report(rows: list[dict[str, Any]]) -> RichDocument:
         issue = quality_issue_for_row(row)
         if not issue:
             continue
-        table_rows.append((str(len(table_rows) + 1), format_task_label(row), str(row.get("emby_title") or "-"), issue))
+        table_rows.append(
+            (
+                str(len(table_rows) + 1),
+                safe_telegram_text(format_task_label(row), 120),
+                safe_telegram_text(row.get("emby_title") or "-", 120),
+                safe_telegram_text(issue, 180),
+            )
+        )
     if not table_rows:
         return document(paragraph("最近任务未发现明显错配。"))
     return document(heading("质量巡检：发现疑似错配"), table(("#", "任务", "Emby", "问题"), table_rows))
@@ -192,17 +191,17 @@ def format_quality_manual_report(rows: list[dict[str, Any]]) -> RichDocument:
         return document(paragraph("质量巡检：当前没有需要人工处理的问题。"))
     table_rows = []
     for row in rows:
-        title = truncate_text(str(row.get("title") or f"任务 #{row.get('task_id')}"), 70)
-        reason = truncate_text(str(row.get("rule_reason") or row.get("message") or "需要人工确认"), 120)
+        title = safe_telegram_text(row.get("title") or f"任务 #{row.get('task_id')}", 70)
+        reason = safe_telegram_text(row.get("rule_reason") or row.get("message") or "需要人工确认", 120)
         table_rows.append(
             (
                 f"#{row.get('task_id')}",
                 title,
-                str(row.get("rule_id") or "-"),
-                str(row.get("risk_level") or "-"),
-                str(row.get("manual_status") or "open"),
+                safe_telegram_text(row.get("rule_id") or "-", 80),
+                safe_telegram_text(row.get("risk_level") or "-", 40),
+                safe_telegram_text(row.get("manual_status") or "open", 40),
                 reason,
-                str(row.get("attempts", 0)),
+                safe_telegram_text(row.get("attempts", 0), 40),
             )
         )
     return document(
@@ -234,19 +233,22 @@ def quality_manual_keyboard(rows: list[dict[str, Any]], limit: int = 8) -> dict[
 def format_counts(counts: dict[str, int]) -> str:
     if not counts:
         return "-"
-    return ", ".join(f"{key}={value}" for key, value in counts.items())
+    return ", ".join(
+        f"{safe_telegram_text(key, 60)}={safe_telegram_text(value, 40)}"
+        for key, value in counts.items()
+    )
 
 
 def format_metrics(payload: dict[str, Any]) -> RichDocument:
     rows = (
-        ("生成时间", payload.get("generated_at") or "-"),
-        ("总数", payload.get("total", 0)),
+        ("生成时间", safe_telegram_text(payload.get("generated_at") or "-", 80)),
+        ("总数", safe_telegram_text(payload.get("total", 0), 40)),
         ("任务", format_counts(payload.get("status_counts") or {})),
         ("Emby", format_counts(payload.get("emby_status_counts") or {})),
         ("移动", format_counts(payload.get("move_status_counts") or {})),
-        ("失败", payload.get("failure_summary") or "-"),
-        ("媒体库", payload.get("library_summary") or "-"),
-        ("Telegram瞬时错误", payload.get("telegram_last_transient_error_at") or "-"),
+        ("失败", safe_telegram_text(payload.get("failure_summary") or "-", 180)),
+        ("媒体库", safe_telegram_text(payload.get("library_summary") or "-", 180)),
+        ("Telegram瞬时错误", safe_telegram_text(payload.get("telegram_last_transient_error_at") or "-", 80)),
     )
     return document(heading("任务统计"), table(("项", "值"), rows))
 
@@ -256,7 +258,7 @@ def format_status(rows: list[dict[str, Any]]) -> RichDocument:
         return document(paragraph("暂无记录。直接发送 115 分享链接即可创建任务。"))
     table_rows = []
     for row in rows:
-        table_rows.append((safe_telegram_text(format_task_label(row), 120), str(row.get("status") or "unknown"), safe_telegram_text(row.get("last_error"), 160)))
+        table_rows.append((safe_telegram_text(format_task_label(row), 120), safe_telegram_text(row.get("status") or "unknown", 60), safe_telegram_text(row.get("last_error"), 160)))
     blocks: list = [heading("最近任务"), table(("任务", "状态", "错误"), table_rows)]
     failure_summary = format_failure_summary(rows)
     if failure_summary:
@@ -284,10 +286,10 @@ def truncate_end(text: str, limit: int) -> str:
 
 def format_hdhive_candidate_label(candidate: dict[str, str] | None) -> str:
     item = candidate if isinstance(candidate, dict) else {}
-    title = str(item.get("title") or "未命名").strip() or "未命名"
-    year = str(item.get("year") or "").strip() or "年份未知"
+    title = safe_telegram_text(str(item.get("title") or "未命名").strip() or "未命名", 120)
+    year = safe_telegram_text(str(item.get("year") or "").strip() or "年份未知", 40)
     media_type = "电影" if item.get("media_type") == "movie" else "剧集"
-    tmdb_id = str(item.get("tmdb_id") or "").strip() or "-"
+    tmdb_id = safe_telegram_text(str(item.get("tmdb_id") or "").strip() or "-", 60)
     return f"{title} ({year}) · {media_type} · TMDB {tmdb_id}"
 
 
@@ -303,10 +305,10 @@ def format_hdhive_candidates(candidates: list[dict[str, str]]) -> RichDocument:
         rows.append(
             (
                 str(index),
-                truncate_end(str(candidate.get("title") or "未命名"), 80),
+                truncate_end(safe_telegram_text(candidate.get("title") or "未命名", 1000), 80),
                 "电影" if candidate.get("media_type") == "movie" else "剧集",
-                str(candidate.get("year") or "年份未知"),
-                str(candidate.get("tmdb_id") or "-"),
+                safe_telegram_text(candidate.get("year") or "年份未知", 40),
+                safe_telegram_text(candidate.get("tmdb_id") or "-", 60),
             )
         )
     return document(
@@ -417,7 +419,7 @@ def task_action_keyboard(
 def hdhive_candidate_keyboard(session_id: str, candidates: list[dict[str, str]]) -> dict[str, Any]:
     buttons = []
     for index, candidate in enumerate(candidates[:12]):
-        title = str(candidate.get("title") or "未命名").strip() or "未命名"
+        title = truncate_end(safe_telegram_text(candidate.get("title") or "未命名", 1000), 64)
         label = truncate_end(f"{index + 1}. {title}", 64)
         row = [{"text": label, "callback_data": f"hive:candidate:{session_id}:{index}"}]
         if candidate.get("media_type") == "tv":
@@ -440,7 +442,7 @@ def format_hdhive_subscriptions(
         blocks.append(
             paragraph(
                 f"自动检查：{'开启' if scheduler_snapshot.get('enabled') else '关闭'}，"
-                f"每天 {scheduler_snapshot.get('time') or '01:30'}，下次：{scheduler_snapshot.get('next_run_at') or '-'}"
+                f"每天 {safe_telegram_text(scheduler_snapshot.get('time') or '01:30', 40)}，下次：{safe_telegram_text(scheduler_snapshot.get('next_run_at') or '-', 80)}"
             )
         )
     table_rows = []
@@ -474,7 +476,8 @@ def format_hdhive_subscriptions(
                 ("blocked", "阻塞"),
             ):
                 if key in summary:
-                    counters.append(f"{label} {summary[key]}")
+                    counters.append(f"{label} {safe_telegram_text(summary[key], 40)}")
+
             if counters:
                 detail_blocks.append(paragraph("最近检查：" + "，".join(counters)))
             if diagnosis.conclusion:
@@ -485,6 +488,7 @@ def format_hdhive_subscriptions(
             detail_blocks.append(paragraph(f"最近错误：{safe_telegram_text(subscription.last_error, 120)}"))
         if detail_blocks:
             extras.append(details(f"#{subscription.id} {title}", detail_blocks))
+
     blocks.append(table(("#", "剧名", "状态", "来源"), table_rows))
     blocks.extend(extras)
     if pending_items:
@@ -526,7 +530,7 @@ def hdhive_resource_keyboard(
     for index, pan_type in enumerate(pan_types):
         filter_buttons.append(
             {
-                "text": f"[{pan_type}]" if pan_type == current_pan_type else pan_type,
+                "text": f"[{safe_telegram_text(pan_type, 40)}]" if pan_type == current_pan_type else safe_telegram_text(pan_type, 40),
                 "callback_data": f"hive:filter:{session_id}:{index}",
             }
         )
@@ -534,14 +538,15 @@ def hdhive_resource_keyboard(
         buttons.append(filter_buttons[start : start + 4])
     for resource_index in visible_indexes:
         resource = resources[resource_index]
-        title = truncate_text(resource.title or f"资源 {resource_index + 1}", 28)
-        details = "/".join(resource.video_resolution) or "分辨率未知"
-        cost = "已解锁" if resource.is_unlocked else f"{resource.unlock_points if resource.unlock_points is not None else '?'}分"
+        title = truncate_end(safe_telegram_text(resource.title or f"资源 {resource_index + 1}", 1000), 28)
+        details = truncate_end(safe_telegram_text("/".join(resource.video_resolution) or "分辨率未知", 1000), 32)
+        pan_type = safe_telegram_text(resource.pan_type or "未知", 40)
+        cost = safe_telegram_text("已解锁" if resource.is_unlocked else f"{resource.unlock_points if resource.unlock_points is not None else '?'}分", 40)
         if resource.validate_status.lower() == "invalid":
-            text = f"不可用 {resource_index + 1}. {title} | {resource.pan_type} | {cost}"
+            text = safe_telegram_text(f"不可用 {resource_index + 1}. {title} | {pan_type} | {cost}", 140)
         else:
             mark = "已选 " if resource_index in selected_indexes else ""
-            text = f"{mark}{resource_index + 1}. {title} | {resource.pan_type} | {details} | {cost}"
+            text = safe_telegram_text(f"{mark}{resource_index + 1}. {title} | {pan_type} | {details} | {cost}", 160)
         buttons.append(
             [
                 {

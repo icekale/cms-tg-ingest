@@ -6,6 +6,7 @@ from app.quality import QualityIssue, format_task_quality_report
 from app.quality_automation import QualityRepairPlan, QualityRunSummary
 from app.telegram_rich import RichDocument, bold, details, heading, paragraph, table
 from app.telegram_ui import (
+    format_hdhive_candidate_label,
     format_hdhive_candidates,
     format_hdhive_subscriptions,
     format_hdhive_unlock_result,
@@ -87,6 +88,17 @@ class TelegramRichTests(unittest.TestCase):
 
 
 class TelegramUiRichTests(unittest.TestCase):
+    def test_hdhive_adversarial_fields_are_redacted_and_bounded(self):
+        hostile = "https://evil.test/s/raw?password=field-password&share_code=field-share token=field-token " + "x" * 300
+        candidate = {"title": hostile, "year": hostile, "media_type": "movie", "tmdb_id": hostile}
+        label = format_hdhive_candidate_label(candidate)
+        self.assertLessEqual(len(label), 200)
+        for secret in ("evil.test", "field-password", "field-share", "field-token"):
+            self.assertNotIn(secret, label)
+        document = format_hdhive_candidates([candidate])
+        self.assertLessEqual(max(len(cell["text"]) for cell in document.to_blocks()[1]["cells"] for cell in cell), 200)
+        self.assertNotIn("field-password", document.to_plain())
+
     def test_format_status_empty_is_paragraph(self):
         doc = format_status([])
         self.assertIn("暂无记录", doc.to_plain())

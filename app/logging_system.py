@@ -272,6 +272,16 @@ def redact_text(value: object) -> str:
     return _HTTP_URL_RE.sub(_redact_http_url, text)
 
 
+def safe_telegram_text(value: object, limit: int = 200) -> str:
+    """Redact logging-sensitive values, hide URLs, and bound Telegram text."""
+    text = _HTTP_URL_RE.sub("<redacted-url>", redact_text("" if value is None else value))
+    if len(text) <= limit:
+        return text
+    tail_len = min(80, max(0, int(limit) // 3))
+    head_len = max(0, int(limit) - tail_len - 3)
+    return f"{text[:head_len]}...{text[-tail_len:]}"
+
+
 def _utf8_size(text: str) -> int:
     return len(text.encode("utf-8", errors="backslashreplace"))
 

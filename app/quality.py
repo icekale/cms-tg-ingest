@@ -7,6 +7,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Iterable
 
 from .config import DEFAULT_OWN_SHARE_RECEIVE_CODE
+from .logging_system import safe_telegram_text
 from .media.strm import UnsafeMediaPathError, iter_strm_files
 from .models import TaskSnapshot
 from .quality_rules import is_path_within_allowed_roots
@@ -172,7 +173,7 @@ def scan_task_quality(
     identity_cache: dict[tuple[str, str], tuple[ShareIdentity, ...]] = {}
     task_rows = list(tasks) if tasks is not None else store.list_recent_tasks(limit=limit)
     for task in task_rows:
-        title = task.title or str(task.metadata.get("received_title") or "") or task.share_code
+        title = safe_telegram_text(task.title or task.metadata.get("received_title") or f"任务 #{task.id}", 120)
         try:
             expected_mode = effective_task_strm_mode(task)
         except ValueError as exc:
@@ -212,8 +213,9 @@ def format_task_quality_report(issues: list[QualityIssue]) -> RichDocument:
         return document(paragraph("TaskStore 轻量巡检：未发现本地 STRM 问题。"))
     rows = []
     for issue in issues:
-        title = issue.title or f"任务 #{issue.task_id}"
+        title = safe_telegram_text(issue.title or f"任务 #{issue.task_id}", 120)
+        message = safe_telegram_text(issue.message, 180)
         task_label = f"#{issue.task_id} {title}" if issue.task_id else title
-        detail = f"：{redact_quality_detail(issue.detail)}" if issue.detail else ""
-        rows.append((task_label, f"{issue.message}{detail}"))
+        detail = f"：{safe_telegram_text(redact_quality_detail(issue.detail), 180)}" if issue.detail else ""
+        rows.append((task_label, f"{message}{detail}"))
     return document(heading("TaskStore 轻量巡检"), table(("# / 任务", "问题"), rows))
