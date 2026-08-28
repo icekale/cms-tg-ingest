@@ -2218,6 +2218,13 @@ class BridgeSelfShareTaskWorkflow:
             own_share_file_id=str(row.get("own_share_file_id") or ""),
             receive_cid=receive_cid,
         )
+        if dest_status == "empty_files" and self._refresh_empty_intake_identity(task, row, stage_metadata):
+            dest_status, dest_targets, dest_identity = self._resolve_intake_dest_folders(
+                stage_metadata,
+                recognition,
+                own_share_file_id=str(row.get("own_share_file_id") or ""),
+                receive_cid=receive_cid,
+            )
         if dest_status == "empty_files":
             return StageResult.defer(
                 "等待 CMS 整理完成",
@@ -5299,6 +5306,48 @@ class BridgeSelfShareTaskWorkflow:
             ],
             "files": snapshot_files(roots, list_files),
         }
+
+    def _refresh_empty_intake_identity(self, task, row: dict[str, Any], stage_metadata: dict[str, Any]) -> bool:
+        identity = stage_metadata.get("intake_identity")
+        if not isinstance(identity, dict):
+            return False
+        existing = [
+            item
+            for item in (identity.get("files") or [])
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        ]
+        if existing:
+            return False
+        roots = self._received_items_for_snapshot(task, row)
+        if not roots:
+            roots = [
+                {"file_id": str(root_id).strip(), "file_name": "", "is_folder": True}
+                for root_id in (identity.get("root_ids") or [])
+                if str(root_id or "").strip()
+            ]
+        if not roots:
+            return False
+        try:
+            refreshed = self._intake_identity_from_roots(roots)
+        except Exception:
+            LOG.debug("Failed to refresh empty intake identity task_id=%s", getattr(task, "id", ""), exc_info=True)
+            return False
+        new_files = [
+            item
+            for item in (refreshed.get("files") or [])
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        ]
+        if not new_files:
+            return False
+        merged = dict(identity)
+        merged["files"] = new_files
+        merged["root_ids"] = [
+            str(value).strip()
+            for value in (identity.get("root_ids") or refreshed.get("root_ids") or [])
+            if str(value or "").strip()
+        ] or refreshed.get("root_ids") or []
+        stage_metadata["intake_identity"] = merged
+        return True
 
     def _received_metadata(self, row: dict[str, Any], task_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         metadata = {

@@ -46,6 +46,63 @@ class IntakeIdentitySnapshotTests(unittest.TestCase):
             {("video-root", "Extra.mkv"), ("ep1", "Show.S01E01.mkv")},
         )
 
+    def test_snapshot_lists_videos_in_release_named_season_packs(self):
+        listed = {
+            "recv-dp": [
+                {
+                    "cid": "pack-s01",
+                    "n": "D.P.S01.KOREAN.2160p.NF.WEB-DL.x265.10bit.HDR.DDP5.1-XEBEC[rartv]",
+                    "pid": "recv-dp",
+                },
+                {
+                    "cid": "pack-s02",
+                    "n": "D.P.S02.2160p.NF.WEB-DL.DDP5.1.Atmos.DV.HDR10.H.265-APEX",
+                    "pid": "recv-dp",
+                },
+            ],
+            "pack-s01": [
+                {"fid": "ep-s01e01", "n": "D.P.S01E01.mkv", "cid": "pack-s01"},
+                {"fid": "nfo-s01", "n": "D.P.S01E01.nfo", "cid": "pack-s01"},
+            ],
+            "pack-s02": [
+                {"fid": "ep-s02e01", "n": "D.P.S02E01.mkv", "cid": "pack-s02"},
+            ],
+        }
+
+        def list_files(parent_id, limit=500):
+            return list(listed.get(str(parent_id), []))
+
+        files = snapshot_files(
+            [
+                {"file_id": "recv-dp", "file_name": "D.P：逃兵追缉令", "is_folder": True},
+            ],
+            list_files,
+        )
+        self.assertEqual(
+            {(item["id"], item["name"]) for item in files},
+            {("ep-s01e01", "D.P.S01E01.mkv"), ("ep-s02e01", "D.P.S02E01.mkv")},
+        )
+
+    def test_snapshot_skips_nested_folder_without_videos(self):
+        listed = {
+            "recv-folder": [
+                {"cid": "screens", "n": "Screens", "pid": "recv-folder"},
+                {"fid": "root-video", "n": "Movie.mkv", "cid": "recv-folder"},
+            ],
+            "screens": [
+                {"fid": "shot", "n": "front.jpg", "cid": "screens"},
+            ],
+        }
+
+        def list_files(parent_id, limit=500):
+            return list(listed.get(str(parent_id), []))
+
+        files = snapshot_files(
+            [{"file_id": "recv-folder", "file_name": "Movie", "is_folder": True}],
+            list_files,
+        )
+        self.assertEqual(files, [{"id": "root-video", "name": "Movie.mkv"}])
+
     def test_snapshot_single_video_root(self):
         files = snapshot_files(
             [{"file_id": "lone-mkv", "file_name": "Movie.mkv", "is_folder": False}],

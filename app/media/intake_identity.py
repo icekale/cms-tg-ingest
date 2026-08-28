@@ -43,10 +43,13 @@ def snapshot_files(roots: list[dict[str, Any]], list_files: ListFiles) -> list[d
         for item in children:
             child_id = p115_item_id(item)
             child_name = p115_file_name(item)
-            if p115_is_folder(item) and is_season_folder_name(child_name):
-                episodes = list_files(child_id, limit=500)
-                for episode in episodes:
-                    add(p115_item_id(episode), p115_file_name(episode))
+            if p115_is_folder(item):
+                nested = list_files(child_id, limit=500)
+                if is_season_folder_name(child_name) or any(
+                    is_video_name(p115_file_name(episode)) for episode in nested
+                ):
+                    for episode in nested:
+                        add(p115_item_id(episode), p115_file_name(episode))
                 continue
             add(child_id, child_name)
     return files

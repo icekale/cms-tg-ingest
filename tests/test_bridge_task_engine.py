@@ -3716,6 +3716,80 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.DEFER)
             self.assertIsNone(stored["own_share_file_id"])
 
+    def test_organizing_resnapshots_release_pack_videos_when_intake_files_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            episode_name = "D.P.S01E01.mkv"
+            self.p115.files_by_parent["recv-dp"] = [
+                {
+                    "cid": "pack-s01",
+                    "n": "D.P.S01.KOREAN.2160p.NF.WEB-DL.x265.10bit.HDR.DDP5.1-XEBEC[rartv]",
+                    "pid": "recv-dp",
+                },
+            ]
+            self.p115.files_by_parent["pack-s01"] = [
+                {"fid": "ep-s01e01", "n": episode_name, "cid": "pack-s01"},
+            ]
+            self.p115.files_by_parent["dest-110534"] = [
+                {"cid": "season-1", "n": "Season 01", "pid": "dest-110534"},
+            ]
+            self.p115.files_by_parent["season-1"] = [
+                {"fid": "ep-s01e01", "n": episode_name, "cid": "season-1"},
+            ]
+            self.p115.search_hits = {
+                episode_name: [
+                    {"fid": "ep-s01e01", "cid": "season-1", "n": episode_name},
+                ],
+                "110534": [
+                    {
+                        "cid": "dest-110534",
+                        "n": "D-D.P：逃兵追缉令-2021-[tmdb=110534]",
+                        "pid": "tv-parent",
+                    },
+                ],
+            }
+            self.p115.folder_paths["dest-110534"] = [
+                {"cid": "tv-parent", "n": "TV", "pid": "0"},
+                {
+                    "cid": "dest-110534",
+                    "n": "D-D.P：逃兵追缉令-2021-[tmdb=110534]",
+                    "pid": "tv-parent",
+                },
+            ]
+            row = self._row()
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_items": [
+                        {
+                            "file_id": "recv-dp",
+                            "file_name": "D.P：逃兵追缉令",
+                            "is_folder": True,
+                            "parent_id": "pending-cid",
+                            "received_item_verified": True,
+                        }
+                    ],
+                    "received_items_complete": True,
+                    "tmdb_hint_normalized": True,
+                    "tmdb_hint_id": "110534",
+                    "intake_identity": {"root_ids": ["recv-dp"], "files": []},
+                },
+                row["id"],
+            )
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["organized_folder"]["file_id"], "dest-110534")
+            self.assertEqual(
+                [item["id"] for item in result.metadata["intake_identity"]["files"]],
+                ["ep-s01e01"],
+            )
+            self.assertEqual(stored["own_share_file_id"], "dest-110534")
+
     def test_organizing_defers_when_intake_files_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
