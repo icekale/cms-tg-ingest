@@ -256,6 +256,9 @@ class TelegramRichClientTests(unittest.TestCase):
         self.assertEqual(len(http.calls), 2)
         self.assertTrue(http.calls[0][0].endswith("/editMessageText"))
         self.assertTrue(http.calls[1][0].endswith("/editMessageText"))
+        rich_payload = http.calls[0][1]["payload"]
+        self.assertIn("rich_message", rich_payload)
+        self.assertEqual(rich_payload["message_id"], 17)
         fallback_payload = http.calls[1][1]["payload"]
         self.assertEqual(fallback_payload["message_id"], 17)
         self.assertEqual(fallback_payload["text"], doc.to_plain())

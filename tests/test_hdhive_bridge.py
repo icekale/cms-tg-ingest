@@ -665,7 +665,15 @@ class HdhiveBridgeTests(unittest.TestCase):
         self.assertEqual(len(telegram.rich_messages), 1)
         document = telegram.rich_messages[-1][1]
         self.assertIn("HDHive 资源：搏击俱乐部", document.to_plain())
-        self.assertIsNotNone(telegram.rich_messages[-1][2])
+        callbacks = [
+            button["callback_data"]
+            for row in telegram.rich_messages[-1][2]["inline_keyboard"]
+            for button in row
+        ]
+        self.assertIn(f"hive:toggle:{session_id}:0", callbacks)
+        self.assertIn(f"hive:single:{session_id}:0", callbacks)
+        self.assertIn(f"hive:unlock:{session_id}", callbacks)
+        self.assertIn(f"hive:cancel:{session_id}", callbacks)
 
     def test_resource_keyboard_exposes_every_pan_type_and_single_unlock(self):
         resources = [resource("115", "115"), resource("quark", "quark"), resource("115-2", "115"), resource("pikpak", "pikpak")]

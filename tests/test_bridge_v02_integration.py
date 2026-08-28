@@ -1208,7 +1208,8 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 task_engine_enabled=True,
             )
 
-            message = telegram.messages[-1][1]
+            self.assertEqual(len(telegram.rich_messages), 1)
+            message = telegram.rich_messages[-1][1].to_plain()
             self.assertIn("TaskStore 最近任务", message)
             self.assertIn("#1 新任务电影", message)
             self.assertIn("STRM 生成", message)
@@ -1243,7 +1244,8 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 task_engine_enabled=True,
             )
 
-            message = telegram.messages[-1][1]
+            self.assertEqual(len(telegram.rich_messages), 1)
+            message = telegram.rich_messages[-1][1].to_plain()
             self.assertIn("等待自有分享 STRM", message)
             self.assertIn("第 2 次", message)
 
@@ -1281,7 +1283,8 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 task_engine_enabled=True,
             )
 
-            message = telegram.messages[-1][1]
+            self.assertEqual(len(telegram.rich_messages), 1)
+            message = telegram.rich_messages[-1][1].to_plain()
             self.assertIn("为什么慢：等 Emby 入库", message)
             self.assertIn("执行 4 秒", message)
             self.assertIn("排队/等待 20 秒", message)
@@ -1315,7 +1318,8 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 task_engine_enabled=True,
             )
 
-            message = telegram.messages[-1][1]
+            self.assertEqual(len(telegram.rich_messages), 1)
+            message = telegram.rich_messages[-1][1].to_plain()
             wait_lines = [line for line in message.splitlines() if "等待：" in line]
             self.assertEqual(len(wait_lines), 1)
             self.assertIn("等待自有分享 STRM", wait_lines[0])
@@ -1360,7 +1364,8 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 task_engine_enabled=True,
             )
 
-            message = telegram.messages[-1][1]
+            self.assertEqual(len(telegram.rich_messages), 1)
+            message = telegram.rich_messages[-1][1].to_plain()
             task_lines = [line for line in message.splitlines() if " | " in line and title_prefix in line]
             self.assertEqual(len(task_lines), 8)
             self.assertIn(title_prefix, message)
@@ -1396,7 +1401,8 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 task_store=task_store,
                 task_engine_enabled=True,
             )
-            taskstore_message = telegram.messages[-1][1]
+            self.assertEqual(len(telegram.rich_messages), 1)
+            taskstore_message = telegram.rich_messages[-1][1].to_plain()
 
             empty_task_store = TaskStore(Path(tmp) / "empty-tasks.db")
             bridge.handle_update(
@@ -1409,7 +1415,8 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 task_store=empty_task_store,
                 task_engine_enabled=True,
             )
-            fallback_message = telegram.messages[-1][1]
+            self.assertEqual(len(telegram.rich_messages), 2)
+            fallback_message = telegram.rich_messages[-1][1].to_plain()
 
             self.assertIn("TaskStore 最近历史", taskstore_message)
             self.assertIn("新任务电影", taskstore_message)
@@ -1444,7 +1451,9 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 task_engine_enabled=True,
             )
 
-            reply_markup = telegram.messages[-1][2]
+            self.assertEqual(len(telegram.rich_messages), 1)
+            self.assertIn("TaskStore 最近任务", telegram.rich_messages[-1][1].to_plain())
+            reply_markup = telegram.rich_messages[-1][2]
             buttons = [button for row in reply_markup["inline_keyboard"] for button in row]
             self.assertIn({"text": "详情 #1", "callback_data": "task_detail:1"}, buttons)
             self.assertIn({"text": "重试 #1", "callback_data": "task_retry:1"}, buttons)
@@ -1487,7 +1496,10 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertNotIn("event-password", document.to_plain())
             self.assertNotIn("event-token", document.to_plain())
             self.assertNotIn("task-token", document.to_plain())
-            self.assertIsNotNone(telegram.rich_messages[-1][2])
+            self.assertEqual(
+                telegram.rich_messages[-1][2],
+                bridge.task_action_keyboard([task], max_retries=3, task_store=task_store),
+            )
 
     def test_multi_source_intake_summary_is_rich_and_lists_task_titles_and_statuses(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3430,7 +3442,8 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 move_config=move_config,
             )
 
-            message = telegram.messages[-1][1]
+            self.assertEqual(len(telegram.rich_messages), 1)
+            message = telegram.rich_messages[-1][1].to_plain()
             self.assertIn("TaskEngine: ENABLED", message)
             self.assertIn("TaskStore最近任务: 3", message)
             self.assertIn("待执行: 1", message)
