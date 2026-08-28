@@ -6,6 +6,7 @@ from app.quality import QualityIssue, format_task_quality_report
 from app.quality_automation import QualityRepairPlan, QualityRunSummary
 from app.telegram_rich import RichDocument, bold, details, heading, paragraph, table
 from app.telegram_ui import (
+    format_counts,
     format_hdhive_candidate_label,
     format_hdhive_candidates,
     format_hdhive_subscriptions,
@@ -18,6 +19,7 @@ from app.telegram_ui import (
     format_status,
     format_taskstore_history,
     format_taskstore_status,
+    quality_issue_for_row,
     safe_telegram_text,
 )
 from app.workflows.self_share import format_task_label
@@ -120,6 +122,30 @@ class TelegramUiRichTests(unittest.TestCase):
 
     def test_quality_scan_summary_stays_str(self):
         self.assertIsInstance(format_quality_scan_summary([]), str)
+
+    def test_format_task_label_ignores_raw_share_code_title(self):
+        self.assertEqual(
+            format_task_label({"cms_task_id": 7, "title": "secret-share", "share_code": "secret-share"}),
+            "任务 #7",
+        )
+
+    def test_quality_report_hides_share_code_title_and_hostile_emby_fields(self):
+        hostile = "https://evil.test/item?password=quality-password token=quality-token"
+        row = {
+            "id": 8,
+            "cms_task_id": 8,
+            "title": "secret-share",
+            "share_code": "secret-share",
+            "emby_status": "confirmed",
+            "emby_title": hostile,
+            "recognition_json": json.dumps({"title": "正常影片", "share_name": "正常影片"}),
+        }
+        plain = format_quality_report([row]).to_plain()
+        self.assertIn("疑似错配", plain)
+        self.assertNotIn("secret-share", plain)
+        self.assertNotIn("evil.test", plain)
+        self.assertNotIn("quality-password", plain)
+        self.assertNotIn("quality-token", plain)
 
     def test_quality_report_table(self):
         rows = [
@@ -335,6 +361,21 @@ class TelegramUiRichTests(unittest.TestCase):
         self.assertIn("HDHive 剧集订阅", plain)
         for secret in (secret_url, "evil.test", "view-password", "view-share", "view-token", "error-token", "view-code", "reason-token"):
             self.assertNotIn(secret, plain)
+
+    def test_dynamic_count_and_quality_fields_have_final_bounds(self):
+        counts = {"key-" + str(index): "value-" + str(index) for index in range(100)}
+        self.assertLessEqual(len(format_counts(counts)), 320)
+        row = {
+            "id": "9" * 100,
+            "cms_task_id": "8" * 100,
+            "title": "正常影片",
+            "emby_status": "confirmed",
+            "emby_title": "另一部影片",
+            "recognition_json": json.dumps({"tmdb_id": "7" * 100, "title": "正常影片"}),
+            "emby_path": "{tmdb=" + "6" * 100 + "}",
+        }
+        issue = quality_issue_for_row(row)
+        self.assertLessEqual(len(issue), 240)
 
     def test_format_hdhive_subscriptions_redacts_last_error(self):
         secret_url = "https://evil.test/subscription?password=subscription-password"

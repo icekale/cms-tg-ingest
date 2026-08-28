@@ -317,7 +317,8 @@ def _quality_attention_message(summary: QualityRunSummary) -> RichDocument:
     rows = []
     for plan in plans[:10]:
         title = safe_telegram_text(plan.title or f"任务 #{plan.task_id}", 120)
-        rows.append((f"#{plan.task_id}", title, safe_telegram_text(plan.reason, 160)))
+        rows.append((f"#{safe_telegram_text(plan.task_id, 40)}", title, safe_telegram_text(plan.reason, 160)))
+
     blocks = [
         heading("质量巡检需要关注"),
         paragraph(
@@ -1718,7 +1719,7 @@ def format_health(
     lib_ok = all(safe_resolve(root).exists() for root in move_config.library_roots.values())
     rows = [("CMS", bold("OK") if cms_ok else bold("FAIL"), "")]
     if telegram_ok is not None:
-        extra = telegram_last_error_at or ""
+        extra = safe_telegram_text(telegram_last_error_at or "", 160)
         rows.append(("Telegram", bold("OK") if telegram_ok else bold("FAIL"), extra))
     if openai_enabled is not None:
         if openai_enabled:
@@ -1735,7 +1736,8 @@ def format_health(
             ("Emby", bold("OK") if emby_ok else bold("FAIL"), ""),
             ("STRM源", bold("OK") if source_ok else bold("FAIL"), str(len(move_config.source_roots))),
             ("媒体库映射", bold("OK") if lib_ok else bold("FAIL"), str(len(move_config.library_roots))),
-            ("冲突策略", move_config.conflict_policy, ""),
+            ("冲突策略", safe_telegram_text(move_config.conflict_policy, 80), ""),
+
         ]
     )
     blocks = [heading("健康检查"), table(("组件", "状态", "说明"), rows)]
@@ -4102,13 +4104,19 @@ def _start_status_poll_impl(
         nonlocal task_id, row
         deadline = time.time() + max_seconds
         last_status = row.get("status") or "submitted"
-        recognition: dict[str, Any] = {"title": row.get("title") or row.get("share_code") or ""}
+        recognition_title = row.get("title") or ""
+        if str(recognition_title).strip() == str(row.get("share_code") or "").strip():
+            recognition_title = ""
+        recognition: dict[str, Any] = {"title": recognition_title or f"任务 #{row.get('id') or '?'}"}
         recognition_checked = False
         while time.time() < deadline:
             time.sleep(max(1, interval))
             try:
                 if self_share_workflow and not task_id:
-                    title = row.get("title") or row.get("share_code") or ""
+                    title = row.get("title") or ""
+                    if str(title).strip() == str(row.get("share_code") or "").strip():
+                        title = ""
+                    title = title or f"任务 #{row.get('id') or '?'}"
                     updated = store.update_status(int(row["id"]), "organizing", title=str(title or "")) or row
                     sync_cms_status_task_event(task_store, updated, "organizing", title=str(title or ""))
                     recognition = normalize_recognition({"code": 500, "msg": "waiting for CMS organize"})
@@ -4410,7 +4418,7 @@ def handle_update(
             hdhive_subscription_scheduler,
             chat_id,
         )
-        telegram.send_rich_message(chat_id, text.with_leading_paragraph("\n".join(lines)), reply_markup=keyboard)
+        telegram.send_rich_message(chat_id, text.with_leading_paragraph(safe_telegram_text("\n".join(lines), 320)), reply_markup=keyboard)
         return
     if command == "/hdhive_subscriptions":
         if hdhive_subscription_service is None:
@@ -4510,7 +4518,7 @@ def handle_update(
                 hdhive_subscription_scheduler,
                 chat_id,
             )
-            telegram.send_rich_message(chat_id, text.with_leading_paragraph("\n".join(lines)), reply_markup=keyboard)
+            telegram.send_rich_message(chat_id, text.with_leading_paragraph(safe_telegram_text("\n".join(lines), 320)), reply_markup=keyboard)
             return
 
     if hdhive_workflow is not None:

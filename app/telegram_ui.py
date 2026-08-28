@@ -78,7 +78,7 @@ def format_failure_summary(rows: list[dict[str, Any]]) -> str:
     if not counts:
         return ""
     parts = [f"{reason}({count})" for reason, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))]
-    return "最近失败原因：" + ", ".join(parts)
+    return safe_telegram_text("最近失败原因：" + ", ".join(parts), 320)
 
 
 def format_library_summary(rows: list[dict[str, Any]]) -> str:
@@ -93,7 +93,7 @@ def format_library_summary(rows: list[dict[str, Any]]) -> str:
     if not counts:
         return ""
     parts = [f"{name}({count})" for name, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))]
-    return "最近入库媒体库：" + ", ".join(parts)
+    return safe_telegram_text("最近入库媒体库：" + ", ".join(parts), 320)
 
 
 def quality_issue_for_row(row: dict[str, Any]) -> str:
@@ -103,14 +103,22 @@ def quality_issue_for_row(row: dict[str, Any]) -> str:
     expected_tmdb = expected_task_tmdb_id(recognition, row)
     actual_tmdb = extract_tmdb_id_from_name(" ".join(str(row.get(k) or "") for k in ("emby_path", "source_path", "dest_path")))
     if expected_tmdb and actual_tmdb and expected_tmdb != actual_tmdb:
-        return f"疑似错配：任务 TMDB {expected_tmdb}，Emby 路径 TMDB {actual_tmdb}"
-    task_title = str(row.get("title") or recognition.get("share_name") or "").strip()
+        return safe_telegram_text(
+            f"疑似错配：任务 TMDB {safe_telegram_text(expected_tmdb, 60)}，"
+            f"Emby 路径 TMDB {safe_telegram_text(actual_tmdb, 60)}",
+            240,
+        )
+    task_title = str(row.get("title") or "").strip()
+    if not task_title or task_title == str(row.get("share_code") or "").strip():
+        task_title = str(recognition.get("share_name") or f"任务 #{row.get('id') or row.get('cms_task_id') or '?'}").strip()
+        if task_title == str(row.get("share_code") or "").strip():
+            task_title = f"任务 #{row.get('id') or row.get('cms_task_id') or '?'}"
     emby_title = str(row.get("emby_title") or "").strip()
     task_norm = normalize_text(task_title)
     emby_norm = normalize_text(emby_title)
     has_cjk_task_title = bool(re.search(r"[\u4e00-\u9fff]", task_title))
     if has_cjk_task_title and task_norm and emby_norm and emby_norm not in task_norm and task_norm not in emby_norm:
-        return f"疑似错配：任务 {safe_telegram_text(task_title, 120)}，Emby {safe_telegram_text(emby_title, 120)}"
+        return safe_telegram_text(f"疑似错配：任务 {safe_telegram_text(task_title, 120)}，Emby {safe_telegram_text(emby_title, 120)}", 240)
     return ""
 
 
@@ -191,7 +199,10 @@ def format_quality_manual_report(rows: list[dict[str, Any]]) -> RichDocument:
         return document(paragraph("质量巡检：当前没有需要人工处理的问题。"))
     table_rows = []
     for row in rows:
-        title = safe_telegram_text(row.get("title") or f"任务 #{row.get('task_id')}", 70)
+        raw_title = row.get("title")
+        if not raw_title or str(raw_title).strip() == str(row.get("share_code") or "").strip():
+            raw_title = f"任务 #{row.get('task_id')}"
+        title = safe_telegram_text(raw_title, 70)
         reason = safe_telegram_text(row.get("rule_reason") or row.get("message") or "需要人工确认", 120)
         table_rows.append(
             (
@@ -233,9 +244,12 @@ def quality_manual_keyboard(rows: list[dict[str, Any]], limit: int = 8) -> dict[
 def format_counts(counts: dict[str, int]) -> str:
     if not counts:
         return "-"
-    return ", ".join(
-        f"{safe_telegram_text(key, 60)}={safe_telegram_text(value, 40)}"
-        for key, value in counts.items()
+    return safe_telegram_text(
+        ", ".join(
+            f"{safe_telegram_text(key, 60)}={safe_telegram_text(value, 40)}"
+            for key, value in counts.items()
+        ),
+        320,
     )
 
 
@@ -290,7 +304,7 @@ def format_hdhive_candidate_label(candidate: dict[str, str] | None) -> str:
     year = safe_telegram_text(str(item.get("year") or "").strip() or "年份未知", 40)
     media_type = "电影" if item.get("media_type") == "movie" else "剧集"
     tmdb_id = safe_telegram_text(str(item.get("tmdb_id") or "").strip() or "-", 60)
-    return f"{title} ({year}) · {media_type} · TMDB {tmdb_id}"
+    return safe_telegram_text(f"{title} ({year}) · {media_type} · TMDB {tmdb_id}", 240)
 
 
 def _safe_hdhive_failure_reason(value: object) -> str:
@@ -452,7 +466,7 @@ def format_hdhive_subscriptions(
         status = safe_telegram_text(status_map.get(subscription.status, subscription.status), 40)
         source = safe_telegram_text(subscription.source_url or f"TMDB:{subscription.tmdb_id}", 180)
         title = safe_telegram_text(subscription.title or subscription.tmdb_id, 120)
-        table_rows.append((f"#{subscription.id}", title, status, source))
+        table_rows.append((safe_telegram_text(f"#{subscription.id}", 40), title, status, source))
         detail_blocks = []
         episode_filter = safe_telegram_text(getattr(subscription, "episode_filter", "") or "", 120).strip()
         if episode_filter:
@@ -479,15 +493,15 @@ def format_hdhive_subscriptions(
                     counters.append(f"{label} {safe_telegram_text(summary[key], 40)}")
 
             if counters:
-                detail_blocks.append(paragraph("最近检查：" + "，".join(counters)))
+                detail_blocks.append(paragraph(safe_telegram_text("最近检查：" + "，".join(counters), 320)))
             if diagnosis.conclusion:
                 detail_blocks.append(paragraph(safe_telegram_text(diagnosis.conclusion, 160)))
             if diagnosis.reasons:
-                detail_blocks.append(paragraph("原因：" + "；".join(safe_telegram_text(reason, 120) for reason in diagnosis.reasons)))
+                detail_blocks.append(paragraph(safe_telegram_text("原因：" + "；".join(safe_telegram_text(reason, 120) for reason in diagnosis.reasons), 320)))
         if subscription.last_error:
             detail_blocks.append(paragraph(f"最近错误：{safe_telegram_text(subscription.last_error, 120)}"))
         if detail_blocks:
-            extras.append(details(f"#{subscription.id} {title}", detail_blocks))
+            extras.append(details(safe_telegram_text(f"#{subscription.id} {title}", 160), detail_blocks))
 
     blocks.append(table(("#", "剧名", "状态", "来源"), table_rows))
     blocks.extend(extras)

@@ -123,6 +123,29 @@ class InvalidShareCleanupTests(unittest.TestCase):
             self.assertEqual(task.current_stage, bridge.TaskStage.NEEDS_ACTION)
             self.assertIn("分享已失效", telegram.messages[0][1])
 
+    def test_invalid_share_notification_redacts_and_bounds_legacy_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, row, destination, move_config = self._row_with_share_strm(tmp)
+            row = store.update_self_share(int(row["id"]), own_share_file_name="https://evil.test/title?password=title-password") or row
+            class HostileInvalidShareP115(InvalidShareP115):
+                def share_snap(self, share_code, receive_code, cid="0", limit=100):
+                    raise P115ShareUnavailableError("失效 https://evil.test/reason?token=reason-token token=raw-token")
+            telegram = FakeTelegram()
+            probe_invalid_self_shares(
+                store,
+                TaskStore(Path(tmp) / "tasks.db"),
+                HostileInvalidShareP115(),
+                FakeEmby(),
+                telegram,
+                "chat-id",
+                move_config,
+                limit=1,
+            )
+            message = telegram.messages[0][1]
+            self.assertLessEqual(len(message), 320)
+            for secret in ("evil.test", "title-password", "reason-token", "raw-token"):
+                self.assertNotIn(secret, message)
+
     def test_keeps_destination_when_115_is_risk_controlled(self):
         with tempfile.TemporaryDirectory() as tmp:
             store, row, destination, move_config = self._row_with_share_strm(tmp)

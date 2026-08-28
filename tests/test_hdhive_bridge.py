@@ -951,6 +951,26 @@ class HdhiveBridgeTests(unittest.TestCase):
         self.assertNotIn("115cdn.com", plain)
         self.assertNotIn(secret_url, repr(document.to_blocks()))
 
+    def test_resource_formatter_redacts_all_external_resource_fields(self):
+        hostile = "https://evil.test/raw?password=resource-password token=resource-token"
+        proxy = FakeProxy()
+        proxy.items = [HdhiveResource(**{
+            **resource(hostile, hostile).__dict__,
+            "title": hostile,
+            "share_size": hostile,
+            "video_resolution": (hostile,),
+            "unlock_points": hostile,
+        })]
+        workflow = HdhiveWorkflow(object(), proxy, HdhiveSessionStore())
+        session_id = workflow.sessions.begin("464100862", "Example")
+        workflow.load_resources(session_id, "movie", "550")
+        document, keyboard = bridge.format_hdhive_resources(workflow, session_id)
+        plain = document.to_plain() + repr(keyboard)
+        self.assertNotIn("evil.test", plain)
+        self.assertNotIn("resource-password", plain)
+        self.assertNotIn("resource-token", plain)
+        self.assertTrue(all(len(button["text"]) <= 160 for row in keyboard["inline_keyboard"] for button in row))
+
     def test_resource_formatter_omits_table_when_filter_has_no_rows(self):
         workflow = HdhiveWorkflow(object(), FakeProxy(), HdhiveSessionStore())
         session_id = workflow.sessions.begin("464100862", "Example")

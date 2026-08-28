@@ -173,7 +173,10 @@ def scan_task_quality(
     identity_cache: dict[tuple[str, str], tuple[ShareIdentity, ...]] = {}
     task_rows = list(tasks) if tasks is not None else store.list_recent_tasks(limit=limit)
     for task in task_rows:
-        title = safe_telegram_text(task.title or task.metadata.get("received_title") or f"任务 #{task.id}", 120)
+        candidate = task.title or task.metadata.get("received_title")
+        if not candidate or str(candidate).strip() == str(task.share_code or "").strip():
+            candidate = f"任务 #{task.id}"
+        title = safe_telegram_text(candidate, 120)
         try:
             expected_mode = effective_task_strm_mode(task)
         except ValueError as exc:

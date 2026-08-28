@@ -28,6 +28,36 @@ class TaskHealthTests(unittest.TestCase):
             self.assertNotIn("health-password", report)
             self.assertNotIn("health-error", report)
 
+    def test_health_bridge_document_hides_received_title_when_it_is_share_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("secret-share", "", "https://115cdn.com/s/secret-share")
+            store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "waiting",
+                metadata_patch={"received_title": "secret-share"},
+                next_run_at=200.0,
+            )
+            report = format_task_health(build_task_health(store, enabled=True, now=100.0), now=100.0)
+            move_config = bridge.MoveConfig(source_roots=[Path(tmp)], library_roots={"测试": Path(tmp)}, stable_seconds=0)
+            plain = bridge.format_health(move_config, True, True, task_health=report).to_plain()
+            self.assertIn(f"任务 #{task.id}", plain)
+            self.assertNotIn("secret-share", plain)
+
+    def test_health_redacts_conflict_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            move_config = bridge.MoveConfig(
+                source_roots=[Path(tmp)],
+                library_roots={"测试": Path(tmp)},
+                stable_seconds=0,
+                conflict_policy="https://evil.test/policy?token=policy-token",
+            )
+            plain = bridge.format_health(move_config, True, True).to_plain()
+            self.assertNotIn("evil.test", plain)
+            self.assertNotIn("policy-token", plain)
+
     def test_health_fallback_title_and_bridge_details_redact_persisted_values(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

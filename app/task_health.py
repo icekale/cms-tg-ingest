@@ -44,7 +44,10 @@ def _truncate(value: object, limit: int) -> str:
 
 
 def _format_wait_detail(task: TaskSnapshot, *, now: float) -> str:
-    title = safe_telegram_text(task.title or task.metadata.get("received_title") or f"任务 #{task.id}", 40)
+    candidate = task.title or task.metadata.get("received_title")
+    if not candidate or str(candidate).strip() == str(task.share_code or "").strip():
+        candidate = f"任务 #{task.id}"
+    title = safe_telegram_text(candidate, 40)
     metadata = dict(task.metadata)
     if "_defer_message" in metadata:
         metadata["_defer_message"] = safe_telegram_text(metadata.get("_defer_message"), 90)
@@ -182,13 +185,19 @@ def format_task_health(summary: TaskHealthSummary, *, now: float | None = None) 
         lines.append(f"等待详情: 另有 {summary.wait_overflow_count} 个任务等待中")
     if summary.latest_lock_wait:
         task = summary.latest_lock_wait
-        title = safe_telegram_text(task.title or task.metadata.get("received_title") or f"任务 #{task.id}", 80)
+        candidate = task.title or task.metadata.get("received_title")
+        if not candidate or str(candidate).strip() == str(task.share_code or "").strip():
+            candidate = f"任务 #{task.id}"
+        title = safe_telegram_text(candidate, 80)
         reason = safe_telegram_text(task.metadata.get("_lock_reason") or "-", 100)
         holder = safe_telegram_text(task.metadata.get("_lock_owner_task_id") or "-", 40)
         lines.append(f"最近锁等待: #{task.id} {title} / {reason} / holder #{holder}")
     if summary.latest_problem:
         task = summary.latest_problem
-        title = safe_telegram_text(task.title or task.metadata.get("received_title") or f"任务 #{task.id}", 80)
+        candidate = task.title or task.metadata.get("received_title")
+        if not candidate or str(candidate).strip() == str(task.share_code or "").strip():
+            candidate = f"任务 #{task.id}"
+        title = safe_telegram_text(candidate, 80)
         suffix = f"，{safe_telegram_text(task.error_summary, 120)}" if task.error_summary else ""
         lines.append(f"最近问题: #{task.id} {title} / {stage_display_name(task.current_stage)}{suffix}")
     return "\n".join(lines)

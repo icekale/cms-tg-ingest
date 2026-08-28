@@ -10,6 +10,7 @@ from typing import Any
 from app.clients.p115 import P115RiskControlError, P115ShareUnavailableError
 from app.config import DEFAULT_OWN_SHARE_RECEIVE_CODE, is_relative_to, safe_resolve
 from app.media.strm import validate_self_share_strm_destination
+from app.logging_system import safe_telegram_text
 from app.models import TaskStage, TaskStatus
 
 LOG = logging.getLogger("cms-tg-ingest")
@@ -194,9 +195,10 @@ def _clean_invalid_self_share(
     _mark_task_needs_action(task_store, updated, message)
     library = _refresh_emby(emby, destination)
     if telegram:
-        title = str(updated.get("emby_title") or updated.get("own_share_file_name") or updated.get("title") or "媒体")
-        suffix = f"，已刷新 Emby 媒体库：{library}" if library else ""
-        telegram.send_message(chat_id, f"分享失效已清理：{title}（{reason}）{suffix}")
+        title = safe_telegram_text(updated.get("emby_title") or updated.get("own_share_file_name") or updated.get("title") or "媒体", 120)
+        clean_reason = safe_telegram_text(reason, 120)
+        suffix = f"，已刷新 Emby 媒体库：{safe_telegram_text(library, 80)}" if library else ""
+        telegram.send_message(chat_id, safe_telegram_text(f"分享失效已清理：{title}（{clean_reason}）{suffix}", 320))
     return True
 
 

@@ -92,6 +92,22 @@ class TaskQualityTests(unittest.TestCase):
             self.assertEqual([issue.code for issue in issues], ["invalid_strm_mode"])
             self.assertEqual(issues[0].task_id, task.id)
 
+    def test_scan_task_quality_uses_task_number_when_received_title_is_share_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "Movie"
+            dest.mkdir()
+            store = TaskStore(root / "tasks.db")
+            task = store.upsert_task("secret-share", "", "https://115cdn.com/s/secret-share")
+            invalid_task = replace(
+                task,
+                title="",
+                metadata={"received_title": "secret-share", "dest_path": str(dest), "strm_mode": "invalid"},
+            )
+            issue = scan_task_quality(store, tasks=[invalid_task])[0]
+            self.assertEqual(issue.title, f"任务 #{task.id}")
+            self.assertNotIn("secret-share", issue.title)
+
     def test_flags_direct_strm_url(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

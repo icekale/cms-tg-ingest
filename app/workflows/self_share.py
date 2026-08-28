@@ -467,9 +467,17 @@ def category_keyboard(row_id: int) -> dict[str, Any]:
     }
 
 
+def _task_display_title(task: Any) -> str:
+    title = str(getattr(task, "title", "") or "").strip()
+    share_code = str(getattr(task, "share_code", "") or "").strip()
+    return title if title and title != share_code else f"任务 #{getattr(task, 'id', '?')}"
+
+
 def format_task_label(row: dict[str, Any]) -> str:
     task_id = row.get("cms_task_id")
-    title = row.get("title") or "任务"
+    title = row.get("title")
+    if not title or str(title).strip() == str(row.get("share_code") or "").strip():
+        title = "任务"
     return f"{title} #{task_id}" if task_id else str(title)
 
 
@@ -1027,7 +1035,7 @@ class BridgeSelfShareTaskWorkflow:
             _ShareKey(task.share_code, task.receive_code),
             task.url,
             "received",
-            title=first_output.get("file_name") or task.title or task.share_code,
+            title=_task_display_title(task) if not first_output.get("file_name") else first_output.get("file_name"),
         )
         row = self.store.update_self_share(
             int(row["id"]),
@@ -1037,12 +1045,12 @@ class BridgeSelfShareTaskWorkflow:
         metadata.update(
             {
                 "submission_id": int(row["id"]),
-                "received_title": first_output.get("file_name") or task.title or task.share_code,
+                "received_title": _task_display_title(task) if not first_output.get("file_name") else first_output.get("file_name"),
                 "received_file_ids": [item["file_id"] for item in output_items],
                 "received_items": [
                     {
                         "file_id": item["file_id"],
-                        "file_name": item.get("file_name") or task.title or task.share_code,
+                        "file_name": item.get("file_name") or _task_display_title(task),
                         "is_folder": bool(item.get("is_folder")),
                         "parent_id": item.get("parent_id") or receive_cid,
                         "received_item_verified": True,
@@ -1266,7 +1274,8 @@ class BridgeSelfShareTaskWorkflow:
                 },
             )
 
-        title = str(received.get("title") or task.title or task.share_code).strip()
+        received_title = str(received.get("title") or "").strip()
+        title = received_title if received_title and received_title != str(task.share_code or "").strip() else _task_display_title(task)
         row = self.store.upsert_submission(
             _ShareKey(task.share_code, task.receive_code),
             task.url,
