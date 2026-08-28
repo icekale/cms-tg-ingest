@@ -52,9 +52,9 @@ def _format_wait_detail(task: TaskSnapshot, *, now: float) -> str:
     title = safe_telegram_text(candidate, 40, blocked_values=blocked)
     metadata = dict(task.metadata)
     if "_defer_message" in metadata:
-        metadata["_defer_message"] = safe_telegram_text(metadata.get("_defer_message"), 90)
-    safe_task = replace(task, title=title, error_summary=safe_telegram_text(task.error_summary, 90), metadata=metadata)
-    return safe_telegram_text(f"#{task.id} {title}: {describe_task_wait(safe_task, now=now)}", 200)
+        metadata["_defer_message"] = safe_telegram_text(metadata.get("_defer_message"), 90, blocked_values=blocked)
+    safe_task = replace(task, title=title, error_summary=safe_telegram_text(task.error_summary, 90, blocked_values=blocked), metadata=metadata)
+    return safe_telegram_text(f"#{task.id} {title}: {describe_task_wait(safe_task, now=now)}", 200, blocked_values=blocked)
 
 
 def build_task_health(

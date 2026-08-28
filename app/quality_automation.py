@@ -42,10 +42,18 @@ _STRM_SHARE_MARKER_RE = re.compile(r"/s/([A-Za-z0-9]+)_([A-Za-z0-9]*)_")
 
 
 def _quality_plan_title(task: TaskSnapshot) -> str:
-    share_code = str(task.share_code or "").strip()
+    blocked = {
+        str(getattr(task, field, "") or "").strip()
+        for field in ("share_code", "receive_code", "own_share_code", "own_share_receive_code")
+    }
+    blocked.update(
+        str((task.metadata or {}).get(field) or "").strip()
+        for field in ("share_code", "receive_code", "own_share_code", "own_share_receive_code")
+    )
+    normalized = {" ".join(value.split()).casefold() for value in blocked if value}
     for value in (task.title, task.metadata.get("received_title")):
         title = str(value or "").strip()
-        if title and title != share_code:
+        if title and " ".join(title.split()).casefold() not in normalized:
             return title
     return f"任务 #{task.id}"
 

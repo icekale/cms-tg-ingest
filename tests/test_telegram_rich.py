@@ -185,6 +185,24 @@ class TelegramUiRichTests(unittest.TestCase):
         self.assertIn("/library/<redacted>", plain)
         self.assertIn("普通媒体库", plain)
 
+    def test_quality_report_hides_own_code_title_and_missing_destination_basename(self):
+        row = {
+            "id": 44,
+            "title": "own-code",
+            "own_share_code": "own-code",
+            "own_share_receive_code": "1234",
+            "share_code": "source-code",
+            "receive_code": "5678",
+            "emby_status": "confirmed",
+            "emby_title": "另一个媒体",
+            "recognition_json": json.dumps({"title": "正常影片"}),
+            "dest_path": "/missing/own-code",
+        }
+        issue = quality_issue_for_row(row)
+        plain = format_quality_report([row]).to_plain()
+        self.assertNotIn("own-code", issue + plain)
+        self.assertNotIn("1234", plain)
+
     def test_quality_report_table(self):
         rows = [
             {
@@ -307,6 +325,37 @@ class TelegramUiRichTests(unittest.TestCase):
         ]
         for formatter in (format_taskstore_history, format_taskstore_status):
             self.assertNotIn(secret, formatter(tasks).to_plain())
+
+    def test_numeric_context_codes_redact_prose_but_preserve_task_number(self):
+        self.assertNotIn("1234", safe_telegram_text("error 1234", blocked_values={"1234"}))
+        self.assertIn("任务 #1234", safe_telegram_text("任务 #1234", blocked_values={"1234"}))
+        self.assertNotIn("1234", safe_telegram_text("path /library/1234", blocked_values={"1234"}))
+
+    def test_format_task_label_uses_row_id_without_cms_task_id(self):
+        self.assertEqual(format_task_label({"id": 12, "title": "own", "own_share_code": "own"}), "任务 #12")
+
+    def test_all_own_codes_are_hidden_from_task_titles(self):
+        common = dict(
+            id=31,
+            share_code="share",
+            receive_code="receive",
+            own_share_code="own",
+            own_share_receive_code="1234",
+            category="",
+            current_stage=TaskStage.RECEIVED,
+            status=TaskStatus.PENDING,
+            error_summary="",
+            next_run_at=0,
+            claimed_by="",
+            claimed_at=None,
+            updated_at=0,
+            created_at=0,
+        )
+        for value in ("own", "1234"):
+            task = SimpleNamespace(title=f" {value.upper()} ", metadata={"received_title": ""}, **common)
+            for formatter in (format_taskstore_history, format_taskstore_status):
+                plain = formatter([task]).to_plain()
+                self.assertNotIn(value, plain)
 
     def test_status_and_history_redact_persisted_error_urls_and_credentials(self):
         self.assertNotIn("secret", safe_telegram_text("share_code=secret"))

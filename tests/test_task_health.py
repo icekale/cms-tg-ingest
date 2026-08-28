@@ -98,6 +98,15 @@ class TaskHealthTests(unittest.TestCase):
             for secret in ("share-password", "lock-token", "error-code", "error-token", "evil.test"):
                 self.assertNotIn(secret, plain)
 
+    def test_health_redacts_short_numeric_code_in_error_but_keeps_task_number(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("share", "1234", "https://115cdn.com/s/share")
+            store.record_event(task.id, TaskStage.FAILED, TaskStatus.FAILED, "error 1234", error_summary="error 1234")
+            report = format_task_health(build_task_health(store, enabled=True, now=100.0), now=100.0)
+            self.assertIn(f"任务 #{task.id}", report)
+            self.assertNotIn("error 1234", report)
+
     def test_health_reports_fresh_task_runner_error_as_problem(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

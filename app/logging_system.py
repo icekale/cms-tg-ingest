@@ -290,9 +290,11 @@ def _replace_blocked_values(text: str, blocked_values: object) -> str:
 
     def replace(match: re.Match[str]) -> str:
         value = match.group(1)
-        # Short numeric codes overlap normal task numbers; a path segment is an
-        # unambiguous code context while labels such as "任务 #1234" are not.
-        if value.isdigit() and len(value) < 6 and not text[: match.start()].endswith("/"):
+        # Short numeric codes are sensitive in prose; only explicit #task labels remain readable.
+        if value.isdigit() and len(value) < 6 and not text[: match.start()].endswith("#"):
+            return "<redacted>"
+        prefix = text[: match.start()]
+        if value.isdigit() and len(value) < 6 and prefix.endswith("#") and not prefix[:-1].endswith("/"):
             return value
         return "<redacted>"
 

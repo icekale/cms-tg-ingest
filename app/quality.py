@@ -14,6 +14,7 @@ from .quality_rules import is_path_within_allowed_roots
 from .strm_mode import effective_task_strm_mode, normalize_strm_mode
 from .task_store import TaskStore
 from .telegram_rich import RichDocument, document, heading, paragraph, table
+from .telegram_ui import task_display_blocked_values
 
 
 @dataclass(frozen=True)
@@ -23,10 +24,23 @@ class QualityIssue:
     detail: str = ""
     task_id: int = 0
     title: str = ""
+    blocked_values: frozenset[str] = frozenset()
+
+
+def _quality_title(task: TaskSnapshot) -> tuple[str, frozenset[str]]:
+    blocked = task_display_blocked_values(task)
+    normalized = {" ".join(str(value or "").split()).casefold() for value in blocked}
+    for value in (task.title, task.metadata.get("received_title")):
+        title = str(value or "").strip()
+        if title and " ".join(title.split()).casefold() not in normalized:
+            return title, blocked
+    return f"任务 #{task.id}", blocked
 
 
 _StrmDirectoryScan = tuple[tuple[tuple[Path, str], ...], tuple[QualityIssue, ...]]
 ShareIdentity = tuple[str, str]
+
+
 ShareIdentityResolver = Callable[[TaskSnapshot], ShareIdentity | Sequence[ShareIdentity] | None]
 
 
@@ -81,7 +95,7 @@ def share_markers_for_identities(
     return tuple(markers) if markers else ("/s/",)
 
 
-def redact_quality_detail(value: object) -> str:
+def redact_quality_detail(value: object, *, blocked_values: object = None) -> str:
     """Keep quality evidence useful without exposing absolute host paths."""
     text = str(value or "")
     if not text:
@@ -91,10 +105,10 @@ def redact_quality_detail(value: object) -> str:
         windows_path = PureWindowsPath(text)
         if posix_path.is_absolute() or windows_path.is_absolute():
             name = posix_path.name or windows_path.name
-            return f"本地路径已隐藏（名称：{name or '未知'}）"
+            return f"本地路径已隐藏（名称：{safe_telegram_text(name or '未知', 120, blocked_values=blocked_values)}）"
     except (OSError, RuntimeError, ValueError):
         return "本地路径已隐藏"
-    return text
+    return safe_telegram_text(text, 180, blocked_values=blocked_values)
 
 
 def inspect_task_files(
@@ -173,15 +187,13 @@ def scan_task_quality(
     identity_cache: dict[tuple[str, str], tuple[ShareIdentity, ...]] = {}
     task_rows = list(tasks) if tasks is not None else store.list_recent_tasks(limit=limit)
     for task in task_rows:
-        candidate = task.title or task.metadata.get("received_title")
-        if not candidate or str(candidate).strip() == str(task.share_code or "").strip():
-            candidate = f"任务 #{task.id}"
-        title = safe_telegram_text(candidate, 120)
+        title, blocked = _quality_title(task)
+        title = safe_telegram_text(title, 120, blocked_values=blocked)
         try:
             expected_mode = effective_task_strm_mode(task)
         except ValueError as exc:
             raw_mode = str(task.metadata.get("strm_mode") or "").strip()
-            issues.append(QualityIssue("invalid_strm_mode", "任务 STRM 模式无效", raw_mode or str(exc), task.id, title))
+            issues.append(QualityIssue("invalid_strm_mode", "任务 STRM 模式无效", raw_mode or str(exc), task.id, title, blocked))
             continue
         dest_path = str(task.metadata.get("dest_path") or "").strip()
         if not dest_path:
@@ -207,7 +219,7 @@ def scan_task_quality(
             allowed_roots=allowed_roots,
             _scan_cache=scan_cache,
         ):
-            issues.append(replace(issue, task_id=task.id, title=title))
+            issues.append(replace(issue, task_id=task.id, title=title, blocked_values=blocked))
     return issues
 
 
@@ -216,9 +228,10 @@ def format_task_quality_report(issues: list[QualityIssue]) -> RichDocument:
         return document(paragraph("TaskStore 轻量巡检：未发现本地 STRM 问题。"))
     rows = []
     for issue in issues:
-        title = safe_telegram_text(issue.title or f"任务 #{issue.task_id}", 120)
-        message = safe_telegram_text(issue.message, 180)
+        blocked = issue.blocked_values
+        title = safe_telegram_text(issue.title or f"任务 #{issue.task_id}", 120, blocked_values=blocked)
+        message = safe_telegram_text(issue.message, 180, blocked_values=blocked)
         task_label = f"#{issue.task_id} {title}" if issue.task_id else title
-        detail = f"：{safe_telegram_text(redact_quality_detail(issue.detail), 180)}" if issue.detail else ""
+        detail = f"：{redact_quality_detail(issue.detail, blocked_values=blocked)}" if issue.detail else ""
         rows.append((task_label, f"{message}{detail}"))
     return document(heading("TaskStore 轻量巡检"), table(("# / 任务", "问题"), rows))

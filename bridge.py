@@ -174,6 +174,7 @@ from app.telegram_ui import (
     format_taskstore_history,
     format_taskstore_status,
     task_display_blocked_values,
+    row_display_blocked_values,
     task_display_title,
     format_hdhive_candidate_label,
     format_hdhive_candidates,
@@ -1624,6 +1625,7 @@ def parse_emby_recheck_callback(data: str) -> int | None:
 def recheck_emby_row(store: Any, row: dict[str, Any], emby: Any | None) -> tuple[dict[str, Any] | None, str]:
     if not emby or not getattr(emby, "enabled", False):
         return None, "Emby 确认未启用。"
+    blocked = row_display_blocked_values(row)
     recognition = parse_recognition_json(row)
     recognition.setdefault("share_name", row.get("title") or "")
     expected_tmdb = expected_task_tmdb_id(recognition, row)
@@ -1647,9 +1649,14 @@ def recheck_emby_row(store: Any, row: dict[str, Any], emby: Any | None) -> tuple
         path=str(match.get("Path") or ""),
         parent=library_name or emby_parent_label(match),
     )
-    title = safe_telegram_text(str(match.get("Name") or format_task_label(row)), 160)
-    library = safe_telegram_text(str((updated or {}).get("emby_parent") or library_name or "未知"), 160)
-    return updated, safe_telegram_text(f"已重新确认 Emby：{title}\n媒体库：{library}", 360)
+    updated_row = updated or row
+    blocked = row_display_blocked_values(row) | row_display_blocked_values(updated_row)
+    raw_title = str(match.get("Name") or "").strip()
+    normalized_blocked = {value.casefold() for value in blocked}
+    title = f"任务 #{updated_row.get('cms_task_id') or updated_row.get('id') or '?'}" if not raw_title or raw_title.casefold() in normalized_blocked else raw_title
+    title = safe_telegram_text(title, 160, blocked_values=blocked)
+    library = safe_telegram_text(str(updated_row.get("emby_parent") or library_name or "未知"), 160, blocked_values=blocked)
+    return updated, safe_telegram_text(f"已重新确认 Emby：{title}\n媒体库：{library}", 360, blocked_values=blocked)
 
 
 def count_field_values(rows: list[dict[str, Any]], field: str) -> dict[str, int]:
@@ -2277,18 +2284,19 @@ def maybe_request_category_confirmation(
     force_uncertain = result.get("category_status") == "openai_suggested"
     status = "uncertain" if force_uncertain or is_recognition_uncertain(result) else "confident"
     updated = store.update_recognition(int(row["id"]), result, status) or row
+    blocked = row_display_blocked_values(row) | row_display_blocked_values(updated)
     if status == "uncertain":
         message = f"CMS 识别不确定：{format_task_label(updated)}\n"
         if result.get("category_suggestion"):
             confidence = as_float(result.get("openai_confidence"), 0.0)
             reason = str(result.get("openai_reason") or "")
-            message += f"OpenAI建议：{result.get('category_suggestion')}（置信度 {confidence:.2f}）\n"
+            message += f"OpenAI建议：{safe_telegram_text(result.get('category_suggestion'), 120, blocked_values=blocked)}（置信度 {confidence:.2f}）\n"
             if reason:
-                message += f"理由：{reason[:80]}\n"
+                message += f"理由：{safe_telegram_text(reason[:80], 120, blocked_values=blocked)}\n"
         message += "请选择建议分类："
         telegram.send_message(
             chat_id,
-            safe_telegram_text(message, 320),
+            safe_telegram_text(message, 320, blocked_values=blocked),
             reply_markup=category_keyboard(int(row["id"])),
         )
     return result
@@ -2695,9 +2703,9 @@ def handle_hdhive_callback(
                 raise HdhiveSelectionError("候选媒体不存在，请重新搜索")
             candidate = session.candidates[index]
             workflow.load_resources(session_id, candidate["media_type"], candidate["tmdb_id"])
-            document, keyboard = format_hdhive_resources(workflow, session_id)
+            rich_document, keyboard = format_hdhive_resources(workflow, session_id)
             telegram.answer_callback_query(callback_id, "已查询 HDHive 资源", show_alert=False)
-            telegram.send_rich_message(chat_id, document, reply_markup=keyboard)
+            telegram.send_rich_message(chat_id, rich_document, reply_markup=keyboard)
             return True
         if action == "subscribe":
             if subscription_service is None:
@@ -2725,9 +2733,9 @@ def handle_hdhive_callback(
                     raise HdhiveSelectionError("网盘筛选不存在，请重新查询")
                 pan_type = pan_types[pan_index]
             workflow.set_filter(session_id, pan_type)
-            document, keyboard = format_hdhive_resources(workflow, session_id)
+            rich_document, keyboard = format_hdhive_resources(workflow, session_id)
             telegram.answer_callback_query(callback_id, f"已筛选：{safe_telegram_text(pan_type, 120)}", show_alert=False)
-            telegram.send_rich_message(chat_id, document, reply_markup=keyboard)
+            telegram.send_rich_message(chat_id, rich_document, reply_markup=keyboard)
             return True
         if action in {"toggle", "single"}:
             resource_index = int(argument)
@@ -2761,9 +2769,9 @@ def handle_hdhive_callback(
                         False,
                     )
                 return True
-            document, keyboard = format_hdhive_resources(workflow, session_id)
+            rich_document, keyboard = format_hdhive_resources(workflow, session_id)
             telegram.answer_callback_query(callback_id, "已更新选择", show_alert=False)
-            telegram.send_rich_message(chat_id, document, reply_markup=keyboard)
+            telegram.send_rich_message(chat_id, rich_document, reply_markup=keyboard)
             return True
         if action == "unlock":
             preview = workflow.unlock_preview(session_id)

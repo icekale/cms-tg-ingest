@@ -747,6 +747,23 @@ class HdhiveBridgeTests(unittest.TestCase):
         self.assertNotIn("https://pan.quark.cn/s/two", telegram.rich_messages[-1][1].to_plain())
         self.assertIn("非 115 资源：1 个", telegram.rich_messages[-1][1].to_plain())
 
+    def test_hdhive_paid_confirmation_sends_rich_document_and_keyboard(self):
+        proxy = FakeProxy()
+        workflow = HdhiveWorkflow(object(), proxy, HdhiveSessionStore(), auto_unlock_max_points=1)
+        session_id = workflow.sessions.begin("464100862", "Example")
+        workflow.load_resources(session_id, "movie", "550")
+        telegram = FakeTelegram()
+
+        self.assertTrue(bridge.handle_hdhive_callback(
+            f"hive:single:{session_id}:0", "callback-paid", "464100862", telegram, workflow, None
+        ))
+        self.assertEqual(len(telegram.rich_messages), 1)
+        sent_document = telegram.rich_messages[0][1]
+        self.assertIsInstance(sent_document, bridge.RichDocument)
+        self.assertIn("HDHive 解锁确认", sent_document.to_plain())
+        callbacks = [button["callback_data"] for row in telegram.rich_messages[0][2]["inline_keyboard"] for button in row]
+        self.assertIn(f"hive:confirm:{session_id}", callbacks)
+
     def test_hdhive_candidate_callback_sends_rich_resources_with_keyboard(self):
         workflow = HdhiveWorkflow(object(), FakeProxy(), HdhiveSessionStore())
         session_id = workflow.sessions.begin("464100862", "Example")

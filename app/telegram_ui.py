@@ -21,6 +21,14 @@ from app.workflows.self_share import format_task_label
 _SERIES_UPDATE_CATEGORIES = {"国产电视", "外国电视", "番剧"}
 
 
+def _normalized_code(value: object) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _is_blocked_display_value(value: object, blocked: frozenset[str]) -> bool:
+    return bool(value and _normalized_code(value) in {_normalized_code(item) for item in blocked})
+
+
 def task_display_blocked_values(task: Any) -> frozenset[str]:
     metadata = getattr(task, "metadata", {}) or {}
     values = {
@@ -47,7 +55,7 @@ def task_display_title(task: Any, limit: int = 160) -> str:
     metadata = getattr(task, "metadata", {}) or {}
     for value in (getattr(task, "title", ""), metadata.get("received_title")):
         title = str(value or "").strip()
-        if title and title not in blocked:
+        if title and not _is_blocked_display_value(title, blocked):
             return safe_telegram_text(title, limit, blocked_values=blocked)
     return safe_telegram_text(f"任务 #{getattr(task, 'id', '?')}", limit, blocked_values=blocked)
 
@@ -248,7 +256,7 @@ def format_quality_manual_report(rows: list[dict[str, Any]]) -> RichDocument:
     for row in rows:
         raw_title = row.get("title")
         blocked = row_display_blocked_values(row)
-        if not raw_title or str(raw_title).strip() in blocked:
+        if not raw_title or _is_blocked_display_value(raw_title, blocked):
             raw_title = f"任务 #{row.get('task_id')}"
         title = safe_telegram_text(raw_title, 70, blocked_values=blocked)
         reason = safe_telegram_text(row.get("rule_reason") or row.get("message") or "需要人工确认", 120, blocked_values=blocked)

@@ -85,6 +85,14 @@ _DELETE_RECOVERY_RETRY_SECONDS = 30
 _DELETE_RECOVERY_WINDOW_SECONDS = 300
 _MULTI_DESTINATIONS = "multiple"
 
+
+def _row_blocked_values(row: dict[str, Any]) -> frozenset[str]:
+    values = {
+        str(row.get(field) or "").strip()
+        for field in ("share_code", "receive_code", "own_share_code", "own_share_receive_code")
+    }
+    return frozenset(value for value in values if value)
+
 _post_organize_guard_lock = threading.Lock()
 _post_organize_guard_last_scheduled_at: float = 0.0
 
@@ -474,8 +482,10 @@ def format_task_label(row: dict[str, Any]) -> str:
         str(row.get(field) or "").strip()
         for field in ("share_code", "receive_code", "own_share_code", "own_share_receive_code")
     }
-    if not title or str(title).strip() in blocked:
+    normalized = {" ".join(value.split()).casefold() for value in blocked if value}
+    if not title or " ".join(str(title).split()).casefold() in normalized:
         title = "任务"
+        task_id = task_id or row.get("id")
     return f"{title} #{task_id}" if task_id else str(title)
 
 
@@ -5388,20 +5398,22 @@ class BridgeSelfShareTaskWorkflow:
 
     def _needs_action_recognition_result(self, row: dict[str, Any], recognition: dict[str, Any]):
         status = str(recognition.get("category_status") or "needs_action").strip()
+        original_row = row
         if hasattr(self.store, "update_recognition"):
             row = self.store.update_recognition(int(row["id"]), recognition, status) or row
-        message = safe_telegram_text(f"CMS 未能确定分类：{format_task_label(row)}\n", 180)
+        blocked = _row_blocked_values(original_row) | _row_blocked_values(row)
+        message = safe_telegram_text(f"CMS 未能确定分类：{format_task_label(row)}\n", 180, blocked_values=blocked)
         suggestion = str(recognition.get("category_suggestion") or "").strip()
         if suggestion:
             confidence = as_float(recognition.get("openai_confidence"), 0.0)
-            message += safe_telegram_text(f"OpenAI建议：{suggestion}（置信度 {confidence:.2f}）\n", 180)
+            message += safe_telegram_text(f"OpenAI建议：{suggestion}（置信度 {confidence:.2f}）\n", 180, blocked_values=blocked)
         reason = str(recognition.get("openai_reason") or "").strip()
         if reason:
-            message += safe_telegram_text(f"理由：{reason[:80]}\n", 160)
+            message += safe_telegram_text(f"理由：{reason[:80]}\n", 160, blocked_values=blocked)
         message += "请选择分类："
         self.telegram.send_message(
             self.chat_id,
-            safe_telegram_text(message, 320),
+            safe_telegram_text(message, 320, blocked_values=blocked),
             reply_markup=category_keyboard(int(row["id"])),
         )
         return StageResult.needs_action(
