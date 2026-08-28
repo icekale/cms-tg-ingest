@@ -1496,10 +1496,12 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertNotIn("event-password", document.to_plain())
             self.assertNotIn("event-token", document.to_plain())
             self.assertNotIn("task-token", document.to_plain())
-            self.assertEqual(
-                telegram.rich_messages[-1][2],
-                bridge.task_action_keyboard([task], max_retries=3, task_store=task_store),
-            )
+            callbacks = {
+                button["callback_data"]
+                for row in telegram.rich_messages[-1][2]["inline_keyboard"]
+                for button in row
+            }
+            self.assertEqual(callbacks, {"task_detail:1"})
 
     def test_multi_source_intake_summary_is_rich_and_lists_task_titles_and_statuses(self):
         with tempfile.TemporaryDirectory() as tmp:

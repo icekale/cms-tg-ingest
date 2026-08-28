@@ -783,10 +783,31 @@ class HdhiveBridgeTests(unittest.TestCase):
         self.assertIn("2 | 攻壳机动队 SAC_2045 | 剧集 | 2020 | 80986", text)
         self.assertNotIn("[电影]", text)
         self.assertNotIn("TMDB:", text)
-        labels = [
-            row[0]["text"]
+        session_id = workflow.sessions.active_for_chat(allowed).session_id
+        callbacks = {
+            button["callback_data"]
             for row in keyboard["inline_keyboard"]
-            if row[0]["callback_data"].startswith("hive:candidate:")
+            for button in row
+        }
+        self.assertEqual(
+            callbacks,
+            {
+                f"hive:candidate:{session_id}:0",
+                f"hive:candidate:{session_id}:1",
+                f"hive:subscribe:{session_id}:1",
+                f"hive:cancel:{session_id}",
+            },
+        )
+        self.assertEqual(len(callbacks), 4)
+        candidate_callbacks = {
+            f"hive:candidate:{session_id}:0",
+            f"hive:candidate:{session_id}:1",
+        }
+        labels = [
+            button["text"]
+            for row in keyboard["inline_keyboard"]
+            for button in row
+            if button["callback_data"] in candidate_callbacks
         ]
         self.assertEqual(labels, ["1. 搏击俱乐部", "2. 攻壳机动队 SAC_2045"])
 
