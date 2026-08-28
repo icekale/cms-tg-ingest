@@ -207,6 +207,14 @@ class TelegramUiRichTests(unittest.TestCase):
         self.assertNotIn("secret", format_taskstore_history([task]).to_plain())
         self.assertNotIn("secret", format_taskstore_status([task]).to_plain())
 
+    def test_format_hdhive_unlock_result_uses_unknown_reason_when_failure_has_no_details(self):
+        doc = format_hdhive_unlock_result(
+            [HdhiveUnlockItem("resource-empty", False, "", "", "", False)],
+            {"resource-empty": "115"},
+        )
+        self.assertIn("未知原因", doc.to_plain())
+        self.assertIn("未知原因", repr(doc.to_blocks()))
+
 
 class BridgeRichFormatterTests(unittest.TestCase):
     def test_task_quality_report_table(self):

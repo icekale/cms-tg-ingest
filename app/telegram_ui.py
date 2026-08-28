@@ -332,7 +332,7 @@ def format_hdhive_unlock_result(
         else:
             failed_count += 1
             status = "失败"
-        reason = _safe_hdhive_failure_reason(item.message or item.error_code) if not item.success else "-"
+        reason = _safe_hdhive_failure_reason(item.message or item.error_code or "未知原因") if not item.success else "-"
         rows.append((truncate_text(str(item.slug), 80), status, reason))
     blocks: list = [
         heading("HDHive 解锁结果"),
