@@ -195,10 +195,17 @@ def _clean_invalid_self_share(
     _mark_task_needs_action(task_store, updated, message)
     library = _refresh_emby(emby, destination)
     if telegram:
-        title = safe_telegram_text(updated.get("emby_title") or updated.get("own_share_file_name") or updated.get("title") or "媒体", 120)
-        clean_reason = safe_telegram_text(reason, 120)
-        suffix = f"，已刷新 Emby 媒体库：{safe_telegram_text(library, 80)}" if library else ""
-        telegram.send_message(chat_id, safe_telegram_text(f"分享失效已清理：{title}（{clean_reason}）{suffix}", 320))
+        blocked = {
+            str(updated.get(field) or "").strip()
+            for field in ("share_code", "receive_code", "own_share_code", "own_share_receive_code")
+            if str(updated.get(field) or "").strip()
+        }
+        raw_title = str(updated.get("emby_title") or updated.get("own_share_file_name") or updated.get("title") or "媒体").strip()
+        title = raw_title if raw_title not in blocked else f"任务 #{updated.get('cms_task_id') or updated.get('id') or '?'}"
+        title = safe_telegram_text(title, 120, blocked_values=blocked)
+        clean_reason = safe_telegram_text(reason, 120, blocked_values=blocked)
+        suffix = f"，已刷新 Emby 媒体库：{safe_telegram_text(library, 80, blocked_values=blocked)}" if library else ""
+        telegram.send_message(chat_id, safe_telegram_text(f"分享失效已清理：{title}（{clean_reason}）{suffix}", 320, blocked_values=blocked))
     return True
 
 

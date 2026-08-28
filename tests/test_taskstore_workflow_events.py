@@ -151,7 +151,37 @@ class PollTaskStoreIntegrationTests(unittest.TestCase):
             self.assertIn("emby_confirmed", stages)
             self.assertEqual(task.current_stage, TaskStage.EMBY_CONFIRMED)
             self.assertEqual(task.status, TaskStatus.NEEDS_ACTION)
+    def test_status_poll_self_share_preserves_source_code_internal_title_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            class TrackingStore(bridge.SubmissionStore):
+                def __init__(self, db_path):
+                    self.status_titles = []
+                    super().__init__(db_path)
 
+                def update_status(self, row_id, status, title=None, last_error=None):
+                    self.status_titles.append(title)
+                    return super().update_status(row_id, status, title=title, last_error=last_error)
 
-if __name__ == "__main__":
-    unittest.main()
+            submission_store = TrackingStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            row = submission_store.upsert_submission(
+                bridge.ShareKey("source-code", "1234"),
+                "https://115cdn.com/s/source-code?password=1234",
+                "submitted",
+                title="",
+            )
+            ensure_task_for_link(task_store, "source-code", "1234", row["url"])
+            clock = iter([0.0, 0.0])
+            with patch.object(bridge.time, "time", side_effect=lambda: next(clock, 2.0)), patch.object(bridge.time, "sleep", lambda seconds: None), patch.object(bridge.threading, "Thread", InlineThread), patch.object(bridge, "sync_cms_status_task_event"):
+                bridge.start_status_poll(
+                    FakePollCms(),
+                    FakePollTelegram(),
+                    1,
+                    submission_store,
+                    row,
+                    1,
+                    1,
+                    self_share_workflow=object(),
+                    task_store=task_store,
+                )
+            self.assertIn("source-code", submission_store.status_titles)

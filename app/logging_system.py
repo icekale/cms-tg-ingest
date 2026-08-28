@@ -272,9 +272,37 @@ def redact_text(value: object) -> str:
     return _HTTP_URL_RE.sub(_redact_http_url, text)
 
 
-def safe_telegram_text(value: object, limit: int = 200) -> str:
-    """Redact logging-sensitive values, hide URLs, and bound Telegram text."""
+def _replace_blocked_values(text: str, blocked_values: object) -> str:
+    if not blocked_values:
+        return text
+    values = sorted(
+        {
+            str(value).strip()
+            for value in blocked_values
+            if str(value or "").strip()
+        },
+        key=len,
+        reverse=True,
+    )
+    if not values:
+        return text
+    pattern = re.compile(r"(?<![\w-])(" + "|".join(re.escape(value) for value in values) + r")(?![\w-])")
+
+    def replace(match: re.Match[str]) -> str:
+        value = match.group(1)
+        # Short numeric codes overlap normal task numbers; a path segment is an
+        # unambiguous code context while labels such as "任务 #1234" are not.
+        if value.isdigit() and len(value) < 6 and not text[: match.start()].endswith("/"):
+            return value
+        return "<redacted>"
+
+    return pattern.sub(replace, text)
+
+
+def safe_telegram_text(value: object, limit: int = 200, *, blocked_values: object = None) -> str:
+    """Redact logging-sensitive values, known context codes, hide URLs, and bound Telegram text."""
     text = _HTTP_URL_RE.sub("<redacted-url>", redact_text("" if value is None else value))
+    text = _replace_blocked_values(text, blocked_values)
     if len(text) <= limit:
         return text
     tail_len = min(80, max(0, int(limit) // 3))

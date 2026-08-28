@@ -21,14 +21,35 @@ from app.workflows.self_share import format_task_label
 _SERIES_UPDATE_CATEGORIES = {"国产电视", "外国电视", "番剧"}
 
 
+def task_display_blocked_values(task: Any) -> frozenset[str]:
+    metadata = getattr(task, "metadata", {}) or {}
+    values = {
+        str(getattr(task, field, "") or "").strip()
+        for field in ("share_code", "receive_code", "own_share_code", "own_share_receive_code")
+    }
+    values.update(
+        str(metadata.get(field) or "").strip()
+        for field in ("share_code", "receive_code", "own_share_code", "own_share_receive_code")
+    )
+    return frozenset(value for value in values if value)
+
+
+def row_display_blocked_values(row: dict[str, Any]) -> frozenset[str]:
+    values = {
+        str(row.get(field) or "").strip()
+        for field in ("share_code", "receive_code", "own_share_code", "own_share_receive_code")
+    }
+    return frozenset(value for value in values if value)
+
+
 def task_display_title(task: Any, limit: int = 160) -> str:
-    share_code = str(getattr(task, "share_code", "") or "").strip()
+    blocked = task_display_blocked_values(task)
     metadata = getattr(task, "metadata", {}) or {}
     for value in (getattr(task, "title", ""), metadata.get("received_title")):
         title = str(value or "").strip()
-        if title and title != share_code:
-            return safe_telegram_text(title, limit)
-    return safe_telegram_text(f"任务 #{getattr(task, 'id', '?')}", limit)
+        if title and title not in blocked:
+            return safe_telegram_text(title, limit, blocked_values=blocked)
+    return safe_telegram_text(f"任务 #{getattr(task, 'id', '?')}", limit, blocked_values=blocked)
 
 
 def format_history(rows: list[dict[str, Any]]) -> RichDocument:
@@ -36,13 +57,14 @@ def format_history(rows: list[dict[str, Any]]) -> RichDocument:
         return document(paragraph("暂无历史记录。"))
     table_rows = []
     for idx, row in enumerate(rows, 1):
+        blocked = row_display_blocked_values(row)
         table_rows.append(
             (
                 str(idx),
-                safe_telegram_text(format_task_label(row), 120),
-                safe_telegram_text(row.get("category_final") or row.get("category_choice") or row.get("category_status") or "-", 120),
-                safe_telegram_text(row.get("move_status") or "-", 120),
-                safe_telegram_text(row.get("emby_status") or "-", 120),
+                safe_telegram_text(format_task_label(row), 120, blocked_values=blocked),
+                safe_telegram_text(row.get("category_final") or row.get("category_choice") or row.get("category_status") or "-", 120, blocked_values=blocked),
+                safe_telegram_text(row.get("move_status") or "-", 120, blocked_values=blocked),
+                safe_telegram_text(row.get("emby_status") or "-", 120, blocked_values=blocked),
             )
         )
     blocks: list = [heading("最近历史"), table(("#", "任务", "分类", "移动", "Emby"), table_rows)]
@@ -61,9 +83,10 @@ def format_taskstore_history(tasks: list[Any]) -> RichDocument:
     table_rows = []
     for idx, task in enumerate(tasks, 1):
         title = task_display_title(task, 80)
-        category = safe_telegram_text(task.category or task.metadata.get("category") or task.metadata.get("category_final") or "-", 120)
-        dest = safe_telegram_text(task.metadata.get("dest_path") or "-", 240)
-        emby_parent = safe_telegram_text(task.metadata.get("emby_parent") or task.metadata.get("emby_refresh_library") or "-", 160)
+        blocked = task_display_blocked_values(task)
+        category = safe_telegram_text(task.category or task.metadata.get("category") or task.metadata.get("category_final") or "-", 120, blocked_values=blocked)
+        dest = safe_telegram_text(task.metadata.get("dest_path") or "-", 240, blocked_values=blocked)
+        emby_parent = safe_telegram_text(task.metadata.get("emby_parent") or task.metadata.get("emby_refresh_library") or "-", 160, blocked_values=blocked)
         table_rows.append(
             (
                 f"#{task.id}",
@@ -83,7 +106,8 @@ def format_failure_summary(rows: list[dict[str, Any]]) -> str:
     for row in rows:
         if str(row.get("status") or "").lower() != "failed":
             continue
-        reason = safe_telegram_text(row.get("last_error"), 160).strip()
+        blocked = row_display_blocked_values(row)
+        reason = safe_telegram_text(row.get("last_error"), 160, blocked_values=blocked).strip()
         if not reason:
             continue
         counts[reason] = counts.get(reason, 0) + 1
@@ -98,7 +122,7 @@ def format_library_summary(rows: list[dict[str, Any]]) -> str:
     for row in rows:
         if str(row.get("emby_status") or "").lower() != "confirmed":
             continue
-        parent = safe_telegram_text(row.get("emby_parent") or "", 160).strip()
+        parent = safe_telegram_text(row.get("emby_parent") or "", 160, blocked_values=row_display_blocked_values(row)).strip()
         if not parent:
             continue
         counts[parent] = counts.get(parent, 0) + 1
@@ -111,6 +135,7 @@ def format_library_summary(rows: list[dict[str, Any]]) -> str:
 def quality_issue_for_row(row: dict[str, Any]) -> str:
     if str(row.get("emby_status") or "").lower() != "confirmed":
         return ""
+    blocked = row_display_blocked_values(row)
     recognition = parse_recognition_json(row)
     expected_tmdb = expected_task_tmdb_id(recognition, row)
     actual_tmdb = extract_tmdb_id_from_name(" ".join(str(row.get(k) or "") for k in ("emby_path", "source_path", "dest_path")))
@@ -119,18 +144,24 @@ def quality_issue_for_row(row: dict[str, Any]) -> str:
             f"疑似错配：任务 TMDB {safe_telegram_text(expected_tmdb, 60)}，"
             f"Emby 路径 TMDB {safe_telegram_text(actual_tmdb, 60)}",
             240,
+            blocked_values=blocked,
         )
     task_title = str(row.get("title") or "").strip()
-    if not task_title or task_title == str(row.get("share_code") or "").strip():
+    if not task_title or task_title in blocked:
         task_title = str(recognition.get("share_name") or f"任务 #{row.get('id') or row.get('cms_task_id') or '?'}").strip()
-        if task_title == str(row.get("share_code") or "").strip():
+        if task_title in blocked:
             task_title = f"任务 #{row.get('id') or row.get('cms_task_id') or '?'}"
     emby_title = str(row.get("emby_title") or "").strip()
+    emby_display_title = "-" if emby_title in blocked else emby_title
     task_norm = normalize_text(task_title)
     emby_norm = normalize_text(emby_title)
     has_cjk_task_title = bool(re.search(r"[\u4e00-\u9fff]", task_title))
     if has_cjk_task_title and task_norm and emby_norm and emby_norm not in task_norm and task_norm not in emby_norm:
-        return safe_telegram_text(f"疑似错配：任务 {safe_telegram_text(task_title, 120)}，Emby {safe_telegram_text(emby_title, 120)}", 240)
+        return safe_telegram_text(
+            f"疑似错配：任务 {safe_telegram_text(task_title, 120)}，Emby {safe_telegram_text(emby_display_title, 120)}",
+            240,
+            blocked_values=blocked,
+        )
     return ""
 
 
@@ -140,12 +171,16 @@ def format_quality_report(rows: list[dict[str, Any]]) -> RichDocument:
         issue = quality_issue_for_row(row)
         if not issue:
             continue
+        blocked = row_display_blocked_values(row)
+        emby_title = str(row.get("emby_title") or "").strip()
+        if emby_title in blocked:
+            emby_title = "-"
         table_rows.append(
             (
                 str(len(table_rows) + 1),
-                safe_telegram_text(format_task_label(row), 120),
-                safe_telegram_text(row.get("emby_title") or "-", 120),
-                safe_telegram_text(issue, 180),
+                safe_telegram_text(format_task_label(row), 120, blocked_values=blocked),
+                safe_telegram_text(emby_title or "-", 120, blocked_values=blocked),
+                safe_telegram_text(issue, 180, blocked_values=blocked),
             )
         )
     if not table_rows:
@@ -212,10 +247,11 @@ def format_quality_manual_report(rows: list[dict[str, Any]]) -> RichDocument:
     table_rows = []
     for row in rows:
         raw_title = row.get("title")
-        if not raw_title or str(raw_title).strip() == str(row.get("share_code") or "").strip():
+        blocked = row_display_blocked_values(row)
+        if not raw_title or str(raw_title).strip() in blocked:
             raw_title = f"任务 #{row.get('task_id')}"
-        title = safe_telegram_text(raw_title, 70)
-        reason = safe_telegram_text(row.get("rule_reason") or row.get("message") or "需要人工确认", 120)
+        title = safe_telegram_text(raw_title, 70, blocked_values=blocked)
+        reason = safe_telegram_text(row.get("rule_reason") or row.get("message") or "需要人工确认", 120, blocked_values=blocked)
         table_rows.append(
             (
                 f"#{row.get('task_id')}",
@@ -284,7 +320,7 @@ def format_status(rows: list[dict[str, Any]]) -> RichDocument:
         return document(paragraph("暂无记录。直接发送 115 分享链接即可创建任务。"))
     table_rows = []
     for row in rows:
-        table_rows.append((safe_telegram_text(format_task_label(row), 120), safe_telegram_text(row.get("status") or "unknown", 60), safe_telegram_text(row.get("last_error"), 160)))
+        table_rows.append((safe_telegram_text(format_task_label(row), 120, blocked_values=row_display_blocked_values(row)), safe_telegram_text(row.get("status") or "unknown", 60), safe_telegram_text(row.get("last_error"), 160, blocked_values=row_display_blocked_values(row))))
     blocks: list = [heading("最近任务"), table(("任务", "状态", "错误"), table_rows)]
     failure_summary = format_failure_summary(rows)
     if failure_summary:
@@ -390,20 +426,21 @@ def format_taskstore_status(tasks: list[Any]) -> RichDocument:
     extra = []
     for task in tasks:
         title = task_display_title(task, 80)
+        blocked = task_display_blocked_values(task)
         table_rows.append(
             (
                 f"#{task.id}",
                 title,
                 stage_display_name(task.current_stage),
                 task.status.value,
-                safe_telegram_text(task.error_summary, 100),
+                safe_telegram_text(task.error_summary, 100, blocked_values=blocked),
             )
         )
         detail_lines = []
         if task.status in {TaskStatus.RUNNING, TaskStatus.PENDING}:
-            detail_lines.append(paragraph(f"等待：{safe_telegram_text(describe_task_wait(task, now=time.time()), 200)}"))
+            detail_lines.append(paragraph(f"等待：{safe_telegram_text(describe_task_wait(task, now=time.time()), 200, blocked_values=blocked)}"))
         for line in format_task_observability(task, now=time.time()):
-            detail_lines.append(paragraph(safe_telegram_text(line, 200)))
+            detail_lines.append(paragraph(safe_telegram_text(line, 200, blocked_values=blocked)))
         if detail_lines:
             extra.append(details(f"#{task.id} {title}", detail_lines))
     return RichDocument((heading("TaskStore 最近任务"), table(("#", "任务", "阶段", "状态", "错误"), table_rows), *extra))

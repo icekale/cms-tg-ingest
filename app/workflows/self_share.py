@@ -467,16 +467,14 @@ def category_keyboard(row_id: int) -> dict[str, Any]:
     }
 
 
-def _task_display_title(task: Any) -> str:
-    title = str(getattr(task, "title", "") or "").strip()
-    share_code = str(getattr(task, "share_code", "") or "").strip()
-    return title if title and title != share_code else f"任务 #{getattr(task, 'id', '?')}"
-
-
 def format_task_label(row: dict[str, Any]) -> str:
     task_id = row.get("cms_task_id")
     title = row.get("title")
-    if not title or str(title).strip() == str(row.get("share_code") or "").strip():
+    blocked = {
+        str(row.get(field) or "").strip()
+        for field in ("share_code", "receive_code", "own_share_code", "own_share_receive_code")
+    }
+    if not title or str(title).strip() in blocked:
         title = "任务"
     return f"{title} #{task_id}" if task_id else str(title)
 
@@ -486,15 +484,20 @@ def emby_parent_label(item: dict) -> str:
 
 
 def send_move_result(telegram: Any, chat_id: int | str, move_plan: MovePlan, moved_row: dict[str, Any]) -> None:
+    blocked = {
+        str(moved_row.get(field) or "").strip()
+        for field in ("share_code", "receive_code", "own_share_code", "own_share_receive_code")
+        if str(moved_row.get(field) or "").strip()
+    }
     if str(moved_row.get("move_status") or "").lower() == "moved":
-        telegram.send_message(chat_id, safe_telegram_text(f"STRM 已移动：{moved_row.get('dest_path')}", 240))
+        telegram.send_message(chat_id, safe_telegram_text(f"STRM 已移动：{moved_row.get('dest_path')}", 240, blocked_values=blocked))
     elif move_plan.status in {"conflict", "error"}:
         message = (
-            f"STRM 未移动：{safe_telegram_text(move_plan.reason, 160)}\n"
-            f"源：{safe_telegram_text(move_plan.source_path or '-', 240)}\n"
-            f"目标：{safe_telegram_text(move_plan.dest_path or '-', 240)}"
+            f"STRM 未移动：{safe_telegram_text(move_plan.reason, 160, blocked_values=blocked)}\n"
+            f"源：{safe_telegram_text(move_plan.source_path or '-', 240, blocked_values=blocked)}\n"
+            f"目标：{safe_telegram_text(move_plan.dest_path or '-', 240, blocked_values=blocked)}"
         )
-        telegram.send_message(chat_id, safe_telegram_text(message, 600))
+        telegram.send_message(chat_id, safe_telegram_text(message, 600, blocked_values=blocked))
 
 
 def match_emby_item(items: list[dict], recognition: dict[str, Any], row: dict[str, Any] | None = None) -> dict | None:
@@ -1035,7 +1038,7 @@ class BridgeSelfShareTaskWorkflow:
             _ShareKey(task.share_code, task.receive_code),
             task.url,
             "received",
-            title=_task_display_title(task) if not first_output.get("file_name") else first_output.get("file_name"),
+            title=first_output.get("file_name") or task.title or task.share_code,
         )
         row = self.store.update_self_share(
             int(row["id"]),
@@ -1045,12 +1048,12 @@ class BridgeSelfShareTaskWorkflow:
         metadata.update(
             {
                 "submission_id": int(row["id"]),
-                "received_title": _task_display_title(task) if not first_output.get("file_name") else first_output.get("file_name"),
+                "received_title": first_output.get("file_name") or task.title or task.share_code,
                 "received_file_ids": [item["file_id"] for item in output_items],
                 "received_items": [
                     {
                         "file_id": item["file_id"],
-                        "file_name": item.get("file_name") or _task_display_title(task),
+                        "file_name": item.get("file_name") or task.title or task.share_code,
                         "is_folder": bool(item.get("is_folder")),
                         "parent_id": item.get("parent_id") or receive_cid,
                         "received_item_verified": True,
@@ -1274,8 +1277,7 @@ class BridgeSelfShareTaskWorkflow:
                 },
             )
 
-        received_title = str(received.get("title") or "").strip()
-        title = received_title if received_title and received_title != str(task.share_code or "").strip() else _task_display_title(task)
+        title = str(received.get("title") or task.title or task.share_code).strip()
         row = self.store.upsert_submission(
             _ShareKey(task.share_code, task.receive_code),
             task.url,
@@ -5740,13 +5742,21 @@ def send_emby_confirmed(
         path=str(item.get("Path") or ""),
         parent=parent_label,
     ) or row
+    blocked = {
+        str(value.get(field) or "").strip()
+        for value in (row, updated)
+        for field in ("share_code", "receive_code", "own_share_code", "own_share_receive_code")
+        if str(value.get(field) or "").strip()
+    }
     library_line = (
-        f"媒体库：{safe_telegram_text(updated.get('emby_parent') or library_name, 160)}"
+        f"媒体库：{safe_telegram_text(updated.get('emby_parent') or library_name, 160, blocked_values=blocked)}"
         if library_name
-        else f"媒体库未解析，父级/类型：{safe_telegram_text(updated.get('emby_parent') or '未知', 160)}"
+        else f"媒体库未解析，父级/类型：{safe_telegram_text(updated.get('emby_parent') or '未知', 160, blocked_values=blocked)}"
     )
+    raw_title = str(updated.get("emby_title") or item.get("Name") or format_task_label(updated)).strip()
+    title = raw_title if raw_title not in blocked else f"任务 #{updated.get('cms_task_id') or updated.get('id') or '?'}"
     lines = [
-        f"Emby 已确认入库：{safe_telegram_text(updated.get('emby_title') or item.get('Name') or format_task_label(updated), 180)}",
+        f"Emby 已确认入库：{safe_telegram_text(title, 180, blocked_values=blocked)}",
         library_line,
     ]
     if cleanup_client:
@@ -5754,8 +5764,8 @@ def send_emby_confirmed(
     if debug_details or not library_name:
         lines.extend(
             [
-                f"ItemId：{safe_telegram_text(updated.get('emby_item_id') or item.get('Id') or '-', 100)}",
-                f"路径：{safe_telegram_text(updated.get('emby_path') or item.get('Path') or '-', 240)}",
+                f"ItemId：{safe_telegram_text(updated.get('emby_item_id') or item.get('Id') or '-', 100, blocked_values=blocked)}",
+                f"路径：{safe_telegram_text(updated.get('emby_path') or item.get('Path') or '-', 240, blocked_values=blocked)}",
             ]
         )
     telegram.send_message(

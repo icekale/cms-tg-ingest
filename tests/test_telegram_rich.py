@@ -147,6 +147,44 @@ class TelegramUiRichTests(unittest.TestCase):
         self.assertNotIn("quality-password", plain)
         self.assertNotIn("quality-token", plain)
 
+    def test_quality_report_hides_emby_title_when_it_matches_any_share_code(self):
+        row = {
+            "id": 18,
+            "title": "正常影片",
+            "share_code": "source-code",
+            "receive_code": "1234",
+            "own_share_code": "own-code",
+            "own_share_receive_code": "5678",
+            "emby_status": "confirmed",
+            "emby_title": "own-code",
+            "recognition_json": json.dumps({"title": "正常影片", "share_name": "正常影片"}),
+        }
+        issue = quality_issue_for_row(row)
+        plain = format_quality_report([row]).to_plain()
+        self.assertIn("疑似错配", issue)
+        self.assertNotIn("own-code", issue)
+        self.assertNotIn("own-code", plain)
+        self.assertIn("正常影片 | - | 疑似错配", plain)
+
+    def test_taskstore_intake_hides_known_codes_in_paths_and_errors(self):
+        from bridge import format_task_intake_reply
+
+        task = SimpleNamespace(
+            id=19,
+            title="正常影片",
+            share_code="source-code",
+            receive_code="1234",
+            metadata={"own_share_code": "own-code", "dest_path": "/library/own-code", "emby_parent": "普通媒体库"},
+            current_stage=TaskStage.CLEANED,
+            status=TaskStatus.SUCCEEDED,
+            error_summary="移动到 /library/source-code",
+        )
+        plain = format_task_intake_reply(task)
+        self.assertNotIn("source-code", plain)
+        self.assertNotIn("own-code", plain)
+        self.assertIn("/library/<redacted>", plain)
+        self.assertIn("普通媒体库", plain)
+
     def test_quality_report_table(self):
         rows = [
             {

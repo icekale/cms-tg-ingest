@@ -173,6 +173,7 @@ from app.telegram_ui import (
     format_status,
     format_taskstore_history,
     format_taskstore_status,
+    task_display_blocked_values,
     task_display_title,
     format_hdhive_candidate_label,
     format_hdhive_candidates,
@@ -3217,15 +3218,20 @@ def format_task_snapshot(task) -> str:
 
 
 def format_task_intake_reply(task) -> str:
+    blocked = task_display_blocked_values(task)
     if task.metadata.get("retry_from_stage") == TaskStage.CLEANED.value and task.metadata.get("retry_stage"):
         return f"任务已重新检查入库状态：{format_task_snapshot(task)}"
     if task.status == TaskStatus.SUCCEEDED and task.current_stage == TaskStage.CLEANED:
-        parent = safe_telegram_text(task.metadata.get("emby_parent") or "", 160)
-        dest = safe_telegram_text(task.metadata.get("dest_path") or "", 240)
+        parent = safe_telegram_text(task.metadata.get("emby_parent") or "", 160, blocked_values=blocked)
+        dest = safe_telegram_text(task.metadata.get("dest_path") or "", 240, blocked_values=blocked)
         suffix = f"\n媒体库：{parent}\n路径：{dest}" if parent or dest else ""
-        return safe_telegram_text(f"任务已完成：{format_task_snapshot(task)}{suffix}", 600)
+        return safe_telegram_text(f"任务已完成：{format_task_snapshot(task)}{suffix}", 600, blocked_values=blocked)
     if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION}:
-        return f"任务需要处理：{format_task_snapshot(task)}\n原因：{safe_telegram_text(task.error_summary or '无详细错误', 200)}"
+        return safe_telegram_text(
+            f"任务需要处理：{format_task_snapshot(task)}\n原因：{safe_telegram_text(task.error_summary or '无详细错误', 200, blocked_values=blocked)}",
+            600,
+            blocked_values=blocked,
+        )
     if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
         return f"任务处理中/已在队列中：{format_task_snapshot(task)}"
     return f"任务已接收：{format_task_snapshot(task)}"
@@ -3993,7 +3999,7 @@ def handle_task_action_callback(
         return True
     if action == "task_detail":
         events = task_store.list_events(task_id)[-5:]
-        event_lines = [safe_telegram_text(f"- {stage_display_name(TaskStage(event['stage'])) if event.get('stage') in TaskStage._value2member_map_ else event.get('stage')} / {event.get('status')}: {event.get('message')}", 200) for event in events]
+        event_lines = [safe_telegram_text(f"- {stage_display_name(TaskStage(event['stage'])) if event.get('stage') in TaskStage._value2member_map_ else event.get('stage')} / {event.get('status')}: {event.get('message')}", 200, blocked_values=task_display_blocked_values(task)) for event in events]
         blocks = [heading(f"任务详情 #{task.id}"), paragraph(format_task_intake_reply(task))]
         if event_lines:
             blocks.append(details("最近事件", [paragraph(truncate_text(line, 200)) for line in event_lines]))
@@ -4104,19 +4110,13 @@ def _start_status_poll_impl(
         nonlocal task_id, row
         deadline = time.time() + max_seconds
         last_status = row.get("status") or "submitted"
-        recognition_title = row.get("title") or ""
-        if str(recognition_title).strip() == str(row.get("share_code") or "").strip():
-            recognition_title = ""
-        recognition: dict[str, Any] = {"title": recognition_title or f"任务 #{row.get('id') or '?'}"}
+        recognition: dict[str, Any] = {"title": row.get("title") or row.get("share_code") or ""}
         recognition_checked = False
         while time.time() < deadline:
             time.sleep(max(1, interval))
             try:
                 if self_share_workflow and not task_id:
-                    title = row.get("title") or ""
-                    if str(title).strip() == str(row.get("share_code") or "").strip():
-                        title = ""
-                    title = title or f"任务 #{row.get('id') or '?'}"
+                    title = row.get("title") or row.get("share_code") or ""
                     updated = store.update_status(int(row["id"]), "organizing", title=str(title or "")) or row
                     sync_cms_status_task_event(task_store, updated, "organizing", title=str(title or ""))
                     recognition = normalize_recognition({"code": 500, "msg": "waiting for CMS organize"})

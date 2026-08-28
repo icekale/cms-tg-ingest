@@ -146,6 +146,25 @@ class InvalidShareCleanupTests(unittest.TestCase):
             for secret in ("evil.test", "title-password", "reason-token", "raw-token"):
                 self.assertNotIn(secret, message)
 
+    def test_invalid_share_notification_hides_title_matching_own_share_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, row, destination, move_config = self._row_with_share_strm(tmp)
+            row = store.update_emby(int(row["id"]), "confirmed", title="owncode") or row
+            telegram = FakeTelegram()
+            probe_invalid_self_shares(
+                store,
+                TaskStore(Path(tmp) / "tasks.db"),
+                InvalidShareP115(),
+                FakeEmby(),
+                telegram,
+                "chat-id",
+                move_config,
+                limit=1,
+            )
+            message = telegram.messages[0][1]
+            self.assertNotIn("owncode", message)
+            self.assertIn("分享失效已清理", message)
+
     def test_keeps_destination_when_115_is_risk_controlled(self):
         with tempfile.TemporaryDirectory() as tmp:
             store, row, destination, move_config = self._row_with_share_strm(tmp)

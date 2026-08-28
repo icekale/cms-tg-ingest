@@ -2489,12 +2489,44 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertEqual(store.cleanup["status"], "deleted")
             self.assertIn("115转存源已删除", line)
 
+    def test_send_emby_confirmed_hides_title_matching_own_share_code(self):
+        class FakeTelegram:
+            def __init__(self):
+                self.messages = []
+
+            def send_message(self, chat_id, text, reply_markup=None):
+                self.messages.append(text)
+
+        class FakeStore:
+            def update_emby(self, row_id, status, *, item_id="", title="", path="", parent=""):
+                return {
+                    "id": row_id,
+                    "own_share_code": "owncode",
+                    "emby_title": title,
+                    "emby_item_id": item_id,
+                    "emby_path": path,
+                    "emby_parent": parent,
+                }
+
+        telegram = FakeTelegram()
+        bridge.send_emby_confirmed(
+            telegram,
+            1,
+            FakeStore(),
+            {"id": 9, "own_share_code": "owncode"},
+            {"Id": "item", "Name": "owncode", "Path": "/library/owncode"},
+        )
+        self.assertNotIn("owncode", telegram.messages[0])
+        self.assertIn("任务 #9", telegram.messages[0])
+
     def test_move_notification_reports_merged_conflict_as_moved(self):
         class FakeTelegram:
             def __init__(self):
                 self.messages = []
+
             def send_message(self, chat_id, text, reply_markup=None):
                 self.messages.append(text)
+
             def send_rich_message(self, chat_id, document, reply_markup=None):
                 self.messages.append((chat_id, document.to_plain(), reply_markup))
 
