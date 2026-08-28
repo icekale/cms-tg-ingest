@@ -468,7 +468,7 @@ def category_keyboard(row_id: int) -> dict[str, Any]:
 
 def format_task_label(row: dict[str, Any]) -> str:
     task_id = row.get("cms_task_id")
-    title = row.get("title") or row.get("share_code") or "任务"
+    title = row.get("title") or "任务"
     return f"{title} #{task_id}" if task_id else str(title)
 
 

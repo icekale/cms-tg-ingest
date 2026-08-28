@@ -1,9 +1,12 @@
 import unittest
+from types import SimpleNamespace
 
 from app.quality import QualityIssue, format_task_quality_report
 from app.quality_automation import QualityRepairPlan, QualityRunSummary
 from app.telegram_rich import RichDocument, bold, details, heading, paragraph, table
 from app.telegram_ui import (
+    format_hdhive_candidates,
+    format_hdhive_unlock_result,
     format_history,
     format_metrics,
     format_quality_manual_report,
@@ -13,6 +16,9 @@ from app.telegram_ui import (
     format_taskstore_history,
     format_taskstore_status,
 )
+from app.workflows.self_share import format_task_label
+from app.clients.hdhive import HdhiveUnlockItem
+from app.models import TaskStage, TaskStatus
 from bridge import _quality_attention_message
 
 
@@ -114,6 +120,68 @@ class TelegramUiRichTests(unittest.TestCase):
         doc = format_quality_report(rows)
         self.assertIn("疑似错配", doc.to_plain())
         self.assertIn("table", [block["type"] for block in doc.to_blocks()])
+
+    def test_format_hdhive_candidates_is_bounded_and_structured(self):
+        candidates = [
+            {"title": "标题" * 50, "media_type": "movie", "year": "2024", "tmdb_id": str(index)}
+            for index in range(13)
+        ]
+        doc = format_hdhive_candidates(candidates)
+        blocks = doc.to_blocks()
+        self.assertIsInstance(doc, RichDocument)
+        self.assertEqual(blocks[0]["type"], "heading")
+        self.assertEqual(blocks[1]["type"], "table")
+        self.assertEqual(blocks[1]["cells"][0][0]["text"], "#")
+        self.assertEqual(len(blocks[1]["cells"]) - 1, 12)
+        self.assertIn("请选择", doc.to_plain())
+        self.assertIn("…", doc.to_plain())
+
+    def test_format_hdhive_candidates_empty_is_a_paragraph(self):
+        doc = format_hdhive_candidates([])
+        self.assertEqual(doc.to_blocks()[0]["type"], "paragraph")
+        self.assertEqual(doc.to_plain(), "")
+
+    def test_format_hdhive_unlock_result_hides_full_urls_and_reports_counts(self):
+        secret_url = "https://115cdn.com/s/secret?password=4321"
+        results = [
+            HdhiveUnlockItem("resource-a", True, secret_url, "", "", False),
+            HdhiveUnlockItem("resource-b", False, "", "积分不足", "POINTS", False),
+        ]
+        doc = format_hdhive_unlock_result(
+            results,
+            {"resource-a": "115", "resource-b": "quark"},
+            enqueued_count=1,
+            enqueue_error="",
+        )
+        plain = doc.to_plain()
+        self.assertIn("HDHive 解锁结果", plain)
+        self.assertIn("resource-a", plain)
+        self.assertIn("成功", plain)
+        self.assertIn("失败", plain)
+        self.assertIn("已入队 1 个", plain)
+        self.assertIn("非 115 资源：0 个", plain)
+        self.assertNotIn(secret_url, plain)
+        self.assertNotIn(secret_url, repr(doc.to_blocks()))
+
+    def test_task_labels_never_fall_back_to_share_code(self):
+        self.assertEqual(format_task_label({"cms_task_id": 7, "share_code": "secret"}), "任务 #7")
+        task = SimpleNamespace(
+            id=8,
+            title="",
+            share_code="secret",
+            metadata={},
+            category="",
+            current_stage=TaskStage.RECEIVED,
+            status=TaskStatus.PENDING,
+            error_summary="",
+            next_run_at=0,
+            claimed_by="",
+            claimed_at=None,
+            updated_at=0,
+            created_at=0,
+        )
+        self.assertNotIn("secret", format_taskstore_history([task]).to_plain())
+        self.assertNotIn("secret", format_taskstore_status([task]).to_plain())
 
 
 class BridgeRichFormatterTests(unittest.TestCase):

@@ -49,7 +49,7 @@ def format_taskstore_history(tasks: list[Any]) -> RichDocument:
         return RichDocument()
     table_rows = []
     for idx, task in enumerate(tasks, 1):
-        title = task.title or task.metadata.get("received_title") or task.share_code
+        title = task.title or task.metadata.get("received_title") or f"任务 #{task.id}"
         category = task.category or task.metadata.get("category") or task.metadata.get("category_final") or "-"
         dest = task.metadata.get("dest_path") or "-"
         emby_parent = task.metadata.get("emby_parent") or task.metadata.get("emby_refresh_library") or "-"
@@ -284,13 +284,71 @@ def format_hdhive_candidate_label(candidate: dict[str, str] | None) -> str:
     return f"{title} ({year}) · {media_type} · TMDB {tmdb_id}"
 
 
+def format_hdhive_candidates(candidates: list[dict[str, str]]) -> RichDocument:
+    if not candidates:
+        return document(paragraph(""))
+    rows = []
+    for index, candidate in enumerate(candidates[:12], 1):
+        rows.append(
+            (
+                str(index),
+                truncate_end(str(candidate.get("title") or "未命名"), 80),
+                "电影" if candidate.get("media_type") == "movie" else "剧集",
+                str(candidate.get("year") or "年份未知"),
+                str(candidate.get("tmdb_id") or "-"),
+            )
+        )
+    return document(
+        heading("HDHive 候选媒体"),
+        table(("#", "标题", "类型", "年份", "TMDB"), rows),
+        paragraph(f"请选择要查询的媒体，共 {len(rows)} 个候选。"),
+    )
+
+
+def format_hdhive_unlock_result(
+    results: list[Any],
+    selected_pan_types: dict[str, str],
+    *,
+    enqueued_count: int = 0,
+    enqueue_error: str = "",
+) -> RichDocument:
+    rows = []
+    success_count = 0
+    failed_count = 0
+    non_115_count = 0
+    for item in results:
+        if item.success:
+            success_count += 1
+            status = "成功" + ("（已拥有）" if item.already_owned else "")
+            if item.full_url and str(selected_pan_types.get(item.slug) or "").lower() != "115":
+                non_115_count += 1
+        else:
+            failed_count += 1
+            status = "失败"
+        reason = item.message or item.error_code or "-"
+        rows.append((str(item.slug), status, str(reason)))
+    blocks: list = [
+        heading("HDHive 解锁结果"),
+        table(("资源", "状态", "原因"), rows),
+        paragraph(f"成功 {success_count} 个，失败 {failed_count} 个。"),
+    ]
+    if enqueue_error:
+        blocks.append(paragraph(f"115 入库提交失败：{truncate_text(enqueue_error, 160)}。解锁链接未丢失，请稍后重试。"))
+    elif enqueued_count:
+        blocks.append(paragraph(f"115 入库：已入队 {enqueued_count} 个。"))
+    else:
+        blocks.append(paragraph("115 入库：无可入队链接。"))
+    blocks.append(paragraph(f"非 115 资源：{non_115_count} 个。"))
+    return RichDocument(tuple(blocks))
+
+
 def format_taskstore_status(tasks: list[Any]) -> RichDocument:
     if not tasks:
         return RichDocument()
     table_rows = []
     extra = []
     for task in tasks:
-        title = truncate_text(str(task.title or task.metadata.get("received_title") or task.share_code), 80)
+        title = truncate_text(str(task.title or task.metadata.get("received_title") or f"任务 #{task.id}"), 80)
         table_rows.append(
             (
                 f"#{task.id}",

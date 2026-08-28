@@ -10,6 +10,7 @@ from app.background_jobs import BackgroundJobCoordinator
 from app.clients.hdhive import HdhiveAccount, HdhiveResource, HdhiveUnlockItem
 from app.hdhive import HdhiveSessionStore, HdhiveWorkflow
 from app.hdhive_subscriptions import HdhiveSubscriptionService
+from app.models import TaskStage, TaskStatus
 from app.telegram_ui import (
     format_hdhive_candidate_label,
     format_hdhive_subscriptions,
@@ -572,7 +573,8 @@ class HdhiveBridgeTests(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual(proxy.unlock_calls, [["115-item", "quark-item"]])
         self.assertEqual(enqueued, [(["https://115cdn.com/s/one?password=1111"], "464100862")])
-        self.assertIn("https://pan.quark.cn/s/two", telegram.messages[-1][1])
+        self.assertNotIn("https://pan.quark.cn/s/two", telegram.messages[-1][1])
+        self.assertIn("非 115 资源：1 个", telegram.messages[-1][1])
 
     def test_resource_keyboard_exposes_every_pan_type_and_single_unlock(self):
         resources = [resource("115", "115"), resource("quark", "quark"), resource("115-2", "115"), resource("pikpak", "pikpak")]
@@ -675,8 +677,8 @@ class HdhiveBridgeTests(unittest.TestCase):
         )
         text = telegram.messages[-1][1]
         keyboard = telegram.messages[-1][2]
-        self.assertIn("1. 搏击俱乐部 (1999) · 电影 · TMDB 550", text)
-        self.assertIn("2. 攻壳机动队 SAC_2045 (2020) · 剧集 · TMDB 80986", text)
+        self.assertIn("1 | 搏击俱乐部 | 电影 | 1999 | 550", text)
+        self.assertIn("2 | 攻壳机动队 SAC_2045 | 剧集 | 2020 | 80986", text)
         self.assertNotIn("[电影]", text)
         self.assertNotIn("TMDB:", text)
         labels = [
@@ -701,16 +703,50 @@ class HdhiveBridgeTests(unittest.TestCase):
             ],
         )
         workflow.load_resources(session_id, "tv", "80986")
-        text, _keyboard = bridge.format_hdhive_resources(workflow, session_id)
+        document, _keyboard = bridge.format_hdhive_resources(workflow, session_id)
+        self.assertIsInstance(document, bridge.RichDocument)
+        text = document.to_plain()
         self.assertTrue(text.startswith("HDHive 资源：攻壳机动队 SAC_2045 (2020) · 剧集 · TMDB 80986"))
         self.assertNotIn("tv / TMDB", text)
+        self.assertIn("table", [block["type"] for block in document.to_blocks()])
+
+    def test_resource_formatter_uses_bounded_table_and_invalid_details(self):
+        proxy = FakeProxy()
+        proxy.items = [resource(f"item-{index}") for index in range(21)]
+        proxy.items[-1] = HdhiveResource(**{**proxy.items[-1].__dict__, "validate_status": "invalid", "validate_message": "资源已失效"})
+        workflow = HdhiveWorkflow(object(), proxy, HdhiveSessionStore())
+        session_id = workflow.sessions.begin("464100862", "Example")
+        workflow.load_resources(session_id, "movie", "550")
+        document, _keyboard = bridge.format_hdhive_resources(workflow, session_id)
+        blocks = document.to_blocks()
+        self.assertEqual(blocks[1]["type"], "table")
+        self.assertEqual(len(blocks[1]["cells"]), 21)
+        self.assertIn("还有 1 条", document.to_plain())
+        self.assertIn("details", [block["type"] for block in blocks])
+        self.assertIn("资源已失效", document.to_plain())
 
     def test_resource_header_falls_back_when_candidate_is_missing(self):
         workflow = HdhiveWorkflow(object(), FakeProxy(), HdhiveSessionStore())
         session_id = workflow.sessions.begin("464100862", "Example")
         workflow.load_resources(session_id, "movie", "550")
-        text, _keyboard = bridge.format_hdhive_resources(workflow, session_id)
+        document, _keyboard = bridge.format_hdhive_resources(workflow, session_id)
+        self.assertIsInstance(document, bridge.RichDocument)
+        text = document.to_plain()
         self.assertTrue(text.startswith("HDHive 资源：未命名 (年份未知) · 电影 · TMDB 550"))
+        self.assertIn("# | 资源 | 网盘 | 大小 | 分辨率 | 费用 | 状态", text)
+
+    def test_task_snapshot_missing_title_never_exposes_share_code(self):
+        task = SimpleNamespace(
+            id=42,
+            title="",
+            share_code="secret-share-code",
+            metadata={},
+            current_stage=TaskStage.RECEIVED,
+            status=TaskStatus.PENDING,
+        )
+        snapshot = bridge.format_task_snapshot(task)
+        self.assertEqual(snapshot, "#42 任务 #42｜收到链接｜pending")
+        self.assertNotIn("secret-share-code", snapshot)
 
 
 if __name__ == "__main__":

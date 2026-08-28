@@ -174,6 +174,8 @@ from app.telegram_ui import (
     format_taskstore_history,
     format_taskstore_status,
     format_hdhive_candidate_label,
+    format_hdhive_candidates,
+    format_hdhive_unlock_result,
     hdhive_candidate_keyboard,
     hdhive_confirmation_keyboard,
     hdhive_resource_keyboard,
@@ -2388,13 +2390,13 @@ def format_hdhive_account(account: Any) -> str:
     return f"账号：{account.nickname}\n等级：{account.level}\n积分：{account.points}\n本周免费次数：{quota}"
 
 
-def format_hdhive_resources(workflow: HdhiveWorkflow, session_id: str) -> tuple[str, dict[str, Any]]:
+def format_hdhive_resources(workflow: HdhiveWorkflow, session_id: str) -> tuple[RichDocument, dict[str, Any]]:
     session = workflow.sessions.get(session_id)
     if session is None:
         raise HdhiveSelectionError("HDHive 操作会话已过期，请重新搜索")
     visible_indexes = workflow.visible_resource_indexes(session_id)
     selectable = set(workflow.selectable_resource_indexes(session_id))
-    selected = next(
+    candidate = next(
         (
             item
             for item in session.candidates
@@ -2403,24 +2405,41 @@ def format_hdhive_resources(workflow: HdhiveWorkflow, session_id: str) -> tuple[
         ),
         {"media_type": session.media_type, "tmdb_id": session.tmdb_id},
     )
-    lines = [f"HDHive 资源：{format_hdhive_candidate_label(selected)}", ""]
+    blocks: list = [heading(f"HDHive 资源：{format_hdhive_candidate_label(candidate)}")]
     if not visible_indexes:
-        lines.append("当前网盘筛选没有资源。")
+        blocks.append(paragraph("当前网盘筛选没有资源。"))
+    rows = []
+    invalid_details = []
     for index in visible_indexes:
         item = session.resources[index]
-        status = "不可用" if item.validate_status.lower() == "invalid" else "可选"
+        invalid = str(item.validate_status or "").lower() == "invalid"
+        status = "不可用" if invalid else "可选"
         cost = "已解锁" if item.is_unlocked else f"积分 {item.unlock_points if item.unlock_points is not None else '未知'}"
-        selected = "已选" if index in session.selected_indexes else "未选"
+        selection = "已选" if index in session.selected_indexes else "未选"
         if index not in selectable:
-            selected = "不可选"
-        lines.append(
-            f"{index + 1}. {item.title or '未命名'} | {item.pan_type} | {item.share_size or '大小未知'} | "
-            f"{'/'.join(item.video_resolution) or '分辨率未知'} | {cost} | {status}/{selected}"
+            selection = "不可选"
+        rows.append(
+            (
+                str(index + 1),
+                truncate_text(item.title or "未命名", 80),
+                truncate_text(item.pan_type or "未知", 24),
+                truncate_text(item.share_size or "大小未知", 24),
+                truncate_text("/".join(item.video_resolution) or "分辨率未知", 32),
+                truncate_text(cost, 24),
+                f"{status}/{selection}",
+            )
         )
-        if item.validate_message and item.validate_status.lower() == "invalid":
-            lines.append(f"   原因：{item.validate_message}")
-    lines.append(f"已选择：{len(session.selected_indexes)} 个。点击资源行选择，再点击解锁。")
-    return "\n".join(lines), hdhive_resource_keyboard(
+        if invalid and item.validate_message:
+            invalid_details.append(
+                details(
+                    f"资源 #{index + 1} 不可用",
+                    (paragraph(truncate_text(f"原因：{item.validate_message}", 160)),),
+                )
+            )
+    blocks.append(table(("#", "资源", "网盘", "大小", "分辨率", "费用", "状态"), rows))
+    blocks.extend(invalid_details)
+    blocks.append(paragraph(f"已选择：{len(session.selected_indexes)} 个。点击资源行选择，再点击解锁。"))
+    return RichDocument(tuple(blocks)), hdhive_resource_keyboard(
         session_id,
         session.resources,
         visible_indexes,
@@ -2608,30 +2627,28 @@ def execute_hdhive_unlock(
         telegram.send_message(chat_id, f"HDHive 请求失败：{exc.message}")
         return
     success_urls: list[str] = []
-    non_115_urls: list[str] = []
-    lines = ["HDHive 解锁结果："]
+    enqueue_error = ""
     for item in results:
-        if item.success:
-            lines.append(f"成功：{item.slug}" + ("（已拥有）" if item.already_owned else ""))
-            if item.full_url:
-                if selected_pan_types.get(item.slug) == "115":
-                    success_urls.append(item.full_url)
-                else:
-                    non_115_urls.append(item.full_url)
-        else:
-            lines.append(f"失败：{item.slug}，{item.message or item.error_code or '未知原因'}")
+        if item.success and item.full_url and selected_pan_types.get(item.slug) == "115":
+            success_urls.append(item.full_url)
+    enqueued_count = 0
     if success_urls and enqueue_unlocked_links is not None:
         try:
             enqueue_unlocked_links(success_urls, str(chat_id))
-            lines.append(f"已将 {len(success_urls)} 个 115 链接交给现有入库流程。")
+            enqueued_count = len(success_urls)
         except Exception as exc:
             LOG.exception("Failed to enqueue unlocked HDHive links")
-            lines.append(f"115 入库提交失败：{classify_error(exc)}。解锁链接未丢失，请稍后重试。")
-    if non_115_urls:
-        lines.append("非 115 链接（已解锁但未自动进入 115 入库流程）：")
-        lines.extend(non_115_urls)
+            enqueue_error = classify_error(exc)
     telegram.answer_callback_query(callback_id, "解锁处理完成", show_alert=False)
-    telegram.send_message(chat_id, "\n".join(lines))
+    telegram.send_rich_message(
+        chat_id,
+        format_hdhive_unlock_result(
+            results,
+            selected_pan_types,
+            enqueued_count=enqueued_count,
+            enqueue_error=enqueue_error,
+        ),
+    )
 
 
 def handle_hdhive_callback(
@@ -2666,9 +2683,9 @@ def handle_hdhive_callback(
                 raise HdhiveSelectionError("候选媒体不存在，请重新搜索")
             candidate = session.candidates[index]
             workflow.load_resources(session_id, candidate["media_type"], candidate["tmdb_id"])
-            text, keyboard = format_hdhive_resources(workflow, session_id)
+            document, keyboard = format_hdhive_resources(workflow, session_id)
             telegram.answer_callback_query(callback_id, "已查询 HDHive 资源", show_alert=False)
-            telegram.send_message(chat_id, text, reply_markup=keyboard)
+            telegram.send_rich_message(chat_id, document, reply_markup=keyboard)
             return True
         if action == "subscribe":
             if subscription_service is None:
@@ -2696,9 +2713,9 @@ def handle_hdhive_callback(
                     raise HdhiveSelectionError("网盘筛选不存在，请重新查询")
                 pan_type = pan_types[pan_index]
             workflow.set_filter(session_id, pan_type)
-            text, keyboard = format_hdhive_resources(workflow, session_id)
+            document, keyboard = format_hdhive_resources(workflow, session_id)
             telegram.answer_callback_query(callback_id, f"已筛选：{pan_type}", show_alert=False)
-            telegram.send_message(chat_id, text, reply_markup=keyboard)
+            telegram.send_rich_message(chat_id, document, reply_markup=keyboard)
             return True
         if action in {"toggle", "single"}:
             resource_index = int(argument)
@@ -2727,9 +2744,9 @@ def handle_hdhive_callback(
                         False,
                     )
                 return True
-            text, keyboard = format_hdhive_resources(workflow, session_id)
+            document, keyboard = format_hdhive_resources(workflow, session_id)
             telegram.answer_callback_query(callback_id, "已更新选择", show_alert=False)
-            telegram.send_message(chat_id, text, reply_markup=keyboard)
+            telegram.send_rich_message(chat_id, document, reply_markup=keyboard)
             return True
         if action == "unlock":
             preview = workflow.unlock_preview(session_id)
@@ -3174,7 +3191,7 @@ def completion_drift_retry_stage(task, submission: dict[str, Any] | None = None)
 
 
 def format_task_snapshot(task) -> str:
-    title = task.title or task.metadata.get("received_title") or task.share_code
+    title = task.title or task.metadata.get("received_title") or f"任务 #{task.id}"
     return f"#{task.id} {title}｜{stage_display_name(task.current_stage)}｜{task.status.value}"
 
 
@@ -4480,12 +4497,9 @@ def handle_update(
             try:
                 candidates = hdhive_workflow.search_candidates(text)
                 hdhive_workflow.set_candidates(pending.session_id, candidates)
-                lines = ["请选择要查询的 TMDB 媒体："]
-                for index, candidate in enumerate(candidates, 1):
-                    lines.append(f"{index}. {format_hdhive_candidate_label(candidate)}")
-                telegram.send_message(
+                telegram.send_rich_message(
                     chat_id,
-                    "\n".join(lines),
+                    format_hdhive_candidates(candidates),
                     reply_markup=hdhive_candidate_keyboard(pending.session_id, candidates),
                 )
             except (HdhiveSelectionError, HdhiveProxyError) as exc:
