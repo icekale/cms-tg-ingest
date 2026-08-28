@@ -692,6 +692,7 @@ class BridgeV02IntegrationTests(unittest.TestCase):
 class FakeTelegram:
     def __init__(self):
         self.messages = []
+        self.rich_messages = []
         self.answers = []
 
     def send_message(self, chat_id, text, reply_markup=None):
@@ -699,6 +700,7 @@ class FakeTelegram:
         return {"ok": True}
 
     def send_rich_message(self, chat_id, document, reply_markup=None):
+        self.rich_messages.append((chat_id, document, reply_markup))
         self.messages.append((chat_id, document.to_plain(), reply_markup))
 
     def answer_callback_query(self, callback_id, text=None, show_alert=False):
@@ -1449,6 +1451,68 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertIn({"text": "从头重跑 #1", "callback_data": "task_reprocess:1"}, buttons)
             self.assertNotIn({"text": "查 Emby #1", "callback_data": "task_emby:1"}, buttons)
             self.assertNotIn({"text": "恢复 STRM #1", "callback_data": "task_restore:1"}, buttons)
+
+    def test_task_detail_callback_sends_rich_document_with_recent_events_and_keyboard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("detail", "", "https://115cdn.com/s/detail", chat_id="464100862")
+            task_store.record_event(
+                task.id,
+                TaskStage.RECEIVED,
+                TaskStatus.PENDING,
+                "等待执行",
+                title="详情电影",
+            )
+            telegram = FakeTelegram()
+
+            handled = bridge.handle_task_action_callback(
+                "task_detail",
+                task.id,
+                "callback-detail",
+                "464100862",
+                telegram,
+                task_store,
+                max_retries=3,
+            )
+
+            self.assertTrue(handled)
+            self.assertEqual(len(telegram.rich_messages), 1)
+            document = telegram.rich_messages[-1][1]
+            self.assertIn("任务详情 #1", document.to_plain())
+            self.assertIn("最近事件", document.to_plain())
+            self.assertIsNotNone(telegram.rich_messages[-1][2])
+
+    def test_multi_source_intake_summary_is_rich_and_lists_task_titles_and_statuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            telegram = FakeTelegram()
+            text = (
+                "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=第一部"
+                " ed2k://|file|第二部.mkv|10|0123456789ABCDEF0123456789ABCDEF|/"
+            )
+
+            bridge.handle_update(
+                self.update(text),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+                task_engine_enabled=True,
+                self_share_workflow=object(),
+            )
+
+            self.assertEqual(len(telegram.rich_messages), 1)
+            document = telegram.rich_messages[-1][1]
+            plain = document.to_plain()
+            self.assertIn("收到 2 个链接", plain)
+            self.assertIn("第一部", plain)
+            self.assertIn("第二部", plain)
+            self.assertIn("pending", plain)
+            self.assertNotIn("magnet:?", plain)
+            self.assertNotIn("ed2k://", plain)
 
     def test_start_series_update_task_requeues_completed_series(self):
         with tempfile.TemporaryDirectory() as tmp:

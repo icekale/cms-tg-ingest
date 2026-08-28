@@ -24,7 +24,7 @@ from app.clients.cms import CmsClient
 from app.cms_cloud_index import CmsCloudDataIndex
 from app.clients.emby import EmbyClient
 from app.clients.http import FormHttp, HttpJson, HttpRequestError, load_cookie_value
-from app.telegram_rich import RichDocument, bold, details, heading, paragraph, table
+from app.telegram_rich import RichDocument, bold, details, document, heading, paragraph, table
 from app.clients.hdhive import HdhiveProxyClient, HdhiveProxyError
 from app.clients.p115 import (
     CMS_PARENT_CID_CATEGORY_MAP,
@@ -2729,9 +2729,14 @@ def handle_hdhive_callback(
                 preview = workflow.unlock_preview(session_id)
                 if preview.requires_confirmation:
                     telegram.answer_callback_query(callback_id, "需要确认扣费", show_alert=False)
-                    telegram.send_message(
+                    telegram.send_rich_message(
                         chat_id,
-                        f"{format_hdhive_account(preview.account)}\n预计最多消耗积分：{preview.maximum_points}\n请确认解锁。",
+                        document(
+                            heading("HDHive 解锁确认"),
+                            paragraph(format_hdhive_account(preview.account)),
+                            paragraph(f"预计最多消耗积分：{preview.maximum_points}"),
+                            paragraph("请确认解锁。"),
+                        ),
                         reply_markup=hdhive_confirmation_keyboard(session_id),
                     )
                 else:
@@ -2753,9 +2758,14 @@ def handle_hdhive_callback(
             preview = workflow.unlock_preview(session_id)
             if preview.requires_confirmation:
                 telegram.answer_callback_query(callback_id, "需要确认扣费", show_alert=False)
-                telegram.send_message(
+                telegram.send_rich_message(
                     chat_id,
-                    f"{format_hdhive_account(preview.account)}\n预计最多消耗积分：{preview.maximum_points}\n请确认解锁。",
+                    document(
+                        heading("HDHive 解锁确认"),
+                        paragraph(format_hdhive_account(preview.account)),
+                        paragraph(f"预计最多消耗积分：{preview.maximum_points}"),
+                        paragraph("请确认解锁。"),
+                    ),
                     reply_markup=hdhive_confirmation_keyboard(session_id),
                 )
             else:
@@ -3974,11 +3984,15 @@ def handle_task_action_callback(
     if action == "task_detail":
         events = task_store.list_events(task_id)[-5:]
         event_lines = [f"- {stage_display_name(TaskStage(event['stage'])) if event.get('stage') in TaskStage._value2member_map_ else event.get('stage')} / {event.get('status')}: {event.get('message')}" for event in events]
-        text = format_task_intake_reply(task)
+        blocks = [heading(f"任务详情 #{task.id}"), paragraph(format_task_intake_reply(task))]
         if event_lines:
-            text += "\n最近事件：\n" + "\n".join(event_lines)
+            blocks.append(details("最近事件", [paragraph(truncate_text(line, 200)) for line in event_lines]))
         telegram.answer_callback_query(callback_id, "已发送任务详情", show_alert=False)
-        telegram.send_message(chat_id, text, reply_markup=task_action_keyboard([task], max_retries=max_retries, task_store=task_store))
+        telegram.send_rich_message(
+            chat_id,
+            document(*blocks),
+            reply_markup=task_action_keyboard([task], max_retries=max_retries, task_store=task_store),
+        )
         return True
     task_action = {
         "task_retry": "retry",
@@ -4559,16 +4573,20 @@ def handle_update(
     if not sources:
         return
 
-    result_lines = [f"收到 {len(sources)} 个链接："]
+    display_rows = []
+
+    def add_display_row(index: int, source, summary: str) -> None:
+        display_rows.append((str(index), source.source_type, truncate_text(summary, 180)))
+
     for index, source in enumerate(sources, 1):
         link = source.raw_url
         try:
             if explicit_series_update and source.source_type != "share":
-                result_lines.append(f"{index}. 新分享链接追更需指定历史任务号，例如：追更 #328 <115链接>")
+                add_display_row(index, source, "新分享链接追更需指定历史任务号，例如：追更 #328 <115链接>")
                 continue
             if source.source_type in {"magnet", "ed2k"}:
                 if not (self_share_workflow and task_engine_enabled and task_store is not None):
-                    result_lines.append(f"{index}. 云下载链接需要启用 TaskStore 自分享工作流")
+                    add_display_row(index, source, "云下载链接需要启用 TaskStore 自分享工作流")
                     continue
                 task = task_store.upsert_cloud_task(
                     source.source_key,
@@ -4578,7 +4596,7 @@ def handle_update(
                 )
                 if not task_store.list_events(task.id):
                     task = task_store.enqueue_task(task.id, TaskStage.CLOUD_DOWNLOADING, message="等待 115 云下载", next_run_at=0)
-                result_lines.append(f"{index}. {format_task_intake_reply(task)}")
+                add_display_row(index, source, format_task_intake_reply(task))
                 LOG.info("Enqueued cloud source in TaskStore: type=%s key=%s task_id=%s", source.source_type, source.source_key, task.id)
                 continue
             key = normalize_share_link(link)
@@ -4594,14 +4612,12 @@ def handle_update(
                         source="文本追更",
                     )
                     if update_result == "started":
-                        result_lines.append(f"{index}. 已开始追更：{format_task_snapshot(updated_task)}")
+                        add_display_row(index, source, f"已开始追更：{format_task_snapshot(updated_task)}")
                         continue
                     if update_result == "failed":
-                        result_lines.append(f"{index}. 追更失败：{format_task_snapshot(updated_task)}")
+                        add_display_row(index, source, f"追更失败：{format_task_snapshot(updated_task)}")
                         continue
-                    result_lines.append(
-                        f"{index}. 新分享链接追更需指定历史任务号，例如：追更 #328 <115链接>"
-                    )
+                    add_display_row(index, source, "新分享链接追更需指定历史任务号，例如：追更 #328 <115链接>")
                     continue
                 task = task_store.upsert_task(key.share_code, key.receive_code, link, chat_id=str(chat_id or ""))
                 submission = None
@@ -4633,7 +4649,7 @@ def handle_update(
                     task = task_store.enqueue_task(task.id, retry_stage, message="重新入队")
                 elif task.current_stage == TaskStage.RECEIVED and task.status == TaskStatus.PENDING and not task_store.list_events(task.id):
                     task = task_store.enqueue_task(task.id, TaskStage.RECEIVED, message="等待执行")
-                result_lines.append(f"{index}. {format_task_intake_reply(task)}")
+                add_display_row(index, source, format_task_intake_reply(task))
                 LOG.info("Enqueued self-share link in TaskStore: share_code=%s task_id=%s stage=%s status=%s", key.share_code, task.id, task.current_stage.value, task.status.value)
                 continue
             best_effort_task_sync(
@@ -4647,7 +4663,7 @@ def handle_update(
             existing = store.find_by_key(key)
             if should_skip_existing_submission(existing, self_share_enabled=bool(self_share_workflow)):
                 best_effort_task_sync("existing_submission", sync_task_from_submission, task_store, existing, "链接已存在")
-                result_lines.append(f"{index}. 已存在：{format_task_label(existing)}")
+                add_display_row(index, source, "已存在：" + format_task_label(existing))
                 continue
             if self_share_workflow:
                 if not cleanup_client or not hasattr(cleanup_client, "receive_share_to_cid"):
@@ -4674,7 +4690,7 @@ def handle_update(
                     received_snapshot_complete=bool(received.get("received_snapshot_complete", False)),
                     tmdb_hint_normalized=False,
                 )
-                result_lines.append(f"{index}. 已接收：{format_task_label(row)}")
+                add_display_row(index, source, "已接收：" + format_task_label(row))
                 LOG.info("Received 115 share without CMS plain submit: share_code=%s cid=%s", key.share_code, self_share_receive_cid)
                 if poll_status:
                     start_status_poll(
@@ -4706,7 +4722,7 @@ def handle_update(
                 TaskStatus.RUNNING,
                 "已提交 CMS",
             )
-            result_lines.append(f"{index}. 已提交：{format_task_label(row)}")
+            add_display_row(index, source, "已提交：" + format_task_label(row))
             LOG.info("Submitted share link to CMS: share_code=%s task_id=%s", key.share_code, task_id)
             if poll_status:
                 start_status_poll(
@@ -4743,8 +4759,14 @@ def handle_update(
                 )
             except Exception:
                 LOG.debug("Failed to record failed submission", exc_info=True)
-            result_lines.append(f"{index}. 失败：{category}")
-    telegram.send_message(chat_id, "\n".join(result_lines))
+            add_display_row(index, source, "失败：" + category)
+    telegram.send_rich_message(
+        chat_id,
+        document(
+            heading(f"收到 {len(sources)} 个链接"),
+            table(("#", "类型", "结果"), display_rows),
+        ),
+    )
     try:
         write_metrics_snapshot(store, metrics_path_for_store(store))
     except Exception:

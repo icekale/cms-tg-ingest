@@ -40,12 +40,14 @@ def resource(slug: str, pan_type: str = "115", points: int = 8) -> HdhiveResourc
 class FakeTelegram:
     def __init__(self):
         self.messages = []
+        self.rich_messages = []
         self.answers = []
 
     def send_message(self, chat_id, text, reply_markup=None):
         self.messages.append((chat_id, text, reply_markup))
 
     def send_rich_message(self, chat_id, document, reply_markup=None):
+        self.rich_messages.append((chat_id, document, reply_markup))
         self.messages.append((chat_id, document.to_plain(), reply_markup))
 
     def answer_callback_query(self, callback_id, text="", show_alert=False):
@@ -573,8 +575,34 @@ class HdhiveBridgeTests(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual(proxy.unlock_calls, [["115-item", "quark-item"]])
         self.assertEqual(enqueued, [(["https://115cdn.com/s/one?password=1111"], "464100862")])
-        self.assertNotIn("https://pan.quark.cn/s/two", telegram.messages[-1][1])
-        self.assertIn("非 115 资源：1 个", telegram.messages[-1][1])
+        self.assertEqual(len(telegram.rich_messages), 1)
+        self.assertNotIn("https://pan.quark.cn/s/two", telegram.rich_messages[-1][1].to_plain())
+        self.assertIn("非 115 资源：1 个", telegram.rich_messages[-1][1].to_plain())
+
+    def test_hdhive_candidate_callback_sends_rich_resources_with_keyboard(self):
+        workflow = HdhiveWorkflow(object(), FakeProxy(), HdhiveSessionStore())
+        session_id = workflow.sessions.begin("464100862", "Example")
+        workflow.set_candidates(
+            session_id,
+            [{"media_type": "movie", "tmdb_id": "550", "title": "搏击俱乐部", "year": "1999"}],
+        )
+        telegram = FakeTelegram()
+
+        self.assertTrue(
+            bridge.handle_hdhive_callback(
+                f"hive:candidate:{session_id}:0",
+                "callback-resource",
+                "464100862",
+                telegram,
+                workflow,
+                None,
+            )
+        )
+
+        self.assertEqual(len(telegram.rich_messages), 1)
+        document = telegram.rich_messages[-1][1]
+        self.assertIn("HDHive 资源：搏击俱乐部", document.to_plain())
+        self.assertIsNotNone(telegram.rich_messages[-1][2])
 
     def test_resource_keyboard_exposes_every_pan_type_and_single_unlock(self):
         resources = [resource("115", "115"), resource("quark", "quark"), resource("115-2", "115"), resource("pikpak", "pikpak")]
@@ -675,8 +703,11 @@ class HdhiveBridgeTests(unittest.TestCase):
         bridge.handle_update(
             update, object(), telegram, allowed, object(), poll_status=False, hdhive_workflow=workflow
         )
-        text = telegram.messages[-1][1]
-        keyboard = telegram.messages[-1][2]
+        text = telegram.rich_messages[-1][1].to_plain()
+        keyboard = telegram.rich_messages[-1][2]
+        self.assertIn("HDHive 候选媒体", text)
+
+        self.assertEqual(len(telegram.rich_messages), 1)
         self.assertIn("1 | 搏击俱乐部 | 电影 | 1999 | 550", text)
         self.assertIn("2 | 攻壳机动队 SAC_2045 | 剧集 | 2020 | 80986", text)
         self.assertNotIn("[电影]", text)
