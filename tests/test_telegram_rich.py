@@ -207,6 +207,56 @@ class TelegramUiRichTests(unittest.TestCase):
         self.assertNotIn("secret", format_taskstore_history([task]).to_plain())
         self.assertNotIn("secret", format_taskstore_status([task]).to_plain())
 
+    def test_status_and_history_redact_persisted_error_urls_and_credentials(self):
+        secret_url = "https://115cdn.com/s/legacy?password=legacy-password"
+        row = {
+            "title": "正常任务",
+            "status": "failed",
+            "last_error": f"正常失败原因 {secret_url} token=legacy-token",
+        }
+
+        status_plain = format_status([row]).to_plain()
+        history_plain = format_history([row]).to_plain()
+
+        for plain in (status_plain, history_plain):
+            self.assertIn("正常失败原因", plain)
+            self.assertNotIn(secret_url, plain)
+            self.assertNotIn("115cdn.com", plain)
+            self.assertNotIn("legacy-password", plain)
+            self.assertNotIn("legacy-token", plain)
+
+    def test_taskstore_status_redacts_error_wait_and_observability_text(self):
+        secret_url = "https://evil.test/task?receive_code=task-code"
+        task = SimpleNamespace(
+            id=9,
+            title="正常任务",
+            metadata={
+                "_defer_message": f"正常等待原因 {secret_url} token=wait-token",
+                "stage_elapsed_seconds": 4,
+                "stage_wait_seconds": 5,
+            },
+            category="",
+            current_stage=TaskStage.ORGANIZING,
+            status=TaskStatus.RUNNING,
+            error_summary=f"正常错误 {secret_url} token=error-token",
+            next_run_at=0,
+            claimed_by="",
+            claimed_at=None,
+            updated_at=0,
+            created_at=0,
+        )
+
+        plain = format_taskstore_status([task]).to_plain()
+
+        self.assertIn("正常错误", plain)
+        self.assertIn("正常等待原因", plain)
+        self.assertIn("耗时", plain)
+        self.assertNotIn(secret_url, plain)
+        self.assertNotIn("evil.test", plain)
+        self.assertNotIn("task-code", plain)
+        self.assertNotIn("wait-token", plain)
+        self.assertNotIn("error-token", plain)
+
     def test_format_hdhive_unlock_result_uses_unknown_reason_when_failure_has_no_details(self):
         doc = format_hdhive_unlock_result(
             [HdhiveUnlockItem("resource-empty", False, "", "", "", False)],

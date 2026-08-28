@@ -187,6 +187,7 @@ from app.telegram_ui import (
     quality_keyboard,
     format_quality_scan_summary,
     quality_manual_keyboard,
+    safe_telegram_text,
     task_action_keyboard,
     truncate_text,
 )
@@ -2433,7 +2434,7 @@ def format_hdhive_resources(workflow: HdhiveWorkflow, session_id: str) -> tuple[
             invalid_details.append(
                 details(
                     f"资源 #{index + 1} 不可用",
-                    (paragraph(truncate_text(f"原因：{item.validate_message}", 160)),),
+                    (paragraph(safe_telegram_text(f"原因：{item.validate_message}", 160)),),
                 )
             )
     if rows:
@@ -3203,6 +3204,7 @@ def completion_drift_retry_stage(task, submission: dict[str, Any] | None = None)
 
 def format_task_snapshot(task) -> str:
     title = task.title or task.metadata.get("received_title") or f"任务 #{task.id}"
+    title = safe_telegram_text(title, 160)
     return f"#{task.id} {title}｜{stage_display_name(task.current_stage)}｜{task.status.value}"
 
 
@@ -3215,7 +3217,7 @@ def format_task_intake_reply(task) -> str:
         suffix = f"\n媒体库：{parent}\n路径：{dest}" if parent or dest else ""
         return f"任务已完成：{format_task_snapshot(task)}{suffix}"
     if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION}:
-        return f"任务需要处理：{format_task_snapshot(task)}\n原因：{task.error_summary or '无详细错误'}"
+        return f"任务需要处理：{format_task_snapshot(task)}\n原因：{safe_telegram_text(task.error_summary or '无详细错误', 200)}"
     if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
         return f"任务处理中/已在队列中：{format_task_snapshot(task)}"
     return f"任务已接收：{format_task_snapshot(task)}"
@@ -3983,7 +3985,7 @@ def handle_task_action_callback(
         return True
     if action == "task_detail":
         events = task_store.list_events(task_id)[-5:]
-        event_lines = [f"- {stage_display_name(TaskStage(event['stage'])) if event.get('stage') in TaskStage._value2member_map_ else event.get('stage')} / {event.get('status')}: {event.get('message')}" for event in events]
+        event_lines = [safe_telegram_text(f"- {stage_display_name(TaskStage(event['stage'])) if event.get('stage') in TaskStage._value2member_map_ else event.get('stage')} / {event.get('status')}: {event.get('message')}", 200) for event in events]
         blocks = [heading(f"任务详情 #{task.id}"), paragraph(format_task_intake_reply(task))]
         if event_lines:
             blocks.append(details("最近事件", [paragraph(truncate_text(line, 200)) for line in event_lines]))

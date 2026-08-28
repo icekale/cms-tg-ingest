@@ -1456,12 +1456,14 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             task_store = TaskStore(Path(tmp) / "tasks.db")
             task = task_store.upsert_task("detail", "", "https://115cdn.com/s/detail", chat_id="464100862")
+            secret_url = "https://evil.test/event?password=event-password"
             task_store.record_event(
                 task.id,
                 TaskStage.RECEIVED,
                 TaskStatus.PENDING,
-                "等待执行",
+                f"等待执行，正常诊断 {secret_url} token=event-token",
                 title="详情电影",
+                error_summary=f"正常任务错误 {secret_url} token=task-token",
             )
             telegram = FakeTelegram()
 
@@ -1479,7 +1481,12 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(len(telegram.rich_messages), 1)
             document = telegram.rich_messages[-1][1]
             self.assertIn("任务详情 #1", document.to_plain())
-            self.assertIn("最近事件", document.to_plain())
+            self.assertIn("正常诊断", document.to_plain())
+            self.assertNotIn(secret_url, document.to_plain())
+            self.assertNotIn("evil.test", document.to_plain())
+            self.assertNotIn("event-password", document.to_plain())
+            self.assertNotIn("event-token", document.to_plain())
+            self.assertNotIn("task-token", document.to_plain())
             self.assertIsNotNone(telegram.rich_messages[-1][2])
 
     def test_multi_source_intake_summary_is_rich_and_lists_task_titles_and_statuses(self):

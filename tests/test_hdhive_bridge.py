@@ -756,6 +756,24 @@ class HdhiveBridgeTests(unittest.TestCase):
         self.assertIn("details", [block["type"] for block in blocks])
         self.assertIn("资源已失效", document.to_plain())
 
+    def test_resource_formatter_redacts_validation_urls_and_credentials(self):
+        proxy = FakeProxy()
+        secret_url = "https://115cdn.com/s/secret-share?password=raw-password"
+        proxy.items = [HdhiveResource(**{**resource("invalid").__dict__, "validate_status": "invalid", "validate_message": f"失效：{secret_url} token=raw-token"})]
+        workflow = HdhiveWorkflow(object(), proxy, HdhiveSessionStore())
+        session_id = workflow.sessions.begin("464100862", "Example")
+        workflow.load_resources(session_id, "movie", "550")
+
+        document, _keyboard = bridge.format_hdhive_resources(workflow, session_id)
+        plain = document.to_plain()
+
+        self.assertIn("失效", plain)
+        self.assertNotIn(secret_url, plain)
+        self.assertNotIn("raw-password", plain)
+        self.assertNotIn("raw-token", plain)
+        self.assertNotIn("115cdn.com", plain)
+        self.assertNotIn(secret_url, repr(document.to_blocks()))
+
     def test_resource_formatter_omits_table_when_filter_has_no_rows(self):
         workflow = HdhiveWorkflow(object(), FakeProxy(), HdhiveSessionStore())
         session_id = workflow.sessions.begin("464100862", "Example")

@@ -7,7 +7,7 @@ import re
 import time
 from typing import Any
 
-from app.clients.http import _redact_text
+from app.logging_system import redact_text
 from app.hdhive_subscriptions import diagnose_subscription_check
 from app.media.classify import expected_task_tmdb_id, extract_tmdb_id_from_name, normalize_text, parse_recognition_json
 from app.models import TaskStage, TaskStatus
@@ -19,7 +19,12 @@ from app.workflows.self_share import format_task_label
 
 
 _SERIES_UPDATE_CATEGORIES = {"国产电视", "外国电视", "番剧"}
-_HDHIVE_REASON_URL_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
+_TELEGRAM_URL_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
+
+
+def safe_telegram_text(value: object, limit: int = 200) -> str:
+    text = redact_text("" if value is None else value)
+    return truncate_text(_TELEGRAM_URL_RE.sub("<redacted-url>", text), limit)
 
 
 def format_history(rows: list[dict[str, Any]]) -> RichDocument:
@@ -30,7 +35,7 @@ def format_history(rows: list[dict[str, Any]]) -> RichDocument:
         table_rows.append(
             (
                 str(idx),
-                format_task_label(row),
+                safe_telegram_text(format_task_label(row), 120),
                 str(row.get("category_final") or row.get("category_choice") or row.get("category_status") or "-"),
                 str(row.get("move_status") or "-"),
                 str(row.get("emby_status") or "-"),
@@ -51,19 +56,19 @@ def format_taskstore_history(tasks: list[Any]) -> RichDocument:
         return RichDocument()
     table_rows = []
     for idx, task in enumerate(tasks, 1):
-        title = task.title or task.metadata.get("received_title") or f"任务 #{task.id}"
+        title = safe_telegram_text(task.title or task.metadata.get("received_title") or f"任务 #{task.id}", 80)
         category = task.category or task.metadata.get("category") or task.metadata.get("category_final") or "-"
-        dest = task.metadata.get("dest_path") or "-"
+        dest = safe_telegram_text(task.metadata.get("dest_path") or "-", 200)
         emby_parent = task.metadata.get("emby_parent") or task.metadata.get("emby_refresh_library") or "-"
         table_rows.append(
             (
                 f"#{task.id}",
-                str(title),
+                title,
                 stage_display_name(task.current_stage),
                 task.status.value,
                 str(category),
                 str(emby_parent),
-                str(dest),
+                dest,
             )
         )
     return document(heading("TaskStore 最近历史"), table(("#", "任务", "阶段", "状态", "分类", "媒体库", "路径"), table_rows))
@@ -74,7 +79,7 @@ def format_failure_summary(rows: list[dict[str, Any]]) -> str:
     for row in rows:
         if str(row.get("status") or "").lower() != "failed":
             continue
-        reason = str(row.get("last_error") or "").strip()
+        reason = safe_telegram_text(row.get("last_error"), 160).strip()
         if not reason:
             continue
         counts[reason] = counts.get(reason, 0) + 1
@@ -251,7 +256,7 @@ def format_status(rows: list[dict[str, Any]]) -> RichDocument:
         return document(paragraph("暂无记录。直接发送 115 分享链接即可创建任务。"))
     table_rows = []
     for row in rows:
-        table_rows.append((format_task_label(row), str(row.get("status") or "unknown"), str(row.get("last_error") or "")))
+        table_rows.append((safe_telegram_text(format_task_label(row), 120), str(row.get("status") or "unknown"), safe_telegram_text(row.get("last_error"), 160)))
     blocks: list = [heading("最近任务"), table(("任务", "状态", "错误"), table_rows)]
     failure_summary = format_failure_summary(rows)
     if failure_summary:
@@ -287,8 +292,7 @@ def format_hdhive_candidate_label(candidate: dict[str, str] | None) -> str:
 
 
 def _safe_hdhive_failure_reason(value: object) -> str:
-    redacted = _redact_text(str(value or ""))
-    return truncate_text(_HDHIVE_REASON_URL_RE.sub("<redacted-url>", redacted), 160)
+    return safe_telegram_text(value, 160)
 
 
 def format_hdhive_candidates(candidates: list[dict[str, str]]) -> RichDocument:
@@ -355,21 +359,21 @@ def format_taskstore_status(tasks: list[Any]) -> RichDocument:
     table_rows = []
     extra = []
     for task in tasks:
-        title = truncate_text(str(task.title or task.metadata.get("received_title") or f"任务 #{task.id}"), 80)
+        title = safe_telegram_text(str(task.title or task.metadata.get("received_title") or f"任务 #{task.id}"), 80)
         table_rows.append(
             (
                 f"#{task.id}",
                 title,
                 stage_display_name(task.current_stage),
                 task.status.value,
-                truncate_text(task.error_summary, 100) if task.error_summary else "",
+                safe_telegram_text(task.error_summary, 100),
             )
         )
         detail_lines = []
         if task.status in {TaskStatus.RUNNING, TaskStatus.PENDING}:
-            detail_lines.append(paragraph(f"等待：{truncate_text(describe_task_wait(task, now=time.time()), 200)}"))
+            detail_lines.append(paragraph(f"等待：{safe_telegram_text(describe_task_wait(task, now=time.time()), 200)}"))
         for line in format_task_observability(task, now=time.time()):
-            detail_lines.append(paragraph(truncate_text(line, 200)))
+            detail_lines.append(paragraph(safe_telegram_text(line, 200)))
         if detail_lines:
             extra.append(details(f"#{task.id} {title}", detail_lines))
     return RichDocument((heading("TaskStore 最近任务"), table(("#", "任务", "阶段", "状态", "错误"), table_rows), *extra))
