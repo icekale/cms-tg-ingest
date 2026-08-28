@@ -725,7 +725,16 @@ class HdhiveBridgeTests(unittest.TestCase):
         self.assertIn("details", [block["type"] for block in blocks])
         self.assertIn("资源已失效", document.to_plain())
 
-    def test_resource_header_falls_back_when_candidate_is_missing(self):
+    def test_resource_formatter_omits_table_when_filter_has_no_rows(self):
+        workflow = HdhiveWorkflow(object(), FakeProxy(), HdhiveSessionStore())
+        session_id = workflow.sessions.begin("464100862", "Example")
+        workflow.load_resources(session_id, "movie", "550")
+        workflow.sessions.get(session_id).pan_type = "missing"
+        document, _keyboard = bridge.format_hdhive_resources(workflow, session_id)
+        self.assertNotIn("table", [block["type"] for block in document.to_blocks()])
+        self.assertIn("当前网盘筛选没有资源", document.to_plain())
+        self.assertIn("已选择：0 个", document.to_plain())
+
         workflow = HdhiveWorkflow(object(), FakeProxy(), HdhiveSessionStore())
         session_id = workflow.sessions.begin("464100862", "Example")
         workflow.load_resources(session_id, "movie", "550")

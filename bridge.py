@@ -2436,7 +2436,8 @@ def format_hdhive_resources(workflow: HdhiveWorkflow, session_id: str) -> tuple[
                     (paragraph(truncate_text(f"原因：{item.validate_message}", 160)),),
                 )
             )
-    blocks.append(table(("#", "资源", "网盘", "大小", "分辨率", "费用", "状态"), rows))
+    if rows:
+        blocks.append(table(("#", "资源", "网盘", "大小", "分辨率", "费用", "状态"), rows))
     blocks.extend(invalid_details)
     blocks.append(paragraph(f"已选择：{len(session.selected_indexes)} 个。点击资源行选择，再点击解锁。"))
     return RichDocument(tuple(blocks)), hdhive_resource_keyboard(

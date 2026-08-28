@@ -7,6 +7,7 @@ import re
 import time
 from typing import Any
 
+from app.clients.http import _redact_text
 from app.hdhive_subscriptions import diagnose_subscription_check
 from app.media.classify import expected_task_tmdb_id, extract_tmdb_id_from_name, normalize_text, parse_recognition_json
 from app.models import TaskStage, TaskStatus
@@ -18,6 +19,7 @@ from app.workflows.self_share import format_task_label
 
 
 _SERIES_UPDATE_CATEGORIES = {"国产电视", "外国电视", "番剧"}
+_HDHIVE_REASON_URL_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
 
 
 def format_history(rows: list[dict[str, Any]]) -> RichDocument:
@@ -284,9 +286,14 @@ def format_hdhive_candidate_label(candidate: dict[str, str] | None) -> str:
     return f"{title} ({year}) · {media_type} · TMDB {tmdb_id}"
 
 
+def _safe_hdhive_failure_reason(value: object) -> str:
+    redacted = _redact_text(str(value or ""))
+    return truncate_text(_HDHIVE_REASON_URL_RE.sub("<redacted-url>", redacted), 160)
+
+
 def format_hdhive_candidates(candidates: list[dict[str, str]]) -> RichDocument:
     if not candidates:
-        return document(paragraph(""))
+        return document(paragraph("没有找到匹配的 TMDB 媒体。"))
     rows = []
     for index, candidate in enumerate(candidates[:12], 1):
         rows.append(
@@ -325,8 +332,8 @@ def format_hdhive_unlock_result(
         else:
             failed_count += 1
             status = "失败"
-        reason = item.message or item.error_code or "-"
-        rows.append((str(item.slug), status, str(reason)))
+        reason = _safe_hdhive_failure_reason(item.message or item.error_code) if not item.success else "-"
+        rows.append((truncate_text(str(item.slug), 80), status, reason))
     blocks: list = [
         heading("HDHive 解锁结果"),
         table(("资源", "状态", "原因"), rows),

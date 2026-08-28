@@ -139,12 +139,19 @@ class TelegramUiRichTests(unittest.TestCase):
     def test_format_hdhive_candidates_empty_is_a_paragraph(self):
         doc = format_hdhive_candidates([])
         self.assertEqual(doc.to_blocks()[0]["type"], "paragraph")
-        self.assertEqual(doc.to_plain(), "")
+        self.assertEqual(doc.to_plain(), "没有找到匹配的 TMDB 媒体。")
 
     def test_format_hdhive_unlock_result_hides_full_urls_and_reports_counts(self):
         secret_url = "https://115cdn.com/s/secret?password=4321"
         results = [
-            HdhiveUnlockItem("resource-a", True, secret_url, "", "", False),
+            HdhiveUnlockItem(
+                "resource-a",
+                True,
+                secret_url,
+                "已解锁 https://evil.test/s/leak?password=message-secret",
+                "",
+                False,
+            ),
             HdhiveUnlockItem("resource-b", False, "", "积分不足", "POINTS", False),
         ]
         doc = format_hdhive_unlock_result(
@@ -161,9 +168,26 @@ class TelegramUiRichTests(unittest.TestCase):
         self.assertIn("已入队 1 个", plain)
         self.assertIn("非 115 资源：0 个", plain)
         self.assertNotIn(secret_url, plain)
+        self.assertNotIn("message-secret", plain)
+        self.assertNotIn("evil.test", plain)
         self.assertNotIn(secret_url, repr(doc.to_blocks()))
 
-    def test_task_labels_never_fall_back_to_share_code(self):
+    def test_format_hdhive_unlock_result_redacts_and_bounds_failure_reason(self):
+        secret_url = "https://evil.test/s/failure?password=failure-secret"
+        long_slug = "resource-" + "s" * 120
+        long_reason = f"failed {secret_url} password=assignment-secret " + ("x" * 300)
+        doc = format_hdhive_unlock_result(
+            [HdhiveUnlockItem(long_slug, False, "", long_reason, "FAIL", False)],
+            {long_slug: "115"},
+        )
+        row = doc.to_blocks()[1]["cells"][1]
+        self.assertLessEqual(len(row[0]["text"]), 80)
+        self.assertLessEqual(len(row[2]["text"]), 160)
+        self.assertNotIn("failure-secret", doc.to_plain())
+        self.assertNotIn("assignment-secret", doc.to_plain())
+        self.assertNotIn("https://evil.test", doc.to_plain())
+        self.assertNotIn("failure-secret", repr(doc.to_blocks()))
+
         self.assertEqual(format_task_label({"cms_task_id": 7, "share_code": "secret"}), "任务 #7")
         task = SimpleNamespace(
             id=8,
