@@ -171,6 +171,7 @@ class TelegramRichClientTests(unittest.TestCase):
             sum(url.endswith("/sendMessage") for url, _kwargs in http.calls),
             1,
         )
+        self.assertEqual(http.calls[1][1]["payload"]["chat_id"], 9)
         self.assertEqual(http.calls[1][1]["payload"]["text"], doc.to_plain())
         self.assertEqual(http.calls[1][1]["payload"]["reply_markup"], keyboard)
 
@@ -192,6 +193,7 @@ class TelegramRichClientTests(unittest.TestCase):
             sum(url.endswith("/sendMessage") for url, _kwargs in http.calls),
             1,
         )
+        self.assertEqual(http.calls[1][1]["payload"]["chat_id"], 1)
         self.assertEqual(http.calls[1][1]["payload"]["text"], doc.to_plain())
         self.assertEqual(http.calls[1][1]["payload"]["reply_markup"], keyboard)
 
@@ -213,6 +215,7 @@ class TelegramRichClientTests(unittest.TestCase):
             sum(url.endswith("/sendMessage") for url, _kwargs in http.calls),
             1,
         )
+        self.assertEqual(http.calls[1][1]["payload"]["chat_id"], 1)
         self.assertEqual(http.calls[1][1]["payload"]["text"], doc.to_plain())
         self.assertEqual(http.calls[1][1]["payload"]["reply_markup"], keyboard)
 
@@ -260,6 +263,7 @@ class TelegramRichClientTests(unittest.TestCase):
         self.assertIn("rich_message", rich_payload)
         self.assertEqual(rich_payload["message_id"], 17)
         fallback_payload = http.calls[1][1]["payload"]
+        self.assertEqual(fallback_payload["chat_id"], 1)
         self.assertEqual(fallback_payload["message_id"], 17)
         self.assertEqual(fallback_payload["text"], doc.to_plain())
         self.assertEqual(fallback_payload["reply_markup"], keyboard)
