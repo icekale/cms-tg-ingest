@@ -350,7 +350,15 @@ class TelegramUiRichTests(unittest.TestCase):
     def test_numeric_context_codes_redact_prose_but_preserve_task_number(self):
         self.assertNotIn("1234", safe_telegram_text("error 1234", blocked_values={"1234"}))
         self.assertIn("任务 #1234", safe_telegram_text("任务 #1234", blocked_values={"1234"}))
+        self.assertIn("#1234", safe_telegram_text("#1234", blocked_values={"1234"}))
+        for prose in ("密码 #1234", "错误 #1234", "source #1234", "/library/#1234/title"):
+            self.assertNotIn("1234", safe_telegram_text(prose, blocked_values={"1234"}))
         self.assertNotIn("1234", safe_telegram_text("path /library/1234", blocked_values={"1234"}))
+
+    def test_safe_telegram_text_respects_small_limits(self):
+        for limit in range(4):
+            result = safe_telegram_text("0123456789", limit)
+            self.assertLessEqual(len(result), limit)
 
     def test_format_task_label_uses_row_id_without_cms_task_id(self):
         self.assertEqual(format_task_label({"id": 12, "title": "own", "own_share_code": "own"}), "任务 #12")

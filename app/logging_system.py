@@ -41,6 +41,9 @@ _URL_SECRET_RE = re.compile(
     re.IGNORECASE,
 )
 _HTTP_URL_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
+_TASK_NUMBER_PREFIX_RE = re.compile(
+    r"(?:^#|(?:任务(?:编号|号)?|task(?:\s+(?:id|number))?)\s*#)$", re.IGNORECASE
+)
 _HEADER_SECRET_RE = re.compile(
     r"\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-web-token|x-emby-token)\b\s*[:=]\s*([^\r\n]+)",
     re.IGNORECASE,
@@ -290,11 +293,9 @@ def _replace_blocked_values(text: str, blocked_values: object) -> str:
 
     def replace(match: re.Match[str]) -> str:
         value = match.group(1)
-        # Short numeric codes are sensitive in prose; only explicit #task labels remain readable.
-        if value.isdigit() and len(value) < 6 and not text[: match.start()].endswith("#"):
-            return "<redacted>"
-        prefix = text[: match.start()]
-        if value.isdigit() and len(value) < 6 and prefix.endswith("#") and not prefix[:-1].endswith("/"):
+        if value.isdigit() and len(value) < 6:
+            if not _TASK_NUMBER_PREFIX_RE.search(text[: match.start()]):
+                return "<redacted>"
             return value
         return "<redacted>"
 
@@ -305,10 +306,15 @@ def safe_telegram_text(value: object, limit: int = 200, *, blocked_values: objec
     """Redact logging-sensitive values, known context codes, hide URLs, and bound Telegram text."""
     text = _HTTP_URL_RE.sub("<redacted-url>", redact_text("" if value is None else value))
     text = _replace_blocked_values(text, blocked_values)
+    limit = int(limit)
+    if limit <= 0:
+        return ""
     if len(text) <= limit:
         return text
-    tail_len = min(80, max(0, int(limit) // 3))
-    head_len = max(0, int(limit) - tail_len - 3)
+    if limit < 4:
+        return text[:limit]
+    tail_len = min(80, limit // 3)
+    head_len = limit - tail_len - 3
     return f"{text[:head_len]}...{text[-tail_len:]}"
 
 
