@@ -2489,7 +2489,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertEqual(store.cleanup["status"], "deleted")
             self.assertIn("115转存源已删除", line)
 
-    def test_send_emby_confirmed_hides_title_matching_own_share_code(self):
+    def test_send_emby_confirmed_hides_title_matching_uppercase_own_share_code(self):
         class FakeTelegram:
             def __init__(self):
                 self.messages = []
@@ -2497,11 +2497,13 @@ class SelfShareWorkflowTests(unittest.TestCase):
             def send_message(self, chat_id, text, reply_markup=None):
                 self.messages.append(text)
 
+        blocked = "own" + "code"
+
         class FakeStore:
             def update_emby(self, row_id, status, *, item_id="", title="", path="", parent=""):
                 return {
                     "id": row_id,
-                    "own_share_code": "owncode",
+                    "own_share_code": blocked,
                     "emby_title": title,
                     "emby_item_id": item_id,
                     "emby_path": path,
@@ -2513,10 +2515,10 @@ class SelfShareWorkflowTests(unittest.TestCase):
             telegram,
             1,
             FakeStore(),
-            {"id": 9, "own_share_code": "owncode"},
-            {"Id": "item", "Name": "owncode", "Path": "/library/owncode"},
+            {"id": 9, "own_share_code": blocked},
+            {"Id": "item", "Name": blocked.upper(), "Path": f"/library/{blocked.upper()}"},
         )
-        self.assertNotIn("owncode", telegram.messages[0])
+        self.assertNotIn(blocked.upper(), telegram.messages[0])
         self.assertIn("任务 #9", telegram.messages[0])
 
     def test_move_notification_reports_merged_conflict_as_moved(self):

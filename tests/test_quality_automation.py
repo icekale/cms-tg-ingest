@@ -664,6 +664,27 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertNotIn("quality-share", document.to_plain())
             self.assertIn("任务 #1", document.to_plain())
 
+    def test_quality_plan_title_falls_back_for_uppercase_share_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            blocked = "quality" + "code"
+            task = self.add_task(service.store, "quality-source", library / "missing", own_share_code=blocked)
+            task = service.store.record_event(
+                task.id,
+                TaskStage.MOVED,
+                TaskStatus.SUCCEEDED,
+                "moved",
+                title=blocked.upper(),
+            )
+
+            plans = service._plan(
+                [task],
+                [QualityIssue("missing_destination", "missing", task_id=task.id, title=blocked.upper())],
+                now=100.0,
+            )
+
+            self.assertEqual(plans[0].title, f"任务 #{task.id}")
+
     def test_scan_only_run_does_not_execute_repair_or_probe(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = FakeQualityRepairAdapter()

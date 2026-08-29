@@ -200,8 +200,9 @@ def _clean_invalid_self_share(
             for field in ("share_code", "receive_code", "own_share_code", "own_share_receive_code")
             if str(updated.get(field) or "").strip()
         }
+        normalized_blocked = {" ".join(value.split()).casefold() for value in blocked}
         raw_title = str(updated.get("emby_title") or updated.get("own_share_file_name") or updated.get("title") or "媒体").strip()
-        title = raw_title if raw_title not in blocked else f"任务 #{updated.get('cms_task_id') or updated.get('id') or '?'}"
+        title = raw_title if " ".join(raw_title.split()).casefold() not in normalized_blocked else f"任务 #{updated.get('cms_task_id') or updated.get('id') or '?'}"
         title = safe_telegram_text(title, 120, blocked_values=blocked)
         clean_reason = safe_telegram_text(reason, 120, blocked_values=blocked)
         suffix = f"，已刷新 Emby 媒体库：{safe_telegram_text(library, 80, blocked_values=blocked)}" if library else ""

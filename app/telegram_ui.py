@@ -155,18 +155,18 @@ def quality_issue_for_row(row: dict[str, Any]) -> str:
             blocked_values=blocked,
         )
     task_title = str(row.get("title") or "").strip()
-    if not task_title or task_title in blocked:
+    if not task_title or _is_blocked_display_value(task_title, blocked):
         task_title = str(recognition.get("share_name") or f"任务 #{row.get('id') or row.get('cms_task_id') or '?'}").strip()
-        if task_title in blocked:
+        if _is_blocked_display_value(task_title, blocked):
             task_title = f"任务 #{row.get('id') or row.get('cms_task_id') or '?'}"
     emby_title = str(row.get("emby_title") or "").strip()
-    emby_display_title = "-" if emby_title in blocked else emby_title
+    emby_display_title = "-" if _is_blocked_display_value(emby_title, blocked) else emby_title
     task_norm = normalize_text(task_title)
     emby_norm = normalize_text(emby_title)
     has_cjk_task_title = bool(re.search(r"[\u4e00-\u9fff]", task_title))
     if has_cjk_task_title and task_norm and emby_norm and emby_norm not in task_norm and task_norm not in emby_norm:
         return safe_telegram_text(
-            f"疑似错配：任务 {safe_telegram_text(task_title, 120)}，Emby {safe_telegram_text(emby_display_title, 120)}",
+            f"疑似错配：任务 {safe_telegram_text(task_title, 120, blocked_values=blocked)}，Emby {safe_telegram_text(emby_display_title, 120, blocked_values=blocked)}",
             240,
             blocked_values=blocked,
         )
@@ -181,7 +181,7 @@ def format_quality_report(rows: list[dict[str, Any]]) -> RichDocument:
             continue
         blocked = row_display_blocked_values(row)
         emby_title = str(row.get("emby_title") or "").strip()
-        if emby_title in blocked:
+        if _is_blocked_display_value(emby_title, blocked):
             emby_title = "-"
         table_rows.append(
             (

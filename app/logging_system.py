@@ -286,7 +286,7 @@ def _replace_blocked_values(text: str, blocked_values: object) -> str:
     )
     if not values:
         return text
-    pattern = re.compile(r"(?<![\w-])(" + "|".join(re.escape(value) for value in values) + r")(?![\w-])")
+    pattern = re.compile(r"(?<![\w-])(" + "|".join(re.escape(value) for value in values) + r")(?![\w-])", re.IGNORECASE)
 
     def replace(match: re.Match[str]) -> str:
         value = match.group(1)

@@ -28,6 +28,26 @@ class TaskHealthTests(unittest.TestCase):
             self.assertNotIn("health-password", report)
             self.assertNotIn("health-error", report)
 
+    def test_health_wait_detail_hides_uppercase_share_code_title(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            blocked = "health" + "code"
+            task = store.upsert_task(blocked, "", "https://115cdn.com/s/health")
+            task = store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "waiting",
+                title=blocked.upper(),
+                metadata_patch={"_defer_message": f"等待 {blocked.upper()}", "_lock_waiting": True, "_lock_reason": blocked.upper()},
+                next_run_at=200.0,
+            )
+
+            report = format_task_health(build_task_health(store, enabled=True, now=100.0), now=100.0)
+
+            self.assertNotIn(blocked.upper(), report)
+            self.assertIn(f"最近锁等待: #{task.id} 任务 #{task.id}", report)
+
     def test_health_bridge_document_hides_received_title_when_it_is_share_code(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

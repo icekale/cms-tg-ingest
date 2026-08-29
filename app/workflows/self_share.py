@@ -5765,8 +5765,9 @@ def send_emby_confirmed(
         if library_name
         else f"媒体库未解析，父级/类型：{safe_telegram_text(updated.get('emby_parent') or '未知', 160, blocked_values=blocked)}"
     )
+    normalized_blocked = {" ".join(value.split()).casefold() for value in blocked}
     raw_title = str(updated.get("emby_title") or item.get("Name") or format_task_label(updated)).strip()
-    title = raw_title if raw_title not in blocked else f"任务 #{updated.get('cms_task_id') or updated.get('id') or '?'}"
+    title = raw_title if " ".join(raw_title.split()).casefold() not in normalized_blocked else f"任务 #{updated.get('cms_task_id') or updated.get('id') or '?'}"
     lines = [
         f"Emby 已确认入库：{safe_telegram_text(title, 180, blocked_values=blocked)}",
         library_line,
@@ -5782,7 +5783,7 @@ def send_emby_confirmed(
         )
     telegram.send_message(
         chat_id,
-        safe_telegram_text("\n".join(lines), 600),
+        safe_telegram_text("\n".join(lines), 600, blocked_values=blocked),
     )
 
 

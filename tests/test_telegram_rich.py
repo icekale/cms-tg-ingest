@@ -326,6 +326,27 @@ class TelegramUiRichTests(unittest.TestCase):
         for formatter in (format_taskstore_history, format_taskstore_status):
             self.assertNotIn(secret, formatter(tasks).to_plain())
 
+    def test_blocked_values_redact_uppercase_variants_in_prose_and_paths(self):
+        blocked = "upper" + "code"
+        for value in (f"ordinary {blocked.upper()} prose", f"/library/{blocked.upper()}/title"):
+            self.assertNotIn(blocked.upper(), safe_telegram_text(value, blocked_values={blocked}))
+
+    def test_quality_report_redacts_uppercase_emby_code(self):
+        blocked = "quality" + "code"
+        row = {
+            "id": 73,
+            "title": "正常影片",
+            "own_share_code": blocked,
+            "emby_status": "confirmed",
+            "emby_title": blocked.upper(),
+            "recognition_json": json.dumps({"title": "另一部影片", "share_name": "另一部影片"}),
+        }
+
+        issue = quality_issue_for_row(row)
+        plain = format_quality_report([row]).to_plain()
+
+        self.assertNotIn(blocked.upper(), issue + plain)
+
     def test_numeric_context_codes_redact_prose_but_preserve_task_number(self):
         self.assertNotIn("1234", safe_telegram_text("error 1234", blocked_values={"1234"}))
         self.assertIn("任务 #1234", safe_telegram_text("任务 #1234", blocked_values={"1234"}))

@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from .models import TaskSnapshot
 from .task_diagnostics import _duration, describe_task_wait
 from .logging_system import safe_telegram_text
-from .telegram_ui import task_display_blocked_values
+from .telegram_ui import _is_blocked_display_value, task_display_blocked_values
 from .task_engine import stage_display_name
 from .task_store import TaskStore
 
@@ -47,7 +47,7 @@ def _truncate(value: object, limit: int) -> str:
 def _format_wait_detail(task: TaskSnapshot, *, now: float) -> str:
     blocked = task_display_blocked_values(task)
     candidate = task.title or task.metadata.get("received_title")
-    if not candidate or str(candidate).strip() in blocked:
+    if not candidate or _is_blocked_display_value(candidate, blocked):
         candidate = f"任务 #{task.id}"
     title = safe_telegram_text(candidate, 40, blocked_values=blocked)
     metadata = dict(task.metadata)
@@ -189,7 +189,7 @@ def format_task_health(summary: TaskHealthSummary, *, now: float | None = None) 
         task = summary.latest_lock_wait
         blocked = task_display_blocked_values(task)
         candidate = task.title or task.metadata.get("received_title")
-        if not candidate or str(candidate).strip() in blocked:
+        if not candidate or _is_blocked_display_value(candidate, blocked):
             candidate = f"任务 #{task.id}"
         title = safe_telegram_text(candidate, 80, blocked_values=blocked)
         reason = safe_telegram_text(task.metadata.get("_lock_reason") or "-", 100, blocked_values=blocked)
@@ -199,7 +199,7 @@ def format_task_health(summary: TaskHealthSummary, *, now: float | None = None) 
         task = summary.latest_problem
         blocked = task_display_blocked_values(task)
         candidate = task.title or task.metadata.get("received_title")
-        if not candidate or str(candidate).strip() in blocked:
+        if not candidate or _is_blocked_display_value(candidate, blocked):
             candidate = f"任务 #{task.id}"
         title = safe_telegram_text(candidate, 80, blocked_values=blocked)
         suffix = f"，{safe_telegram_text(task.error_summary, 120, blocked_values=blocked)}" if task.error_summary else ""
