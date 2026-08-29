@@ -202,6 +202,85 @@ def p115_file_name(item: dict[str, Any]) -> str:
     return str(item.get("n") or item.get("file_name") or item.get("name") or "").strip()
 
 
+_CLOUD_COMPANION_SUFFIXES = {
+    "mkv",
+    "mp4",
+    "ts",
+    "avi",
+    "mov",
+    "wmv",
+    "m2ts",
+    "iso",
+    "srt",
+    "ass",
+    "ssa",
+    "sub",
+    "idx",
+    "nfo",
+    "jpg",
+    "png",
+    "txt",
+    "zh",
+    "chs",
+    "cht",
+    "sc",
+    "tc",
+    "en",
+    "eng",
+    "jp",
+    "jpn",
+    "ko",
+    "kor",
+}
+
+
+def _cloud_output_stem(name: str) -> str:
+    text = str(name or "").strip()
+    while True:
+        prefix, separator, suffix = text.rpartition(".")
+        if not separator or suffix.lower() not in _CLOUD_COMPANION_SUFFIXES:
+            break
+        text = prefix
+    return normalize_text(text)
+
+
+def select_named_cloud_outputs(
+    items: list[dict[str, Any]],
+    names: list[str] | tuple[str, ...] | None,
+) -> list[dict[str, Any]]:
+    """Keep a uniquely named cloud output plus same-stem companions.
+
+    115 often reports a completed lixian task's ``file_id`` as the receive
+    folder. Listing that folder then returns every sibling download. When the
+    task still has a unique filename (ed2k episode links), keep only that file
+    and same-stem extras such as subtitles. Packs without a unique name match
+    keep every child.
+    """
+    if not items:
+        return items
+    expected = [normalize_text(name) for name in (names or []) if str(name or "").strip()]
+    if not expected:
+        return items
+    matched = [item for item in items if normalize_text(p115_file_name(item)) in expected]
+    if len(matched) != 1:
+        expected_stems = [_cloud_output_stem(name) for name in (names or []) if str(name or "").strip()]
+        matched = [item for item in items if _cloud_output_stem(p115_file_name(item)) in expected_stems]
+        if len(matched) != 1:
+            return items
+    selected = matched[0]
+    selected_stem = _cloud_output_stem(p115_file_name(selected))
+    kept = []
+    for item in items:
+        if item is selected:
+            kept.append(item)
+            continue
+        if bool(item["is_folder"]) if "is_folder" in item else p115_is_folder(item):
+            continue
+        if _cloud_output_stem(p115_file_name(item)) == selected_stem:
+            kept.append(item)
+    return kept or items
+
+
 def _organized_scan_cursor(parent_ids: set[str], cursor: dict[str, Any] | None) -> dict[str, Any]:
     roots = sorted({str(parent_id).strip() for parent_id in parent_ids if str(parent_id).strip()})
     if not isinstance(cursor, dict) or sorted(str(value) for value in cursor.get("root_parent_ids") or []) != roots:
@@ -1140,7 +1219,13 @@ class P115WebClient:
                     "is_folder": p115_is_folder(child),
                 }
             )
-        return outputs
+        return select_named_cloud_outputs(
+            outputs,
+            [
+                p115_file_name(status),
+                p115_file_name(raw) if raw else "",
+            ],
+        )
 
     def ensure_cloud_outputs_in_target(
         self,

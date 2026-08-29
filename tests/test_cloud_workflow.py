@@ -463,6 +463,7 @@ class CloudWorkflowTests(unittest.TestCase):
                     }
                 ]
             )
+            p115.file_info = lambda file_id: None
             workflow = make_workflow(p115, FakeSubmissionStore(), task_store=task_store)
             task = task_store.record_event(
                 task.id,
@@ -498,6 +499,68 @@ class CloudWorkflowTests(unittest.TestCase):
             self.assertEqual(
                 [item["is_folder"] for item in moved.metadata["received_items"]],
                 [False, False],
+            )
+            self.assertEqual(moved.metadata["intake_identity"]["root_ids"], ["video", "subtitle"])
+            self.assertEqual(
+                moved.metadata["intake_identity"]["files"],
+                [{"id": "video", "name": "Example.mkv"}],
+            )
+
+    def test_cloud_download_keeps_only_the_named_episode_from_shared_receive_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            title = "Silo.S03E02.2160p.mkv"
+            task = task_store.upsert_cloud_task("ed2k:hash:e02", ED2K, title=title)
+            siblings = [
+                {
+                    "file_id": f"e0{index}",
+                    "file_name": f"Silo.S03E0{index}.2160p.mkv",
+                    "parent_id": TARGET_CID,
+                    "is_folder": False,
+                }
+                for index in range(1, 4)
+            ]
+            p115 = FakeCloudP115(
+                [
+                    {
+                        "status": 11,
+                        "file_id": TARGET_CID,
+                        "parent_id": TARGET_CID,
+                        "file_name": title,
+                        "output_items": siblings,
+                    }
+                ]
+            )
+            p115.file_info = lambda file_id: None
+            workflow = make_workflow(p115, FakeSubmissionStore(), task_store=task_store)
+            task = task_store.record_event(
+                task.id,
+                TaskStage.CLOUD_DOWNLOADING,
+                TaskStatus.RUNNING,
+                "等待云下载",
+                metadata_patch={
+                    "cloud_info_hash": "hash",
+                    "cloud_task_id": "task-1",
+                    "cloud_started_at": time.time(),
+                },
+            )
+
+            discovered = workflow.run_stage(task)
+            task = task_store.record_event(
+                task.id,
+                TaskStage.CLOUD_DOWNLOADING,
+                TaskStatus.RUNNING,
+                discovered.message,
+                metadata_patch=discovered.metadata,
+            )
+            moved = workflow.run_stage(task)
+
+            self.assertEqual(moved.outcome.value, "complete")
+            self.assertEqual(moved.metadata["received_file_ids"], ["e02"])
+            self.assertEqual(moved.metadata["cloud_output_name"], title)
+            self.assertEqual(
+                [item["id"] for item in moved.metadata["intake_identity"]["files"]],
+                ["e02"],
             )
 
     def test_cloud_tasks_route_to_shared_workflow_even_with_direct_default(self):

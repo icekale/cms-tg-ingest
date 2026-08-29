@@ -26,6 +26,7 @@ from app.clients.p115 import (
     p115_is_folder,
     p115_item_id,
     p115_item_parent_id,
+    select_named_cloud_outputs,
 )
 from app.config import DEFAULT_OWN_SHARE_RECEIVE_CODE, MovePlan, SelfShareConfig, default_library_roots, is_relative_to, safe_resolve
 from app.logging_system import safe_telegram_text
@@ -1021,7 +1022,7 @@ class BridgeSelfShareTaskWorkflow:
                     self.self_share_config.cloud_poll_seconds,
                     metadata,
                 )
-            metadata["cloud_output_items"] = output_items
+            metadata["cloud_output_items"] = self._named_cloud_output_items(output_items, task, status, metadata)
             return StageResult.defer(
                 "已识别云下载输出，等待移动到待整理目录",
                 1,
@@ -1035,6 +1036,7 @@ class BridgeSelfShareTaskWorkflow:
                 error_type="cloud_output_movement_unsupported",
                 metadata=metadata,
             )
+        output_items = self._named_cloud_output_items(output_items, task, status, metadata)
         output_items = ensure(output_items, receive_cid)
         if not output_items:
             return StageResult.defer(
@@ -1055,21 +1057,22 @@ class BridgeSelfShareTaskWorkflow:
             workflow_mode="self_share_sync",
             workflow_phase="cloud_downloaded_to_pending",
         ) or row
+        received_items = [
+            {
+                "file_id": item["file_id"],
+                "file_name": item.get("file_name") or task.title or task.share_code,
+                "is_folder": bool(item.get("is_folder")),
+                "parent_id": item.get("parent_id") or receive_cid,
+                "received_item_verified": True,
+            }
+            for item in output_items
+        ]
         metadata.update(
             {
                 "submission_id": int(row["id"]),
                 "received_title": first_output.get("file_name") or task.title or task.share_code,
                 "received_file_ids": [item["file_id"] for item in output_items],
-                "received_items": [
-                    {
-                        "file_id": item["file_id"],
-                        "file_name": item.get("file_name") or task.title or task.share_code,
-                        "is_folder": bool(item.get("is_folder")),
-                        "parent_id": item.get("parent_id") or receive_cid,
-                        "received_item_verified": True,
-                    }
-                    for item in output_items
-                ],
+                "received_items": received_items,
                 "received_items_complete": True,
                 "received_expected_item_count": len(output_items),
                 "received_existing_file_ids": [],
@@ -1080,7 +1083,31 @@ class BridgeSelfShareTaskWorkflow:
                 "auto_organize_pending": True,
             }
         )
+        try:
+            identity = self._intake_identity_from_roots(received_items)
+        except Exception:
+            LOG.debug("Failed to snapshot cloud intake identity task_id=%s", getattr(task, "id", ""), exc_info=True)
+        else:
+            if identity.get("files") and (
+                hasattr(self.p115, "file_info") or hasattr(self.p115, "search_files")
+            ):
+                metadata["intake_identity"] = identity
         return self._trigger_cloud_auto_organize(task, int(row["id"]), metadata)
+
+    def _named_cloud_output_items(self, items, task, status=None, metadata=None):
+        raw_items = [item for item in (items or []) if isinstance(item, dict)]
+        status = status if isinstance(status, dict) else {}
+        meta = metadata if isinstance(metadata, dict) else {}
+        return select_named_cloud_outputs(
+            raw_items,
+            [
+                getattr(task, "title", ""),
+                meta.get("received_title"),
+                meta.get("cloud_output_name"),
+                status.get("file_name"),
+                p115_file_name(status),
+            ],
+        )
 
     def _submission_row(self, task) -> dict[str, Any] | None:
         submission_id = task.metadata.get("submission_id") or task.submission_id
@@ -2954,10 +2981,25 @@ class BridgeSelfShareTaskWorkflow:
         file_id = str((folder or {}).get("file_id") or "").strip()
         if not file_id or file_id in ids:
             return True
-        children = self._folder_child_ids(file_id)
-        if not children:
+        children = []
+        if hasattr(self.p115, "list_files"):
+            try:
+                children = self._p115_list_files(file_id)
+            except Exception:
+                LOG.debug("Failed to list organized folder children dest=%s", file_id, exc_info=True)
+                children = []
+        child_ids = {p115_item_id(item) for item in children if p115_item_id(item)}
+        if not child_ids:
             return True
-        return bool(set(children) & ids)
+        if child_ids & ids:
+            return True
+        for child in children:
+            if not p115_is_folder(child) or not is_season_folder_name(p115_file_name(child)):
+                continue
+            season_id = p115_item_id(child)
+            if season_id and set(self._folder_child_ids(season_id)) & ids:
+                return True
+        return False
 
     def _reject_if_unrelated(self, folder, task, rejected_file_ids):
         if not folder or self._folder_contains_received_items(folder, task):

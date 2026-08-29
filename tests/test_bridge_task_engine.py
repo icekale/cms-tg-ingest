@@ -3884,6 +3884,50 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(stored["own_share_file_id"], "dest-108978")
             self.assertEqual(result.metadata["intake_identity"]["dest_id"], "dest-108978")
 
+    def test_organizing_binds_cloud_dest_when_received_file_is_inside_season_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            self.p115.folder = {
+                "file_id": "dest-silo",
+                "file_name": "M-末日地堡-2023-[tmdb=125988]",
+                "parent_id": "tv-parent",
+            }
+            self.p115.files_by_parent["dest-silo"] = [
+                {"cid": "season-3", "n": "Season 03", "pid": "dest-silo"},
+            ]
+            self.p115.files_by_parent["season-3"] = [
+                {"fid": "ep-e02", "n": "Silo.S03E02.mkv", "cid": "season-3"},
+            ]
+            row = self._row()
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_file_ids": ["ep-e02"],
+                    "received_items": [
+                        {
+                            "file_id": "ep-e02",
+                            "file_name": "Silo.S03E02.mkv",
+                            "is_folder": False,
+                            "parent_id": "pending-cid",
+                            "received_item_verified": True,
+                        }
+                    ],
+                    "received_items_complete": True,
+                    "cloud_output_file_id": "ep-e02",
+                    "cloud_output_name": "Silo.S03E02.mkv",
+                },
+                row["id"],
+            )
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(stored["own_share_file_id"], "dest-silo")
+            self.assertNotIn("dest-silo", result.metadata.get("rejected_organized_file_ids") or [])
+
     def test_organizing_ignores_same_tmdb_dest_without_these_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp, tmdb_resolver=FakeReacherTmdbResolver())

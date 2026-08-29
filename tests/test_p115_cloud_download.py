@@ -80,6 +80,69 @@ class P115CloudDownloadTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "temporary listing failure"):
             client.discover_cloud_download_outputs({"file_id": "container"})
 
+    def test_discover_cloud_outputs_matches_named_file_among_siblings(self):
+        http = FakeHttp(
+            [
+                {
+                    "state": True,
+                    "data": [
+                        {"fid": "e01", "cid": "container", "n": "Silo.S03E01.mkv"},
+                        {"fid": "e02", "cid": "container", "n": "Silo.S03E02.mkv"},
+                        {"fid": "e03", "cid": "container", "n": "Silo.S03E03.mkv"},
+                    ],
+                }
+            ]
+        )
+        client = P115WebClient("UID=1", http=http)
+
+        items = client.discover_cloud_download_outputs(
+            {"file_id": "container", "file_name": "Silo.S03E02.mkv"}
+        )
+
+        self.assertEqual([item["file_id"] for item in items], ["e02"])
+        self.assertEqual(items[0]["file_name"], "Silo.S03E02.mkv")
+
+    def test_discover_cloud_outputs_keeps_same_stem_companions(self):
+        http = FakeHttp(
+            [
+                {
+                    "state": True,
+                    "data": [
+                        {"fid": "video", "cid": "container", "n": "S01E01.mkv"},
+                        {"fid": "subtitle", "cid": "container", "n": "S01E01.zh.srt"},
+                        {"fid": "other", "cid": "container", "n": "S01E02.mkv"},
+                    ],
+                }
+            ]
+        )
+        client = P115WebClient("UID=1", http=http)
+
+        items = client.discover_cloud_download_outputs(
+            {"file_id": "container", "file_name": "S01E01.mkv"}
+        )
+
+        self.assertEqual([item["file_id"] for item in items], ["video", "subtitle"])
+
+    def test_discover_cloud_outputs_keeps_pack_when_name_does_not_match(self):
+        http = FakeHttp(
+            [
+                {
+                    "state": True,
+                    "data": [
+                        {"fid": "video", "cid": "container", "n": "S01E01.mkv"},
+                        {"fid": "extra", "cid": "container", "n": "S01E02.mkv"},
+                    ],
+                }
+            ]
+        )
+        client = P115WebClient("UID=1", http=http)
+
+        items = client.discover_cloud_download_outputs(
+            {"file_id": "container", "file_name": "Season Pack"}
+        )
+
+        self.assertEqual([item["file_id"] for item in items], ["video", "extra"])
+
     def test_discover_cloud_outputs_accepts_explicit_file_record(self):
         client = P115WebClient("UID=1", http=FakeHttp([]))
 
