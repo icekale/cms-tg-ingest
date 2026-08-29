@@ -4,8 +4,9 @@ from types import SimpleNamespace
 
 from app.quality import QualityIssue, format_task_quality_report
 from app.quality_automation import QualityRepairPlan, QualityRunSummary
-from app.telegram_rich import RichDocument, bold, details, heading, paragraph, table
+from app.telegram_rich import RichDocument, bold, details, divider, heading, italic, paragraph, table
 from app.telegram_ui import (
+    display_status,
     format_counts,
     format_hdhive_candidate_label,
     format_hdhive_candidates,
@@ -87,6 +88,20 @@ class TelegramRichTests(unittest.TestCase):
         self.assertEqual(doc.to_blocks()[0]["type"], "paragraph")
         self.assertIn("已设置集数过滤：S01", doc.to_plain())
         self.assertEqual(RichDocument((heading("订阅"),)).with_leading_paragraph("").to_blocks()[0]["type"], "heading")
+
+    def test_italic_and_divider_to_blocks(self):
+        doc = RichDocument((heading("标题"), divider(), paragraph(italic("说明"))))
+        blocks = doc.to_blocks()
+        self.assertEqual(blocks[1], {"type": "divider"})
+        self.assertEqual(blocks[2]["text"], {"type": "italic", "text": "说明"})
+        self.assertEqual(doc.to_plain(), "标题\n\n说明")
+
+    def test_table_caption_renders_before_rows(self):
+        doc = RichDocument((table(("任务", "状态"), (("A", "完成"),), caption="共 1 条"),))
+        block = doc.to_blocks()[0]
+        self.assertEqual(block["caption"], "共 1 条")
+        self.assertTrue(doc.to_plain().startswith("共 1 条"))
+        self.assertIn("A | 完成", doc.to_plain())
 
 
 class TelegramUiRichTests(unittest.TestCase):
@@ -545,6 +560,123 @@ class TelegramUiRichTests(unittest.TestCase):
         )
         self.assertIn("未知原因", doc.to_plain())
         self.assertIn("未知原因", repr(doc.to_blocks()))
+
+
+def _tables(document: RichDocument) -> list[dict]:
+    return [block for block in document.to_blocks() if block["type"] == "table"]
+
+
+def _cell_text(cell: dict) -> str:
+    text = cell.get("text")
+    if isinstance(text, dict):
+        return str(text.get("text") or "")
+    return str(text or "")
+
+
+class TelegramRichLayoutTests(unittest.TestCase):
+    def test_display_status_uses_chinese_labels(self):
+        self.assertEqual(display_status(TaskStatus.PENDING), "等待")
+        self.assertEqual(display_status("done"), "完成")
+        self.assertEqual(display_status("manual_required"), "需人工")
+        self.assertEqual(display_status("运行中"), "运行中")
+
+    def test_format_status_uses_narrow_table_and_chinese_bold_status(self):
+        doc = format_status([{"title": "海贼王", "status": "done", "last_error": "磁盘已满"}])
+        table = _tables(doc)[0]
+        self.assertLessEqual(len(table["cells"][0]), 4)
+        self.assertEqual(table["caption"], "共 1 条")
+        status = table["cells"][1][-1]["text"]
+        self.assertEqual(status, {"type": "bold", "text": "完成"})
+        self.assertIn("磁盘已满", doc.to_plain())
+        self.assertEqual(doc.to_blocks()[0]["size"], 2)
+
+    def test_taskstore_status_keeps_errors_out_of_the_table(self):
+        task = SimpleNamespace(
+            id=9,
+            title="正常任务",
+            metadata={},
+            category="",
+            current_stage=TaskStage.ORGANIZING,
+            status=TaskStatus.RUNNING,
+            error_summary="整理超时",
+            next_run_at=0,
+            claimed_by="",
+            claimed_at=None,
+            updated_at=0,
+            created_at=0,
+        )
+        doc = format_taskstore_status([task])
+        table = _tables(doc)[0]
+        headers = [_cell_text(cell) for cell in table["cells"][0]]
+        self.assertEqual(headers, ["#", "任务", "阶段", "状态"])
+        self.assertEqual(table["cells"][1][3]["text"], {"type": "bold", "text": "进行中"})
+        self.assertNotIn("整理超时", " | ".join(_cell_text(cell) for cell in table["cells"][1]))
+        self.assertIn("整理超时", doc.to_plain())
+
+    def test_taskstore_history_moves_path_into_details(self):
+        task = SimpleNamespace(
+            id=10,
+            title="正常任务",
+            metadata={"category": "外国电影", "emby_parent": "Movies", "dest_path": "/library/Movie"},
+            category="",
+            current_stage=TaskStage.CLEANED,
+            status=TaskStatus.SUCCEEDED,
+        )
+        doc = format_taskstore_history([task])
+        table = _tables(doc)[0]
+        self.assertEqual([_cell_text(cell) for cell in table["cells"][0]], ["#", "任务", "阶段", "状态"])
+        self.assertLessEqual(len(table["cells"][0]), 4)
+        self.assertIn("路径：/library/Movie", doc.to_plain())
+        self.assertIn("details", [block["type"] for block in doc.to_blocks()])
+
+    def test_quality_manual_report_is_narrow_and_localizes_risk(self):
+        doc = format_quality_manual_report(
+            [
+                {
+                    "task_id": 12,
+                    "title": "质量任务",
+                    "rule_id": "missing_destination",
+                    "risk_level": "medium",
+                    "manual_status": "manual_required",
+                    "rule_reason": "需要人工确认",
+                    "attempts": 2,
+                    "auto_allowed": False,
+                }
+            ]
+        )
+        table = _tables(doc)[0]
+        self.assertLessEqual(len(table["cells"][0]), 4)
+        self.assertEqual(table["cells"][1][2]["text"], {"type": "bold", "text": "中"})
+        self.assertIn("规则：missing_destination", doc.to_plain())
+        self.assertIn("需要人工确认", doc.to_plain())
+
+    def test_hdhive_candidates_combine_meta_into_one_column(self):
+        doc = format_hdhive_candidates(
+            [{"title": "攻壳机动队", "media_type": "tv", "year": "2020", "tmdb_id": "80986"}]
+        )
+        table = _tables(doc)[0]
+        self.assertLessEqual(len(table["cells"][0]), 4)
+        self.assertIn("剧集 · 2020 · 80986", doc.to_plain())
+        self.assertEqual(doc.to_blocks()[-1]["text"]["type"], "italic")
+
+    def test_hdhive_subscriptions_keep_source_out_of_the_table(self):
+        subscription = SimpleNamespace(
+            id=1,
+            title="剧集",
+            tmdb_id="1416",
+            source_url="https://example.test/show",
+            status="active",
+            last_error="",
+            episode_filter="",
+            last_summary_json="{}",
+        )
+        doc = format_hdhive_subscriptions([subscription])
+        table = _tables(doc)[0]
+        self.assertEqual([_cell_text(cell) for cell in table["cells"][0]], ["#", "剧名", "状态"])
+        table_text = " | ".join(_cell_text(cell) for row in table["cells"] for cell in row)
+        self.assertNotIn("example.test", table_text)
+        self.assertNotIn("<redacted-url>", table_text)
+        self.assertIn("<redacted-url>", doc.to_plain())
 
 
 class BridgeRichFormatterTests(unittest.TestCase):

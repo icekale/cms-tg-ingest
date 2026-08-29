@@ -17,7 +17,12 @@ class Code:
     text: str
 
 
-RichInline = Union[str, Bold, Code]
+@dataclass(frozen=True)
+class Italic:
+    text: str
+
+
+RichInline = Union[str, Bold, Code, Italic]
 
 
 @dataclass(frozen=True)
@@ -35,6 +40,7 @@ class Paragraph:
 class Table:
     headers: tuple[str, ...]
     rows: tuple[tuple[RichInline, ...], ...]
+    caption: str = ""
 
 
 @dataclass(frozen=True)
@@ -44,7 +50,12 @@ class Details:
     is_open: bool = False
 
 
-Block = Union[Heading, Paragraph, Table, Details]
+@dataclass(frozen=True)
+class Divider:
+    pass
+
+
+Block = Union[Heading, Paragraph, Table, Details, Divider]
 
 
 def bold(text: object) -> Bold:
@@ -55,16 +66,24 @@ def code(text: object) -> Code:
     return Code(str(text))
 
 
+def italic(text: object) -> Italic:
+    return Italic(str(text))
+
+
+def divider() -> Divider:
+    return Divider()
+
+
 def heading(text: object, size: int = 3) -> Heading:
     return Heading(str(text), size=int(size))
 
 
 def paragraph(text: RichInline) -> Paragraph:
-    return Paragraph(text if isinstance(text, (Bold, Code)) else str(text))
+    return Paragraph(text if isinstance(text, (Bold, Code, Italic)) else str(text))
 
 
-def table(headers: Sequence[str], rows: Sequence[Sequence[RichInline]]) -> Table:
-    return Table(tuple(str(item) for item in headers), tuple(tuple(row) for row in rows))
+def table(headers: Sequence[str], rows: Sequence[Sequence[RichInline]], caption: object = "") -> Table:
+    return Table(tuple(str(item) for item in headers), tuple(tuple(row) for row in rows), caption=str(caption or ""))
 
 
 def details(summary: object, blocks: Sequence[Block], is_open: bool = False) -> Details:
@@ -72,7 +91,7 @@ def details(summary: object, blocks: Sequence[Block], is_open: bool = False) -> 
 
 
 def _plain_inline(value: RichInline) -> str:
-    if isinstance(value, (Bold, Code)):
+    if isinstance(value, (Bold, Code, Italic)):
         return value.text
     return str(value)
 
@@ -82,6 +101,8 @@ def _api_inline(value: RichInline) -> Any:
         return {"type": "bold", "text": value.text}
     if isinstance(value, Code):
         return {"type": "code", "text": value.text}
+    if isinstance(value, Italic):
+        return {"type": "italic", "text": value.text}
     return str(value)
 
 
@@ -93,12 +114,17 @@ def _plain_blocks(blocks: Sequence[Block], indent: str = "") -> list[str]:
         elif isinstance(block, Paragraph):
             lines.append(f"{indent}{_plain_inline(block.text)}")
         elif isinstance(block, Table):
+            if block.caption:
+                lines.append(f"{indent}{block.caption}")
             lines.append(f"{indent}{' | '.join(block.headers)}")
             for row in block.rows:
                 lines.append(f"{indent}{' | '.join(_plain_inline(cell) for cell in row)}")
         elif isinstance(block, Details):
             lines.append(f"{indent}{block.summary}")
             lines.extend(_plain_blocks(block.blocks, indent=f"{indent}  "))
+        elif isinstance(block, Divider):
+            if lines and lines[-1] != "":
+                lines.append("")
     return lines
 
 
@@ -120,7 +146,10 @@ def _table_block(block: Table) -> dict[str, Any]:
     for row in rows:
         padded = list(row) + [""] * max(0, len(headers) - len(row))
         cells.append([_cell(_api_inline(cell)) for cell in padded[: len(headers)]])
-    return {"type": "table", "cells": cells, "is_bordered": True, "is_striped": True}
+    payload = {"type": "table", "cells": cells, "is_bordered": True, "is_striped": True}
+    if block.caption:
+        payload["caption"] = block.caption
+    return payload
 
 
 def _api_blocks(blocks: Sequence[Block]) -> list[dict[str, Any]]:
@@ -131,7 +160,7 @@ def _api_blocks(blocks: Sequence[Block]) -> list[dict[str, Any]]:
         elif isinstance(block, Paragraph):
             payload.append({"type": "paragraph", "text": _api_inline(block.text)})
         elif isinstance(block, Table):
-            visible = Table(block.headers, block.rows[:MAX_TABLE_ROWS])
+            visible = Table(block.headers, block.rows[:MAX_TABLE_ROWS], caption=block.caption)
             payload.append(_table_block(visible))
             overflow = block.rows[MAX_TABLE_ROWS:]
             if overflow:
@@ -152,6 +181,8 @@ def _api_blocks(blocks: Sequence[Block]) -> list[dict[str, Any]]:
             if block.is_open:
                 item["is_open"] = True
             payload.append(item)
+        elif isinstance(block, Divider):
+            payload.append({"type": "divider"})
     return payload
 
 
@@ -172,7 +203,7 @@ class RichDocument:
         expanded: list[Block] = []
         for block in self.blocks:
             if isinstance(block, Table) and len(block.rows) > MAX_TABLE_ROWS:
-                expanded.append(Table(block.headers, block.rows[:MAX_TABLE_ROWS]))
+                expanded.append(Table(block.headers, block.rows[:MAX_TABLE_ROWS], caption=block.caption))
                 expanded.append(
                     details(f"还有 {len(block.rows) - MAX_TABLE_ROWS} 条", (Table(block.headers, block.rows[MAX_TABLE_ROWS:]),))
                 )

@@ -901,8 +901,8 @@ class HdhiveBridgeTests(unittest.TestCase):
         self.assertIn("HDHive 候选媒体", text)
 
         self.assertEqual(len(telegram.rich_messages), 1)
-        self.assertIn("1 | 搏击俱乐部 | 电影 | 1999 | 550", text)
-        self.assertIn("2 | 攻壳机动队 SAC_2045 | 剧集 | 2020 | 80986", text)
+        self.assertIn("1 | 搏击俱乐部 | 电影 · 1999 · 550", text)
+        self.assertIn("2 | 攻壳机动队 SAC_2045 | 剧集 · 2020 · 80986", text)
         self.assertNotIn("[电影]", text)
         self.assertNotIn("TMDB:", text)
         session_id = workflow.sessions.active_for_chat(allowed).session_id
@@ -1025,7 +1025,8 @@ class HdhiveBridgeTests(unittest.TestCase):
         self.assertIsInstance(document, bridge.RichDocument)
         text = document.to_plain()
         self.assertTrue(text.startswith("HDHive 资源：未命名 (年份未知) · 电影 · TMDB 550"))
-        self.assertIn("# | 资源 | 网盘 | 大小 | 分辨率 | 费用 | 状态", text)
+        self.assertIn("# | 资源 | 网盘 | 状态", text)
+        self.assertNotIn("大小 | 分辨率 | 费用", text)
 
     def test_hdhive_resource_account_and_filter_feedback_redact_dynamic_fields(self):
         secret = "https://evil.test/s/raw?password=resource-password&share_code=resource-share token=resource-token"

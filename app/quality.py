@@ -234,4 +234,4 @@ def format_task_quality_report(issues: list[QualityIssue]) -> RichDocument:
         task_label = f"#{issue.task_id} {title}" if issue.task_id else title
         detail = f"：{redact_quality_detail(issue.detail, blocked_values=blocked)}" if issue.detail else ""
         rows.append((task_label, f"{message}{detail}"))
-    return document(heading("TaskStore 轻量巡检"), table(("# / 任务", "问题"), rows))
+    return document(heading("TaskStore 轻量巡检", 2), table(("# / 任务", "问题"), rows, caption=f"共 {len(rows)} 条"))

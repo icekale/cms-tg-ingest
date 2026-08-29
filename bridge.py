@@ -24,7 +24,7 @@ from app.clients.cms import CmsClient
 from app.cms_cloud_index import CmsCloudDataIndex
 from app.clients.emby import EmbyClient
 from app.clients.http import FormHttp, HttpJson, HttpRequestError, load_cookie_value
-from app.telegram_rich import RichDocument, bold, details, document, heading, paragraph, table
+from app.telegram_rich import RichDocument, bold, details, divider, document, heading, italic, paragraph, table
 from app.clients.hdhive import HdhiveProxyClient, HdhiveProxyError
 from app.clients.p115 import (
     CMS_PARENT_CID_CATEGORY_MAP,
@@ -176,6 +176,7 @@ from app.telegram_ui import (
     task_display_blocked_values,
     row_display_blocked_values,
     task_display_title,
+    display_status,
     format_hdhive_candidate_label,
     format_hdhive_candidates,
     format_hdhive_unlock_result,
@@ -323,7 +324,7 @@ def _quality_attention_message(summary: QualityRunSummary) -> RichDocument:
         rows.append((f"#{safe_telegram_text(plan.task_id, 40)}", title, safe_telegram_text(plan.reason, 160)))
 
     blocks = [
-        heading("质量巡检需要关注"),
+        heading("质量巡检需要关注", 2),
         paragraph(
             f"{safe_telegram_text(summary.run_id, 100)}：扫描 {safe_telegram_text(summary.scanned_count, 40)} 个任务，发现 {safe_telegram_text(summary.issue_count, 40)} 个问题，"
             f"失败 {safe_telegram_text(summary.failed_count, 40)} 个，跳过 {safe_telegram_text(len(plans), 40)} 个。"
@@ -1734,12 +1735,12 @@ def format_health(
         if openai_enabled:
             rows.append(("OpenAI分类兜底", bold("OK") if openai_ok else bold("FAIL"), ""))
         else:
-            rows.append(("OpenAI分类兜底", "DISABLED", ""))
+            rows.append(("OpenAI分类兜底", bold("未启用"), ""))
     if hdhive_enabled is not None:
         if hdhive_enabled:
             rows.append(("HDHive", bold("OK") if hdhive_ok else bold("FAIL"), ""))
         else:
-            rows.append(("HDHive", "DISABLED", ""))
+            rows.append(("HDHive", bold("未启用"), ""))
     rows.extend(
         [
             ("Emby", bold("OK") if emby_ok else bold("FAIL"), ""),
@@ -1749,9 +1750,10 @@ def format_health(
 
         ]
     )
-    blocks = [heading("健康检查"), table(("组件", "状态", "说明"), rows)]
+    blocks = [heading("健康检查", 2), table(("组件", "状态", "说明"), rows)]
     if task_health:
         health_lines = [paragraph(safe_telegram_text(line, 240)) for line in str(task_health).splitlines() if line]
+        blocks.append(divider())
         blocks.append(details("TaskStore", health_lines))
     return RichDocument(tuple(blocks))
 
@@ -2424,7 +2426,7 @@ def format_hdhive_resources(workflow: HdhiveWorkflow, session_id: str) -> tuple[
         ),
         {"media_type": session.media_type, "tmdb_id": session.tmdb_id},
     )
-    blocks: list = [heading(f"HDHive 资源：{safe_telegram_text(format_hdhive_candidate_label(candidate), 240)}")]
+    blocks: list = [heading(f"HDHive 资源：{safe_telegram_text(format_hdhive_candidate_label(candidate), 240)}", 2)]
     if not visible_indexes:
         blocks.append(paragraph("当前网盘筛选没有资源。"))
     rows = []
@@ -2432,20 +2434,26 @@ def format_hdhive_resources(workflow: HdhiveWorkflow, session_id: str) -> tuple[
     for index in visible_indexes:
         item = session.resources[index]
         invalid = str(item.validate_status or "").lower() == "invalid"
-        status = "不可用" if invalid else "可选"
         cost = "已解锁" if item.is_unlocked else f"积分 {item.unlock_points if item.unlock_points is not None else '未知'}"
-        selection = "已选" if index in session.selected_indexes else "未选"
         if index not in selectable:
-            selection = "不可选"
+            state = "不可选"
+        elif invalid:
+            state = "不可用"
+        elif index in session.selected_indexes:
+            state = "已选"
+        else:
+            state = "可选"
+        extras = []
+        resolution = safe_telegram_text("/".join(item.video_resolution) or "", 24)
+        if resolution:
+            extras.append(resolution)
+        extras.append(safe_telegram_text(cost, 40))
         rows.append(
             (
                 str(index + 1),
-                safe_telegram_text(item.title or "未命名", 80),
+                safe_telegram_text(item.title or "未命名", 48),
                 safe_telegram_text(item.pan_type or "未知", 40),
-                safe_telegram_text(item.share_size or "大小未知", 40),
-                safe_telegram_text("/".join(item.video_resolution) or "分辨率未知", 50),
-                safe_telegram_text(cost, 40),
-                f"{status}/{selection}",
+                bold(" · ".join([state, *extras])),
             )
         )
         if invalid and item.validate_message:
@@ -2456,9 +2464,11 @@ def format_hdhive_resources(workflow: HdhiveWorkflow, session_id: str) -> tuple[
                 )
             )
     if rows:
-        blocks.append(table(("#", "资源", "网盘", "大小", "分辨率", "费用", "状态"), rows))
-    blocks.extend(invalid_details)
-    blocks.append(paragraph(f"已选择：{len(session.selected_indexes)} 个。点击资源行选择，再点击解锁。"))
+        blocks.append(table(("#", "资源", "网盘", "状态"), rows, caption=f"共 {len(rows)} 个资源"))
+    if invalid_details:
+        blocks.append(divider())
+        blocks.extend(invalid_details)
+    blocks.append(paragraph(italic(f"已选择：{len(session.selected_indexes)} 个。点击资源行选择，再点击解锁。")))
     return RichDocument(tuple(blocks)), hdhive_resource_keyboard(
         session_id,
         session.resources,
@@ -2751,10 +2761,10 @@ def handle_hdhive_callback(
                     telegram.send_rich_message(
                         chat_id,
                         document(
-                            heading("HDHive 解锁确认"),
+                            heading("HDHive 解锁确认", 2),
                             paragraph(format_hdhive_account(preview.account)),
                             paragraph(f"预计最多消耗积分：{preview.maximum_points}"),
-                            paragraph("请确认解锁。"),
+                            paragraph(italic("请确认解锁。")),
                         ),
                         reply_markup=hdhive_confirmation_keyboard(session_id),
                     )
@@ -2780,10 +2790,10 @@ def handle_hdhive_callback(
                 telegram.send_rich_message(
                     chat_id,
                     document(
-                        heading("HDHive 解锁确认"),
+                        heading("HDHive 解锁确认", 2),
                         paragraph(format_hdhive_account(preview.account)),
                         paragraph(f"预计最多消耗积分：{preview.maximum_points}"),
-                        paragraph("请确认解锁。"),
+                        paragraph(italic("请确认解锁。")),
                     ),
                     reply_markup=hdhive_confirmation_keyboard(session_id),
                 )
@@ -4007,8 +4017,8 @@ def handle_task_action_callback(
         return True
     if action == "task_detail":
         events = task_store.list_events(task_id)[-5:]
-        event_lines = [safe_telegram_text(f"- {stage_display_name(TaskStage(event['stage'])) if event.get('stage') in TaskStage._value2member_map_ else event.get('stage')} / {event.get('status')}: {event.get('message')}", 200, blocked_values=task_display_blocked_values(task)) for event in events]
-        blocks = [heading(f"任务详情 #{task.id}"), paragraph(format_task_intake_reply(task))]
+        event_lines = [safe_telegram_text(f"- {stage_display_name(TaskStage(event['stage'])) if event.get('stage') in TaskStage._value2member_map_ else event.get('stage')} / {display_status(event.get('status'))}: {event.get('message')}", 200, blocked_values=task_display_blocked_values(task)) for event in events]
+        blocks = [heading(f"任务详情 #{task.id}", 2), paragraph(format_task_intake_reply(task))]
         if event_lines:
             blocks.append(details("最近事件", [paragraph(truncate_text(line, 200)) for line in event_lines]))
         telegram.answer_callback_query(callback_id, "已发送任务详情", show_alert=False)
@@ -4787,7 +4797,7 @@ def handle_update(
     telegram.send_rich_message(
         chat_id,
         document(
-            heading(f"收到 {len(sources)} 个链接"),
+            heading(f"收到 {len(sources)} 个链接", 2),
             table(("#", "类型", "结果"), display_rows),
         ),
     )

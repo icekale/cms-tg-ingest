@@ -1213,7 +1213,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertIn("TaskStore 最近任务", message)
             self.assertIn("#1 新任务电影", message)
             self.assertIn("STRM 生成", message)
-            self.assertIn("failed", message)
+            self.assertIn("失败", message)
             self.assertIn("未找到 STRM", message)
             self.assertNotIn("旧兼容记录", message)
 

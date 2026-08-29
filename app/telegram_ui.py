@@ -14,11 +14,68 @@ from app.models import TaskStage, TaskStatus
 from app.task_diagnostics import describe_task_wait, format_task_observability
 from app.task_actions import available_task_actions
 from app.task_engine import stage_display_name
-from app.telegram_rich import RichDocument, details, document, heading, paragraph, table
+from app.telegram_rich import RichDocument, bold, details, divider, document, heading, italic, paragraph, table
 from app.workflows.self_share import format_task_label
 
 
 _SERIES_UPDATE_CATEGORIES = {"国产电视", "外国电视", "番剧"}
+REPORT_HEADING_SIZE = 2
+
+_STATUS_LABELS = {
+    "pending": "等待",
+    "running": "进行中",
+    "succeeded": "成功",
+    "success": "成功",
+    "done": "完成",
+    "failed": "失败",
+    "error": "失败",
+    "needs_action": "待处理",
+    "cancelled": "已取消",
+    "canceled": "已取消",
+    "open": "待处理",
+    "manual_required": "需人工",
+    "snoozed": "已暂缓",
+    "ignored": "已忽略",
+    "confirmed": "已入库",
+    "moved": "已移动",
+    "skipped": "已跳过",
+    "ok": "正常",
+    "fail": "异常",
+    "disabled": "未启用",
+    "active": "运行中",
+    "paused": "已暂停",
+    "completed": "已完结",
+}
+
+_RISK_LABELS = {
+    "high": "高",
+    "medium": "中",
+    "low": "低",
+}
+
+
+def display_status(value: object) -> str:
+    if value is None:
+        return "-"
+    raw = str(getattr(value, "value", value) or "").strip()
+    if not raw:
+        return "-"
+    return _STATUS_LABELS.get(raw.casefold(), raw)
+
+
+def status_text(value: object) -> Any:
+    return bold(display_status(value))
+
+
+def display_risk(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "-"
+    return _RISK_LABELS.get(raw.casefold(), raw)
+
+
+def _report_heading(text: object):
+    return heading(text, REPORT_HEADING_SIZE)
 
 
 def _normalized_code(value: object) -> str:
@@ -64,18 +121,29 @@ def format_history(rows: list[dict[str, Any]]) -> RichDocument:
     if not rows:
         return document(paragraph("暂无历史记录。"))
     table_rows = []
+    extras = []
     for idx, row in enumerate(rows, 1):
         blocked = row_display_blocked_values(row)
-        table_rows.append(
-            (
-                str(idx),
-                safe_telegram_text(format_task_label(row), 120, blocked_values=blocked),
-                safe_telegram_text(row.get("category_final") or row.get("category_choice") or row.get("category_status") or "-", 120, blocked_values=blocked),
-                safe_telegram_text(row.get("move_status") or "-", 120, blocked_values=blocked),
-                safe_telegram_text(row.get("emby_status") or "-", 120, blocked_values=blocked),
-            )
-        )
-    blocks: list = [heading("最近历史"), table(("#", "任务", "分类", "移动", "Emby"), table_rows)]
+        title = safe_telegram_text(format_task_label(row), 80, blocked_values=blocked)
+        category = safe_telegram_text(row.get("category_final") or row.get("category_choice") or row.get("category_status") or "-", 80, blocked_values=blocked)
+        emby = safe_telegram_text(row.get("emby_status") or "-", 80, blocked_values=blocked)
+        table_rows.append((str(idx), title, category, status_text(emby)))
+        detail_lines = []
+        move = safe_telegram_text(row.get("move_status") or "", 80, blocked_values=blocked).strip()
+        if move and move != "-":
+            detail_lines.append(paragraph(f"移动：{display_status(move)}"))
+        error = safe_telegram_text(row.get("last_error") or "", 160, blocked_values=blocked).strip()
+        if error:
+            detail_lines.append(paragraph(f"错误：{error}"))
+        if detail_lines:
+            extras.append(details(f"{idx}. {title}", detail_lines))
+    blocks: list = [
+        _report_heading("最近历史"),
+        table(("#", "任务", "分类", "Emby"), table_rows, caption=f"共 {len(table_rows)} 条"),
+    ]
+    if extras:
+        blocks.append(divider())
+        blocks.extend(extras)
     failure_summary = format_failure_summary(rows)
     if failure_summary:
         blocks.append(paragraph(failure_summary))
@@ -89,7 +157,8 @@ def format_taskstore_history(tasks: list[Any]) -> RichDocument:
     if not tasks:
         return RichDocument()
     table_rows = []
-    for idx, task in enumerate(tasks, 1):
+    extras = []
+    for task in tasks:
         title = task_display_title(task, 80)
         blocked = task_display_blocked_values(task)
         category = safe_telegram_text(task.category or task.metadata.get("category") or task.metadata.get("category_final") or "-", 120, blocked_values=blocked)
@@ -100,13 +169,26 @@ def format_taskstore_history(tasks: list[Any]) -> RichDocument:
                 f"#{task.id}",
                 title,
                 stage_display_name(task.current_stage),
-                task.status.value,
-                str(category),
-                str(emby_parent),
-                dest,
+                status_text(task.status),
             )
         )
-    return document(heading("TaskStore 最近历史"), table(("#", "任务", "阶段", "状态", "分类", "媒体库", "路径"), table_rows))
+        detail_lines = []
+        if category and category != "-":
+            detail_lines.append(paragraph(f"分类：{category}"))
+        if emby_parent and emby_parent != "-":
+            detail_lines.append(paragraph(f"媒体库：{emby_parent}"))
+        if dest and dest != "-":
+            detail_lines.append(paragraph(f"路径：{dest}"))
+        if detail_lines:
+            extras.append(details(f"#{task.id} {title}", detail_lines))
+    blocks: list = [
+        _report_heading("TaskStore 最近历史"),
+        table(("#", "任务", "阶段", "状态"), table_rows, caption=f"共 {len(table_rows)} 条"),
+    ]
+    if extras:
+        blocks.append(divider())
+        blocks.extend(extras)
+    return RichDocument(tuple(blocks))
 
 
 def format_failure_summary(rows: list[dict[str, Any]]) -> str:
@@ -193,7 +275,10 @@ def format_quality_report(rows: list[dict[str, Any]]) -> RichDocument:
         )
     if not table_rows:
         return document(paragraph("最近任务未发现明显错配。"))
-    return document(heading("质量巡检：发现疑似错配"), table(("#", "任务", "Emby", "问题"), table_rows))
+    return document(
+        _report_heading("质量巡检：发现疑似错配"),
+        table(("#", "任务", "Emby", "问题"), table_rows, caption=f"共 {len(table_rows)} 条"),
+    )
 
 
 def quality_issue_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -253,6 +338,7 @@ def format_quality_manual_report(rows: list[dict[str, Any]]) -> RichDocument:
     if not rows:
         return document(paragraph("质量巡检：当前没有需要人工处理的问题。"))
     table_rows = []
+    extras = []
     for row in rows:
         raw_title = row.get("title")
         blocked = row_display_blocked_values(row)
@@ -264,17 +350,27 @@ def format_quality_manual_report(rows: list[dict[str, Any]]) -> RichDocument:
             (
                 f"#{row.get('task_id')}",
                 title,
-                safe_telegram_text(row.get("rule_id") or "-", 80),
-                safe_telegram_text(row.get("risk_level") or "-", 40),
-                safe_telegram_text(row.get("manual_status") or "open", 40),
-                reason,
-                safe_telegram_text(row.get("attempts", 0), 40),
+                bold(display_risk(row.get("risk_level") or "-")),
+                status_text(row.get("manual_status") or "open"),
             )
         )
-    return document(
-        heading(f"质量巡检：{len(rows)} 项需要关注"),
-        table(("#", "任务", "规则", "风险", "状态", "原因", "尝试"), table_rows),
-    )
+        extras.append(
+            details(
+                f"#{row.get('task_id')} {title}",
+                (
+                    paragraph(f"规则：{safe_telegram_text(row.get('rule_id') or '-', 80)}"),
+                    paragraph(f"原因：{reason}"),
+                    paragraph(f"尝试：{safe_telegram_text(row.get('attempts', 0), 40)}"),
+                ),
+            )
+        )
+    blocks: list = [
+        _report_heading(f"质量巡检：{len(rows)} 项需要关注"),
+        table(("#", "任务", "风险", "状态"), table_rows, caption=f"共 {len(rows)} 条"),
+        divider(),
+        *extras,
+    ]
+    return RichDocument(tuple(blocks))
 
 
 def quality_manual_keyboard(rows: list[dict[str, Any]], limit: int = 8) -> dict[str, Any] | None:
@@ -320,16 +416,28 @@ def format_metrics(payload: dict[str, Any]) -> RichDocument:
         ("媒体库", safe_telegram_text(payload.get("library_summary") or "-", 180)),
         ("Telegram瞬时错误", safe_telegram_text(payload.get("telegram_last_transient_error_at") or "-", 80)),
     )
-    return document(heading("任务统计"), table(("项", "值"), rows))
+    return document(_report_heading("任务统计"), table(("项", "值"), rows))
 
 
 def format_status(rows: list[dict[str, Any]]) -> RichDocument:
     if not rows:
         return document(paragraph("暂无记录。直接发送 115 分享链接即可创建任务。"))
     table_rows = []
-    for row in rows:
-        table_rows.append((safe_telegram_text(format_task_label(row), 120, blocked_values=row_display_blocked_values(row)), safe_telegram_text(row.get("status") or "unknown", 60), safe_telegram_text(row.get("last_error"), 160, blocked_values=row_display_blocked_values(row))))
-    blocks: list = [heading("最近任务"), table(("任务", "状态", "错误"), table_rows)]
+    extras = []
+    for index, row in enumerate(rows, 1):
+        blocked = row_display_blocked_values(row)
+        title = safe_telegram_text(format_task_label(row), 80, blocked_values=blocked)
+        table_rows.append((title, status_text(row.get("status") or "unknown")))
+        error = safe_telegram_text(row.get("last_error"), 160, blocked_values=blocked).strip()
+        if error:
+            extras.append(details(f"{index}. {title}", (paragraph(f"错误：{error}"),)))
+    blocks: list = [
+        _report_heading("最近任务"),
+        table(("任务", "状态"), table_rows, caption=f"共 {len(table_rows)} 条"),
+    ]
+    if extras:
+        blocks.append(divider())
+        blocks.extend(extras)
     failure_summary = format_failure_summary(rows)
     if failure_summary:
         blocks.append(paragraph(failure_summary))
@@ -372,19 +480,20 @@ def format_hdhive_candidates(candidates: list[dict[str, str]]) -> RichDocument:
         return document(paragraph("没有找到匹配的 TMDB 媒体。"))
     rows = []
     for index, candidate in enumerate(candidates[:12], 1):
+        media_type = "电影" if candidate.get("media_type") == "movie" else "剧集"
+        year = safe_telegram_text(candidate.get("year") or "年份未知", 40)
+        tmdb_id = safe_telegram_text(candidate.get("tmdb_id") or "-", 60)
         rows.append(
             (
                 str(index),
-                truncate_end(safe_telegram_text(candidate.get("title") or "未命名", 1000), 80),
-                "电影" if candidate.get("media_type") == "movie" else "剧集",
-                safe_telegram_text(candidate.get("year") or "年份未知", 40),
-                safe_telegram_text(candidate.get("tmdb_id") or "-", 60),
+                truncate_end(safe_telegram_text(candidate.get("title") or "未命名", 1000), 56),
+                safe_telegram_text(f"{media_type} · {year} · {tmdb_id}", 80),
             )
         )
     return document(
-        heading("HDHive 候选媒体"),
-        table(("#", "标题", "类型", "年份", "TMDB"), rows),
-        paragraph(f"请选择要查询的媒体，共 {len(rows)} 个候选。"),
+        _report_heading("HDHive 候选媒体"),
+        table(("#", "标题", "信息"), rows, caption=f"共 {len(rows)} 个候选"),
+        paragraph(italic("请选择要查询的媒体。")),
     )
 
 
@@ -409,14 +518,14 @@ def format_hdhive_unlock_result(
             failed_count += 1
             status = "失败"
         reason = _safe_hdhive_failure_reason(item.message or item.error_code or "未知原因") if not item.success else "-"
-        rows.append((safe_telegram_text(str(item.slug), 80), status, reason))
+        rows.append((safe_telegram_text(str(item.slug), 80), bold(status), reason))
+    caption = f"成功 {success_count} 个，失败 {failed_count} 个。"
     blocks: list = [
-        heading("HDHive 解锁结果"),
-        table(("资源", "状态", "原因"), rows),
+        _report_heading("HDHive 解锁结果"),
+        table(("资源", "状态", "原因"), rows, caption=caption if rows else ""),
     ]
     if not rows:
         blocks.append(paragraph("没有返回解锁结果。"))
-    blocks.append(paragraph(f"成功 {success_count} 个，失败 {failed_count} 个。"))
     if enqueue_error:
         blocks.append(paragraph(f"115 入库提交失败：{safe_telegram_text(enqueue_error, 160)}。解锁链接未丢失，请稍后重试。"))
     elif enqueued_count:
@@ -440,18 +549,27 @@ def format_taskstore_status(tasks: list[Any]) -> RichDocument:
                 f"#{task.id}",
                 title,
                 stage_display_name(task.current_stage),
-                task.status.value,
-                safe_telegram_text(task.error_summary, 100, blocked_values=blocked),
+                status_text(task.status),
             )
         )
         detail_lines = []
+        error = safe_telegram_text(task.error_summary, 160, blocked_values=blocked).strip()
+        if error:
+            detail_lines.append(paragraph(f"错误：{error}"))
         if task.status in {TaskStatus.RUNNING, TaskStatus.PENDING}:
             detail_lines.append(paragraph(f"等待：{safe_telegram_text(describe_task_wait(task, now=time.time()), 200, blocked_values=blocked)}"))
         for line in format_task_observability(task, now=time.time()):
             detail_lines.append(paragraph(safe_telegram_text(line, 200, blocked_values=blocked)))
         if detail_lines:
             extra.append(details(f"#{task.id} {title}", detail_lines))
-    return RichDocument((heading("TaskStore 最近任务"), table(("#", "任务", "阶段", "状态", "错误"), table_rows), *extra))
+    blocks: list = [
+        _report_heading("TaskStore 最近任务"),
+        table(("#", "任务", "阶段", "状态"), table_rows, caption=f"共 {len(table_rows)} 条"),
+    ]
+    if extra:
+        blocks.append(divider())
+        blocks.extend(extra)
+    return RichDocument(tuple(blocks))
 
 
 def task_action_keyboard(
@@ -510,7 +628,7 @@ def format_hdhive_subscriptions(
 ) -> RichDocument:
     if not subscriptions:
         return document(paragraph("暂无 HDHive 剧集订阅。"))
-    blocks: list = [heading("HDHive 剧集订阅")]
+    blocks: list = [_report_heading("HDHive 剧集订阅")]
     if scheduler_snapshot:
         blocks.append(
             paragraph(
@@ -522,11 +640,13 @@ def format_hdhive_subscriptions(
     extras = []
     status_map = {"active": "运行中", "paused": "已暂停", "error": "异常", "completed": "已完结"}
     for subscription in subscriptions:
-        status = safe_telegram_text(status_map.get(subscription.status, subscription.status), 40)
+        status = bold(status_map.get(subscription.status, display_status(subscription.status)))
         source = safe_telegram_text(subscription.source_url or f"TMDB:{subscription.tmdb_id}", 180)
-        title = safe_telegram_text(subscription.title or subscription.tmdb_id, 120)
-        table_rows.append((safe_telegram_text(f"#{subscription.id}", 40), title, status, source))
+        title = safe_telegram_text(subscription.title or subscription.tmdb_id, 80)
+        table_rows.append((safe_telegram_text(f"#{subscription.id}", 40), title, status))
         detail_blocks = []
+        if source:
+            detail_blocks.append(paragraph(f"来源：{source}"))
         episode_filter = safe_telegram_text(getattr(subscription, "episode_filter", "") or "", 120).strip()
         if episode_filter:
             detail_blocks.append(paragraph(f"集数过滤：{episode_filter}"))
@@ -562,8 +682,10 @@ def format_hdhive_subscriptions(
         if detail_blocks:
             extras.append(details(safe_telegram_text(f"#{subscription.id} {title}", 160), detail_blocks))
 
-    blocks.append(table(("#", "剧名", "状态", "来源"), table_rows))
-    blocks.extend(extras)
+    blocks.append(table(("#", "剧名", "状态"), table_rows, caption=f"共 {len(table_rows)} 条"))
+    if extras:
+        blocks.append(divider())
+        blocks.extend(extras)
     if pending_items:
         blocks.append(paragraph(f"待确认高费用资源：{len(pending_items)} 个，请点击按钮确认。"))
     return RichDocument(tuple(blocks))
