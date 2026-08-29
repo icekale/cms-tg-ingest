@@ -82,6 +82,7 @@ LOG = logging.getLogger("cms-tg-ingest")
 OPENAI_CATEGORY_LABELS = ["华语电影", "欧美电影", "亚洲电影", "动漫电影", "国产电视", "外国电视", "番剧", "纪录片"]
 _RECEIVE_RECOVERY_RETRY_SECONDS = 30
 _RECEIVE_RECOVERY_WINDOW_SECONDS = 300
+_CREATE_SHARE_RETRY_AFTER_SECONDS = 900
 _DELETE_RECOVERY_RETRY_SECONDS = 30
 _DELETE_RECOVERY_WINDOW_SECONDS = 300
 _MULTI_DESTINATIONS = "multiple"
@@ -3630,7 +3631,27 @@ class BridgeSelfShareTaskWorkflow:
                     f"multi-target share operation identity mismatch: target_id={request_target_id or 'missing'} "
                     f"file_id={request_file_id or 'missing'} expected target_id={target_id} file_id={file_id}"
                 )
-        if operation.status == "prepared":
+        created = None
+        if operation.status in {"started", "uncertain"}:
+            recovered = self.p115.find_own_share_by_title(
+                str(operation.request.get("share_title") or ""),
+                min_create_time=self._positive_timestamp(operation.request.get("requested_at")),
+            )
+            if recovered:
+                created = recovered
+                if recovered.get("recovery_status") == "ambiguous":
+                    return recovered
+                if operation.status == "started":
+                    completed = self.task_store.complete_operation(int(task.id), operation_key, recovered)
+                    operation = completed or operation
+            elif self._create_share_operation_is_stale(operation):
+                reprepared = self.task_store.reprepare_operation(int(task.id), operation_key)
+                if reprepared is None:
+                    raise P115SharePendingError("115 create share outcome is not visible yet")
+                operation = reprepared
+            else:
+                raise P115SharePendingError("115 create share outcome is not visible yet")
+        if created is None and operation.status == "prepared":
             started = self.task_store.start_operation(int(task.id), operation_key)
             operation = started or self.task_store.find_operation(int(task.id), operation_key)
             if started is not None:
@@ -3646,30 +3667,28 @@ class BridgeSelfShareTaskWorkflow:
                     raise
                 completed = self.task_store.complete_operation(int(task.id), operation_key, created)
                 operation = completed or self.task_store.find_operation(int(task.id), operation_key)
-        if operation.status == "succeeded":
-            created = operation.result
-        elif operation.status in {"started", "uncertain"}:
-            recovered = self.p115.find_own_share_by_title(
-                str(operation.request.get("share_title") or ""),
-                min_create_time=self._positive_timestamp(operation.request.get("requested_at")),
-            )
-            if not recovered:
+        if created is None:
+            if operation.status == "succeeded":
+                created = operation.result
+            elif operation.status in {"started", "uncertain"}:
                 raise P115SharePendingError("115 create share outcome is not visible yet")
-            created = recovered
-            if recovered.get("recovery_status") == "ambiguous":
-                return recovered
-            if operation.status == "started":
-                completed = self.task_store.complete_operation(int(task.id), operation_key, recovered)
-                operation = completed or operation
-        elif operation.status == "failed":
-            raise RuntimeError(operation.last_error or "115 create share failed")
-        else:
-            raise RuntimeError(f"unsupported create share operation status: {operation.status}")
+            elif operation.status == "failed":
+                raise RuntimeError(operation.last_error or "115 create share failed")
+            else:
+                raise RuntimeError(f"unsupported create share operation status: {operation.status}")
         settings = self.p115.ensure_share_settings(
             str(created.get("share_code") or ""),
             str(operation.request.get("receive_code") or receive_code),
         )
         return {**created, **settings}
+
+    def _create_share_operation_is_stale(self, operation: Any) -> bool:
+        started_at = self._positive_timestamp(getattr(operation, "started_at", 0))
+        if not started_at:
+            started_at = self._positive_timestamp(getattr(operation, "created_at", 0))
+        if not started_at:
+            return False
+        return self._now() - started_at >= _CREATE_SHARE_RETRY_AFTER_SECONDS
 
     def _create_share_operation_metadata(self, operation: Any | None) -> dict[str, Any]:
         if operation is None or operation.status not in {"started", "uncertain", "succeeded"}:

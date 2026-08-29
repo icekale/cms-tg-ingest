@@ -5592,6 +5592,100 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.p115.settings, [("recovered-code", "1212")])
             self.assertEqual(stored["own_share_code"], "recovered-code")
 
+    def test_create_share_retries_stale_started_operation_when_recovery_finds_nothing(self):
+        class MissingShareP115(FakeP115):
+            def find_own_share_by_title(self, title, min_create_time=0):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            self.p115 = MissingShareP115()
+            workflow.p115 = self.p115
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="E-耳语人-2026-[tmdb=860508]",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+            operation_key = self._create_share_operation_key(task, "folder-id")
+            self.tasks.prepare_operation(
+                task.id,
+                operation_key,
+                "create_share",
+                {
+                    "file_id": "folder-id",
+                    "share_title": "E-耳语人-2026-[tmdb=860508]",
+                    "receive_code": "1212",
+                    "requested_at": 1000.0,
+                },
+            )
+            started = self.tasks.start_operation(task.id, operation_key)
+            workflow._now = lambda: started.started_at + 900
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            operation = self.tasks.find_operation(task.id, operation_key)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(self.p115.created_shares, ["folder-id"])
+            self.assertEqual(stored["own_share_code"], "owncode")
+            self.assertEqual(operation.status, "succeeded")
+            self.assertEqual(operation.attempt_count, 2)
+
+    def test_create_share_still_defers_fresh_started_operation_without_visible_share(self):
+        class MissingShareP115(FakeP115):
+            def find_own_share_by_title(self, title, min_create_time=0):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            self.p115 = MissingShareP115()
+            workflow.p115 = self.p115
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="folder-id",
+                own_share_file_name="E-耳语人-2026-[tmdb=860508]",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+            operation_key = self._create_share_operation_key(task, "folder-id")
+            self.tasks.prepare_operation(
+                task.id,
+                operation_key,
+                "create_share",
+                {
+                    "file_id": "folder-id",
+                    "share_title": "E-耳语人-2026-[tmdb=860508]",
+                    "receive_code": "1212",
+                    "requested_at": 1000.0,
+                },
+            )
+            started = self.tasks.start_operation(task.id, operation_key)
+            workflow._now = lambda: started.started_at + 60
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertEqual(result.delay_seconds, 1800)
+            self.assertIn("等待 115 完成分享创建", result.message)
+            self.assertEqual(self.p115.created_shares, [])
+            self.assertEqual(self.tasks.find_operation(task.id, operation_key).status, "started")
+
     def test_create_share_recovery_refuses_interleaved_same_title_candidates(self):
         class InterleavedCreateP115(FakeP115):
             def __init__(self):

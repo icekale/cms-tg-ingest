@@ -76,6 +76,32 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(failed.last_error, "request rejected")
             self.assertIsNone(store.start_operation(task.id, "failed"))
 
+    def test_reprepare_operation_allows_started_and_uncertain_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("operation-reprepare", "", "https://115cdn.com/s/operation-reprepare")
+
+            store.prepare_operation(task.id, "started", "create_share", {"file_id": "folder"})
+            started = store.start_operation(task.id, "started")
+            reprepared = store.reprepare_operation(task.id, "started")
+            self.assertEqual(reprepared.status, "prepared")
+            self.assertEqual(reprepared.attempt_count, started.attempt_count)
+            self.assertEqual(reprepared.result, {})
+            self.assertEqual(reprepared.last_error, "")
+            restarted = store.start_operation(task.id, "started")
+            self.assertEqual(restarted.status, "started")
+            self.assertEqual(restarted.attempt_count, 2)
+
+            store.prepare_operation(task.id, "uncertain", "create_share", {"file_id": "other"})
+            store.start_operation(task.id, "uncertain")
+            store.mark_operation_uncertain(task.id, "uncertain", "timeout")
+            self.assertEqual(store.reprepare_operation(task.id, "uncertain").status, "prepared")
+
+            store.prepare_operation(task.id, "succeeded", "create_share", {"file_id": "done"})
+            store.start_operation(task.id, "succeeded")
+            store.complete_operation(task.id, "succeeded", {"share_code": "abc"})
+            self.assertIsNone(store.reprepare_operation(task.id, "succeeded"))
+
     def test_complete_operation_persists_json_result_after_reopening_database(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "tasks.db"

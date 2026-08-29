@@ -497,6 +497,31 @@ class TaskStore:
             ).fetchone()
         return self._operation(row)
 
+    def reprepare_operation(self, task_id: int, operation_key: str) -> TaskOperation | None:
+        now = time.time()
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE task_operations
+                SET status = 'prepared',
+                    started_at = 0,
+                    finished_at = 0,
+                    result_json = '{}',
+                    last_error = '',
+                    updated_at = ?
+                WHERE task_id = ? AND operation_key = ? AND status IN ('started', 'uncertain')
+                """,
+                (now, int(task_id), str(operation_key)),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = conn.execute(
+                "SELECT * FROM task_operations WHERE task_id = ? AND operation_key = ?",
+                (int(task_id), str(operation_key)),
+            ).fetchone()
+        return self._operation(row)
+
     def complete_operation(
         self,
         task_id: int,
