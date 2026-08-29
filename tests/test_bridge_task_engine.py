@@ -2806,6 +2806,116 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
             self.assertEqual(workflow.p115.created_shares, ["shared-folder"])
 
+    def test_own_share_stage_reuses_sibling_share_for_same_dest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="share_alias_prepared",
+                own_share_file_id="dest-silo",
+                own_share_file_name="M-末日地堡-2023-[tmdb=125988]",
+            ) or row
+            sibling = self.tasks.upsert_task("sibling", "", "https://115cdn.com/s/sibling")
+            self.tasks.record_event(
+                sibling.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "sibling already shared dest",
+                metadata_patch={
+                    "own_share_file_id": "dest-silo",
+                    "own_share_code": "keep-code",
+                    "own_share_receive_code": "1212",
+                    "own_share_url": "https://115cdn.com/s/keep-code?password=1212",
+                    "own_share_child_ids": ["season-3"],
+                    "tmdb_id": "125988",
+                },
+            )
+            self.p115.files_by_parent["dest-silo"] = [
+                {"cid": "season-3", "n": "Season 03", "pid": "dest-silo"},
+            ]
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {"submission_id": row["id"], "own_share_file_id": "dest-silo"},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(workflow.p115.created_shares, [])
+            self.assertEqual(stored["own_share_code"], "keep-code")
+            self.assertEqual(stored["own_share_receive_code"], "1212")
+            self.assertEqual(result.metadata["own_share_code"], "keep-code")
+
+    def test_share_sync_skips_cms_when_sibling_already_synced_same_share(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            sibling = self.tasks.upsert_task("sibling", "", "https://115cdn.com/s/sibling")
+            self.tasks.record_event(
+                sibling.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "sibling already synced dest",
+                metadata_patch={
+                    "own_share_file_id": "dest-silo",
+                    "own_share_code": "keep-code",
+                    "own_share_receive_code": "1212",
+                },
+            )
+            sibling_key = f"{operation_scope(sibling)}:cms_share_sync:keep-code"
+            self.tasks.prepare_operation(
+                sibling.id,
+                sibling_key,
+                "cms_share_sync",
+                {
+                    "share_code": "keep-code",
+                    "receive_code": "1212",
+                    "cid": "0",
+                    "local_path": "/media/share",
+                },
+            )
+            self.tasks.start_operation(sibling.id, sibling_key)
+            self.tasks.complete_operation(
+                sibling.id,
+                sibling_key,
+                {"code": 200, "share_code": "keep-code"},
+            )
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                own_share_file_id="dest-silo",
+                own_share_file_name="M-末日地堡-2023-[tmdb=125988]",
+                own_share_code="keep-code",
+                own_share_receive_code="1212",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.SHARE_SYNC_SUBMITTED,
+                {
+                    "submission_id": row["id"],
+                    "own_share_file_id": "dest-silo",
+                    "own_share_code": "keep-code",
+                    "own_share_receive_code": "1212",
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            operation = self.tasks.find_operation(task.id, self._cms_share_sync_operation_key(task, "keep-code"))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(self.cms.share_sync_calls, [])
+            self.assertIsNotNone(operation)
+            self.assertEqual(operation.status, "succeeded")
+            self.assertTrue(operation.result.get("skipped_duplicate_dest"))
+
     def test_organizing_stage_normalizes_explicit_tmdb_name_before_cms(self):
         class ExplicitTmdbResolver:
             enabled = True

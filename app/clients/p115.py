@@ -1603,6 +1603,17 @@ class P115WebClient:
             "receive_code": returned_receive_code or actual_receive_code,
         }
 
+    def cancel_share(self, share_code: str) -> dict[str, Any]:
+        code = str(share_code or "").strip()
+        if not code:
+            raise RuntimeError("115 cancel share requires a share code")
+        resp = self._request(
+            "https://webapi.115.com/share/updateshare",
+            method="POST",
+            data={"share_code": code, "action": "cancel"},
+        )
+        return self._ensure_state(resp, "115 cancel share failed")
+
     def create_long_share(self, file_id: str, preferred_receive_code: str = "") -> dict[str, str]:
         created = self.create_share(file_id)
         settings = self.ensure_share_settings(

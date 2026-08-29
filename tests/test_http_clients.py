@@ -36,6 +36,34 @@ class TrackingHTTPError(HTTPError):
 
 
 class HttpClientTests(unittest.TestCase):
+    def test_cancel_share_posts_updateshare_cancel(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", data=None, headers=None, params=None):
+                self.calls.append((url, method, dict(data or {})))
+                if url.endswith("/share/updateshare"):
+                    return {"state": True}
+                raise AssertionError(url)
+
+        http = FakeHttp()
+        client = P115WebClient("UID=1", http=http, timeout=3)
+
+        result = client.cancel_share("extra-code")
+
+        self.assertEqual(result, {"state": True})
+        self.assertEqual(
+            http.calls,
+            [
+                (
+                    "https://webapi.115.com/share/updateshare",
+                    "POST",
+                    {"share_code": "extra-code", "action": "cancel"},
+                )
+            ],
+        )
+
     def test_create_share_only_sends_share_request(self):
         class FakeHttp:
             def __init__(self):

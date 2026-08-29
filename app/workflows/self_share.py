@@ -3222,6 +3222,16 @@ class BridgeSelfShareTaskWorkflow:
                         "share_create_requested_at": task.metadata.get("share_create_requested_at") or self._now(),
                     },
                 )
+        if not row.get("own_share_code") and create_operation is None:
+            reusable = self._reusable_dest_own_share(task, file_id, child_ids)
+            if reusable:
+                row = self.store.update_self_share(
+                    int(row["id"]),
+                    workflow_phase="own_share_created",
+                    own_share_code=reusable["share_code"],
+                    own_share_receive_code=reusable["receive_code"],
+                    own_share_url=reusable["share_url"],
+                ) or row
         if not row.get("own_share_code"):
             receive_code = resolve_own_share_receive_code(self.task_store, self.self_share_config).value
             try:
@@ -4093,27 +4103,31 @@ class BridgeSelfShareTaskWorkflow:
                 )
         if row.get("share_sync_status") != "submitted" or operation is not None:
             if operation is None:
-                waiting_task = self._pending_cms_share_sync_task(task)
-                if waiting_task:
-                    return StageResult.defer(
-                        "等待上一条 CMS 分享同步完成",
-                        5,
+                skipped = self._record_skipped_dest_share_sync(task, own_code, own_pwd)
+                if skipped is not None:
+                    operation = skipped
+                else:
+                    waiting_task = self._pending_cms_share_sync_task(task)
+                    if waiting_task:
+                        return StageResult.defer(
+                            "等待上一条 CMS 分享同步完成",
+                            5,
+                            {
+                                "submission_id": int(row["id"]),
+                                "share_sync_wait_task_id": waiting_task.id,
+                            },
+                        )
+                    operation = self.task_store.prepare_operation(
+                        int(task.id),
+                        operation_key,
+                        "cms_share_sync",
                         {
-                            "submission_id": int(row["id"]),
-                            "share_sync_wait_task_id": waiting_task.id,
+                            "share_code": own_code,
+                            "receive_code": own_pwd,
+                            "cid": self.self_share_config.cms_cid,
+                            "local_path": self.self_share_config.cms_local_path,
                         },
                     )
-                operation = self.task_store.prepare_operation(
-                    int(task.id),
-                    operation_key,
-                    "cms_share_sync",
-                    {
-                        "share_code": own_code,
-                        "receive_code": own_pwd,
-                        "cid": self.self_share_config.cms_cid,
-                        "local_path": self.self_share_config.cms_local_path,
-                    },
-                )
             if operation.status == "prepared":
                 started = self.task_store.start_operation(int(task.id), operation_key)
                 operation = started or self.task_store.find_operation(int(task.id), operation_key)
@@ -4178,6 +4192,76 @@ class BridgeSelfShareTaskWorkflow:
                 "share_sync_status": row.get("share_sync_status") or "submitted",
                 "share_sync_wait_task_id": "",
                 "cms_share_sync_outcome": sync_outcome,
+            },
+        )
+
+    def _reusable_dest_own_share(self, task, file_id: str, child_ids: list[str]) -> dict[str, str] | None:
+        dest = str(file_id or "").strip()
+        if not dest or not hasattr(self.task_store, "list_tasks_by_own_share_file_id"):
+            return None
+        wanted = [str(value) for value in child_ids]
+        for owner in self.task_store.list_tasks_by_own_share_file_id(dest, exclude_task_id=getattr(task, "id", None)):
+            metadata = owner.metadata if isinstance(owner.metadata, dict) else {}
+            share_code = str(metadata.get("own_share_code") or "").strip()
+            if not share_code:
+                continue
+            owner_children = metadata.get("own_share_child_ids")
+            if isinstance(owner_children, list) and sorted(str(value) for value in owner_children) != wanted:
+                continue
+            receive_code = str(metadata.get("own_share_receive_code") or "").strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
+            return {
+                "share_code": share_code,
+                "receive_code": receive_code,
+                "share_url": str(metadata.get("own_share_url") or "").strip(),
+            }
+        return None
+
+    def _sibling_dest_share_sync(self, task, share_code: str):
+        dest = str(task.metadata.get("own_share_file_id") or "").strip()
+        share_code = str(share_code or "").strip()
+        if not dest or not share_code or not hasattr(self.task_store, "list_tasks_by_own_share_file_id"):
+            return None
+        for owner in self.task_store.list_tasks_by_own_share_file_id(dest, exclude_task_id=getattr(task, "id", None)):
+            metadata = owner.metadata if isinstance(owner.metadata, dict) else {}
+            if str(metadata.get("own_share_code") or "").strip() != share_code:
+                continue
+            for operation in self.task_store.list_operations(int(owner.id)):
+                if operation.operation_type != "cms_share_sync" or operation.status != "succeeded":
+                    continue
+                result = operation.result if isinstance(operation.result, dict) else {}
+                result_code = str(result.get("share_code") or result.get("code") or "").strip()
+                if result_code == share_code:
+                    return operation
+        return None
+
+    def _record_skipped_dest_share_sync(self, task, own_code: str, own_pwd: str):
+        if self._sibling_dest_share_sync(task, own_code) is None:
+            return None
+        operation_key = f"{operation_scope(task)}:cms_share_sync:{own_code}"
+        operation = self.task_store.prepare_operation(
+            int(task.id),
+            operation_key,
+            "cms_share_sync",
+            {
+                "share_code": own_code,
+                "receive_code": own_pwd,
+                "cid": self.self_share_config.cms_cid,
+                "local_path": self.self_share_config.cms_local_path,
+            },
+        )
+        if operation.status == "succeeded":
+            return operation
+        started = self.task_store.start_operation(int(task.id), operation_key)
+        if started is None:
+            return self.task_store.find_operation(int(task.id), operation_key)
+        return self.task_store.complete_operation(
+            int(task.id),
+            operation_key,
+            {
+                "code": 200,
+                "msg": "skipped duplicate dest sync",
+                "share_code": own_code,
+                "skipped_duplicate_dest": True,
             },
         )
 
