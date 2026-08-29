@@ -1537,6 +1537,203 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(targets, [])
             self.assertIsNone(identity)
 
+    def test_resolve_intake_dest_folders_rejects_leftover_redundant_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(
+                tmp,
+                self_share_config=bridge.SelfShareConfig(
+                    enabled=True,
+                    strm_root=Path(tmp) / "share-strm",
+                    cms_cid="0",
+                    cms_local_path="/media/share",
+                    excluded_parent_ids={"pending-cid", "redundant-cid"},
+                    auto_organize_retry_seconds=30,
+                ),
+            )
+            movie = {
+                "fid": "movie-1",
+                "cid": "redundant-cid",
+                "n": "Chasing.the.Dragon.2017.mkv",
+            }
+            workflow.p115.search_hits = {
+                "Chasing.the.Dragon.2017.mkv": [movie],
+                "redundant-cid": [
+                    {"cid": "redundant-cid", "pid": "0", "n": "冗余", "fc": 1},
+                ],
+            }
+            workflow.p115.folder_paths = {
+                "redundant-cid": [{"cid": "redundant-cid", "pid": "0", "n": "冗余"}],
+            }
+            workflow.p115.files_by_parent = {"redundant-cid": [movie]}
+            task_metadata = {
+                "intake_identity": {
+                    "files": [{"id": "movie-1", "name": "Chasing.the.Dragon.2017.mkv"}],
+                    "root_ids": ["movie-1"],
+                }
+            }
+
+            status, targets, identity = workflow._resolve_intake_dest_folders(
+                task_metadata,
+                {},
+                receive_cid="pending-cid",
+            )
+
+            self.assertEqual(status, "incomplete")
+            self.assertEqual(targets, [])
+            self.assertIsNone(identity)
+
+    def test_resolve_intake_dest_folders_rejects_persisted_leftover_dest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(
+                tmp,
+                self_share_config=bridge.SelfShareConfig(
+                    enabled=True,
+                    strm_root=Path(tmp) / "share-strm",
+                    cms_cid="0",
+                    cms_local_path="/media/share",
+                    excluded_parent_ids={"pending-cid", "redundant-cid"},
+                    auto_organize_retry_seconds=30,
+                ),
+            )
+            movie = {
+                "fid": "movie-1",
+                "cid": "redundant-cid",
+                "n": "Chasing.the.Dragon.2017.mkv",
+            }
+            workflow.p115.files_by_parent = {"redundant-cid": [movie]}
+            workflow.p115.folder_paths = {
+                "redundant-cid": [{"cid": "redundant-cid", "pid": "0", "n": "冗余"}],
+            }
+            task_metadata = {
+                "intake_identity": {
+                    "files": [{"id": "movie-1", "name": "Chasing.the.Dragon.2017.mkv"}],
+                    "root_ids": ["movie-1"],
+                    "dest_id": "redundant-cid",
+                }
+            }
+
+            status, targets, identity = workflow._resolve_intake_dest_folders(
+                task_metadata,
+                {},
+                receive_cid="pending-cid",
+            )
+
+            self.assertEqual(status, "incomplete")
+            self.assertEqual(targets, [])
+            self.assertIsNone(identity)
+
+    def test_resolve_intake_dest_folders_rejects_folder_inside_leftover(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(
+                tmp,
+                self_share_config=bridge.SelfShareConfig(
+                    enabled=True,
+                    strm_root=Path(tmp) / "share-strm",
+                    cms_cid="0",
+                    cms_local_path="/media/share",
+                    excluded_parent_ids={"pending-cid", "redundant-cid"},
+                    auto_organize_retry_seconds=30,
+                ),
+            )
+            movie = {
+                "fid": "movie-1",
+                "cid": "leftover-pack",
+                "n": "Chasing.the.Dragon.2017.mkv",
+            }
+            workflow.p115.search_hits = {
+                "Chasing.the.Dragon.2017.mkv": [movie],
+                "leftover-pack": [
+                    {"cid": "leftover-pack", "pid": "redundant-cid", "n": "未识别包", "fc": 1},
+                ],
+            }
+            workflow.p115.folder_paths = {
+                "leftover-pack": [
+                    {"cid": "leftover-pack", "pid": "redundant-cid", "n": "未识别包"},
+                    {"cid": "redundant-cid", "pid": "0", "n": "冗余"},
+                ],
+            }
+            workflow.p115.files_by_parent = {"leftover-pack": [movie]}
+            task_metadata = {
+                "intake_identity": {
+                    "files": [{"id": "movie-1", "name": "Chasing.the.Dragon.2017.mkv"}],
+                    "root_ids": ["received-root"],
+                }
+            }
+
+            status, targets, identity = workflow._resolve_intake_dest_folders(
+                task_metadata,
+                {},
+                receive_cid="pending-cid",
+            )
+
+            self.assertEqual(status, "incomplete")
+            self.assertEqual(targets, [])
+            self.assertIsNone(identity)
+
+    def test_organizing_does_not_bind_leftover_redundant_dest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(
+                tmp,
+                tmdb_resolver=FakeTmdbResolver(),
+                self_share_config=bridge.SelfShareConfig(
+                    enabled=True,
+                    strm_root=Path(tmp) / "share-strm",
+                    cms_cid="0",
+                    cms_local_path="/media/share",
+                    excluded_parent_ids={"pending-cid", "redundant-cid"},
+                    auto_organize_retry_seconds=30,
+                ),
+            )
+            movie = {
+                "fid": "movie-1",
+                "cid": "redundant-cid",
+                "n": "Chasing.the.Dragon.2017.mkv",
+            }
+            self.p115.search_hits = {
+                "Chasing.the.Dragon.2017.mkv": [movie],
+                "redundant-cid": [
+                    {"cid": "redundant-cid", "pid": "0", "n": "冗余", "fc": 1},
+                ],
+            }
+            self.p115.folder_paths = {
+                "redundant-cid": [{"cid": "redundant-cid", "pid": "0", "n": "冗余"}],
+            }
+            self.p115.files_by_parent = {"redundant-cid": [movie]}
+            row = self._row()
+            row = self.submissions.update_self_share(int(row["id"]), workflow_mode="self_share_sync") or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.ORGANIZING,
+                {
+                    "submission_id": row["id"],
+                    "received_items": [
+                        {
+                            "file_id": "movie-1",
+                            "file_name": "Chasing.the.Dragon.2017.mkv",
+                            "is_folder": False,
+                            "parent_id": "pending-cid",
+                            "received_item_verified": True,
+                        }
+                    ],
+                    "received_items_complete": True,
+                    "tmdb_hint_normalized": True,
+                    "intake_identity": {
+                        "root_ids": ["movie-1"],
+                        "files": [{"id": "movie-1", "name": "Chasing.the.Dragon.2017.mkv"}],
+                    },
+                },
+                row["id"],
+            )
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertNotEqual(stored["own_share_file_id"], "redundant-cid")
+            identity = result.metadata.get("intake_identity") or {}
+            self.assertNotEqual(identity.get("dest_id"), "redundant-cid")
+            folder = result.metadata.get("organized_folder") or {}
+            self.assertNotEqual(folder.get("file_id"), "redundant-cid")
+
     def test_organizing_multi_targets_do_not_inherit_global_tmdb_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)

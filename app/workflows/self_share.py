@@ -1762,6 +1762,48 @@ class BridgeSelfShareTaskWorkflow:
             "strm": {"status": "pending", "move_status": "pending", "emby_status": "pending"},
         }
 
+    def _intake_excluded_dest_ids(self, receive_cid: str = "") -> set[str]:
+        excluded = {
+            str(value).strip()
+            for value in (getattr(self.self_share_config, "excluded_parent_ids", None) or set())
+            if str(value).strip()
+        }
+        excluded.update(
+            str(value).strip()
+            for value in (getattr(self.self_share_config, "source_cleanup_parent_ids", None) or set())
+            if str(value).strip()
+        )
+        receive_cid = str(receive_cid or "").strip()
+        if receive_cid:
+            excluded.add(receive_cid)
+        return excluded
+
+    def _dest_is_excluded_source(
+        self,
+        dest: str,
+        folder: dict[str, Any] | None,
+        receive_cid: str,
+    ) -> bool:
+        dest = str(dest or "").strip()
+        if not dest:
+            return False
+        excluded = self._intake_excluded_dest_ids(receive_cid)
+        if dest in excluded:
+            return True
+        parent_id = str((folder or {}).get("parent_id") or "").strip()
+        if parent_id in excluded:
+            return True
+        if hasattr(self.p115, "folder_path"):
+            try:
+                path = self.p115.folder_path(dest) or []
+            except Exception:
+                LOG.debug("Failed to read dest ancestors dest=%s", dest, exc_info=True)
+                path = []
+            path_ids = {p115_item_id(item) for item in path if isinstance(item, dict)}
+            if path_ids & excluded:
+                return True
+        return False
+
     def _resolve_intake_dest_folders(
         self,
         stage_metadata: dict[str, Any],
@@ -1777,6 +1819,7 @@ class BridgeSelfShareTaskWorkflow:
         if not expected_ids:
             return "empty_files", [], None
         receive_cid = str(receive_cid or "").strip()
+        excluded_dest_ids = self._intake_excluded_dest_ids(receive_cid)
         root_ids = {str(value) for value in (identity.get("root_ids") or []) if str(value)}
         persisted_dest = str(identity.get("dest_id") or "").strip()
         if persisted_dest and self._intake_expected_files_located(persisted_dest, expected_ids, []):
@@ -1800,7 +1843,9 @@ class BridgeSelfShareTaskWorkflow:
             if (
                 persisted_dest == receive_cid
                 or persisted_dest in root_ids
+                or persisted_dest in excluded_dest_ids
                 or self._dest_is_receive_child(persisted_dest, receive_cid) is not False
+                or self._dest_is_excluded_source(persisted_dest, folder, receive_cid)
             ):
                 return INCOMPLETE, [], None
             if receive_cid and str(folder.get("parent_id") or "").strip() == receive_cid:
@@ -1823,7 +1868,7 @@ class BridgeSelfShareTaskWorkflow:
             dest_children: list[dict[str, Any]] = []
             for item in list(folder_hits):
                 folder_id = p115_item_id(item)
-                if not folder_id or folder_id == receive_cid or folder_id in root_ids:
+                if not folder_id or folder_id == receive_cid or folder_id in root_ids or folder_id in excluded_dest_ids:
                     continue
                 if not p115_is_folder(item) or is_season_folder_name(p115_file_name(item)):
                     continue
@@ -1866,7 +1911,7 @@ class BridgeSelfShareTaskWorkflow:
                 if candidate:
                     candidate_dest_ids.add(candidate)
             for candidate in sorted(candidate_dest_ids):
-                if candidate in root_ids or candidate == receive_cid:
+                if candidate in root_ids or candidate == receive_cid or candidate in excluded_dest_ids:
                     continue
                 try:
                     children = self._p115_list_files(candidate)
@@ -1971,7 +2016,9 @@ class BridgeSelfShareTaskWorkflow:
                 if (
                     dest == receive_cid
                     or dest in root_ids
+                    or dest in excluded_dest_ids
                     or self._dest_is_receive_child(dest, receive_cid) is not False
+                    or self._dest_is_excluded_source(dest, folder, receive_cid)
                 ):
                     return INCOMPLETE, [], None
                 if receive_cid and str(folder.get("parent_id") or "").strip() == receive_cid:
@@ -1989,6 +2036,7 @@ class BridgeSelfShareTaskWorkflow:
             persisted
             and persisted not in root_ids
             and persisted != receive_cid
+            and persisted not in excluded_dest_ids
             and self._dest_is_receive_child(persisted, receive_cid) is False
         ):
             if not self._intake_expected_files_located(persisted, expected_ids, []):
@@ -1997,6 +2045,8 @@ class BridgeSelfShareTaskWorkflow:
             if is_season_folder_name(str(folder.get("file_name") or persisted).strip()):
                 return INCOMPLETE, [], None
             if receive_cid and str(folder.get("parent_id") or "").strip() == receive_cid:
+                return INCOMPLETE, [], None
+            if self._dest_is_excluded_source(persisted, folder, receive_cid):
                 return INCOMPLETE, [], None
             target = self._organized_target_for_dest(persisted, expected_ids, folder, recognition)
             return persisted, [target], {**identity, "dest_id": persisted}
