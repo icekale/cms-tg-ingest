@@ -113,15 +113,14 @@ class InvalidShareCleanupTests(unittest.TestCase):
             )
 
             updated = store.find_by_id(int(row["id"]))
-            task = task_store.list_recent_tasks(limit=1)[0]
             self.assertEqual(summary.checked_count, 1)
-            self.assertEqual(summary.cleaned_count, 1)
-            self.assertFalse(destination.exists())
-            self.assertEqual(updated["move_status"], "invalid_share_cleaned")
-            self.assertEqual(updated["emby_status"], "invalid_share_cleaned")
-            self.assertEqual(emby.refreshes, [str(bridge.safe_resolve(destination))])
-            self.assertEqual(task.current_stage, bridge.TaskStage.NEEDS_ACTION)
-            self.assertIn("分享已失效", telegram.messages[0][1])
+            self.assertEqual(summary.cleaned_count, 0)
+            self.assertTrue(destination.exists())
+            self.assertEqual(updated["move_status"], "moved")
+            self.assertEqual(updated["emby_status"], "confirmed")
+            self.assertEqual(emby.refreshes, [])
+            self.assertEqual(task_store.list_recent_tasks(limit=1), [])
+            self.assertEqual(telegram.messages, [])
 
     def test_invalid_share_notification_redacts_and_bounds_legacy_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -141,10 +140,8 @@ class InvalidShareCleanupTests(unittest.TestCase):
                 move_config,
                 limit=1,
             )
-            message = telegram.messages[0][1]
-            self.assertLessEqual(len(message), 320)
-            for secret in ("evil.test", "title-password", "reason-token", "raw-token"):
-                self.assertNotIn(secret, message)
+            self.assertEqual(telegram.messages, [])
+            self.assertTrue(destination.exists())
 
     def test_invalid_share_notification_hides_title_matching_uppercase_own_share_code(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -162,9 +159,9 @@ class InvalidShareCleanupTests(unittest.TestCase):
                 move_config,
                 limit=1,
             )
-            message = telegram.messages[0][1]
-            self.assertNotIn(blocked.upper(), message)
-            self.assertIn("分享失效已清理", message)
+            self.assertEqual(telegram.messages, [])
+            self.assertTrue(destination.exists())
+            self.assertEqual(store.find_by_id(int(row["id"]))["move_status"], "moved")
 
     def test_keeps_destination_when_115_is_risk_controlled(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -253,10 +250,10 @@ class InvalidShareCleanupTests(unittest.TestCase):
             )
 
             self.assertEqual(summary.checked_count, 1)
-            self.assertEqual(summary.cleaned_count, 1)
+            self.assertEqual(summary.cleaned_count, 0)
             self.assertEqual(p115.calls, 1)
-            self.assertFalse(destination.exists())
-            self.assertEqual(store.find_by_id(int(row["id"]))["move_status"], "invalid_share_cleaned")
+            self.assertTrue(destination.exists())
+            self.assertEqual(store.find_by_id(int(row["id"]))["move_status"], "moved")
 
     def test_uses_one_batched_share_list_request_for_invalid_status(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -275,7 +272,7 @@ class InvalidShareCleanupTests(unittest.TestCase):
             )
 
             self.assertEqual(summary.checked_count, 1)
-            self.assertEqual(summary.cleaned_count, 1)
+            self.assertEqual(summary.cleaned_count, 0)
             self.assertEqual(p115.list_calls, 1)
             self.assertEqual(p115.deleted, [])
-            self.assertFalse(destination.exists())
+            self.assertTrue(destination.exists())

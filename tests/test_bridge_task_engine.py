@@ -7436,6 +7436,45 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(ready.metadata["recognition"]["tmdb_id"], "123456")
             self.assertEqual(len(self.p115.find_organized_calls), scan_calls_before)
 
+    def test_strm_ready_accepts_validated_destination_when_source_is_gone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            library_root = Path(tmp) / "library" / "华语电影"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(
+                    source_roots=[],
+                    library_roots={"华语电影": library_root},
+                ),
+            )
+            row = self._self_share_row()
+            destination = library_root / row["own_share_file_name"]
+            self._write_strm(destination)
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(self.config.strm_root / row["own_share_file_name"]),
+                dest_path=str(destination),
+                category_final="华语电影",
+            ) or row
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.STRM_READY,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["move_status"], "moved")
+            self.assertEqual(result.metadata["dest_path"], str(bridge.safe_resolve(destination)))
+            self.assertEqual(self.p115.received, [])
+            self.assertEqual(self.p115.created_shares, [])
+            self.assertEqual(self.cms.share_sync_calls, [])
+            self.assertFalse((self.config.strm_root / row["own_share_file_name"]).exists())
+            self.assertTrue((destination / "movie.strm").exists())
+
     def test_strm_ready_stage_ignores_direct_strm_source_roots_while_waiting_for_share_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
             direct_root = Path(tmp) / "direct-strm"
@@ -9440,6 +9479,103 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
         self.assertGreaterEqual(len(worker_parts), 3)
         self.assertEqual(worker_parts[-2], str(os.getpid()))
         self.assertEqual(len(worker_parts[-1]), 12)
+
+    def test_engine_mode_does_not_start_self_share_maintenance(self):
+        captured = {"runner_starts": 0, "maintenance_starts": 0}
+
+        class FakeCmsClient:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+        class FakeSelfShareConfig:
+            enabled = True
+            strm_root = Path("/tmp/share-strm")
+            cms_state_db_path = "/missing/cms-online.db"
+            cms_cid = "0"
+            cms_local_path = "/media/share"
+            cleanup_after_emby = False
+            auto_organize_retry_seconds = 15
+
+            @classmethod
+            def from_config(cls, _config, _cms):
+                return cls()
+
+        class FakeTelegramClient:
+            def __init__(self, *_args, **_kwargs):
+                self.messages = []
+
+            def get_updates(self, **_kwargs):
+                return [{"update_id": 1}]
+
+            def send_rich_message(self, chat_id, document, reply_markup=None):
+                self.messages.append((chat_id, document.to_plain(), reply_markup))
+
+        class FakeP115Client:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+        class FakeTaskRunner:
+            def __init__(self, *_args, **_kwargs):
+                captured["runner_starts"] += 1
+
+            def start(self):
+                captured["started"] = True
+
+            def stop(self, **_kwargs):
+                captured["stopped"] = True
+
+        def capture_maintenance(*_args, **_kwargs):
+            captured["maintenance_starts"] += 1
+            return None
+
+        def capture_quality(*args, **kwargs):
+            captured["quality_repair_adapter"] = kwargs.get("repair_adapter")
+            captured["quality_repair_enabled"] = bool(getattr(args[1], "quality_auto_repair_enabled", True))
+            return object()
+
+        def capture_update(*_args, **kwargs):
+            stop_event.set()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stop_event = __import__("threading").Event()
+            config = bridge.Config(
+                "token",
+                "chat",
+                "http://cms.test",
+                "user",
+                "password",
+                db_path=str(Path(tmp) / "submissions.db"),
+                task_db_path=str(Path(tmp) / "tasks.db"),
+                task_engine_enabled=True,
+                strm_default_mode="shared",
+                status_repair_enabled=True,
+                quality_auto_repair_enabled=True,
+                backup_enabled=False,
+                web_enabled=False,
+                media_strm_repair_enabled=False,
+            )
+
+            with patch.object(bridge, "CmsClient", FakeCmsClient), patch.object(
+                bridge, "TelegramClient", FakeTelegramClient
+            ), patch.object(bridge, "SelfShareConfig", FakeSelfShareConfig), patch.object(
+                bridge, "P115WebClient", FakeP115Client
+            ), patch.object(bridge, "TaskRunner", FakeTaskRunner), patch.object(
+                bridge, "QualityAutomation", capture_quality
+            ), patch.object(
+                bridge, "start_quality_automation_loop", lambda *_args, **_kwargs: None
+            ), patch.object(
+                bridge, "start_self_share_maintenance_loop", capture_maintenance
+            ), patch.object(bridge, "normalize_emby_parents", lambda *_args, **_kwargs: 0), patch.object(
+                bridge, "write_metrics_snapshot", lambda *_args, **_kwargs: None
+            ), patch.object(bridge, "call_maybe_start_web_server", lambda *_args, **_kwargs: None), patch.object(
+                bridge, "handle_update", capture_update
+            ):
+                bridge.run_forever(config, stop_event=stop_event)
+
+        self.assertEqual(captured["runner_starts"], 1)
+        self.assertEqual(captured["maintenance_starts"], 0)
+        self.assertIsNone(captured["quality_repair_adapter"])
+        self.assertFalse(captured["quality_repair_enabled"])
 
 
 if __name__ == "__main__":

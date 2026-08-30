@@ -87,8 +87,7 @@ def probe_invalid_self_shares(
             return InvalidShareProbeSummary(checked_count, cleaned_count, risk_controlled=True)
         except P115ShareUnavailableError as exc:
             store.update_share_probe(row_id)
-            if _clean_invalid_self_share(store, task_store, emby, telegram, chat_id, move_config, row, str(exc)):
-                cleaned_count += 1
+            LOG.warning("Invalid-share probe observed unavailable share row_id=%s error=%s", row_id, exc)
         except RuntimeError as exc:
             store.update_share_probe(row_id)
             LOG.warning("Invalid-share probe returned an unclassified error row_id=%s error=%s", row_id, exc)

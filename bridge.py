@@ -4916,17 +4916,6 @@ def run_forever(
         )
         task_runner.start()
         LOG.info("Task engine worker started interval_seconds=%s", config.task_worker_interval_seconds)
-        if config.status_repair_enabled and self_share_config.enabled and p115:
-            start_self_share_maintenance_loop(
-                store,
-                cms,
-                self_share_config,
-                move_config,
-                interval_seconds=max(1, int(config.status_repair_interval_seconds)),
-                limit=max(1, int(config.status_repair_limit)),
-                stop_event=stop_event,
-                emby=emby,
-            )
     if config.backup_enabled:
         backup_scheduler = create_backup_scheduler(config, task_store)
         backup_thread = start_backup_loop(backup_scheduler, stop_event)
@@ -4971,6 +4960,8 @@ def run_forever(
                 if isinstance(probe_holder["thread"], threading.Thread):
                     probe_threads.append(probe_holder["thread"])
 
+        config.quality_auto_repair_enabled = False
+        LOG.info("Automated quality repair is temporarily read-only")
         quality_automation = QualityAutomation(
             task_store,
             config,
@@ -4980,11 +4971,6 @@ def run_forever(
                 (lambda share_code, receive_code: p115.inspect_share(share_code, receive_code))
                 if p115 is not None
                 else None
-            ),
-            repair_adapter=_QualityRepairAdapter(
-                store,
-                task_store,
-                cleanup_client=p115 if self_share_config.cleanup_after_emby else None,
             ),
             on_enabled_changed=None,
             share_identity_resolver=lambda task: quality_share_identities_for_task(store, task),

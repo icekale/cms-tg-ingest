@@ -28,7 +28,7 @@ from app.clients.p115 import (
     p115_item_parent_id,
     select_named_cloud_outputs,
 )
-from app.config import DEFAULT_OWN_SHARE_RECEIVE_CODE, MovePlan, SelfShareConfig, default_library_roots, is_relative_to, safe_resolve
+from app.config import DEFAULT_OWN_SHARE_RECEIVE_CODE, MovePlan, SelfShareConfig, default_library_roots, is_relative_to, is_under_any_root, safe_resolve
 from app.logging_system import safe_telegram_text
 from app.media.classify import (
     apply_tmdb_hint_resolution,
@@ -4448,6 +4448,21 @@ class BridgeSelfShareTaskWorkflow:
             "recognition": recognition,
         }
         if not source:
+            required_relative_path = ""
+            if task.metadata.get("direct_file_share"):
+                required_relative_path = str(task.metadata.get("direct_file_share_relative_path") or "").strip()
+            if str(row.get("move_status") or "").lower() == "moved":
+                destination = safe_resolve(Path(str(row.get("dest_path") or "")))
+                library_roots = list(self.move_config.library_roots.values())
+                if is_under_any_root(destination, library_roots):
+                    issue = validate_self_share_strm_destination(destination, row, required_relative_path)
+                    if not issue:
+                        metadata["move_status"] = "moved"
+                        metadata["dest_path"] = str(destination)
+                        return StageResult.complete(
+                            "STRM 已在目标目录，按已完成移动继续",
+                            metadata,
+                        )
             folder_name = str(row.get("own_share_file_name") or "").strip()
             if folder_name:
                 cms_category = category_from_existing_library_folder(
