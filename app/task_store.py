@@ -125,6 +125,22 @@ REPROCESS_METADATA_DELETE_KEYS = (
     "quality_success_event",
     "quality_repair_queued",
 )
+# 115 rejects receiving the same share again after a successful receive.
+SHARE_RECEIVE_SNAPSHOT_KEYS = frozenset(
+    {
+        "received_title",
+        "received_file_ids",
+        "received_items",
+        "received_items_complete",
+        "received_expected_item_count",
+        "received_existing_file_ids",
+        "received_snapshot_complete",
+        "intake_identity",
+    }
+)
+SHARE_REPROCESS_METADATA_DELETE_KEYS = tuple(
+    key for key in REPROCESS_METADATA_DELETE_KEYS if key not in SHARE_RECEIVE_SNAPSHOT_KEYS
+)
 CLOUD_REPROCESS_METADATA_DELETE_KEYS = REPROCESS_METADATA_DELETE_KEYS + (
     "cloud_info_hash",
     "cloud_task_id",
@@ -176,10 +192,17 @@ def reprocess_stage_for(task: TaskSnapshot) -> TaskStage:
     return TaskStage.RECEIVED
 
 
-def reprocess_delete_keys_for(task: TaskSnapshot) -> tuple[str, ...]:
+def reprocess_delete_keys_for(
+    task: TaskSnapshot,
+    *,
+    preserve_received_snapshot: bool = False,
+) -> tuple[str, ...]:
     """Return attempt metadata that must not survive a source reprocess."""
-    if str(task.source_type or "").strip().lower() == "cloud_download":
+    source_type = str(task.source_type or "").strip().lower()
+    if source_type == "cloud_download":
         return CLOUD_REPROCESS_METADATA_DELETE_KEYS
+    if preserve_received_snapshot and source_type == "share":
+        return SHARE_REPROCESS_METADATA_DELETE_KEYS
     return REPROCESS_METADATA_DELETE_KEYS
 
 
@@ -2805,13 +2828,20 @@ class TaskStore:
         if task is None:
             raise KeyError(f"task not found: {task_id}")
         target_stage = reprocess_stage_for(task)
+        preserve_received_snapshot = any(
+            operation.operation_type == "receive_share" and operation.status == "succeeded"
+            for operation in self.list_operations(task.id)
+        )
         return self.record_event(
             task_id,
             target_stage,
             TaskStatus.PENDING,
             message,
             metadata_patch=build_reprocess_metadata(task, metadata_patch),
-            metadata_delete_keys=reprocess_delete_keys_for(task),
+            metadata_delete_keys=reprocess_delete_keys_for(
+                task,
+                preserve_received_snapshot=preserve_received_snapshot,
+            ),
             next_run_at=next_run_at,
             clear_claim=True,
         )

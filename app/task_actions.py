@@ -55,16 +55,21 @@ def available_lifecycle_actions(task: TaskSnapshot) -> frozenset[str]:
 def can_resume_organizing(task: TaskSnapshot, store: TaskStore) -> bool:
     if task.status != TaskStatus.NEEDS_ACTION or str(task.claimed_by or "").strip():
         return False
-    if task.current_stage != TaskStage.NEEDS_ACTION:
+    if task.current_stage not in {TaskStage.NEEDS_ACTION, TaskStage.ORGANIZING}:
         return False
     metadata = task.metadata or {}
     defer_stage = str(metadata.get("_defer_stage") or "").strip()
+    # Older conflict tasks kept organizing as the current stage.
+    direct_organizing_resume = (
+        task.current_stage == TaskStage.ORGANIZING
+        and str(task.error_type or "").strip() == "needs_action"
+    )
     legacy_organizing_resume = (
         not defer_stage
         and str(metadata.get("retry_from_stage") or "").strip() == TaskStage.ORGANIZING.value
         and str(metadata.get("retry_stage") or "").strip() == TaskStage.ORGANIZING.value
     )
-    if defer_stage != TaskStage.ORGANIZING.value and not legacy_organizing_resume:
+    if not direct_organizing_resume and defer_stage != TaskStage.ORGANIZING.value and not legacy_organizing_resume:
         return False
     identity = metadata.get("intake_identity")
     root_ids = identity.get("root_ids") if isinstance(identity, dict) else None
@@ -263,8 +268,15 @@ def apply_task_action(
         }
     elif action == "reprocess":
         target_stage = reprocess_stage_for(task)
+        preserve_received_snapshot = any(
+            operation.operation_type == "receive_share" and operation.status == "succeeded"
+            for operation in store.list_operations(task.id)
+        )
         metadata_patch = build_reprocess_metadata(task)
-        metadata_delete_keys = reprocess_delete_keys_for(task)
+        metadata_delete_keys = reprocess_delete_keys_for(
+            task,
+            preserve_received_snapshot=preserve_received_snapshot,
+        )
 
     updated = store.compare_and_set_transition(
         task.id,

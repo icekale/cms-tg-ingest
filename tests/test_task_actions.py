@@ -61,6 +61,31 @@ class TaskActionsTest(unittest.TestCase):
 
         self.assertIn("resume_organizing", available_task_actions(task, 3, store=store))
 
+    def test_resume_organizing_accepts_legacy_direct_organizing_needs_action(self):
+        store = self.make_store()
+        task = store.upsert_task("resume-direct", "", "https://115cdn.com/s/resume-direct")
+        task = store.record_event(
+            task.id,
+            TaskStage.ORGANIZING,
+            TaskStatus.NEEDS_ACTION,
+            "接收文件归属存在歧义",
+            error_type="needs_action",
+            metadata_patch={
+                "intake_identity": {"root_ids": ["root"], "files": [{"id": "file"}]},
+            },
+        )
+        operation = store.prepare_operation(task.id, "g0:u0:receive_share", "receive_share", {})
+        store.start_operation(task.id, operation.operation_key)
+        store.complete_operation(task.id, operation.operation_key, {"received": True})
+
+        self.assertIn("resume_organizing", available_task_actions(task, 3, store=store))
+        result = apply_task_action(store, task.id, "resume_organizing", max_retries=3, actor="Web")
+
+        self.assertTrue(result.applied)
+        resumed = store.find_task(task.id)
+        self.assertEqual(resumed.current_stage, TaskStage.ORGANIZING)
+        self.assertEqual(resumed.status, TaskStatus.PENDING)
+
     def test_resume_organizing_rejects_existing_create_share_operation(self):
         store = self.make_store()
         task = store.upsert_task("resume-share", "", "https://115cdn.com/s/resume-share")
@@ -116,6 +141,38 @@ class TaskActionsTest(unittest.TestCase):
         store.complete_operation(task.id, operation.operation_key, {"received": True})
 
         self.assertNotIn("resume_organizing", available_task_actions(task, 3, store=store))
+
+    def test_reprocess_preserves_received_snapshot_after_successful_receive(self):
+        store = self.make_store()
+        task = store.upsert_task("reprocess-received", "", "https://115cdn.com/s/reprocess-received")
+        task = store.record_event(
+            task.id,
+            TaskStage.NEEDS_ACTION,
+            TaskStatus.NEEDS_ACTION,
+            "整理目录冲突",
+            metadata_patch={
+                "intake_identity": {
+                    "root_ids": ["received-root"],
+                    "files": [{"id": "file-a", "name": "file-a.mkv"}],
+                },
+                "received_items": [{"file_id": "received-root", "file_name": "Root", "is_folder": True}],
+                "received_file_ids": ["file-a"],
+                "received_snapshot_complete": True,
+                "_lock_key": "115:global",
+            },
+        )
+        operation = store.prepare_operation(task.id, "g0:u0:receive_share", "receive_share", {})
+        store.start_operation(task.id, operation.operation_key)
+        store.complete_operation(task.id, operation.operation_key, {"received": True})
+
+        result = apply_task_action(store, task.id, "reprocess", max_retries=3, actor="Web")
+
+        self.assertTrue(result.applied)
+        updated = store.find_task(task.id)
+        self.assertEqual(updated.metadata["intake_identity"]["root_ids"], ["received-root"])
+        self.assertEqual(updated.metadata["received_items"][0]["file_id"], "received-root")
+        self.assertEqual(updated.metadata["received_file_ids"], ["file-a"])
+        self.assertNotIn("_lock_key", updated.metadata)
 
     def test_claimed_running_task_allows_only_terminate(self):
         store = self.make_store()

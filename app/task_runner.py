@@ -786,12 +786,23 @@ class TaskRunner:
             )
             return
         if result.outcome == StageOutcome.NEEDS_ACTION:
+            metadata_patch = _without_defer_metadata(
+                result.metadata | timing_metadata | p115_metadata | observability_metadata
+            )
+            needs_action_stage = task.current_stage
+            if task.current_stage == TaskStage.ORGANIZING:
+                metadata_patch = {
+                    **metadata_patch,
+                    "retry_from_stage": task.current_stage.value,
+                    "retry_stage": task.current_stage.value,
+                }
+                needs_action_stage = TaskStage.NEEDS_ACTION
             self._record_claimed_event(
                 task,
-                task.current_stage,
+                needs_action_stage,
                 TaskStatus.NEEDS_ACTION,
                 result.message,
-                metadata_patch=_without_defer_metadata(result.metadata | timing_metadata | p115_metadata | observability_metadata),
+                metadata_patch=metadata_patch,
                 metadata_delete_keys=_DEFER_METADATA_KEYS,
                 error_type=result.error_type or "needs_action",
                 error_summary=result.message,

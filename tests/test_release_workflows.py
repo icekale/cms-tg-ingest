@@ -22,7 +22,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_release_metadata_describes_multi_directory_resume(self):
         from app import __version__
 
-        self.assertEqual(__version__, "0.4.31")
+        self.assertEqual(__version__, "0.4.32")
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         self.assertIn("多目录", changelog)
         self.assertIn("继续整理", changelog)

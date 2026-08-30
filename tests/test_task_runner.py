@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from app.clients.p115 import P115RiskControlError
 from app.models import TaskStage, TaskStatus
+from app.task_actions import available_task_actions
 from app.task_runner import StageResult, TaskRunner
 from app.task_store import TaskStore
 from app.web import WebApp
@@ -1543,6 +1544,42 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.status, TaskStatus.NEEDS_ACTION)
             self.assertEqual(updated.error_summary, "请选择分类")
             self.assertEqual(updated.claimed_by, "")
+
+    def test_run_once_makes_organizing_needs_action_resumable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("organizing-conflict", "", "https://115cdn.com/s/organizing-conflict")
+            task = store.record_event(
+                task.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.PENDING,
+                "整理中",
+                metadata_patch={
+                    "intake_identity": {
+                        "root_ids": ["received-root"],
+                        "files": [{"id": "file-a", "name": "file-a.mkv"}],
+                    }
+                },
+            )
+            operation = store.prepare_operation(task.id, "g0:u0:receive_share", "receive_share", {})
+            store.start_operation(task.id, operation.operation_key)
+            store.complete_operation(task.id, operation.operation_key, {"received": True})
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            runner = TaskRunner(
+                store,
+                FakeWorkflow([StageResult.needs_action("接收文件归属存在歧义，已停止自动绑定")]),
+                worker_id="worker-1",
+                now=lambda: 1.0,
+            )
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(task.id)
+
+            self.assertEqual(updated.current_stage, TaskStage.NEEDS_ACTION)
+            self.assertEqual(updated.status, TaskStatus.NEEDS_ACTION)
+            self.assertEqual(updated.metadata["retry_from_stage"], TaskStage.ORGANIZING.value)
+            self.assertEqual(updated.metadata["retry_stage"], TaskStage.ORGANIZING.value)
+            self.assertIn("resume_organizing", available_task_actions(updated, 3, store=store))
 
     def test_run_once_records_failure_from_exception(self):
         class ExplodingWorkflow:

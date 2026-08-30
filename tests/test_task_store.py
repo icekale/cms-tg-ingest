@@ -788,6 +788,29 @@ class TaskStoreTests(unittest.TestCase):
             self.assertGreater(updated.metadata["reprocess_started_at"], 0)
             self.assertTrue(updated.metadata["keep_for_retry"])
 
+    def test_reprocess_task_preserves_received_snapshot_after_successful_receive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("reprocess-keeps-receive", "", "https://115cdn.com/s/reprocess-keeps-receive")
+            task = store.record_event(
+                task.id,
+                TaskStage.NEEDS_ACTION,
+                TaskStatus.NEEDS_ACTION,
+                "整理目录冲突",
+                metadata_patch={
+                    "intake_identity": {"root_ids": ["root"], "files": [{"id": "file"}]},
+                    "received_items": [{"file_id": "root"}],
+                },
+            )
+            operation = store.prepare_operation(task.id, "g0:u0:receive_share", "receive_share", {})
+            store.start_operation(task.id, operation.operation_key)
+            store.complete_operation(task.id, operation.operation_key, {"received": True})
+
+            updated = store.reprocess_task(task.id, next_run_at=0)
+
+            self.assertEqual(updated.metadata["intake_identity"]["root_ids"], ["root"])
+            self.assertEqual(updated.metadata["received_items"][0]["file_id"], "root")
+
     def test_cloud_reprocess_returns_to_cloud_downloading_and_clears_attempt_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db", default_strm_mode="direct")

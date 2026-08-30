@@ -1211,7 +1211,7 @@ class BridgeSelfShareTaskWorkflow:
 
         operation_key = f"{operation_scope(task)}:receive_share:{task.share_code}:{receive_cid}"
         operation = self.task_store.find_operation(int(task.id), operation_key)
-        if operation is None and self._should_reuse_received_self_share_state(existing, task.metadata):
+        if operation is None and self._should_reuse_received_self_share_state(task, existing, task.metadata):
             metadata = self._received_metadata(existing, task.metadata)
             identity = metadata.get("intake_identity")
             if not isinstance(identity, dict):
@@ -5445,16 +5445,29 @@ class BridgeSelfShareTaskWorkflow:
 
     def _should_reuse_received_self_share_state(
         self,
+        task,
         row: dict[str, Any] | None,
         task_metadata: dict[str, Any] | None = None,
     ) -> bool:
         if self._is_pending_update_run(task_metadata):
             return False
-        if not self._has_received_self_share_state(row):
+        if not row:
             return False
-        if not (task_metadata or {}).get("force_reprocess"):
+        force_reprocess = bool((task_metadata or {}).get("force_reprocess"))
+        has_succeeded_receive = False
+        if force_reprocess:
+            # A new operation generation must not replay a completed 115 receive.
+            has_succeeded_receive = any(
+                operation.operation_type == "receive_share" and operation.status == "succeeded"
+                for operation in self.task_store.list_operations(int(task.id))
+            )
+        if not self._has_received_self_share_state(row) and not has_succeeded_receive:
+            return False
+        if not force_reprocess:
             return True
-        return self._has_downstream_self_share_state(row)
+        if self._has_downstream_self_share_state(row):
+            return True
+        return has_succeeded_receive
 
     @staticmethod
     def _is_pending_update_run(task_metadata: dict[str, Any] | None = None) -> bool:

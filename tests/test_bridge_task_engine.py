@@ -1150,6 +1150,56 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["received_file_ids"], ["file-a", "file-b"])
             self.assertEqual(updated["workflow_phase"], "received_to_pending")
 
+    def test_force_reprocess_reuses_received_snapshot_after_successful_receive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="auto_organize_submitted",
+            ) or row
+            task = self.tasks.upsert_task(
+                "abc",
+                "1234",
+                "https://115cdn.com/s/abc?password=1234",
+            )
+            operation = self.tasks.prepare_operation(
+                task.id,
+                "g0:u0:receive_share:abc:pending-cid",
+                "receive_share",
+                {},
+            )
+            self.tasks.start_operation(task.id, operation.operation_key)
+            self.tasks.complete_operation(task.id, operation.operation_key, {"received": True})
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.RECEIVED,
+                {
+                    "force_reprocess": True,
+                    "operation_generation": 1,
+                    "submission_id": row["id"],
+                    "receive_target_cid": "pending-cid",
+                    "received_items": [
+                        {"file_id": "received-root", "file_name": "Root", "is_folder": True}
+                    ],
+                    "received_file_ids": ["file-a"],
+                    "received_snapshot_complete": True,
+                    "intake_identity": {
+                        "root_ids": ["received-root"],
+                        "files": [{"id": "file-a", "name": "file-a.mkv"}],
+                    },
+                },
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(self.p115.received, [])
+            self.assertEqual(result.metadata["intake_identity"]["root_ids"], ["received-root"])
+
     def test_received_stage_snapshots_distinct_video_file_ids(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)
