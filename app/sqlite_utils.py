@@ -37,3 +37,16 @@ def sqlite_quick_check(database: str | Path) -> None:
     diagnostic = row[0] if row else ""
     if diagnostic != "ok":
         raise sqlite3.DatabaseError(str(diagnostic))
+
+
+def sqlite_foreign_key_check(database: str | Path) -> None:
+    path = Path(database).expanduser().resolve()
+    with sqlite_connection(f"{path.as_uri()}?mode=ro", uri=True, read_only=True) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        rows = connection.execute("PRAGMA foreign_key_check").fetchall()
+    if not rows:
+        return
+    details = "; ".join(
+        f"{row[0]} rowid={row[1]} parent={row[2]}" for row in rows
+    )
+    raise sqlite3.IntegrityError(details)
