@@ -9709,7 +9709,7 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
         self.assertEqual(captured["runner_starts"], 1)
         self.assertEqual(captured["maintenance_starts"], 0)
         self.assertIsNone(captured["quality_repair_adapter"])
-        self.assertFalse(captured["quality_repair_enabled"])
+        self.assertTrue(captured["quality_repair_enabled"])
 
 
 if __name__ == "__main__":

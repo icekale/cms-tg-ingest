@@ -834,7 +834,7 @@ class TaskRunner:
                 }[command_type]
                 self.store.enqueue_task(task_id, stage)
             elif command_type == "repair_move":
-                self.store.enqueue_task(task_id, TaskStage.MOVED, next_run_at=0)
+                self.store.enqueue_task(task_id, TaskStage.STRM_READY, next_run_at=0)
             elif command_type == "invalidate_share":
                 pass
             elif command_type == "quality_repair":

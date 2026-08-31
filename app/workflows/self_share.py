@@ -766,15 +766,19 @@ class BridgeSelfShareTaskWorkflow:
         title = str(row.get("title") or "").strip()
         category = str(row.get("category_final") or row.get("category_choice") or "").strip()
         recognition = row.get("recognition_json")
-        if title or category or recognition or row.get("cms_task_id") or row.get("tmdb_id"):
+        recognition_text = self._json_text(recognition)
+        if recognition_text in {"", "{}", "null"}:
+            recognition_text = ""
+        if title or category or recognition_text or row.get("cms_task_id") or row.get("tmdb_id"):
             media = {
                 "cms_task_id": str(row.get("cms_task_id") or ""),
                 "title": title,
                 "tmdb_id": str(row.get("tmdb_id") or ""),
                 "category": category,
                 "recognition_status": str(row.get("category_status") or ""),
-                "recognition_json": self._json_text(recognition),
             }
+            if recognition_text:
+                media["recognition_json"] = recognition_text
         share: dict[str, Any] = {}
         if any(str(row.get(key) or "").strip() for key in ("own_share_file_id", "own_share_file_name", "own_share_code", "share_alias_name", "share_sync_status")):
             created_at = row.get("share_created_at") or 0
@@ -1255,7 +1259,7 @@ class BridgeSelfShareTaskWorkflow:
             return None
         merged = dict(row)
         for key, value in facts.items():
-            if key == "id" or value in (None, "", [], {}):
+            if key == "id" or value in (None, "", [], {}, "{}", "[]"):
                 continue
             merged[key] = value
         return merged
