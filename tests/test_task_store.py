@@ -1233,6 +1233,30 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(locked.task.metadata.get("dest_path"), "/library/Lock")
             self.assertEqual(locked.task.metadata.get("_lock_key"), "dest:/library/Lock")
 
+    def test_patch_claimed_metadata_keeps_overlaid_dest_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("patch-facts", "1212", "https://115cdn.com/s/patch-facts")
+            store.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+            store.write_facts(
+                task.id,
+                move={"dest_path": "/library/Patch", "move_status": "moved"},
+            )
+            claimed = store.claim_next_runnable("worker", now=1)
+
+            patched = store.patch_claimed_metadata(
+                claimed.id,
+                expected_claimed_by="worker",
+                expected_claimed_at=claimed.claimed_at,
+                expected_claim_token=claimed.claim_token,
+                expected_updated_at=claimed.updated_at,
+                patch={"receive_target_cid": "111"},
+            )
+
+            self.assertIsNotNone(patched)
+            self.assertEqual(patched.metadata.get("receive_target_cid"), "111")
+            self.assertEqual(patched.metadata.get("dest_path"), "/library/Patch")
+
     def test_record_stage_event_updates_current_task_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

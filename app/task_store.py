@@ -1915,7 +1915,7 @@ class TaskStore:
                 (merged_metadata, int(task_id)),
             )
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
-        return self._snapshot(row) if row else None
+        return self._snapshot_with_facts(row) if row else None
 
     def claim_task_lock(
         self,
