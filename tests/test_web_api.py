@@ -210,6 +210,24 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(store.find_task(active.id).status, TaskStatus.PENDING)
             self.assertIsNotNone(store.find_task(finished.id))
 
+            reprocess_status, _headers, reprocess_body = app.handle_request(
+                "POST", f"/api/v1/tasks/{finished.id}/actions/reprocess", {}, b""
+            )
+            html_reprocess_status, _headers, _body = app.handle_request(
+                "POST", f"/task/{finished.id}/reprocess", {}, b""
+            )
+            self.assertEqual(reprocess_status, 409)
+            self.assertIn("旧版任务引擎", json.loads(reprocess_body)["reason"])
+            self.assertEqual(html_reprocess_status, 409)
+            self.assertIsNone(store.claim_next_command("worker", now=1))
+            clear_status, _headers, clear_body = app.handle_request(
+                "POST", "/api/v1/history/clear", {}, b""
+            )
+            self.assertEqual(clear_status, 409)
+            self.assertIn("写入闸门", json.loads(clear_body)["reason"])
+            self.assertIsNotNone(store.find_task(finished.id))
+            self.assertEqual(getattr(store.find_task(finished.id), "archived_at", 0) or 0, 0)
+
     def test_legacy_engine_delete_does_not_recheck_or_mutate_after_missing_lookup(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

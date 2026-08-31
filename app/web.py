@@ -91,6 +91,7 @@ SSE_CLIENT_QUEUE_SIZE = 256
 SSE_MAX_CLIENTS = 8
 SSE_WRITE_TIMEOUT_SECONDS = 5.0
 LEGACY_LIFECYCLE_REASON = "旧版任务引擎模式不支持终止或删除任务"
+WRITE_GATE_REASON = "写入闸门未开放，当前仅可查看历史"
 TASK_NOT_FOUND_MESSAGE = "任务不存在或已过期"
 
 # Username/password session authentication.
@@ -2033,6 +2034,8 @@ class WebApp:
                 )
                 return 303, {"Location": "/hdhive", **auth_headers}, b""
         if method == "POST" and path == "/history/clear":
+            if not self.task_engine_enabled:
+                return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, WRITE_GATE_REASON.encode("utf-8")
             self.store.clear_finished_tasks()
             return 303, {"Location": "/", **auth_headers}, b""
         if method == "GET" and path.startswith("/task/"):
@@ -2048,7 +2051,7 @@ class WebApp:
         task_action = parse_task_action_path(path) if method == "POST" else None
         if task_action is not None:
             task_id, action = task_action
-            if action == "terminate" and not self.task_engine_enabled:
+            if not self.task_engine_enabled:
                 return (
                     409,
                     {"Content-Type": "text/plain; charset=utf-8", **auth_headers},
@@ -2182,7 +2185,7 @@ class WebApp:
                         status=404,
                     )
                     return status, {**response_headers, **auth_headers}, response_body
-                if action == "terminate" and not self.task_engine_enabled:
+                if not self.task_engine_enabled:
                     status, response_headers, response_body = api_response(
                         {
                             "error": "action_not_allowed",
@@ -2243,6 +2246,12 @@ class WebApp:
                 status, response_headers, response_body = api_response({"deleted": int(raw_id), "message": result.reason})
                 return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path == "/api/v1/history/clear":
+            if not self.task_engine_enabled:
+                status, response_headers, response_body = api_response(
+                    {"error": "write_gate_closed", "reason": WRITE_GATE_REASON},
+                    status=409,
+                )
+                return status, {**response_headers, **auth_headers}, response_body
             cleared = self.store.clear_finished_tasks()
             status, response_headers, response_body = api_response({"cleared": cleared})
             return status, {**response_headers, **auth_headers}, response_body
