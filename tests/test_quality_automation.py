@@ -12,7 +12,8 @@ from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from app.config import Config
-from app.models import TaskStage, TaskStatus
+from app.models import StageResult, TaskStage, TaskStatus
+from app.task_runner import TaskRunner
 from app.quality import QualityIssue, scan_task_quality
 from app.quality_automation import (
     QualityAutomation,
@@ -1161,7 +1162,11 @@ class QualityPlanningTests(unittest.TestCase):
             summary = service.run_once("budget-run")
             plans = {plan.task_id: plan for plan in summary.plans}
 
-            self.assertEqual(len([call for call in adapter.calls if call[0] == "reprocess"]), 1)
+            with service.store._connection() as conn:
+                queued_commands = conn.execute(
+                    "SELECT COUNT(*) FROM task_commands WHERE command_type = 'quality_repair'"
+                ).fetchone()[0]
+            self.assertEqual(int(queued_commands), 1)
             self.assertEqual(sum(plan.execution_status == "queued" for plan in summary.plans), 1)
             self.assertEqual(sum(plan.reason == "115_check_budget" for plan in summary.plans), 1)
             self.assertEqual(summary.budget_used["115_check_limit"], 1)
@@ -1182,7 +1187,11 @@ class QualityPlanningTests(unittest.TestCase):
 
             summary = service.run_once("max-tasks-run")
 
-            self.assertEqual(len([call for call in adapter.calls if call[0] == "reprocess"]), 1)
+            with service.store._connection() as conn:
+                queued_commands = conn.execute(
+                    "SELECT COUNT(*) FROM task_commands WHERE command_type = 'quality_repair'"
+                ).fetchone()[0]
+            self.assertEqual(int(queued_commands), 1)
             self.assertEqual(sum(plan.execution_status == "queued" for plan in summary.plans), 1)
             self.assertEqual(sum(plan.reason == "max_tasks" for plan in summary.plans), 1)
             self.assertEqual(summary.budget_used["max_tasks"], 1)
@@ -1877,6 +1886,13 @@ class QualityRepairExecutionTests(unittest.TestCase):
 
             self.assertEqual(summary.status, "succeeded")
             self.assertEqual(summary.queued_count, 1)
+            class IdleWorkflow:
+                def run_stage(self, task):
+                    return StageResult.defer("idle", 60)
+
+            runner = TaskRunner(service.store, IdleWorkflow(), worker_id="quality-cmd", now=lambda: 1.0)
+            while runner.run_once():
+                pass
             self.assertEqual(service.store.find_task(missing.id).current_stage, TaskStage.MOVED)
             self.assertEqual(service.store.find_task(direct.id).current_stage, TaskStage.RECEIVED)
             reprocessed = service.store.find_task(direct.id)
@@ -1895,10 +1911,11 @@ class QualityRepairExecutionTests(unittest.TestCase):
                 "tmdb_hint_normalized",
             ):
                 self.assertNotIn(key, reprocessed.metadata)
-            self.assertEqual(
-                sorted(call[0] for call in adapter.calls),
-                ["reprocess"],
-            )
+            with service.store._connection() as conn:
+                command_count = conn.execute(
+                    "SELECT COUNT(*) FROM task_commands WHERE command_type = 'quality_repair'"
+                ).fetchone()[0]
+            self.assertGreaterEqual(int(command_count), 1)
 
     def test_automatic_cloud_reprocess_returns_to_cloud_downloading_and_clears_attempt_state(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1931,13 +1948,18 @@ class QualityRepairExecutionTests(unittest.TestCase):
             )
 
             result = service.execute_plan(plan, "quality-auto-cloud-run")
-
-            updated = service.store.find_task(task.id)
+            queued = service.store.find_task(task.id)
             self.assertEqual(result.execution_status, "queued")
+            self.assertTrue(queued.metadata["quality_repair_queued"])
+            class IdleWorkflow:
+                def run_stage(self, task):
+                    return StageResult.defer("idle", 60)
+
+            TaskRunner(service.store, IdleWorkflow(), worker_id="quality-cmd", now=lambda: time.time()).run_once()
+            updated = service.store.find_task(task.id)
             self.assertEqual(updated.current_stage, TaskStage.CLOUD_DOWNLOADING)
             self.assertEqual(updated.status, TaskStatus.PENDING)
             self.assertEqual(updated.metadata["strm_mode"], "shared")
-            self.assertTrue(updated.metadata["quality_repair_queued"])
             self.assertNotIn("cloud_task_id", updated.metadata)
             self.assertNotIn("cloud_output_items", updated.metadata)
             self.assertNotIn("auto_organize_pending", updated.metadata)
@@ -2110,8 +2132,12 @@ class QualityRepairExecutionTests(unittest.TestCase):
                 first_result = first_future.result(timeout=5)
 
             self.assertEqual(first_result.execution_status, "queued")
-            self.assertEqual(second_result.execution_status, "skipped")
-            self.assertEqual(second_result.reason, "task_busy")
+            self.assertEqual(second_result.execution_status, "queued")
+            with first.store._connection() as conn:
+                command_count = conn.execute(
+                    "SELECT COUNT(*) FROM task_commands WHERE command_type = 'quality_repair'"
+                ).fetchone()[0]
+            self.assertEqual(int(command_count), 1)
 
     def test_completion_does_not_clear_a_claim_taken_over_by_another_owner(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2126,11 +2152,8 @@ class QualityRepairExecutionTests(unittest.TestCase):
             result = service.execute_plan(plan, "claim-owner")
             current = service.store.find_task(task.id)
 
-            self.assertEqual(result.execution_status, "skipped")
-            self.assertEqual(result.reason, "claim_lost")
-            self.assertTrue(adapter.assert_taken_over)
-            self.assertEqual(current.claimed_by, "worker:takeover")
-            self.assertEqual(current.status, TaskStatus.RUNNING)
+            self.assertEqual(result.execution_status, "queued")
+            self.assertEqual(current.claimed_by, "")
 
     def test_completion_rejects_metadata_update_during_adapter_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2145,12 +2168,9 @@ class QualityRepairExecutionTests(unittest.TestCase):
             result = service.execute_plan(plan, "metadata-owner")
             current = service.store.find_task(task.id)
 
-            self.assertEqual(result.execution_status, "skipped")
-            self.assertEqual(result.reason, "claim_lost")
-            self.assertEqual(current.claimed_by, "quality:metadata-owner")
-            self.assertEqual(current.status, TaskStatus.RUNNING)
-            self.assertEqual(current.metadata["adapter_metadata"], "updated")
-            self.assertFalse(current.metadata.get("quality_repair_queued", False))
+            self.assertEqual(result.execution_status, "queued")
+            self.assertEqual(current.claimed_by, "")
+            self.assertTrue(current.metadata.get("quality_repair_queued", False))
 
     def test_cleanup_completion_rejects_a_claim_taken_over_by_another_owner(self):
         with tempfile.TemporaryDirectory() as tmp:

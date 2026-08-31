@@ -46,6 +46,30 @@ class TaskCommandAndLeaseTests(unittest.TestCase):
             self.assertFalse(a.release_runner_lease("owner-a", first))
             self.assertTrue(b.release_runner_lease("owner-b", expired))
 
+    def test_observer_commands_are_idempotent_and_do_not_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("quality-cmd", "", "https://115cdn.com/s/quality-cmd")
+            key = command_key("quality", task.id, "missing_strm", "1", "reprocess")
+            first = store.enqueue_command(
+                task.id,
+                "quality_repair",
+                {"action": "reprocess"},
+                idempotency_key=key,
+                actor="quality",
+            )
+            second = store.enqueue_command(
+                task.id,
+                "quality_repair",
+                {"action": "reprocess"},
+                idempotency_key=key,
+                actor="quality",
+            )
+            current = store.find_task(task.id)
+            self.assertEqual(first["id"], second["id"])
+            self.assertEqual(current.claimed_by, "")
+            self.assertNotIn("missing_strm", key)
+
     def test_command_key_hashes_material(self):
         key = command_key("repair-move", 447, "/library/L-movie")
         self.assertTrue(key.startswith("repair-move:"))

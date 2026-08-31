@@ -833,8 +833,21 @@ class TaskRunner:
                     "resume_organizing": TaskStage.ORGANIZING,
                 }[command_type]
                 self.store.enqueue_task(task_id, stage)
-            elif command_type in {"repair_move", "invalidate_share", "quality_repair"}:
+            elif command_type == "repair_move":
+                self.store.enqueue_task(task_id, TaskStage.MOVED, next_run_at=0)
+            elif command_type == "invalidate_share":
                 pass
+            elif command_type == "quality_repair":
+                payload = json.loads(command.get("payload_json") or "{}")
+                action = str(payload.get("action") or "")
+                if action == "reprocess":
+                    self.store.reprocess_task(task_id)
+                elif action == "requeue":
+                    stage_name = str(payload.get("target_stage") or "")
+                    stage = TaskStage(stage_name) if stage_name else None
+                    self.store.enqueue_task(task_id, stage, next_run_at=0)
+                elif action == "restore":
+                    self.store.enqueue_task(task_id, TaskStage.MOVED, next_run_at=0)
             else:
                 self.store.fail_command(command_id, token, "unsupported command")
                 return True

@@ -4969,8 +4969,6 @@ def run_forever(
                 if isinstance(probe_holder["thread"], threading.Thread):
                     probe_threads.append(probe_holder["thread"])
 
-        config.quality_auto_repair_enabled = False
-        LOG.info("Automated quality repair is temporarily read-only")
         quality_automation = QualityAutomation(
             task_store,
             config,

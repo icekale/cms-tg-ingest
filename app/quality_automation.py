@@ -30,6 +30,7 @@ from .task_actions import delete_task_record_and_submission
 from .task_store import (
     TaskStore,
     build_reprocess_metadata,
+    command_key,
     reprocess_delete_keys_for,
     reprocess_stage_for,
 )
@@ -1998,6 +1999,47 @@ class QualityAutomation:
         )
         return updated or self.store.find_task(task.id) or task
 
+    def _enqueue_quality_command(self, plan: QualityRepairPlan, task: TaskSnapshot, run_id: str) -> QualityRepairPlan:
+        enqueue = getattr(self.store, "enqueue_command", None)
+        if not callable(enqueue):
+            return replace(plan, execution_status="skipped", reason="commands_unavailable")
+        enqueue(
+            int(task.id),
+            "quality_repair",
+            {
+                "action": plan.action,
+                "rule_id": plan.rule_id,
+                "rule_version": str(plan.rule_version or QUALITY_RULE_VERSION),
+                "target_stage": str(plan.target_stage or ""),
+            },
+            idempotency_key=command_key(
+                "quality",
+                task.id,
+                plan.rule_id,
+                plan.rule_version or QUALITY_RULE_VERSION,
+                plan.action,
+            ),
+            actor="quality",
+            source="quality-automation",
+        )
+        if plan.action == "reprocess":
+            attempts = quality_attempt_count(task) + 1
+            self.store.record_event(
+                int(task.id),
+                task.current_stage,
+                task.status,
+                "自动巡检已排队",
+                metadata_patch={
+                    "quality_repair_queued": True,
+                    "quality_repair_attempts": attempts,
+                    "quality_last_run_id": str(run_id),
+                    "quality_last_actor": "quality-auto",
+                    "quality_rule_id": plan.rule_id,
+                    "quality_rule_version": str(plan.rule_version or QUALITY_RULE_VERSION),
+                },
+            )
+        return replace(plan, execution_status="queued")
+
     def execute_plan(self, plan: QualityRepairPlan, run_id: str) -> QualityRepairPlan:
         """Atomically reserve a task before handing repair work to an adapter."""
         if plan.action == "skip":
@@ -2008,9 +2050,15 @@ class QualityAutomation:
         if plan.planned_updated_at and task.updated_at != plan.planned_updated_at:
             return replace(plan, execution_status="skipped", reason="task_changed")
         if plan.action == "requeue":
-            return self._execute_auto_recheck(plan, task, run_id)
+            checked = self._execute_auto_recheck(plan, task, run_id)
+            if checked.execution_status != "queued":
+                return checked
+            return self._enqueue_quality_command(plan, task, run_id)
         if plan.action == "restore":
-            return self._execute_auto_restore(plan, task, run_id)
+            checked = self._execute_auto_restore(plan, task, run_id)
+            if checked.execution_status != "queued":
+                return checked
+            return self._enqueue_quality_command(plan, task, run_id)
         if plan.action != "reprocess":
             return replace(plan, execution_status="skipped", reason="unsupported_action")
         if task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {
@@ -2056,6 +2104,7 @@ class QualityAutomation:
         stored_version = str(state.get("quality_rule_version") or "").strip()
         if stored_version and stored_version != str(plan.rule_version or QUALITY_RULE_VERSION):
             return replace(plan, execution_status="skipped", reason="rule_version_changed")
+        return self._enqueue_quality_command(plan, task, run_id)
 
         target_stage = reprocess_stage_for(task)
         metadata = {
