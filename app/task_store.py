@@ -2788,6 +2788,17 @@ class TaskStore:
             conn.execute("UPDATE tasks SET updated_at = ? WHERE id = ?", (timestamp, int(row_id)))
         return True
 
+    def mark_invalid_share_cleaned(self, row_id: int, reason: str, now: float | None = None) -> dict[str, Any]:
+        timestamp = time.time() if now is None else float(now)
+        return self.write_facts(
+            int(row_id),
+            share={"validation_status": "invalid", "validation_error": str(reason)},
+            move={"move_status": "invalid_share_cleaned", "move_error": str(reason)},
+            emby={"status": "invalid_share_cleaned"},
+            probe={"invalid_at": timestamp, "invalid_reason": str(reason)},
+            now=timestamp,
+        )
+
     def recent_workflow_rows(self, limit: int = 5) -> list[dict[str, Any]]:
         with self._lock, self._connection() as conn:
             rows = conn.execute(
@@ -3925,7 +3936,7 @@ class WorkflowRowAdapter:
         return self._tasks.clear_finished_history()
 
     def mark_invalid_share_cleaned(self, row_id: int, reason: str) -> dict[str, Any] | None:
-        return self.find_by_id(row_id)
+        return self._tasks.mark_invalid_share_cleaned(int(row_id), reason)
 
     def claim_self_share_restore_sync(self, row_id: int, retry_seconds: float = 60, now: float | None = None) -> bool:
         return self._tasks.claim_self_share_restore_sync(row_id, retry_seconds=retry_seconds, now=now)

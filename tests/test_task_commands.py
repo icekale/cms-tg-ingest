@@ -5,6 +5,9 @@ import time
 import unittest
 from pathlib import Path
 
+from app.config import MoveConfig
+from app.models import TaskStatus
+from app.task_runner import TaskRunner
 from app.task_store import TaskStore, command_key
 
 
@@ -77,6 +80,48 @@ class TaskCommandAndLeaseTests(unittest.TestCase):
         self.assertNotIn("/library/L-movie", key)
         self.assertEqual(key, command_key("repair-move", 447, "/library/L-movie"))
         self.assertNotEqual(key, command_key("repair-move", 447, "/library/other"))
+
+    def test_invalidate_share_command_removes_validated_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "library" / "华语电影" / "S-示例-2026-[tmdb=123]"
+            dest.mkdir(parents=True)
+            (dest / "movie.strm").write_text("http://cms/s/owncode_1212_movie.mkv", encoding="utf-8")
+            store = TaskStore(root / "tasks.db")
+            task = store.upsert_task("src", "pass", "https://115cdn.com/s/src")
+            store.write_facts(
+                task.id,
+                share={
+                    "canonical_name": dest.name,
+                    "own_share_code": "owncode",
+                    "own_share_receive_code": "1212",
+                    "file_id": "fid",
+                },
+                move={"move_status": "moved", "dest_path": str(dest)},
+                emby={"status": "confirmed", "path": str(dest)},
+            )
+            store.enqueue_command(
+                task.id,
+                "invalidate_share",
+                {"observed_state": "unavailable"},
+                idempotency_key="invalid-share:1",
+                actor="probe",
+            )
+
+            class Workflow:
+                move_config = MoveConfig(source_roots=[], library_roots={"华语电影": dest.parent})
+
+                def run_stage(self, task):
+                    raise AssertionError("stage should not run")
+
+            runner = TaskRunner(store, Workflow(), worker_id="inv")
+            command = store.claim_next_command(runner.worker_id)
+            runner._run_command(command)
+            updated = store.find_task(task.id)
+            facts = store.workflow_facts(task.id)
+            self.assertFalse(dest.exists())
+            self.assertEqual(updated.status, TaskStatus.NEEDS_ACTION)
+            self.assertEqual(facts["move_status"], "invalid_share_cleaned")
 
 
 if __name__ == "__main__":

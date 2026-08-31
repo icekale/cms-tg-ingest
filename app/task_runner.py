@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import socket
 import sqlite3
 import threading
 import time
 import uuid
+from pathlib import Path
 from dataclasses import replace
 from typing import Callable, Protocol
 
@@ -821,6 +823,35 @@ class TaskRunner:
             clear_claim=True,
         )
 
+    def _invalidate_share(self, task_id: int) -> None:
+        facts = self.store.workflow_facts(int(task_id)) if hasattr(self.store, "workflow_facts") else {}
+        dest_text = str((facts or {}).get("dest_path") or "").strip()
+        move_config = getattr(self.workflow, "move_config", None)
+        message = "115 自有分享已失效"
+        if dest_text and move_config is not None:
+            from .config import is_relative_to, safe_resolve
+            from .media.strm import validate_self_share_strm_destination
+
+            dest = safe_resolve(Path(dest_text))
+            library_roots = [safe_resolve(Path(path)) for path in (move_config.library_roots or {}).values()]
+            if dest.is_dir() and any(is_relative_to(dest, root) for root in library_roots):
+                issue = validate_self_share_strm_destination(dest, facts)
+                if not issue:
+                    shutil.rmtree(dest, ignore_errors=True)
+        mark = getattr(self.store, "mark_invalid_share_cleaned", None)
+        if callable(mark):
+            mark(int(task_id), message)
+        self.store.record_event(
+            int(task_id),
+            TaskStage.NEEDS_ACTION,
+            TaskStatus.NEEDS_ACTION,
+            message,
+            error_type="invalid_share",
+            error_summary=message,
+            clear_claim=True,
+            next_run_at=-1,
+        )
+
     def _run_command(self, command: dict) -> bool:
         command_id = int(command["id"])
         token = str(command.get("claim_token") or "")
@@ -882,7 +913,7 @@ class TaskRunner:
             elif command_type == "repair_move":
                 self.store.enqueue_task(task_id, TaskStage.STRM_READY, next_run_at=0)
             elif command_type == "invalidate_share":
-                pass
+                self._invalidate_share(task_id)
             elif command_type == "quality_repair":
                 action = str(payload.get("action") or "")
                 message = str(payload.get("message") or "自动巡检已排队")
