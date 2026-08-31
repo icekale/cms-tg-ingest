@@ -1183,6 +1183,22 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(recent[0].metadata.get("dest_path"), "/library/Movie")
             self.assertEqual(live_codes, {"own-fact"})
 
+    def test_claim_next_runnable_overlays_normalized_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("claim-facts", "1212", "https://115cdn.com/s/claim-facts")
+            store.enqueue_task(task.id, TaskStage.MOVED, next_run_at=0)
+            store.write_facts(
+                task.id,
+                move={"dest_path": "/library/Claim", "move_status": "moved"},
+            )
+
+            claimed = store.claim_next_runnable("worker", now=1)
+
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed.id, task.id)
+            self.assertEqual(claimed.metadata.get("dest_path"), "/library/Claim")
+
     def test_record_stage_event_updates_current_task_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

@@ -562,8 +562,7 @@ class TaskStore:
     def _snapshot(row: sqlite3.Row) -> TaskSnapshot:
         return TaskSnapshot.from_row(dict(row))
 
-    def _snapshot_with_facts(self, row: sqlite3.Row) -> TaskSnapshot:
-        task = self._snapshot(row)
+    def _overlay_facts_on_task(self, task: TaskSnapshot) -> TaskSnapshot:
         try:
             facts = self.workflow_facts(int(task.id))
         except sqlite3.OperationalError:
@@ -593,6 +592,9 @@ class TaskStore:
                 metadata[key] = value
                 changed = True
         return replace(task, metadata=metadata) if changed else task
+
+    def _snapshot_with_facts(self, row: sqlite3.Row) -> TaskSnapshot:
+        return self._overlay_facts_on_task(self._snapshot(row))
 
     @staticmethod
     def _operation(row: sqlite3.Row) -> TaskOperation:
@@ -3523,6 +3525,7 @@ class TaskStore:
         current_time = time.time() if now is None else float(now)
         stale_before = current_time - max(1, int(stale_after_seconds))
         runnable_statuses = (TaskStatus.PENDING.value, TaskStatus.RUNNING.value)
+        claimed_task = None
         with self._lock, self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
@@ -3582,9 +3585,9 @@ class TaskStore:
                 if cursor.rowcount == 0:
                     continue
                 claimed = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(row["id"]),)).fetchone()
-                return self._snapshot(claimed) if claimed else None
-            else:
-                return None
+                claimed_task = self._snapshot(claimed) if claimed else None
+                break
+        return self._overlay_facts_on_task(claimed_task) if claimed_task else None
 
     def renew_claim(
         self,
