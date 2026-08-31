@@ -49,9 +49,13 @@ def _project_workflow_facts(
         "url": str(_row_value(task, "url")),
         "title": str(_row_value(task, "title")),
         "status": str(_row_value(task, "status")),
+        "current_stage": str(_row_value(task, "current_stage")),
         "created_at": float(_row_value(task, "created_at", 0) or 0),
         "updated_at": float(_row_value(task, "updated_at", 0) or 0),
         "tmdb_id": str(_row_value(task, "tmdb_id")),
+        "error_type": str(_row_value(task, "error_type")),
+        "last_error": str(_row_value(task, "error_summary")),
+        "error_summary": str(_row_value(task, "error_summary")),
         "move_status": "",
     }
     if media is not None:
@@ -2763,6 +2767,30 @@ class TaskStore:
             ).fetchall()
         return [self.workflow_facts(int(row[0])) for row in rows]
 
+    def recent_workflow_rows(self, limit: int = 5) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id FROM tasks
+                WHERE COALESCE(archived_at, 0) = 0
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [self.workflow_facts(int(row[0])) for row in rows]
+
+    def clear_finished_history(self, *, actor: str = "telegram", reason: str = "clear_history") -> int:
+        removed = 0
+        for task in self.list_recent_tasks(limit=1000):
+            if float(getattr(task, "archived_at", 0) or 0) > 0:
+                continue
+            if task.status.value not in _DELETABLE_TASK_STATUSES:
+                continue
+            if self.archive_task(task.id, actor=actor, reason=reason, expected_updated_at=task.updated_at):
+                removed += 1
+        return removed
+
     def self_share_probe_candidates(self, limit: int = 3) -> list[dict[str, Any]]:
         with self._lock, self._connection() as conn:
             rows = conn.execute(
@@ -3837,7 +3865,7 @@ class WorkflowRowAdapter:
         return False
 
     def recent(self, limit: int = 5) -> list[dict[str, Any]]:
-        return []
+        return self._tasks.recent_workflow_rows(limit=limit)
 
     def stranded_self_share_move_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
         return []
@@ -3873,7 +3901,7 @@ class WorkflowRowAdapter:
         return self._tasks.all_confirmed_with_emby_path()
 
     def clear_finished_history(self) -> int:
-        return 0
+        return self._tasks.clear_finished_history()
 
     def mark_invalid_share_cleaned(self, row_id: int, reason: str) -> dict[str, Any] | None:
         return self.find_by_id(row_id)

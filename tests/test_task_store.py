@@ -2336,3 +2336,25 @@ class TaskStoreTests(unittest.TestCase):
             self.assertIsNotNone(adapter.latest_self_share_identity(dest, "111"))
             self.assertEqual(len(adapter.all_confirmed_with_emby_path()), 3)
             self.assertEqual(len(adapter.pending_self_share_cleanup_candidates(limit=10)), 3)
+
+    def test_adapter_recent_and_clear_finished_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            adapter = WorkflowRowAdapter(store)
+            live = store.upsert_task("live", "", "https://115cdn.com/s/live")
+            store.enqueue_task(live.id, TaskStage.RECEIVED, next_run_at=0)
+            done = store.upsert_task("done", "", "https://115cdn.com/s/done")
+            store.record_event(done.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            failed = store.upsert_task("failed", "", "https://115cdn.com/s/failed")
+            store.record_event(failed.id, TaskStage.STRM_READY, TaskStatus.FAILED, "missing", error_summary="未找到 STRM")
+
+            rows = adapter.recent(limit=10)
+            ids = {row["id"] for row in rows}
+            self.assertEqual(ids, {live.id, done.id, failed.id})
+            self.assertTrue(any(row.get("last_error") == "未找到 STRM" for row in rows))
+
+            self.assertEqual(adapter.clear_finished_history(), 2)
+            remaining = {row["id"] for row in adapter.recent(limit=10)}
+            self.assertEqual(remaining, {live.id})
+            self.assertGreater(float(store.find_task(done.id).archived_at or 0), 0)
+            self.assertGreater(float(store.find_task(failed.id).archived_at or 0), 0)
