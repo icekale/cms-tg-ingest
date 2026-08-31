@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from app.clients import cms as cms_client
 from app.clients.p115 import p115_item_id, p115_item_parent_id
+from tests.legacy_submission_store import SubmissionStore
 
 spec = importlib.util.spec_from_file_location("bridge", Path(__file__).resolve().parents[1] / "bridge.py")
 bridge = importlib.util.module_from_spec(spec)
@@ -2838,7 +2839,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             source.mkdir(parents=True)
             dest.mkdir(parents=True)
             (source / "movie.strm").write_text("http://cms/d/direct.mkv", encoding="utf-8")
-            store = bridge.SubmissionStore(root / "db.sqlite")
+            store = SubmissionStore(root / "db.sqlite")
             row = store.upsert_submission(
                 bridge.ShareKey("abc", "1234"),
                 "https://115cdn.com/s/abc?password=1234",
@@ -2872,7 +2873,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 "http://cms/d/old-direct.mkv",
                 encoding="utf-8",
             )
-            store = bridge.SubmissionStore(root / "db.sqlite")
+            store = SubmissionStore(root / "db.sqlite")
             row = store.upsert_submission(
                 bridge.ShareKey("abc", "1234"),
                 "https://115cdn.com/s/abc?password=1234",
@@ -2908,7 +2909,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 "http://cms/s/ownshare_1212_old-file.mkv",
                 encoding="utf-8",
             )
-            store = bridge.SubmissionStore(root / "db.sqlite")
+            store = SubmissionStore(root / "db.sqlite")
             row = store.upsert_submission(
                 bridge.ShareKey("abc", "1234"),
                 "https://115cdn.com/s/abc?password=1234",
@@ -2936,7 +2937,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             source.mkdir(parents=True)
             dest.mkdir(parents=True)
             (source / "MOVIE.STRM").write_text("http://cms/d/direct.mkv", encoding="utf-8")
-            store = bridge.SubmissionStore(root / "db.sqlite")
+            store = SubmissionStore(root / "db.sqlite")
             row = store.upsert_submission(
                 bridge.ShareKey("abc", "1234"),
                 "https://115cdn.com/s/abc?password=1234",
@@ -2966,7 +2967,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 "http://cms/d/file.mkv?/杰克・莱恩.mkv",
                 encoding="utf-8",
             )
-            store = bridge.SubmissionStore(root / "db.sqlite")
+            store = SubmissionStore(root / "db.sqlite")
             row = store.upsert_submission(
                 bridge.ShareKey("abc", "1212"),
                 "https://115cdn.com/s/abc?password=1212",
@@ -2996,7 +2997,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             source.mkdir(parents=True)
             dest.mkdir(parents=True)
             (source / "movie.strm").write_text("http://cms/s/othershare_1212_file.mkv", encoding="utf-8")
-            store = bridge.SubmissionStore(root / "db.sqlite")
+            store = SubmissionStore(root / "db.sqlite")
             row = store.upsert_submission(
                 bridge.ShareKey("abc", "1234"),
                 "https://115cdn.com/s/abc?password=1234",
@@ -3023,7 +3024,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             source.mkdir(parents=True)
             dest.mkdir(parents=True)
             (source / "movie.strm").write_text("http://cms/s/ownshare_1212_file.mp4", encoding="utf-8")
-            store = bridge.SubmissionStore(root / "db.sqlite")
+            store = SubmissionStore(root / "db.sqlite")
             row = store.upsert_submission(
                 bridge.ShareKey("abc", "1234"),
                 "https://115cdn.com/s/abc?password=1234",
@@ -3059,7 +3060,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             marker = "http://cms/s/ownshare_1212_episode.mkv"
             (source / "episode.strm").write_text(marker, encoding="utf-8")
             (dest / "episode.strm").write_text(marker, encoding="utf-8")
-            store = bridge.SubmissionStore(root / "db.sqlite")
+            store = SubmissionStore(root / "db.sqlite")
             row = store.upsert_submission(
                 bridge.ShareKey("abc", "1212"),
                 "https://115cdn.com/s/abc?password=1212",
@@ -3107,7 +3108,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             dest.mkdir(parents=True)
             marker = "http://cms/s/ownshare_1212_episode.mkv"
             (source / "episode.strm").write_text(marker, encoding="utf-8")
-            store = bridge.SubmissionStore(root / "db.sqlite")
+            store = SubmissionStore(root / "db.sqlite")
             row = store.upsert_submission(
                 bridge.ShareKey("abc", "1212"),
                 "https://115cdn.com/s/abc?password=1212",
@@ -3303,7 +3304,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             wrong_marker = "http://cms/s/other-share_1212_other.mkv"
             (dest / "other-direct.strm").write_text(direct_marker, encoding="utf-8")
             (dest / "other-wrong.strm").write_text(wrong_marker, encoding="utf-8")
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("abc", "1212"),
                 "https://115cdn.com/s/abc?password=1212",
@@ -3356,7 +3357,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             dest = root / "library" / "H"
             dest.mkdir(parents=True)
             (dest / "环太平洋.strm").write_text("http://cms/s/swswyxm3wul_1212_1.mkv", encoding="utf-8")
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(bridge.ShareKey("dummyshare001", "pass001"), "https://115cdn.com/s/dummyshare001?password=pass001", "submitted", title="环太平洋 (2013)")
             store.update_self_share(
                 int(row["id"]),
@@ -3377,7 +3378,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             self.assertEqual(updated["cleanup_status"], "pending")
 
     def _moving_self_share_row(self, root, source, dest, category, share_code):
-        store = bridge.SubmissionStore(root / "submissions.db")
+        store = SubmissionStore(root / "submissions.db")
         row = store.upsert_submission(
             bridge.ShareKey(f"share-{share_code}", "pass001"),
             f"https://115cdn.com/s/{share_code}",
@@ -3669,7 +3670,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             dest = root / "library" / "Movie"
             source.mkdir(parents=True)
             (source / "movie.strm").write_text("http://cms/s/reconcilepartial_1212_movie", encoding="utf-8")
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("share-reconcilepartial", "pass001"),
                 "https://115cdn.com/s/reconcilepartial",
@@ -3706,7 +3707,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             dest = root / "library" / "Movie"
             source.mkdir(parents=True)
             (source / "movie.strm").write_text("http://cms/s/reconcile_nonmoving_1212_movie", encoding="utf-8")
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("share-reconcile-nonmoving", "pass001"),
                 "https://115cdn.com/s/reconcile-nonmoving",
@@ -3744,7 +3745,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             root = Path(tmp)
             source = root / "share" / "Movie"
             dest = root / "library" / "Movie"
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("share-repair-error", "pass001"),
                 "https://115cdn.com/s/repair-error",
@@ -3794,7 +3795,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             outside.mkdir(parents=True)
             alias = outside / "alias.strm"
             alias.write_text("http://cms/s/reconcile_manifest_1212_movie", encoding="utf-8")
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("share-reconcile-manifest", "pass001"),
                 "https://115cdn.com/s/reconcile-manifest",
@@ -3833,7 +3834,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             source.mkdir(parents=True)
             alias = source / "alias.strm"
             alias.write_text("http://cms/s/reconcile_library_manifest_1212_movie", encoding="utf-8")
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("share-reconcile-library-manifest", "pass001"),
                 "https://115cdn.com/s/reconcile-library-manifest",
@@ -3877,7 +3878,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             (library_root / "Movie").mkdir(parents=True)
             alias = source / "alias.strm"
             alias.write_text("http://cms/s/reconcile_nested_manifest_1212_movie", encoding="utf-8")
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("share-reconcile-nested-manifest", "pass001"),
                 "https://115cdn.com/s/reconcile-nested-manifest",
@@ -3923,7 +3924,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 actual_source = share_root if source_name_case == "." else source
                 alias = actual_source / "alias.strm"
                 alias.write_text("http://cms/s/repair_name_1212_movie", encoding="utf-8")
-                store = bridge.SubmissionStore(root / "submissions.db")
+                store = SubmissionStore(root / "submissions.db")
                 row = store.upsert_submission(
                     bridge.ShareKey("share-repair-name", "pass001"),
                     "https://115cdn.com/s/repair-name",
@@ -3970,7 +3971,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 "http://cms/s/swswrepair_1212_1.mkv",
                 encoding="utf-8",
             )
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(bridge.ShareKey("dummyshare002", "pass002"), "https://115cdn.com/s/dummyshare002?password=pass002", "submitted", title="梦魇绝镇 (2022)")
             store.update_self_share(
                 int(row["id"]),
@@ -4014,7 +4015,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 "http://cms/s/own_share_1212_movie.mkv",
                 encoding="utf-8",
             )
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("external-alias-fallback", "pass001"),
                 "https://115cdn.com/s/external-alias-fallback?password=pass001",
@@ -4062,7 +4063,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             strm_name = "长安的荔枝.strm"
             (source / strm_name).write_text("http://cms/s/swswmerge_1212_1.mp4", encoding="utf-8")
             (dest / strm_name).write_text("http://cms/d/direct.mp4", encoding="utf-8")
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(bridge.ShareKey("dummyshare003", "pass003"), "https://115cdn.com/s/dummyshare003?password=pass003", "submitted", title="长安的荔枝")
             store.update_self_share(
                 int(row["id"]),
@@ -4111,7 +4112,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             share_root = root / "share"
             movie_root = root / "Movie"
             dest = movie_root / "Y-一战再战-2025-[tmdb=1054867]"
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(bridge.ShareKey("dummyshare004", "pass004"), "https://115cdn.com/s/dummyshare004?password=pass004", "submitted", title="一战再战 (2025) {tmdb-1054867}")
             store.update_self_share(
                 int(row["id"]),
@@ -4151,7 +4152,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             root = Path(tmp)
             share_root = root / "share"
             movie_root = root / "Movie"
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             rows = []
             for index in range(2):
                 folder_name = f"M-缺失任务{index}-2025-[tmdb={1054800 + index}]"
@@ -4209,7 +4210,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             movie_root = root / "Movie"
             folder_name = "M-超时恢复-2025-[tmdb=1054801]"
             dest = movie_root / folder_name
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("timed-out-source", "pass"),
                 "https://115cdn.com/s/timed-out-source?password=pass",
@@ -4262,7 +4263,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             root = Path(tmp)
             share_root = root / "share"
             movie_root = root / "Movie"
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
 
             active_folder = "A-等待恢复-2025-[tmdb=1054802]"
             active = store.upsert_submission(
@@ -4339,7 +4340,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
     def test_restore_sync_claim_allows_only_one_fresh_submission_and_retries_after_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            store = SubmissionStore(Path(tmp) / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("claim-source", "pass"),
                 "https://115cdn.com/s/claim-source?password=pass",
@@ -4360,7 +4361,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             dest = movie_root / "Y-一战再战-2025-[tmdb=1054867]"
             source.mkdir(parents=True)
             (source / "一战再战.strm").write_text("http://cms/s/swsw43a3wul_1212_3455387345258282790.mkv", encoding="utf-8")
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(bridge.ShareKey("dummyshare004", "pass004"), "https://115cdn.com/s/dummyshare004?password=pass004", "submitted", title="一战再战 (2025) {tmdb-1054867}")
             store.update_self_share(
                 int(row["id"]),
@@ -4523,7 +4524,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 "http://cms/s/owncode_1212_file.mkv",
                 encoding="utf-8",
             )
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("external", "pass"),
                 "https://115cdn.com/s/external?password=pass",
@@ -4586,7 +4587,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 "http://cms/s/owncode_1212_file.mkv",
                 encoding="utf-8",
             )
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("external-fallback", "pass"),
                 "https://115cdn.com/s/external-fallback?password=pass",
@@ -4667,7 +4668,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             )
             preserved = dest / "Show - S03E02.strm"
             preserved.write_text("http://cms/d/direct/S03E02.mkv", encoding="utf-8")
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("dummyshare007", "pass007"),
                 "https://115cdn.com/s/dummyshare007?password=pass007",
@@ -4727,7 +4728,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             )
             existing = dest / "Show - S03E02.strm"
             existing.write_text("http://cms/s/owncode_ownpwd_S03E02.mkv", encoding="utf-8")
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("dummyshare008", "pass008"),
                 "https://115cdn.com/s/dummyshare008?password=pass008",
@@ -4783,7 +4784,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             duplicate.mkdir(parents=True)
             (source / "jojo.strm").write_text("http://cms/s/swslig43wul_1212_1.mkv", encoding="utf-8")
             (duplicate / "jojo.strm").write_text("http://cms/d/direct.mkv", encoding="utf-8")
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("dummyshare005", "pass005"),
                 "https://115cdn.com/s/dummyshare005?password=pass005",
@@ -4830,7 +4831,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             duplicate.mkdir(parents=True)
             (dest / "jojo.strm").write_text("http://cms/s/swslig43wul_1212_1.mkv", encoding="utf-8")
             (duplicate / "jojo.strm").write_text("http://cms/d/direct.mkv", encoding="utf-8")
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("dummyshare006", "pass006"),
                 "https://115cdn.com/s/dummyshare006?password=pass006",
@@ -4988,7 +4989,7 @@ class P115FailureHandlingTests(unittest.TestCase):
             share_root = root / "share"
             movie_root = root / "Movie"
             dest = movie_root / "Y-旧任务-2025-[tmdb=1054867]"
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(bridge.ShareKey("oldshare", "pass"), "https://115cdn.com/s/oldshare?password=pass", "submitted", title="旧任务 (2025) {tmdb-1054867}")
             store.update_self_share(
                 int(row["id"]),
@@ -5036,7 +5037,7 @@ class P115FailureHandlingTests(unittest.TestCase):
                 "http://cms/s/swswold_1212_3455387345258282790.mkv",
                 encoding="utf-8",
             )
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("oldshare", "pass"),
                 "https://115cdn.com/s/oldshare?password=pass",
@@ -5105,7 +5106,7 @@ class P115FailureHandlingTests(unittest.TestCase):
                 "http://cms/s/invalid_1212_3455387345258282790.mkv",
                 encoding="utf-8",
             )
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("invalid-source", "pass"),
                 "https://115cdn.com/s/invalid-source?password=pass",
@@ -5163,7 +5164,7 @@ class P115FailureHandlingTests(unittest.TestCase):
             (healthy_source / "健康任务.strm").write_text("http://cms/s/healthy_1212_movie", encoding="utf-8")
             (healthy_dest / "健康任务.strm").write_text("http://cms/s/healthy_1212_movie", encoding="utf-8")
             (missing_source / "历史任务.strm").write_text("http://cms/s/history_1212_movie", encoding="utf-8")
-            store = bridge.SubmissionStore(root / "submissions.db")
+            store = SubmissionStore(root / "submissions.db")
 
             healthy = store.upsert_submission(
                 bridge.ShareKey("healthy-source", "pass"),

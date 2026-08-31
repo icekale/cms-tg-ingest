@@ -24,6 +24,7 @@ from app.quality_automation import (
     save_quality_notify_state,
     should_notify_quality_run,
 )
+from tests.legacy_submission_store import SubmissionStore
 from app.quality_rules import QualityRuleMatch
 from app.task_store import TaskStore
 from bridge import _quality_attention_message
@@ -2677,7 +2678,7 @@ class QualityAutoRestoreTests(unittest.TestCase):
             self.assertEqual(plans[capped.id].action, "skip")
 
     def test_restore_falls_back_to_submission_move_status(self):
-        from bridge import ShareKey, SubmissionStore
+        from bridge import ShareKey
 
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = SubmissionStore(Path(tmp) / "submissions.db")
@@ -2915,7 +2916,7 @@ class QualityShareRevalidateTests(unittest.TestCase):
             self.assertFalse(service._auto_revalidate_share(service.store.find_task(claimed.id), 100.0))
 
     def test_completed_task_stale_invalid_marker_cleared_when_share_valid(self):
-        from bridge import ShareKey, SubmissionStore
+        from bridge import ShareKey
 
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = SubmissionStore(Path(tmp) / "submissions.db")
@@ -2959,7 +2960,7 @@ class QualityShareRevalidateTests(unittest.TestCase):
             )
 
     def test_completed_task_marker_kept_when_share_still_invalid(self):
-        from bridge import ShareKey, SubmissionStore
+        from bridge import ShareKey
 
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = SubmissionStore(Path(tmp) / "submissions.db")
@@ -3035,7 +3036,7 @@ class QualityRetentionTests(unittest.TestCase):
         )
 
     def test_retires_old_unfixable_terminal_task_with_submission(self):
-        from bridge import ShareKey, SubmissionStore
+        from bridge import ShareKey
 
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = SubmissionStore(Path(tmp) / "submissions.db")

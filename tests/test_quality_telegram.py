@@ -14,6 +14,7 @@ from app.telegram_ui import (
     quality_manual_keyboard,
     quality_manual_rows,
 )
+from tests.legacy_submission_store import SubmissionStore
 
 
 class FakeTelegram:
@@ -127,7 +128,7 @@ class QualityTelegramTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             service, task = self.make_service(tmp)
             telegram = FakeTelegram()
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
 
             bridge.handle_update(
                 {"message": {"chat": {"id": 464100862}, "from": {"id": 464100862}, "text": "/quality"}},
@@ -150,7 +151,7 @@ class QualityTelegramTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             service, task = self.make_service(tmp)
             telegram = FakeTelegram()
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             update = {
                 "callback_query": {
                     "id": "quality-ignore",
@@ -192,7 +193,7 @@ class QualityTelegramTests(unittest.TestCase):
                 object(),
                 telegram,
                 "464100862",
-                bridge.SubmissionStore(Path(tmp) / "submissions.db"),
+                SubmissionStore(Path(tmp) / "submissions.db"),
                 poll_status=False,
                 task_store=service.store,
                 task_engine_enabled=True,
@@ -229,7 +230,7 @@ class QualityTelegramTests(unittest.TestCase):
             service, task = self.make_service(tmp)
             service.store.mark_quality_ignored(task.id, "test", rule_id="strm_mode_mismatch")
             telegram = NotModifiedEditTelegram()
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
 
             bridge.handle_update(
                 {
@@ -260,7 +261,7 @@ class QualityTelegramTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             service, task = self.make_service(tmp)
             telegram = FailingEditTelegram(RuntimeError("HTTP 500 from telegram"))
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
 
             bridge.handle_update(
                 {

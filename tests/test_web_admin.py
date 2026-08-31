@@ -32,6 +32,7 @@ from app.web import (
     render_task_list,
     start_web_server,
 )
+from tests.legacy_submission_store import SubmissionStore
 
 
 class _ManualActionRuleEngine:
@@ -1440,7 +1441,7 @@ class WebAdminTests(unittest.TestCase):
     def test_worker_claim_after_eligibility_snapshot_makes_web_action_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             row = submission_store.upsert_submission(
                 bridge.ShareKey("claim-race", ""),
                 "https://115cdn.com/s/claim-race",
@@ -1496,7 +1497,7 @@ class WebAdminTests(unittest.TestCase):
     def test_reprocess_endpoint_requeues_task_from_received_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task = store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
             row = submission_store.upsert_submission(
                 bridge.ShareKey("abc", "1234"),
@@ -2298,7 +2299,7 @@ class WebAdminTests(unittest.TestCase):
             task_store = TaskStore(Path(tmp) / "tasks.db")
             existing = task_store.upsert_task("existing", "", "https://115cdn.com/s/existing")
             task_store.record_event(existing.id, TaskStage.RECEIVED, TaskStatus.PENDING, "已有 TaskStore 任务")
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             submission_store.upsert_submission(
                 bridge.ShareKey("dummy-1", ""),
                 "https://115cdn.com/s/dummy-1",

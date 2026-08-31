@@ -14,6 +14,7 @@ from app.task_runner import StageOutcome, TaskRunner
 from app.task_store import TaskStore, operation_scope
 from app.workflows.direct import DirectTaskWorkflow
 import bridge
+from tests.legacy_submission_store import SubmissionStore
 
 
 class CmsFake:
@@ -109,7 +110,7 @@ class DirectWorkflowTests(unittest.TestCase):
 
     def _workflow(self, tmp, emby=None, source_roots=None, library_roots=None):
         cms = CmsFake()
-        submissions = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+        submissions = SubmissionStore(Path(tmp) / "submissions.db")
         task_store = TaskStore(Path(tmp) / "tasks.db")
         move_config = MoveConfig(
             source_roots=source_roots or [],

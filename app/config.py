@@ -186,6 +186,7 @@ class Config:
     self_share_organized_scan_parent_ids: str = ""
     cms_state_db_path: str = "/cms/cms-online.db"
     task_db_path: str = "/data/tasks.db"
+    database_path: str = ""
     task_engine_enabled: bool = False
     web_enabled: bool = False
     web_host: str = "0.0.0.0"
@@ -332,6 +333,7 @@ class Config:
             self_share_organized_scan_parent_ids=os.environ.get("SELF_SHARE_ORGANIZED_SCAN_PARENT_IDS", ""),
             cms_state_db_path=os.environ.get("CMS_STATE_DB_PATH", "/cms/cms-online.db"),
             task_db_path=os.environ.get("TASK_DB_PATH", "/data/tasks.db"),
+            database_path=os.environ.get("DATABASE_PATH", ""),
             task_engine_enabled=parse_bool_env(os.environ.get("TASK_ENGINE_ENABLED"), False),
             web_enabled=parse_bool_env(os.environ.get("WEB_ENABLED"), False),
             web_host=os.environ.get("WEB_HOST", "0.0.0.0"),

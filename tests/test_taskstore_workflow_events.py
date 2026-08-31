@@ -7,6 +7,7 @@ import bridge
 from app.models import TaskStage, TaskStatus
 from app.task_bridge import ensure_task_for_link
 from app.task_store import TaskStore
+from tests.legacy_submission_store import SubmissionStore
 
 
 class TaskStoreWorkflowEventTests(unittest.TestCase):
@@ -127,7 +128,7 @@ class FakePollTelegram:
 class PollTaskStoreIntegrationTests(unittest.TestCase):
     def test_status_poll_records_cms_status_and_emby_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             key = bridge.ShareKey("abc", "")
             row = submission_store.upsert_submission(key, "https://115cdn.com/s/abc", "submitted", cms_task_id="cms-1", title="示例电影")
@@ -153,7 +154,7 @@ class PollTaskStoreIntegrationTests(unittest.TestCase):
             self.assertEqual(task.status, TaskStatus.NEEDS_ACTION)
     def test_status_poll_self_share_preserves_source_code_internal_title_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
-            class TrackingStore(bridge.SubmissionStore):
+            class TrackingStore(SubmissionStore):
                 def __init__(self, db_path):
                     self.status_titles = []
                     super().__init__(db_path)

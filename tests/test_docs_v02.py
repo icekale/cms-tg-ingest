@@ -1,5 +1,6 @@
 from pathlib import Path
 import unittest
+from tests.legacy_submission_store import SubmissionStore
 
 ROOT = Path(__file__).resolve().parents[1]
 

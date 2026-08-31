@@ -7,7 +7,8 @@ from pathlib import Path
 
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
 from app.task_store import TaskStore
-from bridge import SubmissionStore
+from tests.legacy_submission_store import SubmissionStore
+
 
 
 @dataclass(frozen=True)

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .models import StageResult, TaskOperation, TaskSnapshot, TaskStage, TaskStatus
+from .models import StageCheckpoint, StageResult, TaskOperation, TaskSnapshot, TaskStage, TaskStatus
 from .quality_rules import quality_attempt_count
 from .self_share_settings import normalize_receive_cid, normalize_self_share_review_mode
 from .strm_mode import is_strm_mode_locked, normalize_strm_mode
@@ -3512,3 +3512,199 @@ class TaskStore:
                 (str(owner), str(token)),
             )
         return int(cursor.rowcount or 0) == 1
+
+    def write_facts(
+        self,
+        task_id: int,
+        *,
+        media: dict[str, Any] | None = None,
+        share: dict[str, Any] | None = None,
+        move: dict[str, Any] | None = None,
+        emby: dict[str, Any] | None = None,
+        cleanup: dict[str, Any] | None = None,
+        probe: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        result = StageResult.complete(
+            "",
+            checkpoint=StageCheckpoint(
+                media=media or {},
+                share=share or {},
+                move=move or {},
+                emby=emby or {},
+                cleanup=cleanup or {},
+                probe=probe or {},
+            ),
+        )
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._apply_checkpoint(conn, int(task_id), result)
+        return self.workflow_facts(int(task_id))
+
+
+class WorkflowRowAdapter:
+    """Fact-backed row API for TaskRunner workflows."""
+
+    def __init__(self, tasks: TaskStore):
+        self._tasks = tasks
+        self.db_path = tasks.db_path
+
+    def find_by_id(self, row_id: int) -> dict[str, Any] | None:
+        facts = self._tasks.workflow_facts(int(row_id))
+        return facts or None
+
+    def find_by_key(self, key: Any) -> dict[str, Any] | None:
+        share_code = str(getattr(key, "share_code", "") or "")
+        receive_code = str(getattr(key, "receive_code", "") or "")
+        task = self._tasks.find_task_by_share_key(share_code, receive_code)
+        if task is None:
+            return None
+        return self._tasks.workflow_facts(int(task.id))
+
+    def upsert_submission(self, key: Any, url: str, status: str, title: str = "", cms_task_id: str | None = None, **_kwargs: Any) -> dict[str, Any]:
+        share_code = str(getattr(key, "share_code", "") or "")
+        receive_code = str(getattr(key, "receive_code", "") or "")
+        task = self._tasks.upsert_task(share_code, receive_code, str(url or ""), title=str(title or "") or None)
+        media: dict[str, Any] = {}
+        if title:
+            media["title"] = str(title)
+        if cms_task_id:
+            media["cms_task_id"] = str(cms_task_id)
+        if media:
+            self._tasks.write_facts(int(task.id), media=media)
+        return self._tasks.workflow_facts(int(task.id))
+
+    def update_status(self, row_id: int, status: str, title: str | None = None, last_error: str | None = None) -> dict[str, Any] | None:
+        if title:
+            return self._tasks.write_facts(int(row_id), media={"title": str(title)})
+        return self.find_by_id(row_id)
+
+    def update_category(self, row_id: int, choice: str | None, status: str) -> dict[str, Any] | None:
+        media = {"recognition_status": str(status or "")}
+        if choice:
+            media["category"] = str(choice)
+        return self._tasks.write_facts(int(row_id), media=media)
+
+    def update_recognition(self, row_id: int, recognition: dict[str, Any], category_status: str) -> dict[str, Any] | None:
+        recognition = recognition or {}
+        payload = {
+            "recognition_status": str(category_status or ""),
+            "recognition_json": json.dumps(recognition, ensure_ascii=True, sort_keys=True),
+            "title": str(recognition.get("title") or ""),
+            "tmdb_id": str(recognition.get("tmdb_id") or ""),
+            "category": str(recognition.get("category") or ""),
+        }
+        return self._tasks.write_facts(int(row_id), media={k: v for k, v in payload.items() if v})
+
+    def update_emby(self, row_id: int, status: str, item_id: str | None = None, title: str | None = None, path: str | None = None, parent: str | None = None, **_kwargs: Any) -> dict[str, Any] | None:
+        emby = {"status": str(status or "")}
+        if item_id is not None:
+            emby["item_id"] = str(item_id)
+        if title is not None:
+            emby["title"] = str(title)
+        if path is not None:
+            emby["path"] = str(path)
+        if parent is not None:
+            emby["library"] = str(parent)
+        return self._tasks.write_facts(int(row_id), emby=emby)
+
+    def update_move(self, row_id: int, status: str, source_path: str | None = None, dest_path: str | None = None, category_final: str | None = None, error: str | None = None, **_kwargs: Any) -> dict[str, Any] | None:
+        move = {"move_status": str(status or "")}
+        if source_path is not None:
+            move["source_path"] = str(source_path)
+        if dest_path is not None:
+            move["dest_path"] = str(dest_path)
+        if error is not None:
+            move["move_error"] = str(error)
+        media = {"category": str(category_final)} if category_final else None
+        return self._tasks.write_facts(int(row_id), move=move, media=media)
+
+    def update_self_share(self, row_id: int, **fields: Any) -> dict[str, Any] | None:
+        mapping = {
+            "own_share_file_id": "file_id",
+            "own_share_file_name": "canonical_name",
+            "own_share_code": "own_share_code",
+            "own_share_receive_code": "own_share_receive_code",
+            "share_alias_name": "alias_name",
+            "canonical_manifest_json": "canonical_manifest_json",
+            "share_validation_status": "validation_status",
+            "share_validation_error": "validation_error",
+            "share_sync_status": "share_sync_status",
+        }
+        share = {dest: str(fields[src]) for src, dest in mapping.items() if fields.get(src) is not None}
+        if not share:
+            return self.find_by_id(row_id)
+        return self._tasks.write_facts(int(row_id), share=share)
+
+    def update_cleanup(self, row_id: int, status: str, file_id: str | None = None, error: str | None = None, **_kwargs: Any) -> dict[str, Any] | None:
+        cleanup = {"status": str(status or "")}
+        if file_id is not None:
+            cleanup["target_id"] = str(file_id)
+        if error is not None:
+            cleanup["error"] = str(error)
+        return self._tasks.write_facts(int(row_id), cleanup=cleanup)
+
+    def update_share_probe(self, row_id: int) -> dict[str, Any] | None:
+        return self._tasks.write_facts(int(row_id), probe={"last_probe_at": time.time()})
+
+    def remember_parent_category(self, parent_id: str, category: str, source: str = "manual") -> None:
+        now = time.time()
+        with self._tasks._lock, self._tasks._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO parent_category_memory (parent_id, category, source, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(parent_id) DO UPDATE SET category = excluded.category, source = excluded.source, updated_at = excluded.updated_at
+                """,
+                (str(parent_id), str(category), str(source), now, now),
+            )
+
+    def category_for_parent_id(self, parent_id: str) -> str:
+        with self._tasks._lock, self._tasks._connection() as conn:
+            row = conn.execute("SELECT category FROM parent_category_memory WHERE parent_id = ?", (str(parent_id),)).fetchone()
+        return str(row["category"] if row else "")
+
+    def reset_self_share_for_update(self, row_id: int) -> dict[str, Any] | None:
+        self._tasks._clear_reprocess_facts(int(row_id), preserve_received_snapshot=True)
+        return self.find_by_id(row_id)
+
+    def delete_submission(self, row_id: int) -> bool:
+        return False
+
+    def recent(self, limit: int = 5) -> list[dict[str, Any]]:
+        return []
+
+    def stranded_self_share_move_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
+        return []
+
+    def invalid_self_share_move_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
+        return []
+
+    def missing_self_share_library_candidates(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        return []
+
+    def pending_self_share_cleanup_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
+        return []
+
+    def self_share_probe_candidates(self, limit: int = 3) -> list[dict[str, Any]]:
+        return []
+
+    def stale_for_repair(self, limit: int = 50) -> list[dict[str, Any]]:
+        return []
+
+    def live_self_share_identities(self, dest_path: str, tmdb_id: str = "") -> tuple:
+        return ()
+
+    def latest_self_share_identity(self, dest_path: str, tmdb_id: str = "") -> tuple:
+        return ()
+
+    def all_confirmed_with_emby_path(self) -> list[dict[str, Any]]:
+        return []
+
+    def clear_finished_history(self) -> int:
+        return 0
+
+    def mark_invalid_share_cleaned(self, row_id: int, reason: str) -> dict[str, Any] | None:
+        return self.find_by_id(row_id)
+
+    def claim_self_share_restore_sync(self, row_id: int, retry_seconds: float = 60, now: float | None = None) -> bool:
+        return True

@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.workflows.self_share import has_explicit_task_tmdb_hint
+from tests.legacy_submission_store import SubmissionStore
 
 spec = importlib.util.spec_from_file_location("bridge", Path(__file__).resolve().parents[1] / "bridge.py")
 bridge = importlib.util.module_from_spec(spec)
@@ -79,7 +80,7 @@ class ExpectedTmdbPriorityTests(unittest.TestCase):
 class SubmissionSourceTitleTests(unittest.TestCase):
     def test_cms_status_title_does_not_replace_self_share_source_title(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            store = SubmissionStore(Path(tmp) / "submissions.db")
             row = store.upsert_submission(
                 bridge.ShareKey("source-title", "1212"),
                 "https://115cdn.com/s/source-title?password=1212",
@@ -405,7 +406,7 @@ class EmbyAutoMatchTests(unittest.TestCase):
 class StatusRepairTests(unittest.TestCase):
     def test_latest_self_share_identity_prefers_newer_matching_tmdb_submission(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            store = SubmissionStore(Path(tmp) / "submissions.db")
             dest = Path(tmp) / "library" / "Series"
             old = store.upsert_submission(
                 bridge.ShareKey("old-source", "1212"),
@@ -446,7 +447,7 @@ class StatusRepairTests(unittest.TestCase):
     def test_submission_store_creates_self_share_performance_indexes(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "submissions.db"
-            bridge.SubmissionStore(db_path)
+            SubmissionStore(db_path)
 
             conn = sqlite3.connect(db_path)
             try:
@@ -459,7 +460,7 @@ class StatusRepairTests(unittest.TestCase):
 
     def test_submission_store_stale_for_repair_filters_confirmed_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            store = SubmissionStore(Path(tmp) / "submissions.db")
             submitted = store.upsert_submission(bridge.ShareKey("submitted", ""), "https://115cdn.com/s/submitted", "submitted")
             uncertain = store.upsert_submission(bridge.ShareKey("uncertain", ""), "https://115cdn.com/s/uncertain", "done")
             timed_out = store.upsert_submission(bridge.ShareKey("timeout", ""), "https://115cdn.com/s/timeout", "done")

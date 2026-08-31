@@ -27,6 +27,7 @@ from app.web_api import (
     serialize_health,
     serialize_task,
 )
+from tests.legacy_submission_store import SubmissionStore
 
 
 class WebApiTests(unittest.TestCase):
@@ -35,7 +36,7 @@ class WebApiTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             row = submission_store.upsert_submission(
                 bridge.ShareKey("purge", "1234"),
                 "https://115cdn.com/s/purge?password=1234",

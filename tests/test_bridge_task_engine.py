@@ -14,6 +14,7 @@ from app.clients import cms as cms_client
 from app.models import StageCheckpoint, StageResult, TaskStage, TaskStatus
 from app.task_runner import StageOutcome, TaskRunner
 from app.task_store import TaskStore, operation_scope
+from tests.legacy_submission_store import SubmissionStore
 
 
 class FakeCms:
@@ -345,7 +346,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
         self.cms = FakeCms()
         self.p115 = FakeP115()
         self.telegram = FakeTelegram()
-        self.submissions = bridge.SubmissionStore(Path(root) / "submissions.db")
+        self.submissions = SubmissionStore(Path(root) / "submissions.db")
         self.tasks = TaskStore(Path(root) / "tasks.db")
         self.config = self_share_config or bridge.SelfShareConfig(
             enabled=True,
@@ -9499,7 +9500,7 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cms = CmsWithoutDirectSubmission()
             telegram = FakeTelegram()
-            submissions = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submissions = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db", default_strm_mode="direct")
 
             bridge.handle_update(

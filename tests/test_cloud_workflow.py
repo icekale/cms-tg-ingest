@@ -13,6 +13,7 @@ from app.task_runner import TaskRunner
 from app.task_store import TaskStore
 from app.workflows.direct import ModeRoutingWorkflow
 from app.workflows.self_share import BridgeSelfShareTaskWorkflow
+from tests.legacy_submission_store import SubmissionStore
 
 
 ED2K = "ed2k://|file|Example.mkv|10|" + "ABCDEF0123456789" + "ABCDEF0123456789|/"
@@ -812,7 +813,7 @@ class CloudWorkflowTests(unittest.TestCase):
             library_root = root / "library"
             share_root.mkdir()
             task_store = TaskStore(root / "tasks.db")
-            submissions = bridge.SubmissionStore(root / "submissions.db")
+            submissions = SubmissionStore(root / "submissions.db")
             p115 = PipelineP115()
             cms = PipelineCms(share_root)
             emby = PipelineEmby()
@@ -907,7 +908,7 @@ class CloudWorkflowTests(unittest.TestCase):
             library_root = root / "library"
             share_root.mkdir()
             task_store = TaskStore(root / "tasks.db")
-            submissions = bridge.SubmissionStore(root / "submissions.db")
+            submissions = SubmissionStore(root / "submissions.db")
             p115 = FaultInjectingPipelineP115()
             cms = PipelineCms(share_root)
             emby = PipelineEmby()
@@ -1017,7 +1018,7 @@ class CloudWorkflowTests(unittest.TestCase):
 class CloudIntakeTests(unittest.TestCase):
     def test_handle_update_enqueues_cloud_source_without_cms_submit(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submissions = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submissions = SubmissionStore(Path(tmp) / "submissions.db")
             tasks = TaskStore(Path(tmp) / "tasks.db")
 
             bridge.handle_update(

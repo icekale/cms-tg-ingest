@@ -11,6 +11,7 @@ from unittest.mock import patch
 import bridge
 from app.models import TaskStage, TaskStatus
 from app.task_store import TaskStore
+from tests.legacy_submission_store import SubmissionStore
 
 
 class BridgeV02IntegrationTests(unittest.TestCase):
@@ -873,7 +874,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_handle_update_records_received_and_cms_submitted_task_events(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             cms = FakeCmsSubmit()
             telegram = FakeTelegram()
@@ -900,7 +901,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_duplicate_link_does_not_resubmit_but_keeps_taskstore_consistent(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             cms = FakeCmsSubmit()
             telegram = FakeTelegram()
@@ -916,7 +917,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_cms_submit_exception_records_failure_without_retry_count(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             telegram = FakeTelegram()
 
@@ -939,7 +940,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_handle_update_without_task_store_preserves_existing_behavior(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             cms = FakeCmsSubmit()
             telegram = FakeTelegram()
 
@@ -957,7 +958,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_handle_update_with_polling_accepts_task_store(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             cms = FakeCmsSubmit()
             telegram = FakeTelegram()
@@ -979,7 +980,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_self_share_update_receives_115_share_without_cms_plain_submit(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             cms = FakeCmsSubmit()
             telegram = FakeTelegram()
@@ -1009,7 +1010,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_task_engine_self_share_intake_enqueues_without_receiving_immediately(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             cms = FakeCmsSubmit()
             telegram = FakeTelegram()
@@ -1043,7 +1044,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_task_engine_self_share_without_taskstore_does_not_fallback_to_polling(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             cms = FakeCmsSubmit()
             telegram = FakeTelegram()
             p115 = FakeP115Receive()
@@ -1074,7 +1075,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_task_engine_disabled_self_share_still_allows_legacy_polling(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             cms = FakeCmsSubmit()
             telegram = FakeTelegram()
             p115 = FakeP115Receive()
@@ -1104,7 +1105,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_task_engine_duplicate_running_link_reports_current_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
             task_store.record_event(task.id, TaskStage.ORGANIZING, TaskStatus.RUNNING, "CMS 整理中")
@@ -1132,7 +1133,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_task_engine_duplicate_completed_link_requeues_when_dest_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
             task_store.record_event(
@@ -1173,7 +1174,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_status_command_prefers_taskstore_when_authoritative_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             submission_store.upsert_submission(
                 bridge.ShareKey("old", ""),
                 "https://115cdn.com/s/old",
@@ -1214,7 +1215,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_status_command_shows_taskstore_wait_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
             task_store.record_event(
@@ -1246,7 +1247,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_status_command_shows_slowness_and_p115_call_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
             task_store.record_event(
@@ -1287,7 +1288,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_status_command_truncates_long_taskstore_wait_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
             long_reason = "等待自有分享 STRM" + "B" * 260
@@ -1326,7 +1327,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_status_command_truncates_long_taskstore_titles_and_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             title_prefix = "长标题"
             error_prefix = "错误摘要"
@@ -1374,7 +1375,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_history_command_uses_taskstore_then_submission_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             submission_store.upsert_submission(
                 bridge.ShareKey("old", ""),
                 "https://115cdn.com/s/old",
@@ -1422,7 +1423,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_status_command_includes_task_action_buttons(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
             task_store.record_event(
@@ -1500,7 +1501,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_multi_source_intake_summary_is_rich_and_lists_task_titles_and_statuses(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             telegram = FakeTelegram()
             text = (
@@ -1553,7 +1554,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_multi_source_intake_summary_redacts_persisted_task_text(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             telegram = FakeTelegram()
             secret_url = "https://evil.test/intake?share_code=intake-share&password=intake-password"
@@ -1578,7 +1579,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_start_series_update_task_requeues_completed_series(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             row = submission_store.upsert_submission(
                 bridge.ShareKey("abc", "1234"),
                 "https://115cdn.com/s/abc?password=1234",
@@ -1607,7 +1608,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_start_series_update_task_reports_reset_exception_accurately(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             row, task, _recognition = self.make_completed_target(submission_store, task_store)
 
@@ -1635,7 +1636,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_start_series_update_task_reports_missing_submission_accurately(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             row, task, _recognition = self.make_completed_target(submission_store, task_store)
 
@@ -1660,7 +1661,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_start_series_update_task_rejects_claimed_completed_series_without_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             row, task, _recognition = self.make_completed_target(submission_store, task_store)
             claimed = task_store.compare_and_set_transition(
@@ -1690,7 +1691,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_start_series_update_task_recovers_freeze_checkpoint_before_submission_reset(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_db_path = Path(tmp) / "tasks.db"
             task_store = TaskStore(task_db_path)
             row, task, recognition = self.make_completed_target(submission_store, task_store)
@@ -1755,7 +1756,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_start_series_update_task_recovers_checkpoint_after_submission_reset_commit(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_db_path = Path(tmp) / "tasks.db"
             task_store = TaskStore(task_db_path)
             row, task, recognition = self.make_completed_target(submission_store, task_store)
@@ -1804,7 +1805,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_start_series_update_task_parks_unchanged_checkpoint_after_activation_cas_loss(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             row, task, _recognition = self.make_completed_target(submission_store, task_store)
             real_record_event = task_store.record_event
@@ -1833,7 +1834,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_start_series_update_task_preserves_competing_activation_writer(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             row, task, _recognition = self.make_completed_target(submission_store, task_store)
             real_record_event = task_store.record_event
@@ -1875,7 +1876,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_start_series_update_task_rejects_explicit_parent_checkpoint_without_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             row, task, _recognition = self.make_completed_target(submission_store, task_store)
             lookalike = task_store.record_event(
@@ -1915,7 +1916,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_start_series_update_task_rejects_claimed_freeze_checkpoint_without_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             row, task, _recognition = self.make_completed_target(submission_store, task_store)
 
@@ -1979,7 +1980,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_repairs_existing_unclaimed_source(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             target_row, target, target_recognition = self.make_completed_target(submission_store, task_store)
             source_row, source_task = self.make_existing_source(submission_store, task_store)
@@ -2020,7 +2021,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_clears_stale_same_link_checkpoint_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             _source_row, source_task = self.make_existing_source(submission_store, task_store)
@@ -2045,7 +2046,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_writes_task_first_identity_to_both_child_stores(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             original_target_row = submission_store.find_by_id(int(target_row["id"]))
@@ -2089,7 +2090,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_rejects_claimed_source(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             source_row, claimed = self.make_existing_source(submission_store, task_store, claimed=True)
@@ -2114,7 +2115,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_rejects_claimed_target_without_creating_source(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             claimed = task_store.compare_and_set_transition(
@@ -2152,7 +2153,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
         ]
         for invalid in invalid_targets:
             with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as tmp:
-                submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+                submission_store = SubmissionStore(Path(tmp) / "submissions.db")
                 task_store = TaskStore(Path(tmp) / "tasks.db")
                 target_row, target, _recognition = self.make_completed_target(
                     submission_store,
@@ -2182,7 +2183,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_rejects_different_parent(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             source_row, source_task = self.make_existing_source(
@@ -2209,7 +2210,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_rejects_completed_remote_share_in_task_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             source_row, source_task = self.make_existing_source(
@@ -2238,7 +2239,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_rejects_completed_remote_share_in_submission(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             source_row, source_task = self.make_existing_source(
@@ -2267,7 +2268,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_detects_submission_share_completed_after_freeze(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             source_row, _source_task = self.make_existing_source(submission_store, task_store)
@@ -2323,7 +2324,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             key = bridge.ShareKey("new", "1212")
@@ -2354,7 +2355,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_keeps_active_same_parent_started_with_stale_share_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             key = bridge.ShareKey("new", "1212")
@@ -2389,7 +2390,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_atomic_source_creation_preserves_race_winner(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_db_path = Path(tmp) / "tasks.db"
             winner_waiting_to_create = threading.Event()
             allow_winner_creation = threading.Event()
@@ -2462,7 +2463,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_duplicate_does_not_park_active_preparation_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_db_path = Path(tmp) / "tasks.db"
             first_store = TaskStore(task_db_path)
             _target_row, target, _recognition = self.make_completed_target(submission_store, first_store)
@@ -2544,7 +2545,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_parks_preparation_checkpoint_after_preparation_interruption(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             key = bridge.ShareKey("new", "1212")
@@ -2588,7 +2589,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_parks_checkpoint_after_submission_commit_interruption(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             key = bridge.ShareKey("new", "1212")
@@ -2625,7 +2626,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_parks_exact_checkpoint_after_activation_cas_loss(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             real_record_event = task_store.record_event
@@ -2658,7 +2659,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_does_not_park_a_changed_activation_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             real_record_event = task_store.record_event
@@ -2702,7 +2703,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_new_link_series_update_leaves_non_checkpoint_same_parent_task_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             child = task_store.upsert_task("new", "1212", "https://115cdn.com/s/new?password=1212")
@@ -2736,7 +2737,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
         failures = [None, RuntimeError("prepare failed")]
         for failure in failures:
             with self.subTest(failure=repr(failure)), tempfile.TemporaryDirectory() as tmp:
-                submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+                submission_store = SubmissionStore(Path(tmp) / "submissions.db")
                 task_store = TaskStore(Path(tmp) / "tasks.db")
                 _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
                 if isinstance(failure, Exception):
@@ -2770,7 +2771,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_series_update_command_requeues_completed_series(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             row = submission_store.upsert_submission(
                 bridge.ShareKey("abc", "1234"),
                 "https://115cdn.com/s/abc?password=1234",
@@ -2810,7 +2811,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_untargeted_colon_series_update_command_requeues_completed_series(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _row, task, _recognition = self.make_completed_target(submission_store, task_store)
             telegram = FakeTelegram()
@@ -2834,7 +2835,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_explicit_series_update_command_requires_target_for_new_link(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             telegram = FakeTelegram()
 
@@ -2855,7 +2856,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_targeted_explicit_series_update_command_starts_new_link(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             telegram = FakeTelegram()
@@ -2879,7 +2880,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_targeted_explicit_series_update_command_rejects_movie_target(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(
                 submission_store,
@@ -2906,7 +2907,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_targeted_explicit_series_update_command_rejects_unfinished_target(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(
                 submission_store,
@@ -2933,7 +2934,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_targeted_explicit_series_update_command_rejects_missing_target(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             telegram = FakeTelegram()
 
@@ -2954,7 +2955,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_targeted_explicit_series_update_command_rejects_multiple_urls(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             telegram = FakeTelegram()
@@ -2980,7 +2981,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_targeted_explicit_series_update_command_rejects_extra_text(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             telegram = FakeTelegram()
@@ -3003,7 +3004,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_targeted_explicit_series_update_command_rejects_duplicate_url(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             telegram = FakeTelegram()
@@ -3027,7 +3028,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_targeted_explicit_series_update_command_rejects_magnet(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             _target_row, target, _recognition = self.make_completed_target(submission_store, task_store)
             telegram = FakeTelegram()
@@ -3049,7 +3050,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_completed_tv_task_exposes_update_button_and_resets_for_new_run(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             row = submission_store.upsert_submission(
                 bridge.ShareKey("abc", "1234"),
                 "https://115cdn.com/s/abc?password=1234",
@@ -3168,7 +3169,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_prepare_series_update_child_copies_only_stable_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             target_recognition = {
                 "ok": True,
                 "title": "X-悬案-2026-[tmdb=273114]",
@@ -3240,7 +3241,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_prepare_series_update_child_missing_target_creates_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
 
             prepared = submission_store.prepare_series_update_child(
                 99999,
@@ -3253,7 +3254,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_task_retry_callback_requeues_failed_task(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
             task_store.record_event(task.id, TaskStage.STRM_READY, TaskStatus.FAILED, "STRM missing", error_summary="未找到 STRM")
@@ -3300,7 +3301,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             return task
 
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             limited = make_task(task_store, "limited")
             telegram = FakeTelegram()
@@ -3326,7 +3327,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_task_reprocess_callback_requeues_from_received_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
             row = submission_store.upsert_submission(
@@ -3396,7 +3397,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_task_emby_and_restore_callbacks_enqueue_target_stages(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             emby_task = task_store.upsert_task("emby", "", "https://115cdn.com/s/emby", chat_id="464100862")
             task_store.record_event(emby_task.id, TaskStage.MOVED, TaskStatus.SUCCEEDED, "moved")
@@ -3435,7 +3436,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
     def test_health_command_includes_taskstore_queue_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            submission_store = bridge.SubmissionStore(root / "submissions.db")
+            submission_store = SubmissionStore(root / "submissions.db")
             task_store = TaskStore(root / "tasks.db")
             pending = task_store.upsert_task("pending", "", "https://115cdn.com/s/pending")
             task_store.enqueue_task(pending.id, TaskStage.RECEIVED, next_run_at=0)
@@ -3470,7 +3471,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_category_callback_requeues_authoritative_recognizing_task(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             row = submission_store.upsert_submission(
                 bridge.ShareKey("abc", "1234"),
@@ -3511,7 +3512,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_category_callback_remembers_organized_parent_category(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             row = submission_store.upsert_submission(
                 bridge.ShareKey("abc", "1234"),
@@ -3565,7 +3566,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_category_callback_skip_marks_authoritative_task_terminal(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             row = submission_store.upsert_submission(
                 bridge.ShareKey("abc", "1234"),
@@ -3611,7 +3612,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_task_engine_requeues_sentinel_needs_action_to_claimable_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
             task = task_store.record_event(
@@ -3650,7 +3651,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_task_engine_requeue_clears_stale_defer_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
             task = task_store.record_event(
@@ -3694,7 +3695,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_task_engine_requeues_sentinel_failed_to_received_fallback_when_no_retry_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db")
             task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
             task = task_store.record_event(task.id, TaskStage.FAILED, TaskStatus.FAILED, "兼容同步失败")
@@ -3727,7 +3728,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_duplicate_self_share_received_link_does_not_receive_again(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             cms = FakeCmsSubmit()
             telegram = FakeTelegram()
             p115 = FakeP115Receive()
@@ -3752,7 +3753,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_duplicate_self_share_numeric_completed_status_does_not_receive_again(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             key = bridge.ShareKey("abc", "1234")
             row = submission_store.upsert_submission(key, "https://115cdn.com/s/abc?password=1234", "1", title="已完成影片")
             submission_store.update_self_share(row["id"], workflow_mode="self_share_sync", workflow_phase="share_sync_submitted")
@@ -3778,7 +3779,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
     def test_self_share_reprocesses_legacy_plain_submitted_row(self):
         with tempfile.TemporaryDirectory() as tmp:
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             key = bridge.ShareKey("abc", "1234")
             submission_store.upsert_submission(key, "https://115cdn.com/s/abc?password=1234", "submitted")
             cms = FakeCmsSubmit()

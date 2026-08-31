@@ -6,6 +6,7 @@ from unittest.mock import patch
 from app.models import TaskStage, TaskStatus
 from app.task_actions import apply_task_action, available_lifecycle_actions, available_task_actions
 from app.task_store import TaskStore
+from tests.legacy_submission_store import SubmissionStore
 
 
 class TaskActionsTest(unittest.TestCase):
@@ -293,7 +294,7 @@ class TaskActionsTest(unittest.TestCase):
         self.assertEqual(store.find_task(task.id).claimed_by, "new-worker")
 
     def test_delete_task_record_and_submission_removes_task_and_row(self):
-        from bridge import ShareKey, SubmissionStore
+        from bridge import ShareKey
         from app.task_actions import delete_task_record_and_submission
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -322,7 +323,7 @@ class TaskActionsTest(unittest.TestCase):
             self.assertIsNone(submission_store.find_by_id(int(row["id"])))
 
     def test_delete_task_record_and_submission_uses_metadata_submission_id(self):
-        from bridge import ShareKey, SubmissionStore
+        from bridge import ShareKey
         from app.task_actions import delete_task_record_and_submission
 
         with tempfile.TemporaryDirectory() as tmp:
