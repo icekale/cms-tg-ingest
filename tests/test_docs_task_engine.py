@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from tests.legacy_submission_store import SubmissionStore
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,8 +10,8 @@ class TaskEngineDocsTests(unittest.TestCase):
     def test_env_example_documents_authoritative_task_engine_settings(self):
         env = (ROOT / ".env.example").read_text(encoding="utf-8")
 
-        self.assertIn("TASK_ENGINE_ENABLED", env)
-        self.assertIn("TASK_DB_PATH", env)
+        self.assertIn("DATABASE_PATH=/data/cms-tg-ingest.db", env)
+        self.assertNotIn("TASK_ENGINE_ENABLED", env)
 
     def test_readme_documents_taskstore_authoritative_new_links(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -19,13 +20,12 @@ class TaskEngineDocsTests(unittest.TestCase):
         self.assertIn("Web 管理页读取 TaskStore", readme)
         self.assertIn("Telegram 新链接接收回复", readme)
         self.assertIn("`/status` 和 `/history` 优先读取 TaskStore", readme)
-        self.assertIn("旧 SubmissionStore 记录为空时兜底显示", readme)
         self.assertIn("/status 会附带详情、重试、查 Emby、恢复 STRM、从头重跑按钮", readme)
         self.assertIn("/quality 会先执行 TaskStore 本地轻量巡检", readme)
         self.assertIn("Web 任务详情页提供重试、查 Emby、恢复 STRM、从头重跑按钮", readme)
         self.assertIn("Web `/quality` 页面只读取本地 TaskStore 和 STRM 文件", readme)
         self.assertIn("/health 会显示 TaskStore 本地队列健康", readme)
-        self.assertIn("TaskEngine 开启时，新 self-share 链接不会回退到旧 start_status_poll 轮询路径", readme)
+        self.assertIn("新链接由 TaskRunner 执行，不再回退旧轮询路径", readme)
         self.assertNotIn("TaskStore 仍是旁路时间线", readme)
 
     def test_changelog_mentions_authoritative_runner(self):

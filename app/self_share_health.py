@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.clients.p115 import P115RiskControlError, P115ShareUnavailableError
+from app.task_store import command_key
 from app.config import DEFAULT_OWN_SHARE_RECEIVE_CODE, is_relative_to, safe_resolve
 from app.media.strm import validate_self_share_strm_destination
 from app.logging_system import safe_telegram_text
@@ -88,6 +89,20 @@ def probe_invalid_self_shares(
         except P115ShareUnavailableError as exc:
             store.update_share_probe(row_id)
             LOG.warning("Invalid-share probe observed unavailable share row_id=%s error=%s", row_id, exc)
+            task = None
+            finder = getattr(task_store, "find_task_by_share_key", None) if task_store is not None else None
+            if callable(finder):
+                task = finder(str(row.get("share_code") or ""), str(row.get("receive_code") or ""))
+            enqueue = getattr(task_store, "enqueue_command", None) if task_store is not None else None
+            if task is not None and callable(enqueue):
+                enqueue(
+                    int(task.id),
+                    "invalidate_share",
+                    {"observed_state": "unavailable"},
+                    idempotency_key=command_key("invalid-share", task.id, share_code, "unavailable"),
+                    actor="probe",
+                    source="invalid-share",
+                )
         except RuntimeError as exc:
             store.update_share_probe(row_id)
             LOG.warning("Invalid-share probe returned an unclassified error row_id=%s error=%s", row_id, exc)

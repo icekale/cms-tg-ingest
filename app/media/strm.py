@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from app.config import DEFAULT_OWN_SHARE_RECEIVE_CODE, MoveConfig, MovePlan, SelfShareConfig, is_relative_to, is_under_any_root, safe_resolve
+from app.task_store import command_key
 from app.media.classify import (
     candidate_tokens,
     explicit_task_tmdb_id,
@@ -1217,68 +1218,91 @@ def _single_relative_directory_name(value: str) -> str | None:
     return name
 
 
-def repair_stranded_self_share_moves(store: Any, move_config: MoveConfig, limit: int = 50) -> int:
-    repaired = 0
-    invalid_candidates = getattr(store, "invalid_self_share_move_candidates", None)
-    if invalid_candidates:
-        for row in invalid_candidates(limit=max(1, int(limit))):
-            move_status = str(row.get("move_status") or "").lower()
-            has_persisted_paths = bool(
-                str(row.get("source_path") or "").strip()
-                and str(row.get("dest_path") or "").strip()
-            )
-            if move_status == "error" and has_persisted_paths:
-                continue
-            if move_status == "moving":
-                reconcile_self_share_move(store, move_config, row)
-            else:
-                _invalidate_persisted_self_share_move(store, row)
-    for row in store.stranded_self_share_move_candidates(limit=max(1, int(limit))):
-        if str(row.get("move_status") or "").lower() == "moving":
-            if str(row.get("source_path") or "").strip() or str(row.get("dest_path") or "").strip():
-                result = reconcile_self_share_move(store, move_config, row)
-                if result in {"moved", "replayed", "merged"}:
-                    repaired += 1
-                continue
-        category = category_for_self_share_row(row)
-        candidate_names = []
-        for folder_value in (
-            str(row.get("share_alias_name") or "").strip(),
-            str(row.get("own_share_file_name") or "").strip(),
-        ):
-            folder_name = _single_relative_directory_name(folder_value)
-            if folder_name and folder_name not in candidate_names:
-                candidate_names.append(folder_name)
-        canonical_name = canonical_self_share_root_name(row)
-        if not category or not candidate_names or not canonical_name:
+def find_stranded_self_share_moves(store: Any, move_config: MoveConfig, limit: int = 50) -> list[dict[str, Any]]:
+    if not hasattr(store, "list_self_share_move_candidates"):
+        return []
+    found: list[dict[str, Any]] = []
+    for facts in store.list_self_share_move_candidates(limit=max(1, int(limit))):
+        name = canonical_self_share_root_name(facts)
+        category = category_for_self_share_row(facts)
+        if not name or not category:
             continue
-        for source_name in candidate_names:
-            for source_root in move_config.source_roots:
-                source = safe_resolve(Path(source_root) / source_name)
-                if not is_under_any_root(source, move_config.source_roots):
-                    continue
-                if is_under_any_root(source, list(move_config.library_roots.values())):
-                    continue
-                if not source.is_dir():
-                    continue
-                plan = plan_strm_move(source, category, move_config, destination_name=canonical_name)
-                plan = _validate_self_share_move_plan(plan, move_config)
-                if plan.status in {"pending", "conflict"}:
-                    restore_canonical_strm_paths(source, row)
-                    plan = plan_strm_move(source, category, move_config, destination_name=canonical_name)
-                    plan = _validate_self_share_move_plan(plan, move_config)
-                if plan.status in {"pending", "conflict"}:
-                    updated = merge_self_share_strm_folder(plan, store, row, move_config)
-                    if updated.get("move_status") == "moved":
-                        repaired += 1
-                    break
-                if plan.status != "skipped":
-                    execute_strm_move(plan, store, row)
-                    break
-            else:
+        dest = destination_for_category(category, name, move_config)
+        source = None
+        for root in move_config.source_roots:
+            candidate = safe_resolve(Path(root) / name)
+            if candidate.is_dir() and has_strm_file(candidate):
+                source = candidate
+                break
+        if source is None:
+            continue
+        if str(facts.get("move_status") or "").lower() == "moved":
+            dest_value = str(facts.get("validated_dest_path") or facts.get("dest_path") or dest or "")
+            if dest_value and Path(dest_value).exists():
                 continue
-            break
-    return repaired
+        found.append(
+            {
+                "task_id": int(facts["id"]),
+                "source_path": str(source),
+                "expected_destination": str(dest or ""),
+                "canonical_name": name,
+            }
+        )
+    return found
+
+
+def enqueue_stranded_self_share_repairs(store: Any, move_config: MoveConfig, limit: int = 50) -> int:
+    queued = 0
+    enqueue = getattr(store, "enqueue_command", None)
+    if not callable(enqueue):
+        return 0
+    for item in find_stranded_self_share_moves(store, move_config, limit=limit):
+        task_id = int(item["task_id"])
+        dest = str(item.get("expected_destination") or "")
+        enqueue(
+            task_id,
+            "repair_move",
+            {"expected_destination": dest},
+            idempotency_key=command_key("repair-move", task_id, dest),
+            actor="maintenance",
+            source="stranded-move",
+        )
+        queued += 1
+        LOG.info("Enqueued stranded STRM repair task_id=%s command_type=repair_move", task_id)
+    return queued
+
+
+def find_missing_self_share_library_folders(store: Any, limit: int = 50) -> list[dict[str, Any]]:
+    if not hasattr(store, "missing_self_share_library_candidates"):
+        return []
+    found: list[dict[str, Any]] = []
+    for facts in store.missing_self_share_library_candidates(limit=max(1, int(limit))):
+        dest = str(facts.get("dest_path") or facts.get("validated_dest_path") or "")
+        if not dest or Path(dest).exists():
+            continue
+        found.append({"task_id": int(facts["id"]), "expected_destination": dest})
+    return found
+
+
+def enqueue_missing_self_share_restores(store: Any, limit: int = 50) -> int:
+    queued = 0
+    enqueue = getattr(store, "enqueue_command", None)
+    if not callable(enqueue):
+        return 0
+    for item in find_missing_self_share_library_folders(store, limit=limit):
+        task_id = int(item["task_id"])
+        dest = str(item.get("expected_destination") or "")
+        enqueue(
+            task_id,
+            "restore",
+            {"target_stage": "moved", "message": "自动恢复缺失媒体库 STRM"},
+            idempotency_key=command_key("restore", task_id, dest),
+            actor="maintenance",
+            source="missing-library",
+        )
+        queued += 1
+        LOG.info("Enqueued missing library restore task_id=%s command_type=restore", task_id)
+    return queued
 
 
 def restore_missing_self_share_library_folder(

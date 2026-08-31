@@ -11,9 +11,10 @@ from unittest.mock import Mock, patch
 
 import bridge
 from app.clients import cms as cms_client
-from app.models import TaskStage, TaskStatus
+from app.models import StageCheckpoint, StageResult, TaskStage, TaskStatus
 from app.task_runner import StageOutcome, TaskRunner
 from app.task_store import TaskStore, operation_scope
+from tests.legacy_submission_store import SubmissionStore
 
 
 class FakeCms:
@@ -345,7 +346,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
         self.cms = FakeCms()
         self.p115 = FakeP115()
         self.telegram = FakeTelegram()
-        self.submissions = bridge.SubmissionStore(Path(root) / "submissions.db")
+        self.submissions = SubmissionStore(Path(root) / "submissions.db")
         self.tasks = TaskStore(Path(root) / "tasks.db")
         self.config = self_share_config or bridge.SelfShareConfig(
             enabled=True,
@@ -7475,6 +7476,132 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertFalse((self.config.strm_root / row["own_share_file_name"]).exists())
             self.assertTrue((destination / "movie.strm").exists())
 
+    def test_task_447_observer_enqueues_repair_move_without_moving(self):
+        from app.media.strm import enqueue_stranded_self_share_repairs, find_stranded_self_share_moves
+
+        with tempfile.TemporaryDirectory() as tmp:
+            library_root = Path(tmp) / "library" / "华语电影"
+            share_root = Path(tmp) / "share-strm"
+            move_config = bridge.MoveConfig(
+                source_roots=[share_root],
+                library_roots={"华语电影": library_root},
+            )
+            workflow = self._workflow(tmp, move_config=move_config)
+            row = self._self_share_row()
+            source = share_root / row["own_share_file_name"]
+            dest = library_root / row["own_share_file_name"]
+            self._write_strm(source)
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            self.tasks.enqueue_task(task.id, TaskStage.SHARE_SYNC_SUBMITTED, next_run_at=0)
+            claimed = self.tasks.claim_next_runnable("seed-447", now=1.0)
+            self.tasks.commit_claimed_result(
+                claimed,
+                "seed-447",
+                StageResult.complete(
+                    "seed",
+                    checkpoint=StageCheckpoint(
+                        media={"category": "华语电影", "tmdb_id": "123456"},
+                        share={
+                            "canonical_name": row["own_share_file_name"],
+                            "own_share_code": "owncode",
+                            "file_id": "folder-id",
+                        },
+                    ),
+                ),
+                next_stage=TaskStage.STRM_READY,
+                next_run_at=0,
+            )
+
+            found = find_stranded_self_share_moves(self.tasks, move_config, limit=10)
+            enqueue_stranded_self_share_repairs(self.tasks, move_config, limit=10)
+            enqueue_stranded_self_share_repairs(self.tasks, move_config, limit=10)
+
+            self.assertEqual([item["task_id"] for item in found], [task.id])
+            self.assertTrue(source.exists())
+            self.assertFalse(dest.exists())
+            with sqlite3.connect(self.tasks.db_path) as conn:
+                commands = list(conn.execute("SELECT command_type, idempotency_key FROM task_commands"))
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0][0], "repair_move")
+            self.assertNotIn(str(dest), commands[0][1])
+            self.assertNotIn(row["own_share_file_name"], commands[0][1])
+
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            source.rename(dest)
+            self.assertFalse(source.exists())
+            self._write_strm(dest)
+            runner = TaskRunner(self.tasks, workflow, worker_id="task-447", now=lambda: 2.0)
+            runner.run_once()
+            runner.run_once()
+            updated = self.tasks.find_task(task.id)
+            facts = self.tasks.workflow_facts(task.id)
+            self.assertNotEqual(updated.error_type, "stage_wait_timeout")
+            self.assertEqual(facts["move_status"], "moved")
+            self.assertEqual(facts["dest_path"], str(bridge.safe_resolve(dest)))
+            self.assertNotEqual(updated.current_stage, TaskStage.STRM_READY)
+
+    def test_strm_move_crash_reconciles_destination_without_second_move(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            library_root = Path(tmp) / "library" / "movies"
+            share_root = Path(tmp) / "share-strm"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(
+                    source_roots=[share_root],
+                    library_roots={"华语电影": library_root},
+                ),
+            )
+            row = self._self_share_row()
+            source = share_root / row["own_share_file_name"]
+            dest = library_root / row["own_share_file_name"]
+            self._write_strm(source)
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            self.tasks.record_event(
+                task.id,
+                TaskStage.MOVED,
+                TaskStatus.PENDING,
+                "setup",
+                submission_id=int(row["id"]),
+                metadata_patch={"submission_id": int(row["id"])},
+            )
+            self.tasks.enqueue_task(task.id, TaskStage.MOVED, next_run_at=0)
+            runner = TaskRunner(self.tasks, workflow, worker_id="move-crash", now=lambda: 1.0)
+            original_commit = self.tasks.commit_claimed_result
+            commits = {"n": 0}
+            move_calls = {"n": 0}
+            real_move = __import__("shutil").move
+
+            def count_move(src, dst, *args, **kwargs):
+                move_calls["n"] += 1
+                return real_move(src, dst, *args, **kwargs)
+
+            def fail_first_commit(*args, **kwargs):
+                commits["n"] += 1
+                if commits["n"] == 1:
+                    raise RuntimeError("simulated crash before move checkpoint")
+                return original_commit(*args, **kwargs)
+
+            with patch("shutil.move", side_effect=count_move), patch.object(
+                self.tasks, "commit_claimed_result", side_effect=fail_first_commit
+            ):
+                runner.run_once()
+                self.tasks.enqueue_task(task.id, TaskStage.MOVED, next_run_at=0)
+                runner.run_once()
+
+            recovered = self.tasks.find_task(task.id)
+            facts = self.tasks.workflow_facts(task.id)
+            operation = self.tasks.find_operation(
+                task.id,
+                f"{operation_scope(recovered)}:move_strm:{bridge.safe_resolve(source)}:{bridge.safe_resolve(dest)}",
+            )
+            self.assertEqual(move_calls["n"], 1)
+            self.assertFalse(source.exists())
+            self.assertTrue((dest / "movie.strm").exists())
+            self.assertEqual(facts["move_status"], "moved")
+            self.assertEqual(operation.status, "succeeded")
+            self.assertEqual(operation.attempt_count, 1)
+            self.assertNotEqual(recovered.current_stage, TaskStage.MOVED)
+
     def test_strm_ready_stage_ignores_direct_strm_source_roots_while_waiting_for_share_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
             direct_root = Path(tmp) / "direct-strm"
@@ -7594,6 +7721,14 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
             self.assertEqual(result.metadata["organized_folder"]["file_id"], "folder-id")
             self.assertEqual(self.cms.auto_organize_calls, 0)
+            self.assertEqual(result.checkpoint.share.get("file_id"), "folder-id")
+
+            self.tasks.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            runner = TaskRunner(self.tasks, workflow, worker_id="organize-facts", now=lambda: 2.0)
+            runner.run_once()
+            facts = self.tasks.workflow_facts(task.id)
+            self.assertEqual(facts["own_share_file_id"], "folder-id")
+            self.assertEqual(facts["own_share_file_name"], "S-双喜-2025-[tmdb=123456]")
 
     def test_organizing_stage_uses_cms_cloud_index_for_new_direct_strm_in_old_series_root(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -9365,7 +9500,7 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cms = CmsWithoutDirectSubmission()
             telegram = FakeTelegram()
-            submissions = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submissions = SubmissionStore(Path(tmp) / "submissions.db")
             task_store = TaskStore(Path(tmp) / "tasks.db", default_strm_mode="direct")
 
             bridge.handle_update(
@@ -9382,7 +9517,6 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
                 submissions,
                 poll_status=False,
                 task_store=task_store,
-                task_engine_enabled=True,
             )
 
             task = task_store.find_task_by_share_key("direct", "1234")
@@ -9445,9 +9579,7 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
                 "http://cms.test",
                 "user",
                 "password",
-                db_path=str(Path(tmp) / "submissions.db"),
-                task_db_path=str(Path(tmp) / "tasks.db"),
-                task_engine_enabled=True,
+                database_path=str(Path(tmp) / "tasks.db"),
                 strm_default_mode="direct",
                 status_repair_enabled=False,
                 web_enabled=False,
@@ -9461,8 +9593,6 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
                 bridge, "write_metrics_snapshot", lambda *_args, **_kwargs: None
             ), patch.object(bridge, "call_maybe_start_web_server", capture_web_server), patch.object(
                 bridge, "handle_update", capture_update
-            ), patch.object(
-                bridge, "start_status_repair_loop", lambda *_args, **_kwargs: None
             ):
                 bridge.run_forever(config, stop_event=stop_event, log_hub=hub)
 
@@ -9480,7 +9610,7 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
         self.assertEqual(worker_parts[-2], str(os.getpid()))
         self.assertEqual(len(worker_parts[-1]), 12)
 
-    def test_engine_mode_does_not_start_self_share_maintenance(self):
+    def test_open_write_gate_starts_self_share_maintenance_observer(self):
         captured = {"runner_starts": 0, "maintenance_starts": 0}
 
         class FakeCmsClient:
@@ -9544,9 +9674,7 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
                 "http://cms.test",
                 "user",
                 "password",
-                db_path=str(Path(tmp) / "submissions.db"),
-                task_db_path=str(Path(tmp) / "tasks.db"),
-                task_engine_enabled=True,
+                database_path=str(Path(tmp) / "tasks.db"),
                 strm_default_mode="shared",
                 status_repair_enabled=True,
                 quality_auto_repair_enabled=True,
@@ -9573,9 +9701,9 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
                 bridge.run_forever(config, stop_event=stop_event)
 
         self.assertEqual(captured["runner_starts"], 1)
-        self.assertEqual(captured["maintenance_starts"], 0)
+        self.assertEqual(captured["maintenance_starts"], 1)
         self.assertIsNone(captured["quality_repair_adapter"])
-        self.assertFalse(captured["quality_repair_enabled"])
+        self.assertTrue(captured["quality_repair_enabled"])
 
 
 if __name__ == "__main__":

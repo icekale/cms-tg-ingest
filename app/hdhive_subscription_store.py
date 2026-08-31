@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .clients.http import _redact_text
+from .database import Database
 
 
 _URL_IN_ERROR_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
@@ -161,11 +162,7 @@ class HdhiveSubscriptionStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout = 30000")
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        return Database(self.db_path).connect()
 
     @contextmanager
     def _connection(self):
@@ -180,8 +177,10 @@ class HdhiveSubscriptionStore:
             connection.close()
 
     def _init_db(self) -> None:
+        database = Database(self.db_path)
         with self._lock, self._connection() as connection:
-            connection.executescript(
+            if not (self.db_path.is_file() and database._has_schema_meta()):
+                connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS hdhive_subscriptions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -18,10 +18,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import bridge  # noqa: E402
 from app.cms_updater import CmsVersionChecker  # noqa: E402
 from app.models import TaskStage, TaskStatus  # noqa: E402
-from app.task_store import TaskStore  # noqa: E402
+from app.task_store import TaskStore, WorkflowRowAdapter  # noqa: E402
 from app.web import start_web_server  # noqa: E402
 
 
@@ -49,7 +48,7 @@ SEED = [
 def main() -> None:
     tmp = tempfile.mkdtemp(prefix="ui-smoke-")
     store = TaskStore(Path(tmp) / "tasks.db")
-    submissions = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+    submissions = WorkflowRowAdapter(store)
     for share_key, title, media_type, tmdb_id, poster, rating, release, genres in SEED:
         task = store.upsert_task(share_key, "", f"https://115cdn.com/s/{share_key}")
         store.patch_metadata(task.id, {

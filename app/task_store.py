@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sqlite3
@@ -7,16 +8,141 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from .models import TaskOperation, TaskSnapshot, TaskStage, TaskStatus
+from .models import StageCheckpoint, StageResult, TaskOperation, TaskSnapshot, TaskStage, TaskStatus
 from .quality_rules import quality_attempt_count
 from .self_share_settings import normalize_receive_cid, normalize_self_share_review_mode
 from .strm_mode import is_strm_mode_locked, normalize_strm_mode
 
 
+def command_key(kind: str, *parts: object) -> str:
+    material = "\0".join(str(part) for part in parts).encode("utf-8")
+    return f"{kind}:{hashlib.sha256(material).hexdigest()}"
+
+
+def _row_value(row: Any, key: str, default: str | float = "") -> Any:
+    if row is None:
+        return default
+    try:
+        value = row[key]
+    except (KeyError, IndexError):
+        return default
+    return default if value is None else value
+
+
+def _project_workflow_facts(
+    task: Any,
+    media: Any,
+    share: Any,
+    move: Any,
+    emby: Any,
+    cleanup: Any,
+    probe: Any,
+) -> dict[str, Any]:
+    facts: dict[str, Any] = {
+        "id": int(task["id"]),
+        "share_code": str(_row_value(task, "share_code")),
+        "receive_code": str(_row_value(task, "receive_code")),
+        "url": str(_row_value(task, "url")),
+        "title": str(_row_value(task, "title")),
+        "status": str(_row_value(task, "status")),
+        "current_stage": str(_row_value(task, "current_stage")),
+        "created_at": float(_row_value(task, "created_at", 0) or 0),
+        "updated_at": float(_row_value(task, "updated_at", 0) or 0),
+        "tmdb_id": str(_row_value(task, "tmdb_id")),
+        "error_type": str(_row_value(task, "error_type")),
+        "last_error": str(_row_value(task, "error_summary")),
+        "error_summary": str(_row_value(task, "error_summary")),
+        "move_status": "",
+    }
+    if media is not None:
+        category = str(_row_value(media, "category"))
+        facts.update(
+            {
+                "title": str(_row_value(media, "title") or facts["title"]),
+                "cms_task_id": str(_row_value(media, "cms_task_id")),
+                "category_choice": category,
+                "category_status": str(_row_value(media, "recognition_status")),
+                "recognition_json": str(_row_value(media, "recognition_json") or "{}"),
+                "tmdb_id": str(_row_value(media, "tmdb_id") or facts["tmdb_id"]),
+                "category_final": category,
+            }
+        )
+    if share is not None:
+        facts.update(
+            {
+                "own_share_file_id": str(_row_value(share, "file_id")),
+                "own_share_file_name": str(_row_value(share, "canonical_name")),
+                "own_share_code": str(_row_value(share, "own_share_code")),
+                "own_share_receive_code": str(_row_value(share, "own_share_receive_code")),
+                "share_alias_name": str(_row_value(share, "alias_name")),
+                "canonical_manifest_json": str(_row_value(share, "canonical_manifest_json") or "{}"),
+                "share_validation_status": str(_row_value(share, "validation_status")),
+                "share_validation_error": str(_row_value(share, "validation_error")),
+                "share_sync_status": str(_row_value(share, "share_sync_status")),
+                "workflow_mode": "self_share_sync",
+            }
+        )
+        if str(facts.get("share_sync_status") or "").lower() == "restore_submitted":
+            facts["workflow_phase"] = "restore_share_sync_submitted"
+    if move is not None:
+        facts.update(
+            {
+                "source_path": str(_row_value(move, "source_path")),
+                "dest_path": str(_row_value(move, "dest_path") or _row_value(move, "validated_dest_path")),
+                "move_status": str(_row_value(move, "move_status")),
+                "move_error": str(_row_value(move, "move_error")),
+                "move_started_at": float(_row_value(move, "started_at", 0) or 0),
+                "move_finished_at": float(_row_value(move, "finished_at", 0) or 0),
+                "validated_dest_path": str(_row_value(move, "validated_dest_path")),
+            }
+        )
+    if emby is not None:
+        facts.update(
+            {
+                "emby_status": str(_row_value(emby, "status")),
+                "emby_item_id": str(_row_value(emby, "item_id")),
+                "emby_title": str(_row_value(emby, "title")),
+                "emby_path": str(_row_value(emby, "path")),
+                "emby_parent": str(_row_value(emby, "library")),
+            }
+        )
+    if cleanup is not None:
+        facts.update(
+            {
+                "cleanup_status": str(_row_value(cleanup, "status")),
+                "cleanup_file_id": str(_row_value(cleanup, "target_id")),
+                "cleanup_error": str(_row_value(cleanup, "error")),
+                "cleanup_finished_at": float(_row_value(cleanup, "finished_at", 0) or 0),
+            }
+        )
+    if probe is not None:
+        facts.update(
+            {
+                "share_probe_at": float(_row_value(probe, "last_probe_at", 0) or 0),
+                "share_invalid_at": float(_row_value(probe, "invalid_at", 0) or 0),
+                "share_invalid_reason": str(_row_value(probe, "invalid_reason")),
+            }
+        )
+    return facts
+
+
+COMMAND_TYPES = frozenset(
+    {
+        "retry",
+        "reprocess",
+        "resume_organizing",
+        "emby_check",
+        "restore",
+        "repair_move",
+        "invalidate_share",
+        "quality_repair",
+        "terminate",
+    }
+)
 STRM_DEFAULT_MODE_KEY = "strm_default_mode"
 OWN_SHARE_RECEIVE_CODE_KEY = "own_share_receive_code_override"
 SELF_SHARE_RECEIVE_CID_KEY = "self_share_receive_cid_override"
@@ -280,6 +406,8 @@ class TaskStore:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 30000")
         return conn
 
     @contextmanager
@@ -295,31 +423,10 @@ class TaskStore:
             conn.close()
 
     def _init_db(self) -> None:
+        from .database import Database
+
+        Database(self.db_path).initialize()
         with self._connection() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS tasks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    share_code TEXT NOT NULL,
-                    receive_code TEXT NOT NULL DEFAULT '',
-                    source_type TEXT NOT NULL DEFAULT 'share',
-                    source_key TEXT NOT NULL DEFAULT '',
-                    url TEXT NOT NULL,
-                    title TEXT NOT NULL DEFAULT '',
-                    tmdb_id TEXT NOT NULL DEFAULT '',
-                    category TEXT NOT NULL DEFAULT '',
-                    current_stage TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    error_type TEXT NOT NULL DEFAULT '',
-                    error_summary TEXT NOT NULL DEFAULT '',
-                    retry_count INTEGER NOT NULL DEFAULT 0,
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL,
-                    UNIQUE(share_code, receive_code)
-                )
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks(updated_at)")
             self._ensure_columns(conn)
             conn.execute(
                 """
@@ -409,6 +516,11 @@ class TaskStore:
             "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
             "source_type": "TEXT NOT NULL DEFAULT 'share'",
             "source_key": "TEXT NOT NULL DEFAULT ''",
+            "archived_at": "REAL",
+            "archived_by": "TEXT NOT NULL DEFAULT ''",
+            "archive_reason": "TEXT NOT NULL DEFAULT ''",
+            "origin": "TEXT NOT NULL DEFAULT 'runtime'",
+            "is_executable": "INTEGER NOT NULL DEFAULT 1",
         }
         for name, definition in columns.items():
             if name not in existing:
@@ -433,6 +545,14 @@ class TaskStore:
             "UPDATE tasks SET source_key = 'share:' || share_code || ':' || receive_code WHERE source_key IS NULL OR source_key = ''"
         )
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_source_key ON tasks(source_type, source_key)")
+        conn.execute("DROP INDEX IF EXISTS idx_tasks_share_identity")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_share_identity
+            ON tasks(share_code, receive_code)
+            WHERE source_type = 'share' AND COALESCE(archived_at, 0) = 0
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(status, next_run_at, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_claim ON tasks(claimed_by, claimed_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_claim_heartbeat ON tasks(claimed_by, claim_heartbeat_at)")
@@ -441,6 +561,65 @@ class TaskStore:
     @staticmethod
     def _snapshot(row: sqlite3.Row) -> TaskSnapshot:
         return TaskSnapshot.from_row(dict(row))
+
+    def _workflow_facts_unlocked(self, conn: sqlite3.Connection, task_id: int) -> dict[str, Any]:
+        task = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+        if task is None:
+            return {}
+        media = conn.execute("SELECT * FROM task_media WHERE task_id = ?", (int(task_id),)).fetchone()
+        share = conn.execute("SELECT * FROM task_shares WHERE task_id = ?", (int(task_id),)).fetchone()
+        move = conn.execute("SELECT * FROM task_moves WHERE task_id = ?", (int(task_id),)).fetchone()
+        emby = conn.execute("SELECT * FROM task_emby WHERE task_id = ?", (int(task_id),)).fetchone()
+        cleanup = conn.execute("SELECT * FROM task_cleanups WHERE task_id = ?", (int(task_id),)).fetchone()
+        probe = conn.execute("SELECT * FROM task_probes WHERE task_id = ?", (int(task_id),)).fetchone()
+        return _project_workflow_facts(task, media, share, move, emby, cleanup, probe)
+
+    def _overlay_facts_on_task(self, task: TaskSnapshot, conn: sqlite3.Connection | None = None) -> TaskSnapshot:
+        try:
+            facts = (
+                self._workflow_facts_unlocked(conn, int(task.id))
+                if conn is not None
+                else self.workflow_facts(int(task.id))
+            )
+        except sqlite3.OperationalError:
+            return task
+        metadata = dict(task.metadata)
+        changed = False
+        skip = {
+            "id",
+            "share_code",
+            "receive_code",
+            "url",
+            "title",
+            "status",
+            "current_stage",
+            "created_at",
+            "updated_at",
+            "tmdb_id",
+            "error_type",
+            "last_error",
+            "error_summary",
+        }
+        empty = (None, "", [], {}, "[]", "{}")
+        for key, value in facts.items():
+            if key in skip or value in empty:
+                continue
+            if metadata.get(key) in empty:
+                metadata[key] = value
+                changed = True
+        fields: dict[str, Any] = {"metadata": metadata} if changed else {}
+        if not str(task.tmdb_id or "").strip():
+            tmdb_id = facts.get("tmdb_id")
+            if tmdb_id not in empty:
+                fields["tmdb_id"] = str(tmdb_id)
+        if not str(task.category or "").strip():
+            category = facts.get("category_final") or facts.get("category")
+            if category not in empty:
+                fields["category"] = str(category)
+        return replace(task, **fields) if fields else task
+
+    def _snapshot_with_facts(self, row: sqlite3.Row) -> TaskSnapshot:
+        return self._overlay_facts_on_task(self._snapshot(row))
 
     @staticmethod
     def _operation(row: sqlite3.Row) -> TaskOperation:
@@ -1124,7 +1303,7 @@ class TaskStore:
                     current_stage, status, metadata_json, created_at, updated_at
                 )
                 VALUES (?, ?, 'share', ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(share_code, receive_code) DO UPDATE SET
+                ON CONFLICT(source_type, source_key) DO UPDATE SET
                     url = CASE WHEN tasks.claimed_by = '' THEN excluded.url ELSE tasks.url END,
                     chat_id = CASE
                         WHEN tasks.claimed_by = '' THEN COALESCE(NULLIF(excluded.chat_id, ''), tasks.chat_id)
@@ -1147,7 +1326,10 @@ class TaskStore:
             )
             if explicit_mode:
                 current = conn.execute(
-                    "SELECT metadata_json FROM tasks WHERE share_code = ? AND receive_code = ?",
+                    """
+                    SELECT metadata_json FROM tasks
+                    WHERE share_code = ? AND receive_code = ? AND COALESCE(archived_at, 0) = 0
+                    """,
                     (share_code, receive_code),
                 ).fetchone()
                 try:
@@ -1163,11 +1345,15 @@ class TaskStore:
                         """
                         UPDATE tasks SET metadata_json = ?
                         WHERE share_code = ? AND receive_code = ? AND claimed_by = ''
+                          AND COALESCE(archived_at, 0) = 0
                         """,
                         (merged_metadata, share_code, receive_code),
                     )
             row = conn.execute(
-                "SELECT * FROM tasks WHERE share_code = ? AND receive_code = ?",
+                """
+                SELECT * FROM tasks
+                WHERE share_code = ? AND receive_code = ? AND COALESCE(archived_at, 0) = 0
+                """,
                 (share_code, receive_code),
             ).fetchone()
         return self._snapshot(row)
@@ -1196,7 +1382,7 @@ class TaskStore:
                     current_stage, status, metadata_json, created_at, updated_at
                 )
                 VALUES (?, ?, 'share', ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(share_code, receive_code) DO NOTHING
+                ON CONFLICT(source_type, source_key) DO NOTHING
                 """,
                 (
                     share_code,
@@ -1212,7 +1398,10 @@ class TaskStore:
                 ),
             )
             row = conn.execute(
-                "SELECT * FROM tasks WHERE share_code = ? AND receive_code = ?",
+                """
+                SELECT * FROM tasks
+                WHERE share_code = ? AND receive_code = ? AND COALESCE(archived_at, 0) = 0
+                """,
                 (share_code, receive_code),
             ).fetchone()
         return self._snapshot(row)
@@ -1285,15 +1474,18 @@ class TaskStore:
     def find_task(self, task_id: int) -> TaskSnapshot | None:
         with self._lock, self._connection() as conn:
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        return self._snapshot(row) if row else None
+        return self._snapshot_with_facts(row) if row else None
 
     def find_task_by_share_key(self, share_code: str, receive_code: str) -> TaskSnapshot | None:
         with self._lock, self._connection() as conn:
             row = conn.execute(
-                "SELECT * FROM tasks WHERE share_code = ? AND receive_code = ?",
+                """
+                SELECT * FROM tasks
+                WHERE share_code = ? AND receive_code = ? AND COALESCE(archived_at, 0) = 0
+                """,
                 (str(share_code), str(receive_code)),
             ).fetchone()
-        return self._snapshot(row) if row else None
+        return self._snapshot_with_facts(row) if row else None
 
     def list_tasks_by_own_share_file_id(
         self,
@@ -1304,23 +1496,27 @@ class TaskStore:
         normalized = str(file_id or "").strip()
         if not normalized:
             return []
-        params: list[Any] = [normalized]
+        params: list[Any] = [normalized, normalized]
         exclude_clause = ""
         if exclude_task_id is not None:
-            exclude_clause = " AND id <> ?"
+            exclude_clause = " AND t.id <> ?"
             params.append(int(exclude_task_id))
         with self._lock, self._connection() as conn:
             rows = conn.execute(
                 f"""
-                SELECT * FROM tasks
-                WHERE json_valid(metadata_json)
-                  AND CAST(json_extract(metadata_json, '$.own_share_file_id') AS TEXT) = ?
+                SELECT t.* FROM tasks t
+                LEFT JOIN task_shares s ON s.task_id = t.id
+                WHERE COALESCE(t.archived_at, 0) = 0
+                  AND (
+                    (json_valid(t.metadata_json) AND CAST(json_extract(t.metadata_json, '$.own_share_file_id') AS TEXT) = ?)
+                    OR s.file_id = ?
+                  )
                   {exclude_clause}
-                ORDER BY updated_at DESC, id DESC
+                ORDER BY t.updated_at DESC, t.id DESC
                 """,
                 params,
             ).fetchall()
-        return [self._snapshot(row) for row in rows]
+        return [self._snapshot_with_facts(row) for row in rows]
 
     def find_task_by_source(self, source_type: str, source_key: str) -> TaskSnapshot | None:
         with self._lock, self._connection() as conn:
@@ -1345,6 +1541,7 @@ class TaskStore:
                 SELECT json_extract(metadata_json, '$.own_share_code') AS code
                 FROM tasks
                 WHERE json_valid(metadata_json)
+                  AND COALESCE(archived_at, 0) = 0
                   AND COALESCE(json_extract(metadata_json, '$.own_share_code'), '') <> ''
                   AND COALESCE(json_extract(metadata_json, '$.share_validation_status'), '')
                       NOT IN ('invalid', 'invalid_share_cleaned')
@@ -1353,6 +1550,13 @@ class TaskStore:
                   AND COALESCE(json_extract(metadata_json, '$.source_deleted'), '')
                       NOT IN ('1', 'true', 'yes', 'on', 'enabled')
                   AND COALESCE(json_extract(metadata_json, '$.quality_archived_at'), 0) <= 0
+                UNION
+                SELECT s.own_share_code AS code
+                FROM tasks t
+                JOIN task_shares s ON s.task_id = t.id
+                WHERE COALESCE(t.archived_at, 0) = 0
+                  AND s.own_share_code != ''
+                  AND lower(COALESCE(s.validation_status, '')) NOT IN ('invalid', 'unavailable')
                 """
             ).fetchall()
         return {str(row["code"]).strip() for row in rows if str(row["code"] or "").strip()}
@@ -1429,8 +1633,16 @@ class TaskStore:
 
     def list_recent_tasks(self, limit: int = 20) -> list[TaskSnapshot]:
         with self._lock, self._connection() as conn:
-            rows = conn.execute("SELECT * FROM tasks ORDER BY updated_at DESC, id DESC LIMIT ?", (limit,)).fetchall()
-        return [self._snapshot(row) for row in rows]
+            rows = conn.execute(
+                """
+                SELECT * FROM tasks
+                WHERE COALESCE(archived_at, 0) = 0
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [self._snapshot_with_facts(row) for row in rows]
 
     def list_open_tasks(self) -> list[TaskSnapshot]:
         open_statuses = (
@@ -1444,11 +1656,12 @@ class TaskStore:
                 """
                 SELECT * FROM tasks INDEXED BY idx_tasks_next_run
                 WHERE status IN (?, ?, ?, ?)
+                  AND COALESCE(archived_at, 0) = 0
                 ORDER BY updated_at DESC, id DESC
                 """,
                 open_statuses,
             ).fetchall()
-        return [self._snapshot(row) for row in rows]
+        return [self._snapshot_with_facts(row) for row in rows]
 
     def find_pending_stage(self, stage: TaskStage, *, exclude_task_id: int | None = None) -> TaskSnapshot | None:
         params: list[Any] = [stage.value, TaskStatus.PENDING.value, TaskStatus.RUNNING.value]
@@ -1502,6 +1715,7 @@ class TaskStore:
                 SELECT COUNT(*) AS recent_count
                 FROM (
                     SELECT id FROM tasks
+                    WHERE COALESCE(archived_at, 0) = 0
                     ORDER BY updated_at DESC, id DESC
                     LIMIT ?
                 )
@@ -1528,6 +1742,7 @@ class TaskStore:
                     COALESCE(MAX({p115_cooldown_value}), 0) AS p115_cooldown_until
                 FROM tasks INDEXED BY idx_tasks_next_run
                 WHERE status IN (?, ?, ?, ?)
+                  AND COALESCE(archived_at, 0) = 0
                 """,
                 (
                     TaskStatus.PENDING.value,
@@ -1548,6 +1763,7 @@ class TaskStore:
                 """
                 SELECT * FROM tasks INDEXED BY idx_tasks_next_run
                 WHERE status IN (?, ?)
+                  AND COALESCE(archived_at, 0) = 0
                 ORDER BY updated_at DESC, id DESC
                 LIMIT ?
                 """,
@@ -1556,8 +1772,11 @@ class TaskStore:
             latest_problem_row = conn.execute(
                 """
                 SELECT * FROM tasks INDEXED BY idx_tasks_next_run
-                WHERE status IN (?, ?)
-                   OR (status IN (?, ?) AND next_run_at < 0 AND TRIM(claimed_by) = '')
+                WHERE COALESCE(archived_at, 0) = 0
+                  AND (
+                    status IN (?, ?)
+                    OR (status IN (?, ?) AND next_run_at < 0 AND TRIM(claimed_by) = '')
+                  )
                 ORDER BY updated_at DESC, id DESC
                 LIMIT 1
                 """,
@@ -1572,6 +1791,7 @@ class TaskStore:
                 f"""
                 SELECT * FROM tasks INDEXED BY idx_tasks_next_run
                 WHERE status = ? AND {lock_wait_condition}
+                  AND COALESCE(archived_at, 0) = 0
                 ORDER BY updated_at DESC, id DESC
                 LIMIT 1
                 """,
@@ -1720,7 +1940,7 @@ class TaskStore:
                 (merged_metadata, int(task_id)),
             )
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
-        return self._snapshot(row) if row else None
+        return self._snapshot_with_facts(row) if row else None
 
     def claim_task_lock(
         self,
@@ -1741,6 +1961,9 @@ class TaskStore:
     ) -> TaskLockClaimResult:
         current_time = time.time() if now is None else float(now)
         stale_before = current_time - max(1, int(stale_after_seconds))
+        locked_task: TaskSnapshot | None = None
+        locked_holder: TaskSnapshot | None = None
+        stale = False
         with self._lock, self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             holder: TaskSnapshot | None = None
@@ -1757,7 +1980,7 @@ class TaskStore:
                 (task_id, TaskStatus.RUNNING.value, stale_before, int(limit)),
             ).fetchall()
             for row in rows:
-                candidate = self._snapshot(row)
+                candidate = self._overlay_facts_on_task(self._snapshot(row), conn)
                 if candidate.metadata.get("_lock_waiting"):
                     continue
                 if conflicts_with_holder(candidate):
@@ -1775,56 +1998,65 @@ class TaskStore:
                 expected_claim_token,
                 expected_updated_at,
             ):
-                return TaskLockClaimResult(stale=True)
-            metadata_patch = dict(lock_metadata)
-            if holder is not None:
-                metadata_patch.update({"_lock_waiting": True, "_lock_owner_task_id": holder.id})
-            merged_metadata = self._merge_metadata(current["metadata_json"], metadata_patch)
-            if holder is None:
-                conn.execute(
-                    "UPDATE tasks SET metadata_json = ?, updated_at = ? WHERE id = ?",
-                    (merged_metadata, current_time, task_id),
-                )
-                row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-                return TaskLockClaimResult(task=self._snapshot(row) if row else None)
-
-            last_event = conn.execute(
-                """
-                SELECT stage, status, message, error_type, error_detail
-                FROM task_events
-                WHERE task_id = ?
-                ORDER BY id DESC
-                LIMIT 1
-                """,
-                (task_id,),
-            ).fetchone()
-            duplicate_running_event = bool(
-                last_event
-                and last_event["stage"] == current["current_stage"]
-                and last_event["status"] == TaskStatus.RUNNING.value
-                and last_event["message"] == wait_message
-                and last_event["error_type"] == ""
-                and last_event["error_detail"] == ""
-            )
-            if not duplicate_running_event:
-                conn.execute(
-                    """
-                    INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (task_id, current["current_stage"], TaskStatus.RUNNING.value, wait_message, "", "", current_time),
-                )
-            conn.execute(
-                """
-                UPDATE tasks
-                SET status = ?, metadata_json = ?, next_run_at = ?, claimed_by = '', claimed_at = 0,
-                    claim_token = '', claim_heartbeat_at = 0, updated_at = ?
-                WHERE id = ?
-                """,
-                (TaskStatus.RUNNING.value, merged_metadata, float(next_run_at), current_time, task_id),
-            )
-            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        return TaskLockClaimResult(task=self._snapshot(row) if row else None, holder=holder)
+                stale = True
+            else:
+                metadata_patch = dict(lock_metadata)
+                if holder is not None:
+                    metadata_patch.update({"_lock_waiting": True, "_lock_owner_task_id": holder.id})
+                merged_metadata = self._merge_metadata(current["metadata_json"], metadata_patch)
+                if holder is None:
+                    conn.execute(
+                        "UPDATE tasks SET metadata_json = ?, updated_at = ? WHERE id = ?",
+                        (merged_metadata, current_time, task_id),
+                    )
+                    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                    locked_task = self._snapshot(row) if row else None
+                else:
+                    last_event = conn.execute(
+                        """
+                        SELECT stage, status, message, error_type, error_detail
+                        FROM task_events
+                        WHERE task_id = ?
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (task_id,),
+                    ).fetchone()
+                    duplicate_running_event = bool(
+                        last_event
+                        and last_event["stage"] == current["current_stage"]
+                        and last_event["status"] == TaskStatus.RUNNING.value
+                        and last_event["message"] == wait_message
+                        and last_event["error_type"] == ""
+                        and last_event["error_detail"] == ""
+                    )
+                    if not duplicate_running_event:
+                        conn.execute(
+                            """
+                            INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (task_id, current["current_stage"], TaskStatus.RUNNING.value, wait_message, "", "", current_time),
+                        )
+                    conn.execute(
+                        """
+                        UPDATE tasks
+                        SET status = ?, metadata_json = ?, next_run_at = ?, claimed_by = '', claimed_at = 0,
+                            claim_token = '', claim_heartbeat_at = 0, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (TaskStatus.RUNNING.value, merged_metadata, float(next_run_at), current_time, task_id),
+                    )
+                    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                    locked_task = self._snapshot(row) if row else None
+                    locked_holder = holder
+        if stale:
+            return TaskLockClaimResult(stale=True)
+        if locked_task is not None:
+            locked_task = self._overlay_facts_on_task(locked_task)
+        if locked_holder is not None:
+            locked_holder = self._overlay_facts_on_task(locked_holder)
+        return TaskLockClaimResult(task=locked_task, holder=locked_holder)
 
     def list_events(self, task_id: int) -> list[dict[str, Any]]:
         with self._lock, self._connection() as conn:
@@ -2047,28 +2279,19 @@ class TaskStore:
         )
 
     def clear_finished_tasks(self) -> int:
-        terminal_statuses = (
-            TaskStatus.SUCCEEDED.value,
-            TaskStatus.FAILED.value,
-            TaskStatus.CANCELLED.value,
-        )
-        with self._lock, self._connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute(
-                "SELECT id FROM tasks WHERE status IN (?, ?, ?) AND claimed_by = ''",
-                terminal_statuses,
-            ).fetchall()
-            task_ids = [int(row["id"]) for row in rows]
-            if not task_ids:
-                return 0
-            placeholders = ",".join("?" for _ in task_ids)
-            conn.execute(f"DELETE FROM task_events WHERE task_id IN ({placeholders})", task_ids)
-            conn.execute(f"DELETE FROM task_operations WHERE task_id IN ({placeholders})", task_ids)
-            cursor = conn.execute(
-                f"DELETE FROM tasks WHERE id IN ({placeholders}) AND claimed_by = ''",
-                task_ids,
-            )
-        return int(cursor.rowcount or 0)
+        removed = 0
+        for task in self.list_recent_tasks(limit=1000):
+            if str(task.claimed_by or "").strip():
+                continue
+            if task.status.value not in {
+                TaskStatus.SUCCEEDED.value,
+                TaskStatus.FAILED.value,
+                TaskStatus.CANCELLED.value,
+            }:
+                continue
+            if self.archive_task(task.id, actor="web", reason="clear_history", expected_updated_at=task.updated_at):
+                removed += 1
+        return removed
 
     def delete_finished_task(self, task_id: int, *, expected_updated_at: float) -> bool:
         with self._lock, self._connection() as conn:
@@ -2084,6 +2307,89 @@ class TaskStore:
                 return False
             conn.execute("DELETE FROM task_events WHERE task_id = ?", (int(task_id),))
             conn.execute("DELETE FROM task_operations WHERE task_id = ?", (int(task_id),))
+            cursor = conn.execute("DELETE FROM tasks WHERE id = ?", (int(task_id),))
+        return int(cursor.rowcount or 0) == 1
+
+    def archive_task(
+        self,
+        task_id: int,
+        *,
+        actor: str,
+        reason: str,
+        expected_updated_at: float,
+        now: float | None = None,
+    ) -> bool:
+        current_time = time.time() if now is None else float(now)
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+            if row is None or str(row["claimed_by"] or ""):
+                return False
+            if row["status"] not in _DELETABLE_TASK_STATUSES:
+                return False
+            if float(row["updated_at"] or 0) != float(expected_updated_at):
+                return False
+            if row["archived_at"] not in (None, "", 0):
+                return True
+            conn.execute(
+                "UPDATE task_commands SET status = 'cancelled', updated_at = ? WHERE task_id = ? AND status = 'pending'",
+                (current_time, int(task_id)),
+            )
+            conn.execute(
+                "INSERT INTO task_events (task_id, stage, status, message, created_at) VALUES (?, ?, ?, ?, ?)",
+                (int(task_id), row["current_stage"], row["status"], f"{actor} 已归档任务", current_time),
+            )
+            source_key = str(row["source_key"] or "")
+            marker = f"#archived#{int(task_id)}"
+            if marker not in source_key:
+                source_key = f"{source_key}{marker}"
+            cursor = conn.execute(
+                """
+                UPDATE tasks
+                SET archived_at = ?, archived_by = ?, archive_reason = ?, next_run_at = -1, updated_at = ?,
+                    source_key = ?
+                WHERE id = ? AND claimed_by = ''
+                """,
+                (current_time, str(actor), str(reason), current_time, source_key, int(task_id)),
+            )
+        return int(cursor.rowcount or 0) == 1
+
+    def purge_archived_task(self, task_id: int, *, actor: str, confirmation: str) -> bool:
+        if confirmation != f"PURGE TASK {int(task_id)}":
+            return False
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+            if row is None or str(row["claimed_by"] or ""):
+                return False
+            if row["status"] not in _DELETABLE_TASK_STATUSES:
+                return False
+            if row["archived_at"] in (None, "", 0):
+                return False
+            pending = conn.execute(
+                "SELECT COUNT(*) FROM task_commands WHERE task_id = ? AND status IN ('pending', 'claimed')",
+                (int(task_id),),
+            ).fetchone()[0]
+            if int(pending or 0):
+                return False
+            conn.execute(
+                """
+                INSERT INTO task_purge_audit (task_id, source_type, source_key, actor, reason, identity_json, purged_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(task_id),
+                    str(row["source_type"] or ""),
+                    str(row["source_key"] or ""),
+                    str(actor),
+                    str(row["archive_reason"] or ""),
+                    json.dumps({"title": row["title"]}, ensure_ascii=True, sort_keys=True),
+                    time.time(),
+                ),
+            )
+            conn.execute("DELETE FROM task_events WHERE task_id = ?", (int(task_id),))
+            conn.execute("DELETE FROM task_operations WHERE task_id = ?", (int(task_id),))
+            conn.execute("DELETE FROM task_commands WHERE task_id = ?", (int(task_id),))
             cursor = conn.execute("DELETE FROM tasks WHERE id = ?", (int(task_id),))
         return int(cursor.rowcount or 0) == 1
 
@@ -2355,6 +2661,377 @@ class TaskStore:
             )
             result = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return self._snapshot(result) if result else None
+
+    _FACT_COLUMNS = {
+        "task_media": frozenset(
+            {
+                "cms_task_id",
+                "title",
+                "media_type",
+                "tmdb_id",
+                "category",
+                "recognition_status",
+                "recognition_json",
+                "poster_path",
+                "backdrop_path",
+                "release_date",
+                "genres_json",
+            }
+        ),
+        "task_shares": frozenset(
+            {
+                "file_id",
+                "folder_id",
+                "own_share_code",
+                "own_share_receive_code",
+                "canonical_name",
+                "alias_name",
+                "canonical_manifest_json",
+                "validation_status",
+                "validation_error",
+                "share_sync_status",
+                "created_at",
+            }
+        ),
+        "task_moves": frozenset(
+            {
+                "source_path",
+                "dest_path",
+                "move_status",
+                "move_error",
+                "started_at",
+                "finished_at",
+                "validated_dest_path",
+                "validated_at",
+            }
+        ),
+        "task_emby": frozenset(
+            {"status", "item_id", "title", "path", "library", "refresh_requested_at", "confirmed_at"}
+        ),
+        "task_cleanups": frozenset({"target_id", "status", "error", "attempted_at", "finished_at"}),
+        "task_probes": frozenset({"last_probe_at", "invalid_at", "invalid_reason", "review_status", "next_check_at"}),
+    }
+
+    def _apply_checkpoint(self, conn: sqlite3.Connection, task_id: int, result: StageResult) -> None:
+        checkpoint = result.checkpoint
+        mapping = {
+            "task_media": checkpoint.media,
+            "task_shares": checkpoint.share,
+            "task_moves": checkpoint.move,
+            "task_emby": checkpoint.emby,
+            "task_cleanups": checkpoint.cleanup,
+            "task_probes": checkpoint.probe,
+        }
+        for table, payload in mapping.items():
+            if not payload:
+                continue
+            unknown = set(payload) - self._FACT_COLUMNS[table]
+            if unknown:
+                raise ValueError(f"unsupported {table} columns: {sorted(unknown)}")
+            columns = ["task_id", *payload.keys()]
+            values = [int(task_id), *payload.values()]
+            placeholders = ", ".join("?" for _ in columns)
+            assignments = ", ".join(f"{name} = excluded.{name}" for name in payload)
+            conn.execute(
+                f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) "
+                f"ON CONFLICT(task_id) DO UPDATE SET {assignments}",
+                values,
+            )
+        for target in checkpoint.targets:
+            if "target_key" not in target:
+                raise ValueError("task_targets require target_key")
+            conn.execute(
+                """
+                INSERT INTO task_targets (
+                    task_id, target_key, ordinal, folder_id, recognition_json, share_json,
+                    strm_json, move_json, emby_json, cleanup_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id, target_key) DO UPDATE SET
+                    ordinal = excluded.ordinal,
+                    folder_id = excluded.folder_id,
+                    recognition_json = excluded.recognition_json,
+                    share_json = excluded.share_json,
+                    strm_json = excluded.strm_json,
+                    move_json = excluded.move_json,
+                    emby_json = excluded.emby_json,
+                    cleanup_json = excluded.cleanup_json
+                """,
+                (
+                    int(task_id),
+                    str(target["target_key"]),
+                    int(target.get("ordinal") or 0),
+                    str(target.get("folder_id") or ""),
+                    str(target.get("recognition_json") or "{}"),
+                    str(target.get("share_json") or "{}"),
+                    str(target.get("strm_json") or "{}"),
+                    str(target.get("move_json") or "{}"),
+                    str(target.get("emby_json") or "{}"),
+                    str(target.get("cleanup_json") or "{}"),
+                ),
+            )
+        for operation in checkpoint.operations:
+            assignments = ["status = ?", "updated_at = ?"]
+            values: list[Any] = [operation.status, time.time()]
+            if operation.result:
+                assignments.append("result_json = ?")
+                values.append(self._operation_json(operation.result))
+            if operation.last_error:
+                assignments.append("last_error = ?")
+                values.append(operation.last_error)
+            values.extend([int(task_id), operation.operation_key])
+            conn.execute(
+                f"UPDATE task_operations SET {', '.join(assignments)} "
+                "WHERE task_id = ? AND operation_key = ? AND status IN ('started', 'uncertain')",
+                values,
+            )
+
+    def commit_claimed_result(
+        self,
+        task: TaskSnapshot,
+        worker_id: str,
+        result: StageResult,
+        *,
+        next_stage: TaskStage | None,
+        next_run_at: float,
+        metadata_delete_keys: tuple[str, ...] = (),
+    ) -> TaskSnapshot | None:
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task.id),)).fetchone()
+            if row is None or not self._claim_matches(
+                row,
+                task.current_stage,
+                worker_id,
+                task.claimed_at,
+                task.claim_token,
+                task.updated_at,
+            ):
+                return None
+            self._apply_checkpoint(conn, int(task.id), result)
+            now = time.time()
+            if self._termination_requested(row):
+                settled = self._settle_requested_termination_in_transaction(conn, row, now=now)
+                return self._snapshot(settled)
+            metadata = self._merge_metadata(row["metadata_json"], result.metadata, metadata_delete_keys)
+            conn.execute(
+                "INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at) "
+                "VALUES (?, ?, ?, ?, '', '', ?)",
+                (int(task.id), task.current_stage.value, TaskStatus.SUCCEEDED.value, result.message, now),
+            )
+            target_stage = next_stage or task.current_stage
+            target_status = TaskStatus.PENDING if next_stage else TaskStatus.SUCCEEDED
+            if next_stage:
+                conn.execute(
+                    "INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at) "
+                    "VALUES (?, ?, ?, '等待执行', '', '', ?)",
+                    (int(task.id), next_stage.value, TaskStatus.PENDING.value, now),
+                )
+            conn.execute(
+                "UPDATE tasks SET current_stage = ?, status = ?, error_type = '', error_summary = '', "
+                "metadata_json = ?, next_run_at = ?, claimed_by = '', claimed_at = 0, claim_token = '', "
+                "claim_heartbeat_at = 0, updated_at = ? WHERE id = ?",
+                (target_stage.value, target_status.value, metadata, next_run_at, now, int(task.id)),
+            )
+            updated = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task.id),)).fetchone()
+        return self._snapshot(updated) if updated else None
+
+    def workflow_facts(self, task_id: int) -> dict[str, Any]:
+        with self._lock, self._connection() as conn:
+            return self._workflow_facts_unlocked(conn, int(task_id))
+
+    def list_self_share_move_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.id FROM tasks t
+                JOIN task_shares s ON s.task_id = t.id
+                WHERE COALESCE(t.archived_at, 0) = 0
+                  AND COALESCE(t.is_executable, 1) = 1
+                  AND s.canonical_name != ''
+                ORDER BY t.id
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [self.workflow_facts(int(row[0])) for row in rows]
+
+    def missing_self_share_library_candidates(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.id FROM tasks t
+                JOIN task_shares s ON s.task_id = t.id
+                JOIN task_moves m ON m.task_id = t.id
+                WHERE COALESCE(t.archived_at, 0) = 0
+                  AND COALESCE(t.is_executable, 1) = 1
+                  AND lower(m.move_status) = 'moved'
+                  AND COALESCE(m.dest_path, '') <> ''
+                  AND s.canonical_name != ''
+                  AND s.own_share_code != ''
+                  AND lower(COALESCE(s.validation_status, '')) NOT IN ('invalid', 'unavailable')
+                ORDER BY t.updated_at DESC, t.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (max(1, int(limit)), max(0, int(offset))),
+            ).fetchall()
+        return [self.workflow_facts(int(row[0])) for row in rows]
+
+    def claim_self_share_restore_sync(
+        self,
+        row_id: int,
+        retry_seconds: float = 60,
+        now: float | None = None,
+    ) -> bool:
+        timestamp = time.time() if now is None else float(now)
+        facts = self.workflow_facts(int(row_id))
+        if not facts:
+            return False
+        if str(facts.get("share_sync_status") or "").lower() == "restore_submitted":
+            stale_before = timestamp - max(1.0, float(retry_seconds))
+            if float(facts.get("updated_at") or 0) > stale_before:
+                return False
+        self.write_facts(int(row_id), share={"share_sync_status": "restore_submitted"}, now=timestamp)
+        with self._lock, self._connection() as conn:
+            conn.execute("UPDATE tasks SET updated_at = ? WHERE id = ?", (timestamp, int(row_id)))
+        return True
+
+    def mark_invalid_share_cleaned(self, row_id: int, reason: str, now: float | None = None) -> dict[str, Any]:
+        timestamp = time.time() if now is None else float(now)
+        return self.write_facts(
+            int(row_id),
+            share={"validation_status": "invalid", "validation_error": str(reason)},
+            move={"move_status": "invalid_share_cleaned", "move_error": str(reason)},
+            emby={"status": "invalid_share_cleaned"},
+            probe={"invalid_at": timestamp, "invalid_reason": str(reason)},
+            now=timestamp,
+        )
+
+    def recent_workflow_rows(self, limit: int = 5) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id FROM tasks
+                WHERE COALESCE(archived_at, 0) = 0
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [self.workflow_facts(int(row[0])) for row in rows]
+
+    def clear_finished_history(self, *, actor: str = "telegram", reason: str = "clear_history") -> int:
+        removed = 0
+        for task in self.list_recent_tasks(limit=1000):
+            if float(getattr(task, "archived_at", 0) or 0) > 0:
+                continue
+            if task.status.value not in _DELETABLE_TASK_STATUSES:
+                continue
+            if self.archive_task(task.id, actor=actor, reason=reason, expected_updated_at=task.updated_at):
+                removed += 1
+        return removed
+
+    def self_share_probe_candidates(self, limit: int = 3) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.id FROM tasks t
+                JOIN task_shares s ON s.task_id = t.id
+                JOIN task_moves m ON m.task_id = t.id
+                JOIN task_emby e ON e.task_id = t.id
+                LEFT JOIN task_probes p ON p.task_id = t.id
+                WHERE COALESCE(t.archived_at, 0) = 0
+                  AND COALESCE(t.is_executable, 1) = 1
+                  AND lower(m.move_status) = 'moved'
+                  AND lower(e.status) = 'confirmed'
+                  AND COALESCE(m.dest_path, '') <> ''
+                  AND s.own_share_code != ''
+                ORDER BY CASE WHEN COALESCE(p.last_probe_at, 0) = 0 THEN 0 ELSE 1 END ASC,
+                         t.created_at DESC,
+                         COALESCE(p.last_probe_at, 0) ASC,
+                         t.id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [self.workflow_facts(int(row[0])) for row in rows]
+
+    def live_self_share_identities(self, dest_path: str, tmdb_id: str = "") -> tuple[tuple[str, str], ...]:
+        dest_path = str(dest_path or "").strip()
+        target_tmdb = str(tmdb_id or "").strip()
+        if not dest_path:
+            return ()
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.id FROM tasks t
+                JOIN task_shares s ON s.task_id = t.id
+                JOIN task_moves m ON m.task_id = t.id
+                WHERE COALESCE(t.archived_at, 0) = 0
+                  AND lower(m.move_status) = 'moved'
+                  AND COALESCE(m.dest_path, '') = ?
+                  AND s.own_share_code != ''
+                  AND lower(COALESCE(s.validation_status, '')) NOT IN ('invalid', 'unavailable')
+                ORDER BY t.updated_at DESC, t.id DESC
+                """,
+                (dest_path,),
+            ).fetchall()
+        identities: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for row in rows:
+            facts = self.workflow_facts(int(row[0]))
+            candidate_tmdb = str(facts.get("tmdb_id") or "").strip()
+            if target_tmdb and candidate_tmdb != target_tmdb:
+                continue
+            share_code = str(facts.get("own_share_code") or "").strip()
+            if not share_code:
+                continue
+            receive_code = str(facts.get("own_share_receive_code") or "1212").strip() or "1212"
+            identity = (share_code, receive_code)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            identities.append(identity)
+        return tuple(identities)
+
+    def latest_self_share_identity(self, dest_path: str, tmdb_id: str = "") -> tuple[str, str] | None:
+        identities = self.live_self_share_identities(dest_path, tmdb_id)
+        return identities[0] if identities else None
+
+    def all_confirmed_with_emby_path(self) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.id FROM tasks t
+                JOIN task_emby e ON e.task_id = t.id
+                WHERE COALESCE(t.archived_at, 0) = 0
+                  AND e.status = 'confirmed'
+                  AND COALESCE(e.path, '') <> ''
+                ORDER BY t.updated_at DESC, t.id DESC
+                """
+            ).fetchall()
+        return [self.workflow_facts(int(row[0])) for row in rows]
+
+    def pending_self_share_cleanup_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.id FROM tasks t
+                JOIN task_shares s ON s.task_id = t.id
+                JOIN task_moves m ON m.task_id = t.id
+                JOIN task_emby e ON e.task_id = t.id
+                JOIN task_cleanups c ON c.task_id = t.id
+                WHERE COALESCE(t.archived_at, 0) = 0
+                  AND lower(m.move_status) = 'moved'
+                  AND lower(e.status) = 'confirmed'
+                  AND lower(c.status) IN ('pending', 'error')
+                  AND s.file_id != ''
+                  AND s.own_share_code != ''
+                ORDER BY t.updated_at DESC, t.id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [self.workflow_facts(int(row[0])) for row in rows]
 
     def record_event(
         self,
@@ -2802,6 +3479,8 @@ class TaskStore:
         stage: TaskStage | None = None,
         message: str = "等待执行",
         next_run_at: float | None = None,
+        metadata_patch: dict[str, Any] | None = None,
+        metadata_delete_keys: tuple[str, ...] = (),
     ) -> TaskSnapshot:
         task = self.find_task(task_id)
         if task is None:
@@ -2812,7 +3491,8 @@ class TaskStore:
             target_stage,
             TaskStatus.PENDING,
             message,
-            metadata_delete_keys=("_defer_stage", "_defer_message", "_defer_count"),
+            metadata_patch=metadata_patch,
+            metadata_delete_keys=("_defer_stage", "_defer_message", "_defer_count") + tuple(metadata_delete_keys),
             next_run_at=time.time() if next_run_at is None else float(next_run_at),
             clear_claim=True,
         )
@@ -2832,19 +3512,37 @@ class TaskStore:
             operation.operation_type == "receive_share" and operation.status == "succeeded"
             for operation in self.list_operations(task.id)
         )
+        self._clear_reprocess_facts(int(task.id), preserve_received_snapshot=preserve_received_snapshot)
+        extra_patch = dict(metadata_patch or {})
+        delete_keys = tuple(
+            key
+            for key in reprocess_delete_keys_for(
+                task,
+                preserve_received_snapshot=preserve_received_snapshot,
+            )
+            if key not in extra_patch
+        )
         return self.record_event(
             task_id,
             target_stage,
             TaskStatus.PENDING,
             message,
-            metadata_patch=build_reprocess_metadata(task, metadata_patch),
-            metadata_delete_keys=reprocess_delete_keys_for(
-                task,
-                preserve_received_snapshot=preserve_received_snapshot,
-            ),
+            metadata_patch=build_reprocess_metadata(task, extra_patch),
+            metadata_delete_keys=delete_keys,
             next_run_at=next_run_at,
             clear_claim=True,
         )
+
+    def _clear_reprocess_facts(self, task_id: int, *, preserve_received_snapshot: bool) -> None:
+        with self._lock, self._connection() as conn:
+            conn.execute("DELETE FROM task_shares WHERE task_id = ?", (int(task_id),))
+            conn.execute("DELETE FROM task_moves WHERE task_id = ?", (int(task_id),))
+            conn.execute("DELETE FROM task_emby WHERE task_id = ?", (int(task_id),))
+            conn.execute("DELETE FROM task_cleanups WHERE task_id = ?", (int(task_id),))
+            conn.execute("DELETE FROM task_probes WHERE task_id = ?", (int(task_id),))
+            conn.execute("DELETE FROM task_targets WHERE task_id = ?", (int(task_id),))
+            if not preserve_received_snapshot:
+                conn.execute("DELETE FROM task_media WHERE task_id = ?", (int(task_id),))
 
     def claim_next_runnable(
         self,
@@ -2855,6 +3553,7 @@ class TaskStore:
         current_time = time.time() if now is None else float(now)
         stale_before = current_time - max(1, int(stale_after_seconds))
         runnable_statuses = (TaskStatus.PENDING.value, TaskStatus.RUNNING.value)
+        claimed_task = None
         with self._lock, self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
@@ -2864,6 +3563,8 @@ class TaskStore:
                   AND current_stage NOT IN (?, ?)
                   AND next_run_at >= 0
                   AND next_run_at <= ?
+                  AND COALESCE(archived_at, 0) = 0
+                  AND COALESCE(is_executable, 1) != 0
                   AND (claimed_by = '' OR COALESCE(NULLIF(claim_heartbeat_at, 0), claimed_at) <= ?)
                 ORDER BY updated_at ASC, id ASC
                 LIMIT 10
@@ -2889,6 +3590,8 @@ class TaskStore:
                       AND current_stage NOT IN (?, ?)
                       AND next_run_at >= 0
                       AND next_run_at <= ?
+                      AND COALESCE(archived_at, 0) = 0
+                      AND COALESCE(is_executable, 1) != 0
                       AND (claimed_by = '' OR COALESCE(NULLIF(claim_heartbeat_at, 0), claimed_at) <= ?)
                     """,
                     (
@@ -2910,9 +3613,9 @@ class TaskStore:
                 if cursor.rowcount == 0:
                     continue
                 claimed = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(row["id"]),)).fetchone()
-                return self._snapshot(claimed) if claimed else None
-            else:
-                return None
+                claimed_task = self._snapshot(claimed) if claimed else None
+                break
+        return self._overlay_facts_on_task(claimed_task) if claimed_task else None
 
     def renew_claim(
         self,
@@ -2938,3 +3641,410 @@ class TaskStore:
                 ),
             )
         return int(cursor.rowcount or 0) == 1
+
+    def enqueue_command(
+        self,
+        task_id: int,
+        command_type: str,
+        payload: dict[str, Any],
+        *,
+        idempotency_key: str,
+        actor: str = "",
+        source: str = "",
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        if command_type not in COMMAND_TYPES:
+            raise ValueError(f"unsupported command type: {command_type}")
+        payload_json = self._operation_json(payload)
+        current_time = time.time() if now is None else float(now)
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT * FROM task_commands WHERE idempotency_key = ?",
+                (str(idempotency_key),),
+            ).fetchone()
+            if existing is not None:
+                if existing["command_type"] != command_type or existing["payload_json"] != payload_json:
+                    raise ValueError("command payload identity is immutable")
+                return dict(existing)
+            conn.execute(
+                """
+                INSERT INTO task_commands (
+                    idempotency_key, task_id, command_type, payload_json, actor, source,
+                    status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    str(idempotency_key),
+                    int(task_id),
+                    str(command_type),
+                    payload_json,
+                    str(actor),
+                    str(source),
+                    current_time,
+                    current_time,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM task_commands WHERE idempotency_key = ?",
+                (str(idempotency_key),),
+            ).fetchone()
+        return dict(row)
+
+    def claim_next_command(self, owner: str, now: float | None = None) -> dict[str, Any] | None:
+        current_time = time.time() if now is None else float(now)
+        token = str(uuid.uuid4())
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM task_commands WHERE status = 'pending' ORDER BY id ASC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            cursor = conn.execute(
+                """
+                UPDATE task_commands
+                SET status = 'claimed', claim_token = ?, claimed_by = ?, claimed_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (token, str(owner), current_time, current_time, int(row["id"])),
+            )
+            if cursor.rowcount != 1:
+                return None
+            claimed = conn.execute("SELECT * FROM task_commands WHERE id = ?", (int(row["id"]),)).fetchone()
+        return dict(claimed) if claimed else None
+
+    def complete_command(
+        self,
+        command_id: int,
+        claim_token: str,
+        *,
+        result: dict[str, Any] | None = None,
+        now: float | None = None,
+    ) -> bool:
+        current_time = time.time() if now is None else float(now)
+        with self._lock, self._connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE task_commands
+                SET status = 'completed', result_json = ?, updated_at = ?
+                WHERE id = ? AND claim_token = ? AND status = 'claimed'
+                """,
+                (self._operation_json(result or {}), current_time, int(command_id), str(claim_token)),
+            )
+        return int(cursor.rowcount or 0) == 1
+
+    def fail_command(
+        self,
+        command_id: int,
+        claim_token: str,
+        error: str,
+        now: float | None = None,
+    ) -> bool:
+        current_time = time.time() if now is None else float(now)
+        with self._lock, self._connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE task_commands
+                SET status = 'failed', error = ?, updated_at = ?
+                WHERE id = ? AND claim_token = ? AND status = 'claimed'
+                """,
+                (str(error), current_time, int(command_id), str(claim_token)),
+            )
+        return int(cursor.rowcount or 0) == 1
+
+    def cancel_pending_commands(self, task_id: int, now: float | None = None) -> int:
+        current_time = time.time() if now is None else float(now)
+        with self._lock, self._connection() as conn:
+            cursor = conn.execute(
+                "UPDATE task_commands SET status = 'cancelled', updated_at = ? WHERE task_id = ? AND status = 'pending'",
+                (current_time, int(task_id)),
+            )
+        return int(cursor.rowcount or 0)
+
+    def acquire_runner_lease(self, owner: str, now: float | None = None, ttl_seconds: int = 30) -> str | None:
+        current_time = time.time() if now is None else float(now)
+        token = str(uuid.uuid4())
+        expires = current_time + max(1, int(ttl_seconds))
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM runner_leases WHERE name = 'task_runner'").fetchone()
+            if row is not None and float(row["expires_at"] or 0) > current_time:
+                return None
+            conn.execute(
+                """
+                INSERT INTO runner_leases (name, owner, token, acquired_at, renew_at, expires_at)
+                VALUES ('task_runner', ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    owner = excluded.owner,
+                    token = excluded.token,
+                    acquired_at = excluded.acquired_at,
+                    renew_at = excluded.renew_at,
+                    expires_at = excluded.expires_at
+                """,
+                (str(owner), token, current_time, current_time, expires),
+            )
+        return token
+
+    def renew_runner_lease(
+        self,
+        owner: str,
+        token: str,
+        now: float | None = None,
+        ttl_seconds: int = 30,
+    ) -> bool:
+        current_time = time.time() if now is None else float(now)
+        expires = current_time + max(1, int(ttl_seconds))
+        with self._lock, self._connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE runner_leases
+                SET renew_at = ?, expires_at = ?
+                WHERE name = 'task_runner' AND owner = ? AND token = ?
+                """,
+                (current_time, expires, str(owner), str(token)),
+            )
+        return int(cursor.rowcount or 0) == 1
+
+    def release_runner_lease(self, owner: str, token: str) -> bool:
+        with self._lock, self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM runner_leases WHERE name = 'task_runner' AND owner = ? AND token = ?",
+                (str(owner), str(token)),
+            )
+        return int(cursor.rowcount or 0) == 1
+
+    def write_facts(
+        self,
+        task_id: int,
+        *,
+        media: dict[str, Any] | None = None,
+        share: dict[str, Any] | None = None,
+        move: dict[str, Any] | None = None,
+        emby: dict[str, Any] | None = None,
+        cleanup: dict[str, Any] | None = None,
+        probe: dict[str, Any] | None = None,
+        claimed_by: str = "",
+        claim_token: str = "",
+        now: float | None = None,
+        stale_after_seconds: int = 21600,
+    ) -> dict[str, Any]:
+        current_time = time.time() if now is None else float(now)
+        result = StageResult.complete(
+            "",
+            checkpoint=StageCheckpoint(
+                media=media or {},
+                share=share or {},
+                move=move or {},
+                emby=emby or {},
+                cleanup=cleanup or {},
+                probe=probe or {},
+            ),
+        )
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+            if row is None:
+                return {}
+            owner = str(row["claimed_by"] or "")
+            heartbeat = float(row["claim_heartbeat_at"] or row["claimed_at"] or 0)
+            live = bool(owner) and heartbeat > current_time - max(1, int(stale_after_seconds))
+            if not live or (
+                owner == str(claimed_by or "") and str(row["claim_token"] or "") == str(claim_token or "")
+            ):
+                self._apply_checkpoint(conn, int(task_id), result)
+        return self.workflow_facts(int(task_id))
+
+
+class WorkflowRowAdapter:
+    """Fact-backed row API for TaskRunner workflows."""
+
+    def __init__(self, tasks: TaskStore):
+        self._tasks = tasks
+        self.db_path = tasks.db_path
+        self._claim_task_id = 0
+        self._claimed_by = ""
+        self._claim_token = ""
+
+    def bind_claim(self, task: Any) -> None:
+        self._claim_task_id = int(getattr(task, "id", 0) or 0)
+        self._claimed_by = str(getattr(task, "claimed_by", "") or "")
+        self._claim_token = str(getattr(task, "claim_token", "") or "")
+
+    def clear_claim(self) -> None:
+        self._claim_task_id = 0
+        self._claimed_by = ""
+        self._claim_token = ""
+
+    def write_facts(self, task_id: int, **kwargs: Any) -> dict[str, Any]:
+        if int(task_id) == self._claim_task_id:
+            kwargs.setdefault("claimed_by", self._claimed_by)
+            kwargs.setdefault("claim_token", self._claim_token)
+        return self._tasks.write_facts(int(task_id), **kwargs)
+
+    def find_by_id(self, row_id: int) -> dict[str, Any] | None:
+        facts = self._tasks.workflow_facts(int(row_id))
+        return facts or None
+
+    def find_by_key(self, key: Any) -> dict[str, Any] | None:
+        share_code = str(getattr(key, "share_code", "") or "")
+        receive_code = str(getattr(key, "receive_code", "") or "")
+        task = self._tasks.find_task_by_share_key(share_code, receive_code)
+        if task is None:
+            return None
+        return self._tasks.workflow_facts(int(task.id))
+
+    def upsert_submission(self, key: Any, url: str, status: str, title: str = "", cms_task_id: str | None = None, **_kwargs: Any) -> dict[str, Any]:
+        share_code = str(getattr(key, "share_code", "") or "")
+        receive_code = str(getattr(key, "receive_code", "") or "")
+        task = self._tasks.upsert_task(share_code, receive_code, str(url or ""), title=str(title or "") or None)
+        media: dict[str, Any] = {}
+        if title:
+            media["title"] = str(title)
+        if cms_task_id:
+            media["cms_task_id"] = str(cms_task_id)
+        if media:
+            self.write_facts(int(task.id), media=media)
+        return self._tasks.workflow_facts(int(task.id))
+
+    def update_status(self, row_id: int, status: str, title: str | None = None, last_error: str | None = None) -> dict[str, Any] | None:
+        if title:
+            return self.write_facts(int(row_id), media={"title": str(title)})
+        return self.find_by_id(row_id)
+
+    def update_category(self, row_id: int, choice: str | None, status: str) -> dict[str, Any] | None:
+        media = {"recognition_status": str(status or "")}
+        if choice:
+            media["category"] = str(choice)
+        return self.write_facts(int(row_id), media=media)
+
+    def update_recognition(self, row_id: int, recognition: dict[str, Any], category_status: str) -> dict[str, Any] | None:
+        recognition = recognition or {}
+        payload = {
+            "recognition_status": str(category_status or ""),
+            "recognition_json": json.dumps(recognition, ensure_ascii=True, sort_keys=True),
+            "title": str(recognition.get("title") or ""),
+            "tmdb_id": str(recognition.get("tmdb_id") or ""),
+            "category": str(recognition.get("category") or ""),
+        }
+        return self.write_facts(int(row_id), media={k: v for k, v in payload.items() if v})
+
+    def update_emby(self, row_id: int, status: str, item_id: str | None = None, title: str | None = None, path: str | None = None, parent: str | None = None, **_kwargs: Any) -> dict[str, Any] | None:
+        emby = {"status": str(status or "")}
+        if item_id is not None:
+            emby["item_id"] = str(item_id)
+        if title is not None:
+            emby["title"] = str(title)
+        if path is not None:
+            emby["path"] = str(path)
+        if parent is not None:
+            emby["library"] = str(parent)
+        return self.write_facts(int(row_id), emby=emby)
+
+    def update_move(self, row_id: int, status: str, source_path: str | None = None, dest_path: str | None = None, category_final: str | None = None, error: str | None = None, **_kwargs: Any) -> dict[str, Any] | None:
+        move = {"move_status": str(status or "")}
+        if source_path is not None:
+            move["source_path"] = str(source_path)
+        if dest_path is not None:
+            move["dest_path"] = str(dest_path)
+        if error is not None:
+            move["move_error"] = str(error)
+        media = {"category": str(category_final)} if category_final else None
+        return self.write_facts(int(row_id), move=move, media=media)
+
+    def update_self_share(self, row_id: int, **fields: Any) -> dict[str, Any] | None:
+        mapping = {
+            "own_share_file_id": "file_id",
+            "own_share_file_name": "canonical_name",
+            "own_share_code": "own_share_code",
+            "own_share_receive_code": "own_share_receive_code",
+            "share_alias_name": "alias_name",
+            "canonical_manifest_json": "canonical_manifest_json",
+            "share_validation_status": "validation_status",
+            "share_validation_error": "validation_error",
+            "share_sync_status": "share_sync_status",
+        }
+        share = {dest: str(fields[src]) for src, dest in mapping.items() if fields.get(src) is not None}
+        if not share:
+            return self.find_by_id(row_id)
+        return self.write_facts(int(row_id), share=share)
+
+    def update_cleanup(self, row_id: int, status: str, file_id: str | None = None, error: str | None = None, **_kwargs: Any) -> dict[str, Any] | None:
+        cleanup = {"status": str(status or "")}
+        if file_id is not None:
+            cleanup["target_id"] = str(file_id)
+        if error is not None:
+            cleanup["error"] = str(error)
+        return self.write_facts(int(row_id), cleanup=cleanup)
+
+    def update_share_probe(self, row_id: int) -> dict[str, Any] | None:
+        return self.write_facts(int(row_id), probe={"last_probe_at": time.time()})
+
+    def remember_parent_category(self, parent_id: str, category: str, source: str = "manual") -> None:
+        now = time.time()
+        with self._tasks._lock, self._tasks._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO parent_category_memory (parent_id, category, source, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(parent_id) DO UPDATE SET category = excluded.category, source = excluded.source, updated_at = excluded.updated_at
+                """,
+                (str(parent_id), str(category), str(source), now, now),
+            )
+
+    def category_for_parent_id(self, parent_id: str) -> str:
+        with self._tasks._lock, self._tasks._connection() as conn:
+            row = conn.execute("SELECT category FROM parent_category_memory WHERE parent_id = ?", (str(parent_id),)).fetchone()
+        return str(row["category"] if row else "")
+
+    def reset_self_share_for_update(self, row_id: int) -> dict[str, Any] | None:
+        self._tasks._clear_reprocess_facts(int(row_id), preserve_received_snapshot=True)
+        return self.find_by_id(row_id)
+
+    def delete_submission(self, row_id: int) -> bool:
+        return True
+
+    def recent(self, limit: int = 5) -> list[dict[str, Any]]:
+        return self._tasks.recent_workflow_rows(limit=limit)
+
+    def stranded_self_share_move_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
+        return []
+
+    def invalid_self_share_move_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
+        return []
+
+    def enqueue_command(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self._tasks.enqueue_command(*args, **kwargs)
+
+    def list_self_share_move_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
+        return self._tasks.list_self_share_move_candidates(limit=limit)
+
+    def missing_self_share_library_candidates(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        return self._tasks.missing_self_share_library_candidates(limit=limit, offset=offset)
+
+    def pending_self_share_cleanup_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
+        return self._tasks.pending_self_share_cleanup_candidates(limit=limit)
+
+    def self_share_probe_candidates(self, limit: int = 3) -> list[dict[str, Any]]:
+        return self._tasks.self_share_probe_candidates(limit=limit)
+
+    def stale_for_repair(self, limit: int = 50) -> list[dict[str, Any]]:
+        return []
+
+    def live_self_share_identities(self, dest_path: str, tmdb_id: str = "") -> tuple[tuple[str, str], ...]:
+        return self._tasks.live_self_share_identities(dest_path, tmdb_id)
+
+    def latest_self_share_identity(self, dest_path: str, tmdb_id: str = "") -> tuple[str, str] | None:
+        return self._tasks.latest_self_share_identity(dest_path, tmdb_id)
+
+    def all_confirmed_with_emby_path(self) -> list[dict[str, Any]]:
+        return self._tasks.all_confirmed_with_emby_path()
+
+    def clear_finished_history(self) -> int:
+        return self._tasks.clear_finished_history()
+
+    def mark_invalid_share_cleaned(self, row_id: int, reason: str) -> dict[str, Any] | None:
+        return self._tasks.mark_invalid_share_cleaned(int(row_id), reason)
+
+    def claim_self_share_restore_sync(self, row_id: int, retry_seconds: float = 60, now: float | None = None) -> bool:
+        return self._tasks.claim_self_share_restore_sync(row_id, retry_seconds=retry_seconds, now=now)

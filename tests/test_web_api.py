@@ -27,6 +27,8 @@ from app.web_api import (
     serialize_health,
     serialize_task,
 )
+from tests.legacy_submission_store import SubmissionStore
+from tests.task_command_drain import drain_task_commands
 
 
 class WebApiTests(unittest.TestCase):
@@ -35,7 +37,7 @@ class WebApiTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             row = submission_store.upsert_submission(
                 bridge.ShareKey("purge", "1234"),
                 "https://115cdn.com/s/purge?password=1234",
@@ -77,7 +79,7 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertFalse(payload["dry_run"])
             self.assertEqual(payload["deleted"][0]["id"], task.id)
-            self.assertIsNone(store.find_task(task.id))
+            self.assertIsNotNone(store.find_task(task.id))
             self.assertIsNone(submission_store.find_by_id(int(row["id"])))
 
     def test_completed_task_exposes_missing_media_directory_drift(self):
@@ -201,12 +203,55 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(tasks[active.id]["available_actions"], [])
             self.assertEqual(tasks[finished.id]["available_actions"], [])
             self.assertEqual(terminate_status, 409)
-            self.assertIn("旧版任务引擎", json.loads(terminate_body)["reason"])
+            self.assertIn("写入闸门", json.loads(terminate_body)["reason"])
             self.assertEqual(legacy_terminate_status, 409)
             self.assertEqual(delete_status, 409)
             self.assertIn("旧版任务引擎", json.loads(delete_body)["reason"])
             self.assertEqual(store.find_task(active.id).status, TaskStatus.PENDING)
             self.assertIsNotNone(store.find_task(finished.id))
+
+            reprocess_status, _headers, reprocess_body = app.handle_request(
+                "POST", f"/api/v1/tasks/{finished.id}/actions/reprocess", {}, b""
+            )
+            html_reprocess_status, _headers, _body = app.handle_request(
+                "POST", f"/task/{finished.id}/reprocess", {}, b""
+            )
+            self.assertEqual(reprocess_status, 409)
+            self.assertIn("写入闸门", json.loads(reprocess_body)["reason"])
+            self.assertEqual(html_reprocess_status, 409)
+            self.assertIsNone(store.claim_next_command("worker", now=1))
+            clear_status, _headers, clear_body = app.handle_request(
+                "POST", "/api/v1/history/clear", {}, b""
+            )
+            self.assertEqual(clear_status, 409)
+            self.assertIn("写入闸门", json.loads(clear_body)["reason"])
+            self.assertIsNotNone(store.find_task(finished.id))
+            self.assertEqual(getattr(store.find_task(finished.id), "archived_at", 0) or 0, 0)
+
+    def test_closed_write_gate_rejects_settings_and_quality_posts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            before = store.get_default_strm_mode()
+            app = WebApp(store, task_engine_enabled=False)
+            settings_status, _headers, settings_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/strm-mode",
+                {"Content-Type": "application/json"},
+                b'{"mode":"direct"}',
+            )
+            quality_status, _headers, quality_body = app.handle_request(
+                "POST", "/api/v1/quality/run", {}, b""
+            )
+            html_quality_status, _headers, _body = app.handle_request(
+                "POST", "/quality/settings/reset", {}, b""
+            )
+
+            self.assertEqual(settings_status, 409)
+            self.assertIn("写入闸门", json.loads(settings_body)["reason"])
+            self.assertEqual(store.get_default_strm_mode(), before)
+            self.assertEqual(quality_status, 409)
+            self.assertIn("写入闸门", json.loads(quality_body)["reason"])
+            self.assertEqual(html_quality_status, 409)
 
     def test_legacy_engine_delete_does_not_recheck_or_mutate_after_missing_lookup(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -399,7 +444,7 @@ class WebApiTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=False,
         )
         return QualityAutomation(store, config, allowed_roots=[root]), root
@@ -1438,11 +1483,10 @@ class WebApiTests(unittest.TestCase):
 
             status, _headers, body = app.handle_request("POST", f"/api/v1/tasks/{task.id}/actions/retry", {}, b"")
             missing_status, _headers, missing_body = app.handle_request("POST", "/api/v1/tasks/999/actions/retry", {}, b"")
-
+            drain_task_commands(store)
             succeeded = store.find_task(task.id)
 
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["status"], "pending")
         self.assertEqual(succeeded.status, TaskStatus.PENDING)
         self.assertEqual(missing_status, 404)
         self.assertEqual(json.loads(missing_body)["error"], "task_not_found")
@@ -1469,9 +1513,9 @@ class WebApiTests(unittest.TestCase):
             app = WebApp(store, max_retries=5)
 
             status, _headers, body = app.handle_request("POST", f"/api/v1/tasks/{task.id}/actions/retry", {}, b"")
-
-        self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["status"], "pending")
+            drain_task_commands(store)
+            self.assertEqual(status, 200)
+            self.assertEqual(store.find_task(task.id).status, TaskStatus.PENDING)
 
     def test_history_and_quality_action_api(self):
         with tempfile.TemporaryDirectory() as tmp:

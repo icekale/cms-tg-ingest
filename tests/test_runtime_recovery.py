@@ -22,6 +22,7 @@ from tests.test_bridge_task_engine import (
     FakeP115,
     FakeTelegram,
 )
+from tests.legacy_submission_store import SubmissionStore
 from tests.test_hdhive_subscriptions import FakeSubscriptionProxy, resource
 
 
@@ -78,7 +79,7 @@ class AbsenceAwareCleanup(FakeCleanupClient):
 @dataclass
 class SelfShareRuntime:
     tasks: TaskStore
-    submissions: bridge.SubmissionStore
+    submissions: SubmissionStore
     workflow: bridge.BridgeSelfShareTaskWorkflow
 
 
@@ -91,7 +92,7 @@ def open_self_share_runtime(
     now=lambda: time.time(),
 ) -> SelfShareRuntime:
     tasks = TaskStore(root / "tasks.db")
-    submissions = bridge.SubmissionStore(root / "submissions.db")
+    submissions = SubmissionStore(root / "submissions.db")
     config = bridge.SelfShareConfig(
         enabled=True,
         strm_root=root / "share-strm",
@@ -125,7 +126,7 @@ def inject_task_operation_crash(store: TaskStore, boundary: str):
         "intent": "prepare_operation",
         "start": "start_operation",
         "result": "complete_operation",
-        "stage_commit": "complete_claimed_stage",
+        "stage_commit": "commit_claimed_result",
     }[boundary]
     original = getattr(store, method_name)
     hits = []

@@ -29,7 +29,12 @@ from app.models import TaskSnapshot, TaskStage
 from app.strm_mode import effective_task_strm_mode
 from app.task_runner import StageResult
 from app.task_store import operation_scope
-from app.workflows.self_share import BridgeSelfShareTaskWorkflow, emby_parent_label, match_emby_item
+from app.workflows.self_share import (
+    BridgeSelfShareTaskWorkflow,
+    attach_row_checkpoint,
+    emby_parent_label,
+    match_emby_item,
+)
 
 
 _CMS_FAILURE_MARKERS = ("failed", "error", "失败", "timeout", "超时", "cancel")
@@ -142,24 +147,43 @@ class DirectTaskWorkflow:
                 metadata={"strm_mode": effective_task_strm_mode(task)},
             )
         if task.current_stage == TaskStage.RECEIVED:
-            return self._stage_received(task)
-        if task.current_stage == TaskStage.ORGANIZING:
-            return self._stage_organizing(task)
-        if task.current_stage == TaskStage.RECOGNIZING:
-            return self._stage_recognizing(task)
-        if task.current_stage == TaskStage.STRM_READY:
-            return self._stage_strm_ready(task)
-        if task.current_stage == TaskStage.MOVED:
-            return self._stage_moved(task)
-        if task.current_stage == TaskStage.EMBY_CONFIRMED:
-            return self._stage_emby_confirmed(task)
-        return StageResult.failed("直链工作流不支持此阶段", error_type="unsupported_stage")
+            result = self._stage_received(task)
+        elif task.current_stage == TaskStage.ORGANIZING:
+            result = self._stage_organizing(task)
+        elif task.current_stage == TaskStage.RECOGNIZING:
+            result = self._stage_recognizing(task)
+        elif task.current_stage == TaskStage.STRM_READY:
+            result = self._stage_strm_ready(task)
+        elif task.current_stage == TaskStage.MOVED:
+            result = self._stage_moved(task)
+        elif task.current_stage == TaskStage.EMBY_CONFIRMED:
+            result = self._stage_emby_confirmed(task)
+        else:
+            result = StageResult.failed("直链工作流不支持此阶段", error_type="unsupported_stage")
+        return attach_row_checkpoint(result, self._submission_row(task))
 
     def _submission_row(self, task: TaskSnapshot) -> dict[str, Any] | None:
         submission_id = task.metadata.get("submission_id") or task.submission_id
+        row = None
         if submission_id not in (None, ""):
-            return self.store.find_by_id(int(submission_id))
-        return self.store.find_by_key(_ShareKey(task.share_code, task.receive_code))
+            row = self.store.find_by_id(int(submission_id))
+        if row is None:
+            row = self.store.find_by_key(_ShareKey(task.share_code, task.receive_code))
+        facts = {}
+        if self.task_store is not None and hasattr(self.task_store, "workflow_facts"):
+            facts = self.task_store.workflow_facts(int(task.id))
+        if not facts:
+            return row
+        if row is None:
+            if facts.get("dest_path") or facts.get("move_status") or facts.get("cms_task_id"):
+                return facts
+            return None
+        merged = dict(row)
+        for key, value in facts.items():
+            if key == "id" or value in (None, "", [], {}, "{}", "[]"):
+                continue
+            merged[key] = value
+        return merged
 
     @staticmethod
     def _recognition(row: dict[str, Any]) -> dict[str, Any]:
@@ -768,18 +792,20 @@ class SourceShareTaskWorkflow(DirectTaskWorkflow):
                 metadata={"strm_mode": effective_task_strm_mode(task)},
             )
         if task.current_stage == TaskStage.RECEIVED:
-            return self._stage_received(task)
-        if task.current_stage == TaskStage.SHARE_SYNC_SUBMITTED:
-            return self._stage_share_sync_submitted(task)
-        if task.current_stage == TaskStage.RECOGNIZING:
-            return self._stage_recognizing(task)
-        if task.current_stage == TaskStage.STRM_READY:
-            return self._stage_strm_ready(task)
-        if task.current_stage == TaskStage.MOVED:
-            return self._stage_moved(task)
-        if task.current_stage == TaskStage.EMBY_CONFIRMED:
-            return self._stage_emby_confirmed(task)
-        return StageResult.failed("原始分享工作流不支持此阶段", error_type="unsupported_stage")
+            result = self._stage_received(task)
+        elif task.current_stage == TaskStage.SHARE_SYNC_SUBMITTED:
+            result = self._stage_share_sync_submitted(task)
+        elif task.current_stage == TaskStage.RECOGNIZING:
+            result = self._stage_recognizing(task)
+        elif task.current_stage == TaskStage.STRM_READY:
+            result = self._stage_strm_ready(task)
+        elif task.current_stage == TaskStage.MOVED:
+            result = self._stage_moved(task)
+        elif task.current_stage == TaskStage.EMBY_CONFIRMED:
+            result = self._stage_emby_confirmed(task)
+        else:
+            result = StageResult.failed("原始分享工作流不支持此阶段", error_type="unsupported_stage")
+        return attach_row_checkpoint(result, self._submission_row(task))
 
     def _submission_metadata(self, row: dict[str, Any], **extra: Any) -> dict[str, Any]:
         metadata = {

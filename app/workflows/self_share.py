@@ -7,7 +7,7 @@ import os
 import shutil
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -55,8 +55,10 @@ from app.media.intake_identity import (
     snapshot_files,
 )
 from app.media.strm import (
+    canonical_self_share_root_name,
     category_from_existing_library_folder,
     category_from_existing_library_match,
+    destination_for_category,
     find_recent_direct_library_strm_source_dir,
     dest_missing_source_strms,
     find_self_share_strm_source_dir,
@@ -65,6 +67,7 @@ from app.media.strm import (
     move_config_for_workflow_source,
     plan_strm_move,
     restore_canonical_strm_paths,
+    enqueue_missing_self_share_restores,
     restore_missing_self_share_library_folder,
     restore_missing_self_share_library_folders,
     _single_relative_directory_name,
@@ -76,7 +79,7 @@ from app.self_share_settings import resolve_own_share_receive_code, resolve_self
 from app.task_bridge import reset_self_share_submission_for_reprocess
 from app.task_store import operation_scope
 from app.strm_mode import effective_task_strm_mode
-from app.task_runner import StageOutcome, StageResult
+from app.models import OperationCompletion, StageCheckpoint, StageOutcome, StageResult
 
 LOG = logging.getLogger("cms-tg-ingest")
 OPENAI_CATEGORY_LABELS = ["华语电影", "欧美电影", "亚洲电影", "动漫电影", "国产电视", "外国电视", "番剧", "纪录片"]
@@ -156,16 +159,9 @@ def schedule_post_organize_restore_guard(
         try:
             if delay:
                 time.sleep(delay)
-            restored = restore_missing_self_share_library_folders(
-                store,
-                cms,
-                self_share_config,
-                move_config,
-                emby=emby,
-                limit=limit,
-            )
-            if restored:
-                LOG.info("Post-auto-organize guard restored %s missing self-share folders", restored)
+            queued = enqueue_missing_self_share_restores(store, limit=limit)
+            if queued:
+                LOG.info("Post-auto-organize guard queued %s missing library restores", queued)
         except Exception:
             LOG.warning("Post-auto-organize guard failed", exc_info=True)
 
@@ -539,6 +535,127 @@ def find_emby_match(emby: Any, recognition: dict[str, Any], row: dict[str, Any] 
     return match_emby_item(emby.recent_items(limit=recent_limit), recognition, row)
 
 
+def checkpoint_json_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value or "{}"
+    return json.dumps(value or {}, ensure_ascii=True, sort_keys=True)
+
+
+def checkpoint_from_row(row: dict[str, Any] | None, targets: list[dict[str, Any]] | None = None) -> StageCheckpoint:
+    row = row or {}
+    media: dict[str, Any] = {}
+    title = str(row.get("title") or "").strip()
+    category = str(row.get("category_final") or row.get("category_choice") or "").strip()
+    recognition = row.get("recognition_json")
+    recognition_text = checkpoint_json_text(recognition)
+    if recognition_text in {"", "{}", "null"}:
+        recognition_text = ""
+    if title or category or recognition_text or row.get("cms_task_id") or row.get("tmdb_id"):
+        media = {
+            "cms_task_id": str(row.get("cms_task_id") or ""),
+            "title": title,
+            "tmdb_id": str(row.get("tmdb_id") or ""),
+            "category": category,
+            "recognition_status": str(row.get("category_status") or ""),
+        }
+        if recognition_text:
+            media["recognition_json"] = recognition_text
+    share: dict[str, Any] = {}
+    if any(str(row.get(key) or "").strip() for key in ("own_share_file_id", "own_share_file_name", "own_share_code", "share_alias_name", "share_sync_status")):
+        created_at = row.get("share_created_at") or 0
+        try:
+            created_at = float(created_at or 0)
+        except (TypeError, ValueError):
+            created_at = 0
+        share = {
+            "file_id": str(row.get("own_share_file_id") or ""),
+            "canonical_name": str(row.get("own_share_file_name") or ""),
+            "own_share_code": str(row.get("own_share_code") or ""),
+            "own_share_receive_code": str(row.get("own_share_receive_code") or ""),
+            "alias_name": str(row.get("share_alias_name") or ""),
+            "canonical_manifest_json": checkpoint_json_text(row.get("canonical_manifest_json")),
+            "validation_status": str(row.get("share_validation_status") or ""),
+            "validation_error": str(row.get("share_validation_error") or ""),
+            "share_sync_status": str(row.get("share_sync_status") or ""),
+            "created_at": created_at,
+        }
+    move: dict[str, Any] = {}
+    if any(str(row.get(key) or "").strip() for key in ("move_status", "dest_path", "source_path")):
+        move = {
+            "source_path": str(row.get("source_path") or ""),
+            "dest_path": str(row.get("dest_path") or ""),
+            "move_status": str(row.get("move_status") or ""),
+            "move_error": str(row.get("move_error") or ""),
+        }
+    emby: dict[str, Any] = {}
+    if any(str(row.get(key) or "").strip() for key in ("emby_status", "emby_item_id")):
+        emby = {
+            "status": str(row.get("emby_status") or ""),
+            "item_id": str(row.get("emby_item_id") or ""),
+            "title": str(row.get("emby_title") or ""),
+            "path": str(row.get("emby_path") or ""),
+            "library": str(row.get("emby_parent") or ""),
+        }
+    cleanup: dict[str, Any] = {}
+    if any(str(row.get(key) or "").strip() for key in ("cleanup_status", "cleanup_file_id")):
+        cleanup = {
+            "target_id": str(row.get("cleanup_file_id") or ""),
+            "status": str(row.get("cleanup_status") or ""),
+            "error": str(row.get("cleanup_error") or ""),
+        }
+    checkpoint_targets: list[dict[str, Any]] = []
+    for index, target in enumerate(targets or []):
+        if not isinstance(target, dict):
+            continue
+        key = str(target.get("target_id") or target.get("target_key") or "").strip()
+        if not key:
+            continue
+        folder = dict(target.get("folder") or {})
+        checkpoint_targets.append(
+            {
+                "target_key": key,
+                "ordinal": int(target.get("ordinal") or index),
+                "folder_id": str(folder.get("file_id") or ""),
+                "recognition_json": checkpoint_json_text(target.get("recognition")),
+                "share_json": checkpoint_json_text(target.get("share")),
+                "strm_json": checkpoint_json_text(target.get("strm")),
+                "move_json": checkpoint_json_text((target.get("strm") or {}).get("move") or target.get("strm")),
+                "emby_json": checkpoint_json_text({"status": str((target.get("strm") or {}).get("emby_status") or "")}),
+                "cleanup_json": checkpoint_json_text(target.get("cleanup")),
+            }
+        )
+    return StageCheckpoint(
+        media=media,
+        share=share,
+        move=move,
+        emby=emby,
+        cleanup=cleanup,
+        targets=tuple(checkpoint_targets),
+    )
+
+
+def checkpoint_is_populated(checkpoint: StageCheckpoint) -> bool:
+    return bool(
+        checkpoint.media
+        or checkpoint.share
+        or checkpoint.move
+        or checkpoint.emby
+        or checkpoint.cleanup
+        or checkpoint.probe
+        or checkpoint.targets
+        or checkpoint.operations
+    )
+
+
+def attach_row_checkpoint(result: StageResult, row: dict[str, Any] | None, targets: list[dict[str, Any]] | None = None) -> StageResult:
+    if result.outcome != StageOutcome.COMPLETE or checkpoint_is_populated(result.checkpoint):
+        return result
+    attached = checkpoint_from_row(row, targets)
+    if not checkpoint_is_populated(attached):
+        return result
+    return replace(result, checkpoint=attached)
+
+
 class SelfShareWorkflow:
     def __init__(
         self,
@@ -724,32 +841,55 @@ class BridgeSelfShareTaskWorkflow:
                 metadata={"strm_mode": effective_task_strm_mode(task)},
             )
         if task.current_stage == TaskStage.RECEIVED:
-            return self._stage_received(task)
-        if task.current_stage == TaskStage.CLOUD_DOWNLOADING:
-            return self._stage_cloud_downloading(task)
-        if task.current_stage == TaskStage.ORGANIZING:
-            return self._stage_organizing(task)
-        if task.current_stage == TaskStage.RECOGNIZING:
-            return self._stage_recognizing(task)
-        if task.current_stage == TaskStage.SHARE_ALIAS_PREPARED:
-            return self._stage_share_alias_prepared(task)
-        if task.current_stage == TaskStage.OWN_SHARE_CREATED:
-            return self._stage_own_share_created(task)
-        if task.current_stage == TaskStage.SHARE_VALIDATED:
-            return self._stage_share_validated(task)
-        if task.current_stage == TaskStage.SHARE_SYNC_SUBMITTED:
-            return self._stage_share_sync_submitted(task)
-        if task.current_stage == TaskStage.STRM_READY:
-            return self._stage_strm_ready(task)
-        if task.current_stage == TaskStage.CMS_DELETE_SETTLED:
-            return self._stage_cms_delete_settled(task)
-        if task.current_stage == TaskStage.MOVED:
-            return self._stage_moved(task)
-        if task.current_stage == TaskStage.EMBY_CONFIRMED:
-            return self._stage_emby_confirmed(task)
-        if task.current_stage == TaskStage.CLEANED:
-            return self._stage_cleaned(task)
-        return StageResult.failed("阶段尚未实现", error_type="unsupported_stage")
+            result = self._stage_received(task)
+        elif task.current_stage == TaskStage.CLOUD_DOWNLOADING:
+            result = self._stage_cloud_downloading(task)
+        elif task.current_stage == TaskStage.ORGANIZING:
+            result = self._stage_organizing(task)
+        elif task.current_stage == TaskStage.RECOGNIZING:
+            result = self._stage_recognizing(task)
+        elif task.current_stage == TaskStage.SHARE_ALIAS_PREPARED:
+            result = self._stage_share_alias_prepared(task)
+        elif task.current_stage == TaskStage.OWN_SHARE_CREATED:
+            result = self._stage_own_share_created(task)
+        elif task.current_stage == TaskStage.SHARE_VALIDATED:
+            result = self._stage_share_validated(task)
+        elif task.current_stage == TaskStage.SHARE_SYNC_SUBMITTED:
+            result = self._stage_share_sync_submitted(task)
+        elif task.current_stage == TaskStage.STRM_READY:
+            result = self._stage_strm_ready(task)
+        elif task.current_stage == TaskStage.CMS_DELETE_SETTLED:
+            result = self._stage_cms_delete_settled(task)
+        elif task.current_stage == TaskStage.MOVED:
+            result = self._stage_moved(task)
+        elif task.current_stage == TaskStage.EMBY_CONFIRMED:
+            result = self._stage_emby_confirmed(task)
+        elif task.current_stage == TaskStage.CLEANED:
+            result = self._stage_cleaned(task)
+        else:
+            result = StageResult.failed("阶段尚未实现", error_type="unsupported_stage")
+        return self._with_row_checkpoint(task, result)
+
+    def _json_text(self, value: Any) -> str:
+        return checkpoint_json_text(value)
+
+    def _checkpoint_for_row(self, row: dict[str, Any] | None, targets: list[dict[str, Any]] | None = None) -> StageCheckpoint:
+        return checkpoint_from_row(row, targets)
+
+    def _checkpoint_is_populated(self, checkpoint: StageCheckpoint) -> bool:
+        return checkpoint_is_populated(checkpoint)
+
+    def _with_row_checkpoint(self, task, result: StageResult) -> StageResult:
+        targets: list[dict[str, Any]] = []
+        organized = result.metadata.get("organized_targets") if isinstance(result.metadata, dict) else None
+        if isinstance(organized, list):
+            targets = [item for item in organized if isinstance(item, dict)]
+        elif result.outcome == StageOutcome.COMPLETE:
+            try:
+                targets = list(self._organized_targets(task) or [])
+            except Exception:
+                targets = []
+        return attach_row_checkpoint(result, self._submission_row(task), targets)
 
     def _trigger_cloud_auto_organize(self, task, row_id: int, metadata: dict[str, Any]) -> StageResult:
         operation = None
@@ -1112,9 +1252,26 @@ class BridgeSelfShareTaskWorkflow:
 
     def _submission_row(self, task) -> dict[str, Any] | None:
         submission_id = task.metadata.get("submission_id") or task.submission_id
+        row = None
         if submission_id not in (None, ""):
-            return self.store.find_by_id(int(submission_id))
-        return self.store.find_by_key(_ShareKey(task.share_code, task.receive_code))
+            row = self.store.find_by_id(int(submission_id))
+        if row is None:
+            row = self.store.find_by_key(_ShareKey(task.share_code, task.receive_code))
+        facts = {}
+        if self.task_store is not None and hasattr(self.task_store, "workflow_facts"):
+            facts = self.task_store.workflow_facts(int(task.id))
+        if not facts:
+            return row
+        if row is None:
+            if facts.get("own_share_file_name") or facts.get("dest_path") or facts.get("move_status"):
+                return facts
+            return None
+        merged = dict(row)
+        for key, value in facts.items():
+            if key == "id" or value in (None, "", [], {}, "{}", "[]"):
+                continue
+            merged[key] = value
+        return merged
 
     def _find_organized_folder(self, recognition, title, find_kwargs, scan_cursor, max_requests=8):
         try:
@@ -4451,8 +4608,17 @@ class BridgeSelfShareTaskWorkflow:
             required_relative_path = ""
             if task.metadata.get("direct_file_share"):
                 required_relative_path = str(task.metadata.get("direct_file_share_relative_path") or "").strip()
-            if str(row.get("move_status") or "").lower() == "moved":
-                destination = safe_resolve(Path(str(row.get("dest_path") or "")))
+            destination = None
+            dest_value = str(row.get("dest_path") or row.get("validated_dest_path") or "").strip()
+            if dest_value:
+                destination = safe_resolve(Path(dest_value))
+            elif str(row.get("move_status") or "").lower() != "moved":
+                planned_name = canonical_self_share_root_name(row)
+                planned_category = str(metadata.get("category") or final_category_for_move(row, recognition) or "").strip()
+                planned = destination_for_category(planned_category, planned_name, self.move_config) if planned_name and planned_category else None
+                if planned is not None:
+                    destination = planned
+            if destination is not None:
                 library_roots = list(self.move_config.library_roots.values())
                 if is_under_any_root(destination, library_roots):
                     issue = validate_self_share_strm_destination(destination, row, required_relative_path)
@@ -4462,6 +4628,13 @@ class BridgeSelfShareTaskWorkflow:
                         return StageResult.complete(
                             "STRM 已在目标目录，按已完成移动继续",
                             metadata,
+                            checkpoint=StageCheckpoint(
+                                move={
+                                    "dest_path": str(destination),
+                                    "move_status": "moved",
+                                    "validated_dest_path": str(destination),
+                                }
+                            ),
                         )
             folder_name = str(row.get("own_share_file_name") or "").strip()
             if folder_name:
@@ -4652,6 +4825,45 @@ class BridgeSelfShareTaskWorkflow:
             )
         return StageResult.complete("全部目标 STRM 已移动到媒体库", self._multi_target_metadata(row, targets, move_status="moved"))
 
+    def _move_strm_operation(self, task, source, dest):
+        key = f"{operation_scope(task)}:move_strm:{source}:{dest}"
+        operation = self.task_store.find_operation(int(task.id), key)
+        if operation is None:
+            for existing in self.task_store.list_operations(int(task.id)):
+                if existing.operation_type == "move_strm":
+                    return existing
+            return self.task_store.prepare_operation(
+                int(task.id),
+                key,
+                "move_strm",
+                {"source": str(source or ""), "dest": str(dest or "")},
+            )
+        return operation
+
+    def _moved_stage_result(self, message, metadata, operation, source, dest):
+        operations = ()
+        if operation is not None:
+            operations = (
+                OperationCompletion(
+                    operation.operation_key,
+                    "succeeded",
+                    {"dest_path": str(dest or "")},
+                ),
+            )
+        return StageResult.complete(
+            message,
+            metadata,
+            checkpoint=StageCheckpoint(
+                move={
+                    "source_path": str(source or ""),
+                    "dest_path": str(dest or ""),
+                    "move_status": "moved",
+                    "validated_dest_path": str(dest or ""),
+                },
+                operations=operations,
+            ),
+        )
+
     def _stage_moved(self, task):
         row = self._submission_row(task)
         if not row:
@@ -4672,7 +4884,13 @@ class BridgeSelfShareTaskWorkflow:
             if not (source and dest_path and dest_missing_source_strms(source, Path(dest_path))):
                 if self._strm_destination_ready(dest_path, row, task.metadata):
                     metadata.update(self._request_emby_refresh_once(task, dest_path))
-                    return StageResult.complete("STRM 已移动到媒体库", metadata)
+                    source_path = str(metadata.get("source_path") or source or "")
+                    operation = self._move_strm_operation(task, source_path, dest_path)
+                    if operation.status == "prepared":
+                        started = self.task_store.start_operation(int(task.id), operation.operation_key)
+                        if started is not None:
+                            operation = started
+                    return self._moved_stage_result("STRM 已移动到媒体库", metadata, operation, source_path, dest_path)
                 return self._restore_missing_moved_destination(task, row, metadata)
         category = final_category_for_move(row, recognition)
         existing_category = "" if has_authoritative_category(row, recognition) else category_from_existing_library_match(self.move_config, row, recognition, share_name)
@@ -4690,12 +4908,41 @@ class BridgeSelfShareTaskWorkflow:
         }
         if plan.metadata:
             metadata.update(plan.metadata)
+        source_path = str(plan.source_path or source or metadata.get("source_path") or "")
+        dest_path = str(plan.dest_path or metadata.get("dest_path") or "")
+        if dest_path and self._strm_destination_ready(dest_path, row, task.metadata) and (source is None or not Path(str(source)).exists()):
+            operation = self._move_strm_operation(task, source_path, dest_path)
+            if operation.status == "prepared":
+                started = self.task_store.start_operation(int(task.id), operation.operation_key)
+                if started is not None:
+                    operation = started
+            metadata["move_status"] = "moved"
+            metadata.update(self._request_emby_refresh_once(task, dest_path))
+            return self._moved_stage_result("STRM 已移动到媒体库", metadata, operation, source_path, dest_path)
         if is_move_plan_retryable(plan):
             return StageResult.defer(
                 plan.reason,
                 self.self_share_config.auto_organize_retry_seconds or 30,
                 metadata,
             )
+        operation = self._move_strm_operation(task, source_path, dest_path)
+        execute_authorized = False
+        if operation.status == "prepared":
+            started = self.task_store.start_operation(int(task.id), operation.operation_key)
+            if started is not None:
+                operation = started
+                execute_authorized = True
+        if not execute_authorized:
+            if dest_path and self._strm_destination_ready(dest_path, row, task.metadata):
+                metadata["move_status"] = "moved"
+                metadata.update(self._request_emby_refresh_once(task, dest_path))
+                return self._moved_stage_result("STRM 已移动到媒体库", metadata, operation, source_path, dest_path)
+            if source is None or not Path(str(source)).exists():
+                return StageResult.defer(
+                    "等待确认 STRM 移动结果",
+                    self.self_share_config.auto_organize_retry_seconds or 30,
+                    metadata,
+                )
         moved_row = merge_self_share_strm_folder(plan, self.store, row, move_config)
         move_status = str(moved_row.get("move_status") or "").lower()
         metadata.update(
@@ -4708,7 +4955,13 @@ class BridgeSelfShareTaskWorkflow:
         if move_status == "moved":
             send_move_result(self.telegram, self.chat_id, plan, moved_row)
             metadata.update(self._request_emby_refresh_once(task, str(metadata.get("dest_path") or "")))
-            return StageResult.complete("STRM 已移动到媒体库", metadata)
+            return self._moved_stage_result(
+                "STRM 已移动到媒体库",
+                metadata,
+                operation,
+                metadata["source_path"],
+                metadata["dest_path"],
+            )
         error = str(moved_row.get("move_error") or plan.reason or "STRM 移动失败")
         return StageResult.failed(error, error_type="strm_move_failed", metadata=metadata)
 

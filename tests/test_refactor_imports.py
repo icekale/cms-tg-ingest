@@ -1,10 +1,6 @@
 import ast
-import inspect
-import sys
-import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 
 class RefactorImportTests(unittest.TestCase):
@@ -87,82 +83,18 @@ class RefactorImportTests(unittest.TestCase):
         self.assertIs(bridge.format_status, format_status)
         self.assertIs(bridge.task_action_keyboard, task_action_keyboard)
 
-    def test_legacy_polling_exports_start_status_poll_and_bridge_compat(self):
+    def test_runtime_scripts_do_not_use_removed_submission_store(self):
         import bridge
-        from app.legacy_polling import start_status_poll
 
-        self.assertIs(bridge.start_status_poll, start_status_poll)
+        self.assertFalse(hasattr(bridge, "SubmissionStore"))
+        root = Path(__file__).resolve().parents[1]
+        offenders = []
+        for path in sorted((root / "scripts").glob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            if "bridge.SubmissionStore" in text or "from bridge import SubmissionStore" in text:
+                offenders.append(str(path.relative_to(root)))
+        self.assertEqual(offenders, [])
 
-    def test_legacy_polling_start_status_poll_signature(self):
-        from app.legacy_polling import start_status_poll
-
-        signature = inspect.signature(start_status_poll)
-        expected_names = [
-            "cms",
-            "telegram",
-            "chat_id",
-            "store",
-            "row",
-            "status_poll_seconds",
-            "status_poll_interval",
-            "emby",
-            "move_config",
-            "openai_classifier",
-            "tmdb_resolver",
-            "self_share_workflow",
-            "cleanup_client",
-            "task_store",
-        ]
-        self.assertEqual(list(signature.parameters), expected_names)
-        for name in expected_names[:7]:
-            self.assertIs(signature.parameters[name].default, inspect.Parameter.empty)
-        for name in expected_names[7:]:
-            self.assertIsNone(signature.parameters[name].default)
-            self.assertEqual(signature.parameters[name].kind, inspect.Parameter.KEYWORD_ONLY)
-
-    def test_legacy_polling_prefers_main_bridge_impl_without_importing_bridge(self):
-        from app.legacy_polling import start_status_poll
-
-        calls = []
-        fake_main = types.SimpleNamespace(
-            _start_status_poll_impl=lambda *args, **kwargs: calls.append((args, kwargs))
-        )
-        original_bridge = sys.modules.pop("bridge", None)
-        original_main = sys.modules.get("__main__")
-        sys.modules["__main__"] = fake_main
-        try:
-            with patch("builtins.__import__", side_effect=AssertionError("bridge should not be imported")):
-                start_status_poll("cms", "telegram", "chat", "store", {"id": 1}, 1, 1)
-        finally:
-            if original_bridge is not None:
-                sys.modules["bridge"] = original_bridge
-            else:
-                sys.modules.pop("bridge", None)
-            if original_main is not None:
-                sys.modules["__main__"] = original_main
-            else:
-                sys.modules.pop("__main__", None)
-
-        self.assertEqual(len(calls), 1)
-        args, kwargs = calls[0]
-        self.assertEqual(args[:7], ("cms", "telegram", "chat", "store", {"id": 1}, 1, 1))
-        self.assertEqual(kwargs["task_store"], None)
-
-    def test_legacy_polling_accepts_old_poll_kwargs_without_exposing_them(self):
-        from app.legacy_polling import start_status_poll
-
-        calls = []
-        fake_bridge = types.SimpleNamespace(
-            _start_status_poll_impl=lambda *args, **kwargs: calls.append((args, kwargs))
-        )
-        with patch.dict(sys.modules, {"bridge": fake_bridge}):
-            start_status_poll("cms", "telegram", "chat", "store", {"id": 1}, max_seconds=1, interval=2)
-
-        self.assertEqual(len(calls), 1)
-        args, _kwargs = calls[0]
-        self.assertEqual(args[:7], ("cms", "telegram", "chat", "store", {"id": 1}, 1, 2))
-        self.assertNotIn("max_seconds", inspect.signature(start_status_poll).parameters)
-        self.assertNotIn("interval", inspect.signature(start_status_poll).parameters)
 
 
 if __name__ == "__main__":

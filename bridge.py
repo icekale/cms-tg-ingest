@@ -45,6 +45,7 @@ from app.clients.p115 import (
     select_source_residue_115_files,
 )
 from app.backup import BackupScheduler, start_backup_loop
+from app.database import Database
 from app.background_jobs import BackgroundJobCoordinator
 from app.cms_updater import CmsVersionChecker, start_cms_version_check_loop
 from app.logging_system import LogHub, configure_logging
@@ -134,7 +135,8 @@ from app.media.strm import (
     prepare_self_share_move_inputs,
     reconcile_self_share_move,
     remove_direct_strm_files,
-    repair_stranded_self_share_moves,
+    enqueue_missing_self_share_restores,
+    enqueue_stranded_self_share_repairs,
     restore_missing_self_share_library_folder,
     restore_missing_self_share_library_folders,
     select_move_source_for_workflow,
@@ -196,7 +198,7 @@ from app.telegram_ui import (
     truncate_text,
 )
 from app.task_runner import StageResult, TaskRunner, new_worker_id
-from app.task_store import TaskStore, reprocess_delete_keys_for
+from app.task_store import TaskStore, WorkflowRowAdapter, reprocess_delete_keys_for
 from app.web import start_web_server
 from app.web_api import quality_items
 from app.workflows.direct import DirectTaskWorkflow, ModeRoutingWorkflow, SourceShareTaskWorkflow
@@ -434,15 +436,14 @@ def normalize_share_link(url: str) -> ShareKey:
 
 
 def create_task_store(config: Config) -> TaskStore:
-    return TaskStore(config.task_db_path, default_strm_mode=getattr(config, "strm_default_mode", "shared"))
+    return TaskStore(config.database_path, default_strm_mode=getattr(config, "strm_default_mode", "shared"))
 
 
 def create_backup_scheduler(config: Config, task_store: TaskStore) -> BackupScheduler:
     return BackupScheduler(
         task_store,
         {
-            "submissions": Path(config.db_path),
-            "tasks": Path(config.task_db_path),
+            "cms-tg-ingest": Path(config.database_path),
         },
         config.backup_dir,
         run_time=config.backup_time,
@@ -484,7 +485,7 @@ def create_hdhive_subscription_service(
         return None
     return HdhiveSubscriptionService(
         proxy=hdhive_workflow.proxy,
-        store=HdhiveSubscriptionStore(getattr(config, "task_db_path", "/data/tasks.db")),
+        store=HdhiveSubscriptionStore(getattr(config, "database_path", "/data/cms-tg-ingest.db")),
         enqueue_links=enqueue_links,
         auto_unlock_max_points=int(getattr(config, "hdhive_auto_unlock_max_points", 20)),
         on_item_enqueued=on_item_enqueued,
@@ -532,7 +533,11 @@ def maybe_start_web_server(
         "web_token": config.web_token,
         "web_username": web_username,
         "web_password": web_password,
-        "task_engine_enabled": config.task_engine_enabled,
+        "task_engine_enabled": (
+            Database(task_store.db_path).write_gate() == "open"
+            if getattr(task_store, "db_path", None)
+            else True
+        ),
         "max_retries": int(getattr(config, "task_max_retries", 3)),
         "frontend_dist_path": frontend_dist_path or getattr(config, "frontend_dist_path", "/app/frontend/dist"),
         "cms_guard_container": "cloud-media-sync",
@@ -728,7 +733,7 @@ def stop_web_server(server: Any | None, join_timeout: float = 5) -> None:
             shutdown(wait=True)
 
 
-def best_effort_task_sync(action: str, func, *args, **kwargs):
+def _sync_task_store(action: str, func, *args, **kwargs):
     try:
         return func(*args, **kwargs)
     except Exception:
@@ -736,869 +741,8 @@ def best_effort_task_sync(action: str, func, *args, **kwargs):
         return None
 
 
-class SubmissionStore:
-    def __init__(self, db_path: str | Path):
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-        self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    @contextmanager
-    def _connection(self):
-        conn = self._connect()
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
-    def _init_db(self) -> None:
-        with self._connection() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS submissions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    share_code TEXT NOT NULL,
-                    receive_code TEXT NOT NULL DEFAULT '',
-                    url TEXT NOT NULL,
-                    cms_task_id TEXT,
-                    title TEXT,
-                    status TEXT NOT NULL,
-                    last_error TEXT,
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL,
-                    UNIQUE(share_code, receive_code)
-                )
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_submissions_updated_at ON submissions(updated_at)")
-            self._ensure_columns(conn)
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_submissions_self_share_move
-                ON submissions(workflow_mode, lower(COALESCE(move_status, '')), updated_at)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_submissions_self_share_cleanup
-                ON submissions(
-                    workflow_mode,
-                    lower(COALESCE(move_status, '')),
-                    lower(COALESCE(emby_status, '')),
-                    lower(COALESCE(cleanup_status, '')),
-                    updated_at
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_submissions_self_share_probe
-                ON submissions(workflow_mode, move_status, emby_status, share_probe_at)
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS parent_category_memory (
-                    parent_id TEXT PRIMARY KEY,
-                    category TEXT NOT NULL,
-                    source TEXT NOT NULL DEFAULT '',
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL
-                )
-                """
-            )
-
-    def _ensure_columns(self, conn: sqlite3.Connection) -> None:
-        existing = {row[1] for row in conn.execute("PRAGMA table_info(submissions)")}
-        columns = {
-            "category_choice": "TEXT",
-            "category_status": "TEXT",
-            "recognition_json": "TEXT",
-            "emby_status": "TEXT",
-            "emby_item_id": "TEXT",
-            "emby_title": "TEXT",
-            "emby_path": "TEXT",
-            "emby_parent": "TEXT",
-            "source_path": "TEXT",
-            "dest_path": "TEXT",
-            "move_status": "TEXT",
-            "move_error": "TEXT",
-            "move_started_at": "REAL",
-            "move_finished_at": "REAL",
-            "category_final": "TEXT",
-            "workflow_mode": "TEXT",
-            "workflow_phase": "TEXT",
-            "own_share_file_id": "TEXT",
-            "own_share_file_name": "TEXT",
-            "own_share_code": "TEXT",
-            "own_share_receive_code": "TEXT",
-            "own_share_url": "TEXT",
-            "share_sync_status": "TEXT",
-            "cleanup_status": "TEXT",
-            "cleanup_file_id": "TEXT",
-            "cleanup_error": "TEXT",
-            "cleanup_finished_at": "REAL",
-            "share_probe_at": "REAL",
-            "share_invalid_at": "REAL",
-            "share_invalid_reason": "TEXT",
-            "canonical_manifest_json": "TEXT",
-            "share_alias_name": "TEXT",
-            "share_alias_level": "INTEGER",
-            "share_validation_status": "TEXT",
-            "share_validation_error": "TEXT",
-        }
-        for name, definition in columns.items():
-            if name not in existing:
-                conn.execute(f"ALTER TABLE submissions ADD COLUMN {name} {definition}")
-
-    @staticmethod
-    def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
-        if row is None:
-            return None
-        return dict(row)
-
-    def find_by_key(self, key: ShareKey) -> dict[str, Any] | None:
-        with self._lock, self._connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM submissions WHERE share_code = ? AND receive_code = ?",
-                (key.share_code, key.receive_code),
-            ).fetchone()
-        return self._row_to_dict(row)
-
-    def upsert_submission(
-        self,
-        key: ShareKey,
-        url: str,
-        status: str,
-        cms_task_id: str | None = None,
-        title: str | None = None,
-        last_error: str | None = None,
-    ) -> dict[str, Any]:
-        now = time.time()
-        with self._lock, self._connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO submissions (share_code, receive_code, url, cms_task_id, title, status, last_error, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(share_code, receive_code) DO UPDATE SET
-                    url = excluded.url,
-                    cms_task_id = COALESCE(excluded.cms_task_id, submissions.cms_task_id),
-                    title = COALESCE(excluded.title, submissions.title),
-                    status = excluded.status,
-                    last_error = excluded.last_error,
-                    updated_at = excluded.updated_at
-                """,
-                (key.share_code, key.receive_code, url, cms_task_id, title, status, last_error, now, now),
-            )
-            row = conn.execute(
-                "SELECT * FROM submissions WHERE share_code = ? AND receive_code = ?",
-                (key.share_code, key.receive_code),
-            ).fetchone()
-        found = self._row_to_dict(row)
-        if found is None:
-            raise RuntimeError("保存任务记录失败")
-        return found
-
-    def update_status(self, row_id: int, status: str, title: str | None = None, last_error: str | None = None) -> dict[str, Any] | None:
-        with self._lock, self._connection() as conn:
-            conn.execute(
-                """
-                UPDATE submissions
-                SET status = ?,
-                    title = CASE
-                        WHEN workflow_mode = 'self_share_sync' THEN title
-                        ELSE COALESCE(?, title)
-                    END,
-                    last_error = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (status, title, last_error, time.time(), row_id),
-            )
-            row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
-        return self._row_to_dict(row)
-
-    def find_by_id(self, row_id: int) -> dict[str, Any] | None:
-        with self._lock, self._connection() as conn:
-            row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
-        return self._row_to_dict(row)
-
-    def delete_submission(self, row_id: int) -> bool:
-        with self._lock, self._connection() as conn:
-            cursor = conn.execute("DELETE FROM submissions WHERE id = ?", (int(row_id),))
-        return int(cursor.rowcount or 0) == 1
-
-    def update_category(self, row_id: int, choice: str | None, status: str) -> dict[str, Any] | None:
-        with self._lock, self._connection() as conn:
-            conn.execute(
-                """
-                UPDATE submissions
-                SET category_choice = ?, category_status = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (choice, status, time.time(), row_id),
-            )
-            row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
-        return self._row_to_dict(row)
-
-    def remember_parent_category(self, parent_id: str, category: str, source: str = "manual") -> None:
-        parent_id = str(parent_id or "").strip()
-        category = str(category or "").strip()
-        if not parent_id or not category:
-            return
-        now = time.time()
-        with self._lock, self._connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO parent_category_memory (parent_id, category, source, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(parent_id) DO UPDATE SET
-                    category = excluded.category,
-                    source = excluded.source,
-                    updated_at = excluded.updated_at
-                """,
-                (parent_id, category, str(source or "").strip(), now, now),
-            )
-
-    def category_for_parent_id(self, parent_id: str) -> str:
-        parent_id = str(parent_id or "").strip()
-        if not parent_id:
-            return ""
-        with self._lock, self._connection() as conn:
-            row = conn.execute(
-                "SELECT category FROM parent_category_memory WHERE parent_id = ?",
-                (parent_id,),
-            ).fetchone()
-        return str(row["category"] or "").strip() if row else ""
-
-    def update_recognition(self, row_id: int, recognition: dict[str, Any], category_status: str) -> dict[str, Any] | None:
-        with self._lock, self._connection() as conn:
-            conn.execute(
-                """
-                UPDATE submissions
-                SET recognition_json = ?, category_status = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (json.dumps(recognition, ensure_ascii=False, sort_keys=True), category_status, time.time(), row_id),
-            )
-            row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
-        return self._row_to_dict(row)
-
-    def update_emby(
-        self,
-        row_id: int,
-        status: str,
-        item_id: str | None = None,
-        title: str | None = None,
-        path: str | None = None,
-        parent: str | None = None,
-    ) -> dict[str, Any] | None:
-        with self._lock, self._connection() as conn:
-            conn.execute(
-                """
-                UPDATE submissions
-                SET emby_status = ?,
-                    emby_item_id = COALESCE(?, emby_item_id),
-                    emby_title = COALESCE(?, emby_title),
-                    emby_path = COALESCE(?, emby_path),
-                    emby_parent = COALESCE(?, emby_parent),
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (status, item_id, title, path, parent, time.time(), row_id),
-            )
-            row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
-        return self._row_to_dict(row)
-
-    def update_move(
-        self,
-        row_id: int,
-        status: str,
-        source_path: str | None = None,
-        dest_path: str | None = None,
-        category_final: str | None = None,
-        error: str | None = None,
-    ) -> dict[str, Any] | None:
-        now = time.time()
-        with self._lock, self._connection() as conn:
-            conn.execute(
-                """
-                UPDATE submissions
-                SET move_status = ?,
-                    source_path = COALESCE(?, source_path),
-                    dest_path = COALESCE(?, dest_path),
-                    category_final = COALESCE(?, category_final),
-                    move_error = ?,
-                    move_started_at = COALESCE(move_started_at, ?),
-                    move_finished_at = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (status, source_path, dest_path, category_final, error, now, now, now, row_id),
-            )
-            row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
-        return self._row_to_dict(row)
-
-    def update_self_share(
-        self,
-        row_id: int,
-        workflow_mode: str | None = None,
-        workflow_phase: str | None = None,
-        own_share_file_id: str | None = None,
-        own_share_file_name: str | None = None,
-        own_share_code: str | None = None,
-        own_share_receive_code: str | None = None,
-        own_share_url: str | None = None,
-        share_sync_status: str | None = None,
-        canonical_manifest_json: str | None = None,
-        share_alias_name: str | None = None,
-        share_alias_level: int | None = None,
-        share_validation_status: str | None = None,
-        share_validation_error: str | None = None,
-    ) -> dict[str, Any] | None:
-        with self._lock, self._connection() as conn:
-            conn.execute(
-                """
-                UPDATE submissions
-                SET workflow_mode = COALESCE(?, workflow_mode),
-                    workflow_phase = COALESCE(?, workflow_phase),
-                    own_share_file_id = COALESCE(?, own_share_file_id),
-                    own_share_file_name = COALESCE(?, own_share_file_name),
-                    own_share_code = COALESCE(?, own_share_code),
-                    own_share_receive_code = COALESCE(?, own_share_receive_code),
-                    own_share_url = COALESCE(?, own_share_url),
-                    share_sync_status = COALESCE(?, share_sync_status),
-                    canonical_manifest_json = COALESCE(?, canonical_manifest_json),
-                    share_alias_name = COALESCE(?, share_alias_name),
-                    share_alias_level = COALESCE(?, share_alias_level),
-                    share_validation_status = COALESCE(?, share_validation_status),
-                    share_validation_error = COALESCE(?, share_validation_error),
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    workflow_mode,
-                    workflow_phase,
-                    own_share_file_id,
-                    own_share_file_name,
-                    own_share_code,
-                    own_share_receive_code,
-                    own_share_url,
-                    share_sync_status,
-                    canonical_manifest_json,
-                    share_alias_name,
-                    share_alias_level,
-                    share_validation_status,
-                    share_validation_error,
-                    time.time(),
-                    row_id,
-                ),
-            )
-            row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
-        return self._row_to_dict(row)
-
-    def claim_self_share_restore_sync(
-        self,
-        row_id: int,
-        retry_seconds: float = 60,
-        now: float | None = None,
-    ) -> bool:
-        timestamp = time.time() if now is None else float(now)
-        stale_before = timestamp - max(1.0, float(retry_seconds))
-        with self._lock, self._connection() as conn:
-            cursor = conn.execute(
-                """
-                UPDATE submissions
-                SET workflow_phase = 'restore_share_sync_submitted',
-                    share_sync_status = 'restore_submitted',
-                    updated_at = ?
-                WHERE id = ?
-                  AND (
-                      lower(COALESCE(workflow_phase, '')) <> 'restore_share_sync_submitted'
-                      OR COALESCE(updated_at, 0) <= ?
-                  )
-                """,
-                (timestamp, row_id, stale_before),
-            )
-            return bool(cursor.rowcount)
-
-    def reset_self_share_for_update(self, row_id: int) -> dict[str, Any] | None:
-        """Keep stable media identity while clearing only one self-share execution's state."""
-        with self._lock, self._connection() as conn:
-            conn.execute(
-                """
-                UPDATE submissions
-                SET cms_task_id = NULL,
-                    status = 'received',
-                    last_error = NULL,
-                    workflow_mode = 'self_share_sync',
-                    workflow_phase = 'update_requested',
-                    own_share_file_id = NULL,
-                    own_share_file_name = NULL,
-                    own_share_code = NULL,
-                    own_share_receive_code = NULL,
-                    own_share_url = NULL,
-                    share_sync_status = NULL,
-                    canonical_manifest_json = NULL,
-                    share_alias_name = NULL,
-                    share_alias_level = NULL,
-                    share_validation_status = NULL,
-                    share_validation_error = NULL,
-                    source_path = NULL,
-                    dest_path = NULL,
-                    move_status = NULL,
-                    move_error = NULL,
-                    move_started_at = NULL,
-                    move_finished_at = NULL,
-                    category_final = NULL,
-                    emby_status = NULL,
-                    emby_item_id = NULL,
-                    emby_title = NULL,
-                    emby_path = NULL,
-                    emby_parent = NULL,
-                    cleanup_status = NULL,
-                    cleanup_file_id = NULL,
-                    cleanup_error = NULL,
-                    cleanup_finished_at = NULL,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (time.time(), row_id),
-            )
-            row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
-        return self._row_to_dict(row)
-
-    def prepare_series_update_child(
-        self,
-        target_row_id: int,
-        child_key: ShareKey,
-        child_url: str,
-        *,
-        canonical_title: str | None = None,
-        canonical_tmdb_id: str | None = None,
-        canonical_category: str | None = None,
-        canonical_recognition: dict[str, Any] | None = None,
-        expected_child_exists: bool | None = None,
-        expected_child_id: int | None = None,
-        expected_child_updated_at: float | None = None,
-    ) -> dict[str, Any] | None:
-        now = time.time()
-        with self._lock, self._connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            existing_child = conn.execute(
-                "SELECT id, updated_at, own_share_code FROM submissions WHERE share_code = ? AND receive_code = ?",
-                (child_key.share_code, child_key.receive_code),
-            ).fetchone()
-            if expected_child_exists is False and existing_child is not None:
-                raise SeriesUpdateSourceConflict("子任务提交记录在冻结后出现")
-            if expected_child_exists is True:
-                if (
-                    existing_child is None
-                    or int(existing_child["id"]) != int(expected_child_id)
-                    or float(existing_child["updated_at"] or 0) != float(expected_child_updated_at)
-                ):
-                    raise SeriesUpdateSourceConflict("子任务提交记录在冻结后发生变化")
-                if str(existing_child["own_share_code"] or "").strip():
-                    raise SeriesUpdateSourceConflict("子任务分享已在冻结后创建")
-            target = conn.execute(
-                "SELECT * FROM submissions WHERE id = ?",
-                (int(target_row_id),),
-            ).fetchone()
-            if target is None:
-                return None
-            if (
-                str(target["share_code"] or "") == child_key.share_code
-                and str(target["receive_code"] or "") == child_key.receive_code
-            ):
-                return None
-            try:
-                target_recognition = json.loads(str(target["recognition_json"] or "{}"))
-            except (TypeError, ValueError, json.JSONDecodeError):
-                target_recognition = {}
-            if not isinstance(target_recognition, dict):
-                target_recognition = {}
-            child_title = str(target["title"] or "") if canonical_title is None else str(canonical_title)
-            category = (
-                str(
-                    target["category_choice"]
-                    or target["category_final"]
-                    or target_recognition.get("category")
-                    or ""
-                ).strip()
-                if canonical_category is None
-                else str(canonical_category).strip()
-            )
-            child_recognition = dict(canonical_recognition) if canonical_recognition is not None else target_recognition
-            if canonical_title is not None:
-                child_recognition["title"] = child_title
-            if canonical_tmdb_id is not None:
-                child_recognition["tmdb_id"] = str(canonical_tmdb_id).strip()
-            if canonical_category is not None:
-                child_recognition["category"] = category
-            recognition_json = json.dumps(child_recognition, ensure_ascii=False, sort_keys=True)
-            conn.execute(
-                """
-                INSERT INTO submissions (
-                    share_code, receive_code, url, title, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 'received', ?, ?)
-                ON CONFLICT(share_code, receive_code) DO UPDATE SET
-                    url = excluded.url,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    child_key.share_code,
-                    child_key.receive_code,
-                    str(child_url),
-                    child_title,
-                    now,
-                    now,
-                ),
-            )
-            child = conn.execute(
-                "SELECT id FROM submissions WHERE share_code = ? AND receive_code = ?",
-                (child_key.share_code, child_key.receive_code),
-            ).fetchone()
-            if child is None or int(child["id"]) == int(target_row_id):
-                return None
-            conn.execute(
-                """
-                UPDATE submissions
-                SET cms_task_id = NULL,
-                    title = ?, status = 'received', last_error = NULL,
-                    category_choice = ?, category_status = 'selected',
-                    recognition_json = ?, workflow_mode = 'self_share_sync',
-                    workflow_phase = 'update_requested',
-                    own_share_file_id = NULL, own_share_file_name = NULL,
-                    own_share_code = NULL, own_share_receive_code = NULL,
-                    own_share_url = NULL, share_sync_status = NULL,
-                    canonical_manifest_json = NULL, share_alias_name = NULL,
-                    share_alias_level = NULL, share_validation_status = NULL,
-                    share_validation_error = NULL, share_probe_at = NULL,
-                    share_invalid_at = NULL, share_invalid_reason = NULL,
-                    source_path = NULL,
-                    dest_path = NULL, move_status = NULL, move_error = NULL,
-                    move_started_at = NULL, move_finished_at = NULL,
-                    category_final = NULL, emby_status = NULL,
-                    emby_item_id = NULL, emby_title = NULL, emby_path = NULL,
-                    emby_parent = NULL, cleanup_status = NULL,
-                    cleanup_file_id = NULL, cleanup_error = NULL,
-                    cleanup_finished_at = NULL, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    child_title,
-                    category,
-                    recognition_json,
-                    now,
-                    int(child["id"]),
-                ),
-            )
-            prepared = conn.execute(
-                "SELECT * FROM submissions WHERE id = ?",
-                (int(child["id"]),),
-            ).fetchone()
-        return self._row_to_dict(prepared)
-
-    def replace_self_share_source_file_id(self, row_id: int, file_id: str) -> dict[str, Any] | None:
-        with self._lock, self._connection() as conn:
-            conn.execute(
-                """
-                UPDATE submissions
-                SET own_share_file_id = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (str(file_id), time.time(), row_id),
-            )
-            row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
-        return self._row_to_dict(row)
-
-    def update_cleanup(
-        self,
-        row_id: int,
-        status: str,
-        file_id: str | None = None,
-        error: str | None = None,
-    ) -> dict[str, Any] | None:
-        with self._lock, self._connection() as conn:
-            conn.execute(
-                """
-                UPDATE submissions
-                SET cleanup_status = ?,
-                    cleanup_file_id = COALESCE(?, cleanup_file_id),
-                    cleanup_error = ?,
-                    cleanup_finished_at = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (status, file_id, error, time.time(), time.time(), row_id),
-            )
-            row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
-        return self._row_to_dict(row)
-
-    def clear_finished_history(self) -> int:
-        terminal_status_like = " OR ".join(["lower(status) LIKE ?"] * len(TERMINAL_STATUS_KEYWORDS))
-        terminal_status_params = [f"%{keyword}%" for keyword in TERMINAL_STATUS_KEYWORDS]
-        terminal_emby_placeholders = ",".join("?" for _ in TERMINAL_EMBY_STATUSES)
-        terminal_move_placeholders = ",".join("?" for _ in TERMINAL_MOVE_STATUSES)
-        where = f"""
-            ({terminal_status_like})
-            OR lower(COALESCE(emby_status, '')) IN ({terminal_emby_placeholders})
-            OR lower(COALESCE(move_status, '')) IN ({terminal_move_placeholders})
-        """
-        params = terminal_status_params + list(TERMINAL_EMBY_STATUSES) + list(TERMINAL_MOVE_STATUSES)
-        with self._lock, self._connection() as conn:
-            cursor = conn.execute(f"DELETE FROM submissions WHERE {where}", params)
-        return int(cursor.rowcount or 0)
-
-    def recent(self, limit: int = 5) -> list[dict[str, Any]]:
-        with self._lock, self._connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM submissions ORDER BY updated_at DESC, id DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-        return [dict(row) for row in rows]
-
-    def live_self_share_identities(self, dest_path: str, tmdb_id: str = "") -> tuple[tuple[str, str], ...]:
-        """Return all moved, valid self-share identities for one media directory."""
-        dest_path = str(dest_path or "").strip()
-        target_tmdb = str(tmdb_id or "").strip()
-        if not dest_path:
-            return ()
-        with self._lock, self._connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, own_share_code, own_share_receive_code, recognition_json
-                FROM submissions
-                WHERE workflow_mode = 'self_share_sync'
-                  AND lower(COALESCE(move_status, '')) = 'moved'
-                  AND COALESCE(dest_path, '') = ?
-                  AND COALESCE(own_share_code, '') <> ''
-                  AND lower(COALESCE(share_validation_status, '')) NOT IN ('invalid', 'unavailable')
-                ORDER BY updated_at DESC, id DESC
-                """,
-                (dest_path,),
-            ).fetchall()
-        identities: list[tuple[str, str]] = []
-        seen: set[tuple[str, str]] = set()
-        for row in rows:
-            try:
-                recognition = json.loads(str(row["recognition_json"] or "{}"))
-            except (TypeError, ValueError, json.JSONDecodeError):
-                recognition = {}
-            if not isinstance(recognition, dict):
-                recognition = {}
-            candidate_tmdb = str(recognition.get("tmdb_id") or "").strip()
-            if target_tmdb and candidate_tmdb != target_tmdb:
-                continue
-            share_code = str(row["own_share_code"] or "").strip()
-            if not share_code:
-                continue
-            receive_code = str(row["own_share_receive_code"] or DEFAULT_OWN_SHARE_RECEIVE_CODE).strip() or DEFAULT_OWN_SHARE_RECEIVE_CODE
-            identity = (share_code, receive_code)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            identities.append(identity)
-        return tuple(identities)
-
-    def latest_self_share_identity(self, dest_path: str, tmdb_id: str = "") -> tuple[str, str] | None:
-        """Return the newest moved, valid self-share identity for one media directory."""
-        identities = self.live_self_share_identities(dest_path, tmdb_id)
-        return identities[0] if identities else None
-
-    def all_confirmed_with_emby_path(self) -> list[dict[str, Any]]:
-        with self._lock, self._connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM submissions
-                WHERE emby_status = ? AND COALESCE(emby_path, '') <> ''
-                ORDER BY updated_at DESC, id DESC
-                """,
-                ("confirmed",),
-            ).fetchall()
-        return [dict(row) for row in rows]
-
-    def stranded_self_share_move_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
-        with self._lock, self._connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM submissions
-                WHERE workflow_mode = 'self_share_sync'
-                  AND lower(COALESCE(move_status, '')) <> 'moved'
-                  AND (
-                      (
-                          lower(COALESCE(move_status, '')) = 'moving'
-                          AND COALESCE(source_path, '') <> ''
-                          AND COALESCE(dest_path, '') <> ''
-                      )
-                      OR (
-                          COALESCE(own_share_file_name, '') <> ''
-                          AND COALESCE(source_path, '') = ''
-                          AND COALESCE(dest_path, '') = ''
-                      )
-                  )
-                ORDER BY updated_at DESC, id DESC
-                LIMIT ?
-                """,
-                (max(1, int(limit)),),
-            ).fetchall()
-        return [dict(row) for row in rows]
-
-    def invalid_self_share_move_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
-        with self._lock, self._connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM submissions
-                WHERE workflow_mode = 'self_share_sync'
-                  AND lower(COALESCE(move_status, '')) <> 'moved'
-                  AND (COALESCE(source_path, '') <> '' OR COALESCE(dest_path, '') <> '')
-                  AND NOT (
-                      lower(COALESCE(move_status, '')) = 'error'
-                      AND COALESCE(source_path, '') <> ''
-                      AND COALESCE(dest_path, '') <> ''
-                  )
-                  AND NOT (
-                      lower(COALESCE(move_status, '')) = 'moving'
-                      AND COALESCE(source_path, '') <> ''
-                      AND COALESCE(dest_path, '') <> ''
-                  )
-                ORDER BY updated_at DESC, id DESC
-                LIMIT ?
-                """,
-                (max(1, int(limit)),),
-            ).fetchall()
-        return [dict(row) for row in rows]
-
-    def missing_self_share_library_candidates(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-        with self._lock, self._connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM submissions
-                WHERE workflow_mode = 'self_share_sync'
-                  AND lower(COALESCE(move_status, '')) = 'moved'
-                  AND lower(COALESCE(share_validation_status, '')) NOT IN ('invalid', 'unavailable')
-                  AND COALESCE(dest_path, '') <> ''
-                  AND COALESCE(own_share_file_name, '') <> ''
-                  AND COALESCE(own_share_code, '') <> ''
-                ORDER BY updated_at DESC, id DESC
-                LIMIT ? OFFSET ?
-                """,
-                (max(1, int(limit)), max(0, int(offset))),
-            ).fetchall()
-        return [dict(row) for row in rows]
-
-    def pending_self_share_cleanup_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
-        with self._lock, self._connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM submissions
-                WHERE workflow_mode = 'self_share_sync'
-                  AND lower(COALESCE(move_status, '')) = 'moved'
-                  AND lower(COALESCE(emby_status, '')) = 'confirmed'
-                  AND lower(COALESCE(cleanup_status, '')) IN ('pending', 'error')
-                  AND COALESCE(own_share_file_id, '') <> ''
-                  AND COALESCE(own_share_code, '') <> ''
-                ORDER BY updated_at DESC, id DESC
-                LIMIT ?
-                """,
-                (max(1, int(limit)),),
-            ).fetchall()
-        return [dict(row) for row in rows]
-
-    def self_share_probe_candidates(self, limit: int = 3) -> list[dict[str, Any]]:
-        with self._lock, self._connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM submissions
-                WHERE workflow_mode = 'self_share_sync'
-                  AND lower(COALESCE(move_status, '')) = 'moved'
-                  AND lower(COALESCE(emby_status, '')) = 'confirmed'
-                  AND COALESCE(dest_path, '') <> ''
-                  AND COALESCE(own_share_code, '') <> ''
-                ORDER BY
-                    CASE WHEN COALESCE(share_probe_at, 0) = 0 THEN 0 ELSE 1 END ASC,
-                    created_at DESC,
-                    share_probe_at ASC,
-                    id DESC
-                LIMIT ?
-                """,
-                (max(1, int(limit)),),
-            ).fetchall()
-        return [dict(row) for row in rows]
-
-    def update_share_probe(self, row_id: int) -> dict[str, Any] | None:
-        with self._lock, self._connection() as conn:
-            conn.execute(
-                """
-                UPDATE submissions
-                SET share_probe_at = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (time.time(), time.time(), row_id),
-            )
-            row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
-        return self._row_to_dict(row)
-
-    def mark_invalid_share_cleaned(self, row_id: int, reason: str) -> dict[str, Any] | None:
-        now = time.time()
-        with self._lock, self._connection() as conn:
-            conn.execute(
-                """
-                UPDATE submissions
-                SET move_status = 'invalid_share_cleaned',
-                    move_error = ?,
-                    emby_status = 'invalid_share_cleaned',
-                    share_invalid_at = ?,
-                    share_invalid_reason = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (reason, now, reason, now, row_id),
-            )
-            row = conn.execute("SELECT * FROM submissions WHERE id = ?", (row_id,)).fetchone()
-        return self._row_to_dict(row)
-
-    def stale_for_repair(self, limit: int = 50) -> list[dict[str, Any]]:
-        repair_emby_statuses = ("timeout", "failed", "error")
-        repair_category_statuses = ("uncertain", "probing", "openai_suggested")
-        repair_statuses = ("submitted", "unknown", "pending")
-        emby_placeholders = ",".join("?" for _ in repair_emby_statuses)
-        category_placeholders = ",".join("?" for _ in repair_category_statuses)
-        status_placeholders = ",".join("?" for _ in repair_statuses)
-        params = [
-            *repair_emby_statuses,
-            *repair_category_statuses,
-            *repair_statuses,
-            max(1, int(limit)),
-        ]
-        with self._lock, self._connection() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT * FROM submissions
-                WHERE lower(COALESCE(emby_status, '')) <> 'confirmed'
-                  AND (
-                    lower(COALESCE(emby_status, '')) IN ({emby_placeholders})
-                    OR lower(COALESCE(category_status, '')) IN ({category_placeholders})
-                    OR lower(COALESCE(status, '')) IN ({status_placeholders})
-                  )
-                ORDER BY updated_at DESC, id DESC
-                LIMIT ?
-                """,
-                params,
-            ).fetchall()
-        return [dict(row) for row in rows]
-
-
-def quality_share_identities_for_task(store: SubmissionStore, task: Any) -> tuple[tuple[str, str], ...]:
+def quality_share_identities_for_task(store: Any, task: Any) -> tuple[tuple[str, str], ...]:
     metadata = getattr(task, "metadata", {})
     if not isinstance(metadata, dict):
         metadata = {}
@@ -1607,7 +751,7 @@ def quality_share_identities_for_task(store: SubmissionStore, task: Any) -> tupl
     return store.live_self_share_identities(dest_path, tmdb_id)
 
 
-def quality_share_identity_for_task(store: SubmissionStore, task: Any) -> tuple[str, str] | None:
+def quality_share_identity_for_task(store: Any, task: Any) -> tuple[str, str] | None:
     identities = quality_share_identities_for_task(store, task)
     return identities[0] if identities else None
 
@@ -1666,7 +810,7 @@ def count_field_values(rows: list[dict[str, Any]], field: str) -> dict[str, int]
         status = str(row.get(field) or "unknown")
         status_counts[status] = status_counts.get(status, 0) + 1
     return status_counts
-def build_metrics_snapshot(store: SubmissionStore) -> dict[str, Any]:
+def build_metrics_snapshot(store: Any) -> dict[str, Any]:
     rows = store.recent(limit=200)
     return {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
@@ -1680,16 +824,16 @@ def build_metrics_snapshot(store: SubmissionStore) -> dict[str, Any]:
     }
 
 
-def write_metrics_snapshot(store: SubmissionStore, metrics_path: str | Path) -> None:
+def write_metrics_snapshot(store: Any, metrics_path: str | Path) -> None:
     payload = build_metrics_snapshot(store)
     path = Path(metrics_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-def metrics_path_for_store(store: SubmissionStore) -> Path:
+def metrics_path_for_store(store: Any) -> Path:
     return store.db_path.parent / "metrics.json"
 
 
-def normalize_emby_parents(store: SubmissionStore, emby: EmbyClient | None) -> int:
+def normalize_emby_parents(store: Any, emby: EmbyClient | None) -> int:
     if not emby or not emby.enabled:
         return 0
     changed = 0
@@ -2209,7 +1353,7 @@ def media_type_for_emby_item(item: dict[str, Any], category: str) -> str:
 def resolve_category_or_existing_import(
     telegram: TelegramClient,
     chat_id: int | str,
-    store: SubmissionStore,
+    store: Any,
     row: dict[str, Any],
     recognition: dict[str, Any],
     share_name: str,
@@ -2278,7 +1422,7 @@ def resolve_category_or_existing_import(
 def maybe_request_category_confirmation(
     telegram: TelegramClient,
     chat_id: int | str,
-    store: SubmissionStore,
+    store: Any,
     row: dict[str, Any],
     recognition_resp: dict,
 ) -> dict[str, Any]:
@@ -2307,7 +1451,7 @@ def maybe_request_category_confirmation(
 def resolve_category_or_prompt(
     telegram: TelegramClient,
     chat_id: int | str,
-    store: SubmissionStore,
+    store: Any,
     row: dict[str, Any],
     recognition: dict[str, Any],
     share_name: str,
@@ -2351,7 +1495,7 @@ def enrich_recognition_from_library_path(
 
 
 def decide_category_prompt(
-    store: SubmissionStore,
+    store: Any,
     row: dict[str, Any],
     recognition: dict[str, Any],
     move_config: MoveConfig | None,
@@ -2811,7 +1955,7 @@ def handle_hdhive_callback(
         telegram.send_message(chat_id, f"HDHive 请求失败：{safe_telegram_text(exc.message, 160)}")
         return True
     return True
-def remember_manual_parent_category(store: SubmissionStore, row: dict[str, Any], category: str) -> None:
+def remember_manual_parent_category(store: Any, row: dict[str, Any], category: str) -> None:
     if not hasattr(store, "remember_parent_category"):
         return
     try:
@@ -2829,7 +1973,7 @@ def handle_callback_query(
     callback_query: dict,
     telegram: TelegramClient,
     allowed_chat_id: str,
-    store: SubmissionStore,
+    store: Any,
     emby: EmbyClient | None = None,
     task_store: TaskStore | None = None,
     hdhive_workflow: HdhiveWorkflow | None = None,
@@ -3030,6 +2174,12 @@ def repair_stale_submission(store: Any, row: dict[str, Any], emby: Any | None, m
     return True
 
 
+def _observe_stranded_self_share_moves(store: Any, move_config: MoveConfig | None, limit: int) -> int:
+    if move_config is None:
+        return 0
+    return enqueue_stranded_self_share_repairs(store, move_config, limit=limit)
+
+
 def repair_stale_submissions(store: Any, emby: Any | None, move_config: MoveConfig | None = None, limit: int = 50) -> int:
     repaired = 0
     for row in store.stale_for_repair(limit=max(1, int(limit))):
@@ -3039,56 +2189,6 @@ def repair_stale_submissions(store: Any, emby: Any | None, move_config: MoveConf
         except Exception:
             LOG.debug("Status repair failed for row id=%s", row.get("id"), exc_info=True)
     return repaired
-
-
-def start_status_repair_loop(
-    store: Any,
-    emby: Any | None,
-    move_config: MoveConfig | None = None,
-    cms: Any | None = None,
-    self_share_config: SelfShareConfig | None = None,
-    cleanup_client: Any | None = None,
-    interval_seconds: int = 300,
-    limit: int = 50,
-) -> threading.Thread | None:
-    if interval_seconds <= 0:
-        return None
-
-    def loop() -> None:
-        while True:
-            try:
-                repaired = repair_stale_submissions(store, emby, move_config=move_config, limit=limit)
-                moved = repair_stranded_self_share_moves(store, move_config, limit=limit) if move_config else 0
-                restored = (
-                    restore_missing_self_share_library_folders(
-                        store,
-                        cms,
-                        self_share_config,
-                        move_config,
-                        emby=emby,
-                        limit=limit,
-                    )
-                    if cms and self_share_config and move_config
-                    else 0
-                )
-                cleaned = cleanup_pending_self_share_sources(store, cleanup_client, limit=limit)
-                if repaired:
-                    LOG.info("Status repair fixed %s stale submissions", repaired)
-                if moved:
-                    LOG.info("Status repair moved %s stranded self-share STRM folders", moved)
-                if restored:
-                    LOG.info("Status repair restored %s missing self-share STRM folders", restored)
-                if cleaned:
-                    LOG.info("Status repair cleaned %s pending self-share source folders", cleaned)
-                if repaired or moved or restored or cleaned:
-                    write_metrics_snapshot(store, metrics_path_for_store(store))
-            except Exception:
-                LOG.debug("Status repair loop failed", exc_info=True)
-            time.sleep(interval_seconds)
-
-    thread = threading.Thread(target=loop, name="status-repair", daemon=True)
-    thread.start()
-    return thread
 
 
 def start_media_strm_repair_loop(
@@ -3149,21 +2249,12 @@ def start_self_share_maintenance_loop(
     def loop() -> None:
         while not loop_stop_event.is_set():
             try:
-                moved = repair_stranded_self_share_moves(store, move_config, limit=limit)
-                restored = restore_missing_self_share_library_folders(
-                    store,
-                    cms,
-                    self_share_config,
-                    move_config,
-                    emby=emby,
-                    limit=limit,
-                )
+                moved = _observe_stranded_self_share_moves(store, move_config, limit)
+                restored = enqueue_missing_self_share_restores(store, limit=limit)
                 if moved:
-                    LOG.info("Self-share maintenance reconciled %s stranded STRM moves", moved)
+                    LOG.info("Self-share maintenance queued %s stranded STRM repairs", moved)
                 if restored:
-                    LOG.info("Self-share maintenance restored %s missing STRM folders", restored)
-                if moved or restored:
-                    write_metrics_snapshot(store, metrics_path_for_store(store))
+                    LOG.info("Self-share maintenance queued %s missing library restores", restored)
             except Exception:
                 LOG.debug("Self-share maintenance loop failed", exc_info=True)
             if loop_stop_event.wait(interval_seconds):
@@ -3174,7 +2265,7 @@ def start_self_share_maintenance_loop(
     return thread
 
 
-def send_emby_timeout(telegram: TelegramClient, chat_id: int | str, store: SubmissionStore, row: dict[str, Any]) -> None:
+def send_emby_timeout(telegram: TelegramClient, chat_id: int | str, store: Any, row: dict[str, Any]) -> None:
     updated = store.update_emby(int(row["id"]), "timeout") or row
     telegram.send_message(
         chat_id,
@@ -3263,7 +2354,7 @@ def sync_cms_status_task_event(task_store: TaskStore | None, row: dict[str, Any]
     task_status = TaskStatus.SUCCEEDED if is_terminal_status(normalized) and normalized not in {"failed", "error"} else TaskStatus.RUNNING
     if normalized in {"failed", "error"}:
         task_status = TaskStatus.FAILED
-    return best_effort_task_sync(
+    return _sync_task_store(
         "cms_status",
         record_submission_event,
         task_store,
@@ -3276,7 +2367,7 @@ def sync_cms_status_task_event(task_store: TaskStore | None, row: dict[str, Any]
 
 
 def sync_needs_action_task_event(task_store: TaskStore | None, row: dict[str, Any], reason: str):
-    return best_effort_task_sync(
+    return _sync_task_store(
         "needs_action",
         record_submission_event,
         task_store,
@@ -3292,7 +2383,7 @@ def sync_self_share_task_events(task_store: TaskStore | None, row: dict[str, Any
     if not task_store:
         return
     if row.get("own_share_code"):
-        best_effort_task_sync(
+        _sync_task_store(
             "own_share_created",
             record_submission_event,
             task_store,
@@ -3302,7 +2393,7 @@ def sync_self_share_task_events(task_store: TaskStore | None, row: dict[str, Any
             "已创建自有 115 分享",
         )
     if str(row.get("share_sync_status") or "").lower() in {"submitted", "restore_submitted"}:
-        best_effort_task_sync(
+        _sync_task_store(
             "share_sync_submitted",
             record_submission_event,
             task_store,
@@ -3317,7 +2408,7 @@ def sync_strm_ready_task_event(task_store: TaskStore | None, row: dict[str, Any]
     if not task_store:
         return
     if move_plan.status in {"pending", "conflict"}:
-        best_effort_task_sync(
+        _sync_task_store(
             "strm_ready",
             record_submission_event,
             task_store,
@@ -3327,7 +2418,7 @@ def sync_strm_ready_task_event(task_store: TaskStore | None, row: dict[str, Any]
             "已找到 STRM 源目录",
         )
     elif move_plan.status == "error":
-        best_effort_task_sync(
+        _sync_task_store(
             "strm_ready_failed",
             record_submission_event,
             task_store,
@@ -3342,7 +2433,7 @@ def sync_strm_ready_task_event(task_store: TaskStore | None, row: dict[str, Any]
 def sync_move_task_event(task_store: TaskStore | None, row: dict[str, Any]):
     move_status = str(row.get("move_status") or "").lower()
     if move_status == "moved":
-        return best_effort_task_sync(
+        return _sync_task_store(
             "moved",
             record_submission_event,
             task_store,
@@ -3353,7 +2444,7 @@ def sync_move_task_event(task_store: TaskStore | None, row: dict[str, Any]):
         )
     if move_status in {"error", "failed"}:
         reason = str(row.get("move_error") or "STRM 移动失败")
-        return best_effort_task_sync(
+        return _sync_task_store(
             "move_failed",
             record_submission_event,
             task_store,
@@ -3369,7 +2460,7 @@ def sync_move_task_event(task_store: TaskStore | None, row: dict[str, Any]):
 def sync_emby_task_event(task_store: TaskStore | None, row: dict[str, Any]):
     emby_status = str(row.get("emby_status") or "").lower()
     if emby_status == "confirmed":
-        return best_effort_task_sync(
+        return _sync_task_store(
             "emby_confirmed",
             record_submission_event,
             task_store,
@@ -3379,7 +2470,7 @@ def sync_emby_task_event(task_store: TaskStore | None, row: dict[str, Any]):
             f"Emby 已确认：{safe_telegram_text(format_task_label(row), 160)}",
         )
     if emby_status == "timeout":
-        return best_effort_task_sync(
+        return _sync_task_store(
             "emby_timeout",
             record_submission_event,
             task_store,
@@ -3390,7 +2481,7 @@ def sync_emby_task_event(task_store: TaskStore | None, row: dict[str, Any]):
             error_summary="Emby 确认超时",
         )
     if emby_status == "disabled":
-        return best_effort_task_sync(
+        return _sync_task_store(
             "emby_disabled",
             record_submission_event,
             task_store,
@@ -3406,7 +2497,7 @@ def sync_emby_task_event(task_store: TaskStore | None, row: dict[str, Any]):
 def sync_cleanup_task_event(task_store: TaskStore | None, row: dict[str, Any]):
     if str(row.get("cleanup_status") or "").lower() != "deleted":
         return None
-    return best_effort_task_sync(
+    return _sync_task_store(
         "cleaned",
         record_submission_event,
         task_store,
@@ -3526,7 +2617,7 @@ def handle_quality_action_callback(
 
 def _series_update_target_identity(
     target_task: Any | None,
-    store: SubmissionStore | None,
+    store: Any | None,
 ) -> tuple[dict[str, Any], dict[str, Any], str, str, str] | None:
     if target_task is None or store is None:
         return None
@@ -3630,7 +2721,7 @@ def start_series_update_from_link(
     key: ShareKey,
     link: str,
     chat_id: int | str,
-    store: SubmissionStore | None,
+    store: Any | None,
     task_store: TaskStore | None,
     *,
     source: str,
@@ -3654,7 +2745,7 @@ def _start_series_update_from_link_locked(
     key: ShareKey,
     link: str,
     chat_id: int | str,
-    store: SubmissionStore | None,
+    store: Any | None,
     task_store: TaskStore,
     *,
     source: str,
@@ -3833,7 +2924,7 @@ def _start_series_update_from_link_locked(
 
 def start_series_update_task(
     task: Any | None,
-    store: SubmissionStore | None,
+    store: Any | None,
     task_store: TaskStore | None,
     *,
     source: str,
@@ -4004,7 +3095,7 @@ def handle_task_action_callback(
     chat_id: int | str,
     telegram: Any,
     task_store: TaskStore | None,
-    store: SubmissionStore | None = None,
+    store: Any | None = None,
     *,
     max_retries: int = 3,
 ) -> bool:
@@ -4104,252 +3195,12 @@ def should_skip_existing_submission(row: dict[str, Any] | None, self_share_enabl
     return any(row.get(key) for key in progress_keys)
 
 
-def _start_status_poll_impl(
-    cms: CmsClient,
-    telegram: TelegramClient,
-    chat_id: int | str,
-    store: SubmissionStore,
-    row: dict[str, Any],
-    max_seconds: int = 300,
-    interval: int = 20,
-    emby: EmbyClient | None = None,
-    move_config: MoveConfig | None = None,
-    openai_classifier: OpenAIClassifier | None = None,
-    tmdb_resolver: Any | None = None,
-    self_share_workflow: SelfShareWorkflow | None = None,
-    cleanup_client: Any | None = None,
-    task_store: TaskStore | None = None,
-) -> None:
-    task_id = row.get("cms_task_id")
-    if max_seconds <= 0:
-        return
-
-    def worker() -> None:
-        nonlocal task_id, row
-        deadline = time.time() + max_seconds
-        last_status = row.get("status") or "submitted"
-        recognition: dict[str, Any] = {"title": row.get("title") or row.get("share_code") or ""}
-        recognition_checked = False
-        while time.time() < deadline:
-            time.sleep(max(1, interval))
-            try:
-                if self_share_workflow and not task_id:
-                    title = row.get("title") or row.get("share_code") or ""
-                    updated = store.update_status(int(row["id"]), "organizing", title=str(title or "")) or row
-                    sync_cms_status_task_event(task_store, updated, "organizing", title=str(title or ""))
-                    recognition = normalize_recognition({"code": 500, "msg": "waiting for CMS organize"})
-                    recognition["share_name"] = str(title or "")
-                    recognition_checked = True
-                    current_row = store.find_by_id(int(row["id"])) or updated
-                    if move_config and should_attempt_strm_move(current_row, self_share_enabled=True):
-                        current_row, recognition = resolve_self_share_recognition_before_prepare(
-                            store,
-                            current_row,
-                            recognition,
-                            str(title or ""),
-                            openai_classifier=openai_classifier,
-                            tmdb_resolver=tmdb_resolver,
-                        )
-                        source_dir = safe_resolve(Path(str(recognition.get("source_path")))) if recognition.get("source_path") else None
-                        current_row, source_dir, category = prepare_self_share_move_inputs(
-                            current_row,
-                            recognition,
-                            str(title or ""),
-                            self_share_workflow,
-                            source_dir,
-                        )
-                        sync_self_share_task_events(task_store, current_row)
-                        if not source_dir:
-                            row = current_row
-                            continue
-                        active_move_config = move_config_for_workflow_source(move_config, source_dir, self_share_workflow.config)
-                        move_plan = plan_strm_move(source_dir, category, active_move_config)
-                        sync_strm_ready_task_event(task_store, current_row, move_plan)
-                        if is_move_plan_retryable(move_plan):
-                            row = current_row
-                            continue
-                        moved_row = merge_self_share_strm_folder(move_plan, store, current_row, active_move_config)
-                        sync_move_task_event(task_store, moved_row)
-                        send_move_result(telegram, chat_id, move_plan, moved_row)
-                        row = moved_row
-                        if moved_row.get("dest_path"):
-                            recognition["dest_path"] = moved_row.get("dest_path")
-                    if emby and emby.enabled:
-                        try:
-                            match = find_emby_match(emby, recognition, store.find_by_id(int(row["id"])) or updated, recent_limit=30)
-                            if match:
-                                confirmed_row = store.find_by_id(int(row["id"])) or updated
-                                send_emby_confirmed(telegram, chat_id, store, confirmed_row, match, emby, cleanup_client=cleanup_client)
-                                latest_row = store.find_by_id(int(row["id"])) or confirmed_row
-                                sync_emby_task_event(task_store, latest_row)
-                                sync_cleanup_task_event(task_store, latest_row)
-                                return
-                        except Exception:
-                            LOG.debug("Emby confirmation probe failed", exc_info=True)
-                    last_status = "organizing"
-                    continue
-                if not task_id:
-                    key = ShareKey(str(row.get("share_code") or ""), str(row.get("receive_code") or ""))
-                    found_task = cms.get_share_down_by_key(key)
-                    found_task_id = found_task.get("id") or found_task.get("task_id") or found_task.get("taskId")
-                    if found_task_id:
-                        task_id = str(found_task_id)
-                        row = store.upsert_submission(
-                            key,
-                            str(row.get("url") or ""),
-                            str(row.get("status") or "submitted"),
-                            cms_task_id=task_id,
-                            title=found_task.get("share_name") or found_task.get("name") or row.get("title"),
-                        )
-                        best_effort_task_sync(
-                            "late_cms_task_id",
-                            record_submission_event,
-                            task_store,
-                            row,
-                            TaskStage.CMS_SUBMITTED,
-                            TaskStatus.RUNNING,
-                            "已找到 CMS 任务 ID",
-                        )
-                    else:
-                        continue
-                detail = cms.get_share_down_detail(str(task_id))
-                status = str(detail.get("status") or detail.get("state") or detail.get("task_status") or last_status)
-                title = detail.get("name") or detail.get("title") or detail.get("share_name") or row.get("title")
-                updated = store.update_status(int(row["id"]), status, title=title) or row
-                sync_cms_status_task_event(task_store, updated, status, title=str(title or ""))
-                if title and not recognition_checked:
-                    recognition_checked = True
-                    try:
-                        recognition_resp = cms.recognize_media(str(title))
-                        recognition = normalize_recognition(recognition_resp)
-                    except Exception:
-                        LOG.debug("CMS recognition failed", exc_info=True)
-                        recognition = normalize_recognition({"code": 500, "msg": "recognition failed"})
-                    recognition["share_name"] = str(title)
-                    recognition, should_prompt = decide_category_prompt(store, updated, recognition, move_config, str(title))
-                    if should_prompt:
-                        sync_needs_action_task_event(task_store, updated, "等待人工确认分类")
-                        recognition, _should_prompt = resolve_category_or_existing_import(
-                            telegram,
-                            chat_id,
-                            store,
-                            updated,
-                            recognition,
-                            str(title),
-                            move_config=move_config,
-                            emby=emby,
-                            openai_classifier=openai_classifier,
-                            tmdb_resolver=tmdb_resolver,
-                        )
-                if move_config and recognition_checked:
-                    current_row = store.find_by_id(int(row["id"])) or updated
-                    if should_attempt_strm_move(current_row, self_share_enabled=bool(self_share_workflow)):
-                        if should_defer_for_probing(current_row, recognition, self_share_enabled=bool(self_share_workflow)):
-                            recognition, should_prompt = decide_category_prompt(store, current_row, recognition, move_config, str(title or ""))
-                            if not should_prompt:
-                                row = current_row
-                                continue
-                            sync_needs_action_task_event(task_store, current_row, "等待人工确认分类")
-                            recognition, _should_prompt = resolve_category_or_existing_import(
-                                telegram,
-                                chat_id,
-                                store,
-                                current_row,
-                                recognition,
-                                str(title or ""),
-                                move_config=move_config,
-                                emby=emby,
-                                openai_classifier=openai_classifier,
-                                tmdb_resolver=tmdb_resolver,
-                            )
-                            current_row = store.find_by_id(int(row["id"])) or current_row
-                        if should_wait_for_category(current_row):
-                            row = current_row
-                            continue
-                        source_dir = safe_resolve(Path(str(recognition.get("source_path")))) if recognition.get("source_path") else None
-                        if self_share_workflow:
-                            current_row, recognition = resolve_self_share_recognition_before_prepare(
-                                store,
-                                current_row,
-                                recognition,
-                                str(title or ""),
-                                openai_classifier=openai_classifier,
-                                tmdb_resolver=tmdb_resolver,
-                            )
-                            current_row, source_dir, category = prepare_self_share_move_inputs(
-                                current_row,
-                                recognition,
-                                str(title or ""),
-                                self_share_workflow,
-                                source_dir,
-                            )
-                            sync_self_share_task_events(task_store, current_row)
-                        else:
-                            category = final_category_for_move(current_row, recognition)
-                        if not source_dir and not self_share_workflow:
-                            source_dir = find_strm_source_dir(move_config, recognition, share_name=str(title or ""))
-                        if not source_dir:
-                            row = current_row
-                            continue
-                        active_move_config = move_config_for_workflow_source(
-                            move_config,
-                            source_dir,
-                            self_share_workflow.config if self_share_workflow else None,
-                        )
-                        move_plan = plan_strm_move(source_dir, category, active_move_config)
-                        sync_strm_ready_task_event(task_store, current_row, move_plan)
-                        if is_move_plan_retryable(move_plan):
-                            row = current_row
-                            continue
-                        moved_row = (
-                            merge_self_share_strm_folder(move_plan, store, current_row, active_move_config)
-                            if self_share_workflow
-                            else execute_strm_move(move_plan, store, current_row)
-                        )
-                        sync_move_task_event(task_store, moved_row)
-                        send_move_result(telegram, chat_id, move_plan, moved_row)
-                        row = moved_row
-                        if moved_row.get("dest_path"):
-                            recognition["dest_path"] = moved_row.get("dest_path")
-                if emby and emby.enabled:
-                    try:
-                        match = find_emby_match(emby, recognition, store.find_by_id(int(row["id"])) or updated, recent_limit=30)
-                        if match:
-                            confirmed_row = store.find_by_id(int(row["id"])) or updated
-                            send_emby_confirmed(telegram, chat_id, store, confirmed_row, match, emby, cleanup_client=cleanup_client)
-                            latest_row = store.find_by_id(int(row["id"])) or confirmed_row
-                            sync_emby_task_event(task_store, latest_row)
-                            sync_cleanup_task_event(task_store, latest_row)
-                            return
-                    except Exception:
-                        LOG.debug("Emby confirmation probe failed", exc_info=True)
-                if updated and status != last_status and is_terminal_status(status):
-                    telegram.send_message(chat_id, safe_telegram_text(f"CMS 任务状态更新：{format_task_label(updated)}：{status}", 240))
-                last_status = status
-            except Exception:
-                LOG.debug("Status poll failed", exc_info=True)
-        updated = store.update_status(int(row["id"]), last_status) or row
-        if emby and emby.enabled:
-            send_emby_timeout(telegram, chat_id, store, updated)
-            sync_emby_task_event(task_store, store.find_by_id(int(row["id"])) or updated)
-        else:
-            disabled_row = store.update_emby(int(row["id"]), "disabled") or row
-            sync_emby_task_event(task_store, disabled_row)
-            telegram.send_message(chat_id, safe_telegram_text(f"CMS 已提交：{format_task_label(updated)}。Emby 确认未启用，后续请看 CMS/Emby 后台状态。", 280))
-
-    threading.Thread(target=worker, daemon=True).start()
-
-
-# Import after the implementation exists so app.legacy_polling can avoid
-# importing bridge at module load time.
-from app.legacy_polling import start_status_poll
-
 def handle_update(
     update: dict,
     cms: CmsClient,
     telegram: TelegramClient,
     allowed_chat_id: str,
-    store: SubmissionStore,
+    store: Any,
     poll_status: bool = True,
     status_poll_seconds: int = 300,
     status_poll_interval: int = 20,
@@ -4458,7 +3309,7 @@ def handle_update(
     ):
         return
     if command == "/status":
-        if task_engine_enabled and task_store is not None:
+        if task_store is not None:
             tasks = task_store.list_recent_tasks(limit=8)
             taskstore_status = format_taskstore_status(tasks)
             if taskstore_status:
@@ -4472,7 +3323,7 @@ def handle_update(
         telegram.send_rich_message(chat_id, format_metrics(payload))
         return
     if command == "/history":
-        if task_engine_enabled and task_store is not None:
+        if task_store is not None:
             taskstore_history = format_taskstore_history(task_store.list_recent_tasks(limit=10))
             if taskstore_history:
                 telegram.send_rich_message(chat_id, taskstore_history)
@@ -4480,7 +3331,7 @@ def handle_update(
         telegram.send_rich_message(chat_id, format_history(store.recent(limit=10)))
         return
     if command == "/quality":
-        if task_engine_enabled and task_store is not None:
+        if task_store is not None:
             if quality_automation is not None:
                 send_quality_manual_queue(telegram, chat_id, quality_automation)
                 return
@@ -4515,8 +3366,8 @@ def handle_update(
                 hdhive_ok=hdhive_workflow.proxy.healthcheck() if hdhive_workflow is not None else False,
                 task_health=format_taskstore_health(
                     task_store,
-                    enabled=bool(task_engine_enabled),
-                ) if task_engine_enabled and task_store is not None else None,
+                    enabled=True,
+                ) if task_store is not None else None,
             ),
         )
         return
@@ -4568,7 +3419,7 @@ def handle_update(
     if explicit_series_update:
         text = series_update_payload
     sources = parse_media_sources(text)
-    if explicit_series_update and not (self_share_workflow and task_engine_enabled and task_store is not None):
+    if explicit_series_update and not (self_share_workflow and task_store is not None):
         telegram.send_message(chat_id, "追更需要启用 TaskStore 自分享工作流")
         return
     if explicit_target_task_id is not None:
@@ -4619,7 +3470,7 @@ def handle_update(
                 add_display_row(index, source, "新分享链接追更需指定历史任务号，例如：追更 #328 <115链接>")
                 continue
             if source.source_type in {"magnet", "ed2k"}:
-                if not (self_share_workflow and task_engine_enabled and task_store is not None):
+                if not (self_share_workflow and task_store is not None):
                     add_display_row(index, source, "云下载链接需要启用 TaskStore 自分享工作流")
                     continue
                 task = task_store.upsert_cloud_task(
@@ -4634,154 +3485,64 @@ def handle_update(
                 LOG.info("Enqueued cloud source in TaskStore: type=%s key=%s task_id=%s", source.source_type, source.source_key, task.id)
                 continue
             key = normalize_share_link(link)
-            if task_engine_enabled and task_store is None:
-                raise RuntimeError("TaskStore is required when TASK_ENGINE_ENABLED=true")
-            if task_engine_enabled and task_store is not None:
-                if explicit_series_update:
-                    existing_task = task_store.find_task_by_share_key(key.share_code, key.receive_code)
-                    updated_task, update_result = start_series_update_task(
-                        existing_task,
-                        store,
-                        task_store,
-                        source="文本追更",
-                    )
-                    if update_result == "started":
-                        add_display_row(index, source, f"已开始追更：{format_task_snapshot(updated_task)}")
-                        continue
-                    if update_result == "failed":
-                        add_display_row(index, source, f"追更失败：{format_task_snapshot(updated_task)}")
-                        continue
-                    add_display_row(index, source, "新分享链接追更需指定历史任务号，例如：追更 #328 <115链接>")
-                    continue
-                task = task_store.upsert_task(key.share_code, key.receive_code, link, chat_id=str(chat_id or ""))
-                submission = None
-                submission_id = task.submission_id or task.metadata.get("submission_id")
-                if submission_id not in (None, ""):
-                    try:
-                        submission = store.find_by_id(int(submission_id))
-                    except (TypeError, ValueError):
-                        submission = None
-                drift_stage = completion_drift_retry_stage(task, submission)
-                if drift_stage:
-                    task = task_store.record_event(
-                        task.id,
-                        drift_stage,
-                        TaskStatus.RUNNING,
-                        "已完成任务状态漂移，准备重新检查",
-                        metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": drift_stage.value},
-                    )
-                    task = task_store.enqueue_task(task.id, drift_stage, message="重新检查入库状态")
-                elif task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {TaskStage.FAILED, TaskStage.NEEDS_ACTION}:
-                    retry_stage = retry_stage_for_intake(task)
-                    task = task_store.record_event(
-                        task.id,
-                        retry_stage,
-                        task.status,
-                        "准备重新入队",
-                        metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": retry_stage.value},
-                    )
-                    task = task_store.enqueue_task(task.id, retry_stage, message="重新入队")
-                elif task.current_stage == TaskStage.RECEIVED and task.status == TaskStatus.PENDING and not task_store.list_events(task.id):
-                    task = task_store.enqueue_task(task.id, TaskStage.RECEIVED, message="等待执行")
-                add_display_row(index, source, format_task_intake_reply(task))
-                LOG.info("Enqueued self-share link in TaskStore: share_code=%s task_id=%s stage=%s status=%s", key.share_code, task.id, task.current_stage.value, task.status.value)
-                continue
-            best_effort_task_sync(
-                "received",
-                ensure_task_for_link,
-                task_store,
-                key.share_code,
-                key.receive_code,
-                link,
-            )
-            existing = store.find_by_key(key)
-            if should_skip_existing_submission(existing, self_share_enabled=bool(self_share_workflow)):
-                best_effort_task_sync("existing_submission", sync_task_from_submission, task_store, existing, "链接已存在")
-                add_display_row(index, source, "已存在：" + format_task_label(existing))
-                continue
-            if self_share_workflow:
-                if not cleanup_client or not hasattr(cleanup_client, "receive_share_to_cid"):
-                    raise RuntimeError("self_share_sync requires P115 receive client")
-                if not str(self_share_receive_cid or "").strip():
-                    raise RuntimeError("SELF_SHARE_RECEIVE_CID is required for self_share_sync")
-                received = cleanup_client.receive_share_to_cid(key.share_code, key.receive_code, str(self_share_receive_cid).strip())
-                row = store.upsert_submission(key, link, "received", title=received.get("title"))
-                row = store.update_self_share(row["id"], workflow_mode="self_share_sync", workflow_phase="received_to_pending") or row
-                best_effort_task_sync(
-                    "self_share_received",
-                    record_submission_event,
-                    task_store,
-                    row,
-                    TaskStage.RECEIVED,
-                    TaskStatus.RUNNING,
-                    "已接收 115 分享到待整理",
-                    received_title=received.get("title") or "",
-                    received_file_ids=received.get("file_ids") or [],
-                    received_items=received.get("received_items") or [],
-                    received_items_complete=bool(received.get("received_items_complete", True)),
-                    received_expected_item_count=int(received.get("received_expected_item_count") or 0),
-                    received_existing_file_ids=received.get("received_existing_file_ids") or [],
-                    received_snapshot_complete=bool(received.get("received_snapshot_complete", False)),
-                    tmdb_hint_normalized=False,
-                )
-                add_display_row(index, source, "已接收：" + format_task_label(row))
-                LOG.info("Received 115 share without CMS plain submit: share_code=%s cid=%s", key.share_code, self_share_receive_cid)
-                if poll_status:
-                    start_status_poll(
-                        cms,
-                        telegram,
-                        chat_id,
-                        store,
-                        row,
-                        status_poll_seconds,
-                        status_poll_interval,
-                        emby=emby,
-                        move_config=move_config,
-                        openai_classifier=openai_classifier,
-                        tmdb_resolver=tmdb_resolver,
-                        self_share_workflow=self_share_workflow,
-                        cleanup_client=cleanup_client,
-                        task_store=task_store,
-                    )
-                continue
-            resp = cms.add_share_down(link)
-            task_id, title = extract_task_info(resp)
-            row = store.upsert_submission(key, link, "submitted", cms_task_id=task_id, title=title)
-            best_effort_task_sync(
-                "cms_submitted",
-                record_submission_event,
-                task_store,
-                row,
-                TaskStage.CMS_SUBMITTED,
-                TaskStatus.RUNNING,
-                "已提交 CMS",
-            )
-            add_display_row(index, source, "已提交：" + format_task_label(row))
-            LOG.info("Submitted share link to CMS: share_code=%s task_id=%s", key.share_code, task_id)
-            if poll_status:
-                start_status_poll(
-                    cms,
-                    telegram,
-                    chat_id,
+            if task_store is None:
+                raise RuntimeError("TaskStore is required")
+            if explicit_series_update:
+                existing_task = task_store.find_task_by_share_key(key.share_code, key.receive_code)
+                updated_task, update_result = start_series_update_task(
+                    existing_task,
                     store,
-                    row,
-                    status_poll_seconds,
-                    status_poll_interval,
-                    emby=emby,
-                    move_config=move_config,
-                    openai_classifier=openai_classifier,
-                    tmdb_resolver=tmdb_resolver,
-                    self_share_workflow=self_share_workflow,
-                    cleanup_client=cleanup_client,
-                    task_store=task_store,
+                    task_store,
+                    source="文本追更",
                 )
+                if update_result == "started":
+                    add_display_row(index, source, f"已开始追更：{format_task_snapshot(updated_task)}")
+                    continue
+                if update_result == "failed":
+                    add_display_row(index, source, f"追更失败：{format_task_snapshot(updated_task)}")
+                    continue
+                add_display_row(index, source, "新分享链接追更需指定历史任务号，例如：追更 #328 <115链接>")
+                continue
+            task = task_store.upsert_task(key.share_code, key.receive_code, link, chat_id=str(chat_id or ""))
+            submission = None
+            submission_id = task.submission_id or task.metadata.get("submission_id")
+            if submission_id not in (None, ""):
+                try:
+                    submission = store.find_by_id(int(submission_id))
+                except (TypeError, ValueError):
+                    submission = None
+            drift_stage = completion_drift_retry_stage(task, submission)
+            if drift_stage:
+                task = task_store.record_event(
+                    task.id,
+                    drift_stage,
+                    TaskStatus.RUNNING,
+                    "已完成任务状态漂移，准备重新检查",
+                    metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": drift_stage.value},
+                )
+                task = task_store.enqueue_task(task.id, drift_stage, message="重新检查入库状态")
+            elif task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {TaskStage.FAILED, TaskStage.NEEDS_ACTION}:
+                retry_stage = retry_stage_for_intake(task)
+                task = task_store.record_event(
+                    task.id,
+                    retry_stage,
+                    task.status,
+                    "准备重新入队",
+                    metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": retry_stage.value},
+                )
+                task = task_store.enqueue_task(task.id, retry_stage, message="重新入队")
+            elif task.current_stage == TaskStage.RECEIVED and task.status == TaskStatus.PENDING and not task_store.list_events(task.id):
+                task = task_store.enqueue_task(task.id, TaskStage.RECEIVED, message="等待执行")
+            add_display_row(index, source, format_task_intake_reply(task))
+            LOG.info("Enqueued self-share link in TaskStore: share_code=%s task_id=%s stage=%s status=%s", key.share_code, task.id, task.current_stage.value, task.status.value)
+            continue
         except Exception as exc:  # keep bot alive and report the failed link
             LOG.exception("Failed to submit link")
             category = classify_error(exc)
             try:
                 key = normalize_share_link(link)
                 store.upsert_submission(key, link, "failed", last_error=category)
-                best_effort_task_sync(
+                _sync_task_store(
                     "submit_failed",
                     record_failure,
                     task_store,
@@ -4824,8 +3585,12 @@ def run_forever(
         if config.tmdb_api_key or config.tmdb_bearer_token
         else tmdb_web_resolver
     )
-    store = SubmissionStore(config.db_path)
     task_store = create_task_store(config)
+    write_gate = Database(task_store.db_path).write_gate()
+    start_runner = write_gate in {"runner_open", "open"}
+    start_intake = write_gate == "open"
+    start_observers = write_gate == "open"
+    store = WorkflowRowAdapter(task_store)
     background_jobs = BackgroundJobCoordinator(state_store=task_store)
     hdhive_workflow = create_hdhive_workflow(config, cms)
     self_share_config = SelfShareConfig.from_config(config, cms)
@@ -4865,7 +3630,7 @@ def run_forever(
     probe_threads: list[threading.Thread] = []
     probe_holder: dict[str, Any] = {"stop_event": None, "thread": None}
     probe_holder_lock = threading.Lock()
-    if config.task_engine_enabled:
+    if start_runner:
         direct_workflow = DirectTaskWorkflow(
             cms=cms,
             store=store,
@@ -4925,7 +3690,7 @@ def run_forever(
             config.backup_timezone,
             config.backup_retention_days,
         )
-    if config.task_engine_enabled and self_share_config.enabled and p115:
+    if start_observers and self_share_config.enabled and p115:
         def set_invalid_probe_enabled(quality_enabled: bool) -> None:
             if not config.self_share_invalid_cleanup_enabled:
                 return
@@ -4960,8 +3725,6 @@ def run_forever(
                 if isinstance(probe_holder["thread"], threading.Thread):
                     probe_threads.append(probe_holder["thread"])
 
-        config.quality_auto_repair_enabled = False
-        LOG.info("Automated quality repair is temporarily read-only")
         quality_automation = QualityAutomation(
             task_store,
             config,
@@ -4985,8 +3748,18 @@ def run_forever(
             config.tg_allowed_chat_id,
             stop_event,
         )
+        start_self_share_maintenance_loop(
+            store,
+            cms,
+            self_share_config,
+            move_config,
+            interval_seconds=15,
+            limit=50,
+            stop_event=stop_event,
+            emby=emby,
+        )
     offset = None
-    LOG.info("cms-tg-ingest started db_path=%s", config.db_path)
+    LOG.info("cms-tg-ingest started database_path=%s write_gate=%s", config.database_path, write_gate)
     try:
         repaired = normalize_emby_parents(store, emby)
         if repaired:
@@ -4994,30 +3767,6 @@ def run_forever(
         write_metrics_snapshot(store, metrics_path_for_store(store))
     except Exception:
         LOG.debug("Failed to write startup metrics snapshot", exc_info=True)
-    if config.status_repair_enabled and not config.task_engine_enabled:
-        start_status_repair_loop(
-            store,
-            emby,
-            move_config=move_config,
-            cms=cms,
-            self_share_config=self_share_config,
-            cleanup_client=p115 if self_share_config.cleanup_after_emby else None,
-            interval_seconds=max(1, int(config.status_repair_interval_seconds)),
-            limit=max(1, int(config.status_repair_limit)),
-        )
-    if config.media_strm_repair_enabled and Path(config.cms_state_db_path).is_file():
-        cms_index = CmsCloudDataIndex(config.cms_state_db_path)
-        strm_source_root = Path(config.strm_source_roots.split(",")[0].strip())
-        host_strm_root = strm_source_root.parent  # /mnt/user/Unraid/strm, the host root for /media
-        start_media_strm_repair_loop(
-            config.cms_state_db_path,
-            host_strm_root,
-            direct_domain=config.media_strm_direct_domain or cms_index.direct_302_domain(),
-            interval_seconds=max(60, int(config.media_strm_repair_interval_seconds)),
-            limit=max(1, int(config.media_strm_repair_limit)),
-            stop_event=stop_event,
-        )
-
     def enqueue_hdhive_links(urls: list[str], chat_id: str) -> int | None:
         links = [str(url).strip() for url in urls if str(url).strip()]
         if not links:
@@ -5045,7 +3794,7 @@ def run_forever(
             cleanup_client=p115 if self_share_config.enabled else None,
             self_share_receive_cid=config.self_share_receive_cid,
             task_store=task_store,
-            task_engine_enabled=config.task_engine_enabled,
+            task_engine_enabled=start_intake,
             hdhive_workflow=hdhive_workflow,
             enqueue_unlocked_links=enqueue_hdhive_links,
             hdhive_subscription_service=hdhive_subscription_service,
@@ -5061,7 +3810,7 @@ def run_forever(
                 return None
         return None
 
-    tmdb_card_cache = TmdbDetailCache(Path(config.task_db_path).with_name("tmdb-card-cache.db"))
+    tmdb_card_cache = TmdbDetailCache(Path(config.database_path))
 
     def notify_hdhive_item(subscription: Any, item: Any) -> None:
         details = {}
@@ -5122,7 +3871,7 @@ def run_forever(
         tmdb_resolver=tmdb_resolver,
         emby=emby,
     )
-    if hdhive_subscription_service is not None and Path(
+    if start_observers and hdhive_subscription_service is not None and Path(
         getattr(config, "hdhive_token_config_path", "")
     ).is_file():
         hdhive_subscription_scheduler = HdhiveSubscriptionScheduler(
@@ -5177,6 +3926,9 @@ def run_forever(
 
     try:
         while not stop_event.is_set():
+            if not start_intake:
+                stop_event.wait(max(1, int(config.poll_timeout)))
+                continue
             try:
                 updates = telegram.get_updates(offset=offset, timeout=config.poll_timeout)
                 for update in updates:
@@ -5197,7 +3949,7 @@ def run_forever(
                         cleanup_client=p115 if self_share_config.enabled else None,
                         self_share_receive_cid=config.self_share_receive_cid,
                         task_store=task_store,
-                        task_engine_enabled=config.task_engine_enabled,
+                        task_engine_enabled=start_intake,
                         hdhive_workflow=hdhive_workflow,
                         enqueue_unlocked_links=enqueue_hdhive_links if hdhive_workflow is not None else None,
                         quality_automation=quality_automation,

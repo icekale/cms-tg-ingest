@@ -40,14 +40,16 @@ class DoctorConfigTests(unittest.TestCase):
             for path in (data, share, movie):
                 path.mkdir(parents=True)
             cookie.write_text("UID=1;CID=2", encoding="utf-8")
+            from app.task_store import TaskStore
+            database = data / "cms-tg-ingest.db"
+            TaskStore(database)
             env = {
                 "TG_BOT_TOKEN": "123456:secret-token",
                 "TG_ALLOWED_CHAT_ID": "464100862",
                 "CMS_BASE_URL": "http://cms:9527",
                 "CMS_USERNAME": "user",
                 "CMS_PASSWORD": "secret-password",
-                "DB_PATH": str(data / "submissions.db"),
-                "TASK_DB_PATH": str(data / "tasks.db"),
+                "DATABASE_PATH": str(database),
                 "BACKUP_DIR": str(data / "backups"),
                 "WORKFLOW_MODE": "self_share_sync",
                 "P115_COOKIE_PATH": str(cookie),
@@ -82,7 +84,6 @@ class DoctorConfigTests(unittest.TestCase):
             "CMS_PASSWORD": "secret-password",
             "WEB_ENABLED": "true",
             "WEB_PORT": "not-a-port",
-            "TASK_DB_PATH": "/missing/tasks.db",
         }
 
         report = doctor.run_checks(env=env, filesystem=doctor.MemoryFilesystem(existing_paths={"/data"}))
@@ -90,7 +91,6 @@ class DoctorConfigTests(unittest.TestCase):
         self.assertFalse(report.ok)
         text = report.to_text()
         self.assertIn("WEB_PORT", text)
-        self.assertIn("TASK_DB directory does not exist", text)
 
     def test_hdhive_enabled_requires_mounted_oauth_token_file(self):
         env = {
@@ -100,7 +100,6 @@ class DoctorConfigTests(unittest.TestCase):
             "CMS_USERNAME": "user",
             "CMS_PASSWORD": "secret-password",
             "DB_PATH": "/data/submissions.db",
-            "TASK_DB_PATH": "/data/tasks.db",
             "STRM_SOURCE_ROOTS": "/data",
             "HDHIVE_ENABLED": "true",
             "HDHIVE_TOKEN_CONFIG_PATH": "/config/hdhive-openapi.json",
@@ -122,8 +121,10 @@ class DoctorConfigTests(unittest.TestCase):
             token = root / "hdhive-openapi.json"
             data.mkdir()
             token.write_text("{}", encoding="utf-8")
-            task_db = data / "tasks.db"
-            store = HdhiveSubscriptionStore(task_db)
+            from app.task_store import TaskStore
+            database = data / "cms-tg-ingest.db"
+            TaskStore(database)
+            store = HdhiveSubscriptionStore(database)
             subscription = store.create_subscription("chat", "hdhive_tv", "slug", "剧集", "255358")
             item = store.upsert_item(subscription.id, "s01e01", "resource", "valid", 1080, 21)
             store.mark_item_pending(item.id, "需要确认")
@@ -133,8 +134,7 @@ class DoctorConfigTests(unittest.TestCase):
                 "CMS_BASE_URL": "http://cms:9527",
                 "CMS_USERNAME": "user",
                 "CMS_PASSWORD": "secret-password",
-                "DB_PATH": str(data / "submissions.db"),
-                "TASK_DB_PATH": str(task_db),
+                "DATABASE_PATH": str(database),
                 "BACKUP_DIR": str(data / "backups"),
                 "STRM_SOURCE_ROOTS": str(data),
                 "HDHIVE_ENABLED": "true",
@@ -143,10 +143,7 @@ class DoctorConfigTests(unittest.TestCase):
                 "HDHIVE_SUBSCRIPTION_TIMEZONE": "Asia/Shanghai",
             }
 
-            report = doctor.run_checks(
-                env=env,
-                filesystem=doctor.MemoryFilesystem(existing_paths={data, token}),
-            )
+            report = doctor.run_checks(env=env)
 
         self.assertTrue(report.ok, report.to_text())
         text = report.to_text()
@@ -163,7 +160,6 @@ class DoctorConfigTests(unittest.TestCase):
             "CMS_USERNAME": "user",
             "CMS_PASSWORD": "secret-password",
             "DB_PATH": "/data/submissions.db",
-            "TASK_DB_PATH": "/data/tasks.db",
             "STRM_SOURCE_ROOTS": "/data",
             "WEB_ENABLED": "true",
             "WEB_HOST": "0.0.0.0",
@@ -189,7 +185,6 @@ class DoctorConfigTests(unittest.TestCase):
             "CMS_USERNAME": "user",
             "CMS_PASSWORD": "secret-password",
             "DB_PATH": "/data/submissions.db",
-            "TASK_DB_PATH": "/data/tasks.db",
             "STRM_SOURCE_ROOTS": "/data",
             "WEB_ENABLED": "true",
             "WEB_HOST": "127.0.0.1",
@@ -208,7 +203,6 @@ class DoctorConfigTests(unittest.TestCase):
             "CMS_USERNAME": "user",
             "CMS_PASSWORD": "secret-password",
             "DB_PATH": "/data/submissions.db",
-            "TASK_DB_PATH": "/data/tasks.db",
             "STRM_SOURCE_ROOTS": "/data",
             "BACKUP_ENABLED": "true",
             "BACKUP_TIME": "bad",
@@ -236,7 +230,6 @@ class DoctorConfigTests(unittest.TestCase):
                 "CMS_USERNAME": "user",
                 "CMS_PASSWORD": "secret-password",
                 "DB_PATH": str(root / "submissions.db"),
-                "TASK_DB_PATH": str(root / "tasks.db"),
                 "STRM_SOURCE_ROOTS": str(root),
                 "BACKUP_DIR": str(parent_file / "backups"),
                 "BACKUP_ENABLED": "true",
@@ -247,48 +240,6 @@ class DoctorConfigTests(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertIn("backup directory parent is not a directory", report.to_text())
 
-    def test_task_engine_requires_self_share_workflow_without_leaking_secrets(self):
-        env = {
-            "TG_BOT_TOKEN": "123456:secret-token",
-            "TG_ALLOWED_CHAT_ID": "464100862",
-            "CMS_BASE_URL": "http://cms:9527",
-            "CMS_USERNAME": "user",
-            "CMS_PASSWORD": "secret-password",
-            "DB_PATH": "/data/submissions.db",
-            "TASK_DB_PATH": "/data/tasks.db",
-            "TASK_ENGINE_ENABLED": "true",
-            "WORKFLOW_MODE": "direct",
-        }
-
-        report = doctor.run_checks(env=env, filesystem=doctor.MemoryFilesystem(existing_paths={"/data"}))
-
-        self.assertFalse(report.ok)
-        text = report.to_text()
-        self.assertIn("Task engine currently requires WORKFLOW_MODE=self_share_sync", text)
-        self.assertNotIn("secret-token", text)
-        self.assertNotIn("secret-password", text)
-
-    def test_task_engine_enabled_alias_requires_self_share_workflow_without_leaking_secrets(self):
-        env = {
-            "TG_BOT_TOKEN": "123456:secret-token",
-            "TG_ALLOWED_CHAT_ID": "464100862",
-            "CMS_BASE_URL": "http://cms:9527",
-            "CMS_USERNAME": "user",
-            "CMS_PASSWORD": "secret-password",
-            "DB_PATH": "/data/submissions.db",
-            "TASK_DB_PATH": "/data/tasks.db",
-            "TASK_ENGINE_ENABLED": "enabled",
-            "WORKFLOW_MODE": "direct",
-        }
-
-        report = doctor.run_checks(env=env, filesystem=doctor.MemoryFilesystem(existing_paths={"/data"}))
-
-        self.assertFalse(report.ok)
-        text = report.to_text()
-        self.assertIn("Task engine currently requires WORKFLOW_MODE=self_share_sync", text)
-        self.assertNotIn("secret-token", text)
-        self.assertNotIn("secret-password", text)
-
     def test_task_engine_requires_positive_worker_interval(self):
         env = {
             "TG_BOT_TOKEN": "123456:secret-token",
@@ -297,7 +248,6 @@ class DoctorConfigTests(unittest.TestCase):
             "CMS_USERNAME": "user",
             "CMS_PASSWORD": "secret-password",
             "DB_PATH": "/data/submissions.db",
-            "TASK_DB_PATH": "/data/tasks.db",
             "TASK_ENGINE_ENABLED": "true",
             "TASK_WORKER_INTERVAL_SECONDS": "0",
             "WORKFLOW_MODE": "self_share_sync",
@@ -321,7 +271,6 @@ class DoctorConfigTests(unittest.TestCase):
             "CMS_USERNAME": "user",
             "CMS_PASSWORD": "secret-password",
             "DB_PATH": "/data/submissions.db",
-            "TASK_DB_PATH": "/data/tasks.db",
             "WORKFLOW_MODE": "self_share_sync",
             "TASK_ENGINE_ENABLED": "true",
             "P115_COOKIE_PATH": "/config/115-cookies.txt",
@@ -624,6 +573,32 @@ class CmsStrmGuardCheckTests(unittest.TestCase):
         self.assertFalse(guard.ok)
         self.assertTrue(direct_guard.ok)
         self.assertTrue(os_guard.ok)
+
+    def test_unified_database_reports_schema_and_nonrunnable_legacy_imports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from app.unified_migration import migrate_legacy_databases
+            from tests.fixtures.legacy_databases import build_legacy_databases
+
+            fixture = build_legacy_databases(tmp)
+            unified = Path(tmp) / "cms-tg-ingest.db"
+            migrate_legacy_databases(fixture.tasks_db, fixture.submissions_db, unified)
+            env = {
+                "TG_BOT_TOKEN": "123456:secret-token",
+                "TG_ALLOWED_CHAT_ID": "464100862",
+                "CMS_BASE_URL": "http://cms:9527",
+                "CMS_USERNAME": "user",
+                "CMS_PASSWORD": "secret-password",
+                "DATABASE_PATH": str(unified),
+                "BACKUP_DIR": str(Path(tmp) / "backups"),
+                "STRM_SOURCE_ROOTS": tmp,
+            }
+            Path(tmp, "backups").mkdir()
+            report = doctor.run_checks(env=env)
+            item = next(entry for entry in report.items if entry.name == "unified_database")
+            self.assertTrue(item.ok, item.message)
+            self.assertIn("schema=1", item.message)
+            self.assertIn("legacy_import_executable=0", item.message)
+            self.assertIn("write_gate=closed", item.message)
 
 
 if __name__ == "__main__":

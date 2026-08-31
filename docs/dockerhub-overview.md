@@ -30,7 +30,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 固定版本镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.4.33
+docker pull icekale/cms-tg-ingest:0.5.0
 ```
 
 ### 完整 Docker Compose
@@ -40,7 +40,7 @@ docker pull icekale/cms-tg-ingest:0.4.33
 ```yaml
 services:
   cms-tg-ingest:
-    image: icekale/cms-tg-ingest:0.4.33
+    image: icekale/cms-tg-ingest:0.5.0
     container_name: cms-tg-ingest
     restart: unless-stopped
     env_file:
@@ -81,7 +81,7 @@ SELF_SHARE_STRM_ROOT=/mnt/user/Unraid/strm/share
 SELF_SHARE_OWN_SHARE_PASSWORD=1212
 STRM_LIBRARY_MAP=华语电影=/mnt/user/Unraid/strm/转存/Movie/电影/华语电影,欧美电影=/mnt/user/Unraid/strm/转存/Movie/电影/欧美电影
 STRM_DEFAULT_MODE=shared
-TASK_ENGINE_ENABLED=true
+DATABASE_PATH=/data/cms-tg-ingest.db
 WEB_ENABLED=true
 # Web 认证（推荐用户名密码，与 WEB_TOKEN 二选一）
 WEB_USERNAME=admin
@@ -188,13 +188,13 @@ https://hdhive.com/tv/<slug>
 
 ### SQLite 数据库备份
 
-默认每天 `03:30`（`Asia/Shanghai`）在线备份 `/data/submissions.db` 和 `/data/tasks.db` 到 `/data/backups`，保留 14 天。由于 Compose 已将 `./data` 映射到 `/data`，不需要额外挂载目录。最近一次结果可在 `/health` 或 Web `/api/v1/health` 查看。
+默认每天 `03:30`（`Asia/Shanghai`）在线备份 `/data/cms-tg-ingest.db` 到 `/data/backups`，保留 14 天。由于 Compose 已将 `./data` 映射到 `/data`，不需要额外挂载目录。最近一次结果可在 `/health` 或 Web `/api/v1/health` 查看。
 
 ```sh
 docker compose exec cms-tg-ingest sh -c 'ls -lh /data/backups'
 ```
 
-恢复时先停止容器、备份当前文件，再将同一时间戳的 `submissions-*.db` 和 `tasks-*.db` 快照复制回 `data/submissions.db`、`data/tasks.db`，最后启动容器。备份不包含 Cookie、CMS 配置或媒体文件；失败会在健康状态中显示，并在当天下一次调度 tick 重试。
+恢复时先停止容器、备份当前文件，再将 `cms-tg-ingest-*.db` 快照复制回 `data/cms-tg-ingest.db`，最后启动容器。备份不包含 Cookie、CMS 配置或媒体文件；失败会在健康状态中显示，并在当天下一次调度 tick 重试。从 0.4.x 升级到 0.5.0 必须先导入遗留库并按 `closed → runner_open → open` 打开写入闸门；打开后只向前修。
 
 ## 更新、回滚和排障
 

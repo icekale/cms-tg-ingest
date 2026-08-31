@@ -8,9 +8,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from app.models import TaskStage, TaskStatus
+from app.models import StageCheckpoint, StageResult, TaskStage, TaskStatus
 from app.strm_mode import effective_task_strm_mode
-from app.task_store import TaskStore, operation_scope
+from app.task_store import TaskStore, WorkflowRowAdapter, operation_scope
 
 
 class TaskStoreTests(unittest.TestCase):
@@ -121,7 +121,7 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(completed.result, {"submission_id": 7, "accepted": True})
             self.assertEqual(reopened, completed)
 
-    def test_clear_finished_tasks_removes_operation_history(self):
+    def test_clear_finished_tasks_archives_without_removing_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
             task = store.upsert_task("operation-cleanup", "", "https://115cdn.com/s/operation-cleanup")
@@ -129,7 +129,11 @@ class TaskStoreTests(unittest.TestCase):
             store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
 
             self.assertEqual(store.clear_finished_tasks(), 1)
-            self.assertIsNone(store.find_operation(task.id, "g0:u0:submit"))
+            archived = store.find_task(task.id)
+            self.assertIsNotNone(archived)
+            self.assertGreater(float(archived.archived_at or 0), 0)
+            self.assertIsNotNone(store.find_operation(task.id, "g0:u0:submit"))
+            self.assertEqual(store.list_recent_tasks(limit=10), [])
 
     def test_delete_finished_task_removes_task_events_and_operations_atomically(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -166,7 +170,9 @@ class TaskStoreTests(unittest.TestCase):
             store.request_task_termination(task.id, "Web", now=10)
 
             self.assertEqual(store.clear_finished_tasks(), 1)
-            self.assertIsNone(store.find_task(task.id))
+            archived = store.find_task(task.id)
+            self.assertIsNotNone(archived)
+            self.assertGreater(float(archived.archived_at or 0), 0)
 
     def test_clear_finished_tasks_keeps_quality_claimed_terminal_task(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -183,9 +189,10 @@ class TaskStoreTests(unittest.TestCase):
 
             self.assertEqual(store.clear_finished_tasks(), 3)
             self.assertEqual(store.find_task(claimed.id).claimed_by, "quality-cleanup:cleanup-run")
-            self.assertIsNone(store.find_task(succeeded.id))
-            self.assertIsNone(store.find_task(failed.id))
-            self.assertIsNone(store.find_task(cancelled.id))
+            self.assertEqual(float(store.find_task(claimed.id).archived_at or 0), 0)
+            self.assertGreater(float(store.find_task(succeeded.id).archived_at or 0), 0)
+            self.assertGreater(float(store.find_task(failed.id).archived_at or 0), 0)
+            self.assertGreater(float(store.find_task(cancelled.id).archived_at or 0), 0)
 
     def test_unclaimed_task_termination_is_immediate_and_not_runnable(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1119,6 +1126,192 @@ class TaskStoreTests(unittest.TestCase):
             )
             self.assertEqual(store.list_tasks_by_own_share_file_id(""), [])
 
+    def test_archived_tasks_do_not_own_live_share_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            archived = store.upsert_task("old", "1212", "https://115cdn.com/s/old")
+            archived = store.record_event(
+                archived.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "done",
+                metadata_patch={"own_share_file_id": "folder-1", "own_share_code": "own-old"},
+            )
+            live = store.upsert_task("new", "1212", "https://115cdn.com/s/new")
+            store.record_event(
+                live.id,
+                TaskStage.OWN_SHARE_CREATED,
+                TaskStatus.PENDING,
+                "live owner",
+                metadata_patch={"own_share_file_id": "folder-1", "own_share_code": "own-new"},
+            )
+            self.assertTrue(
+                store.archive_task(
+                    archived.id,
+                    actor="test",
+                    reason="user_delete",
+                    expected_updated_at=archived.updated_at,
+                )
+            )
+
+            owners = store.list_tasks_by_own_share_file_id("folder-1")
+            live_codes = store.list_live_share_codes()
+
+            self.assertEqual([task.id for task in owners], [live.id])
+            self.assertEqual(live_codes, {"own-new"})
+
+    def test_share_identity_lookups_include_normalized_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("fact-owner", "1212", "https://115cdn.com/s/fact-owner")
+            store.write_facts(
+                task.id,
+                share={"file_id": "folder-fact", "own_share_code": "own-fact"},
+                move={"dest_path": "/library/Movie", "move_status": "moved"},
+                emby={"library": "电影", "status": "confirmed"},
+            )
+
+            owners = store.list_tasks_by_own_share_file_id("folder-fact")
+            found = store.find_task(task.id)
+            recent = store.list_recent_tasks(limit=1)
+            live_codes = store.list_live_share_codes()
+
+            self.assertEqual([item.id for item in owners], [task.id])
+            self.assertEqual(owners[0].metadata.get("own_share_code"), "own-fact")
+            self.assertEqual(found.metadata.get("dest_path"), "/library/Movie")
+            self.assertEqual(found.metadata.get("emby_parent"), "电影")
+            self.assertEqual(recent[0].metadata.get("dest_path"), "/library/Movie")
+            self.assertEqual(live_codes, {"own-fact"})
+
+    def test_overlay_fills_category_and_tmdb_from_media_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("media-facts", "1212", "https://115cdn.com/s/media-facts")
+            store.write_facts(
+                task.id,
+                media={"tmdb_id": "345735", "category": "华语电影", "title": "老笠"},
+            )
+
+            found = store.find_task(task.id)
+
+            self.assertEqual(found.tmdb_id, "345735")
+            self.assertEqual(found.category, "华语电影")
+
+    def test_claim_next_runnable_overlays_normalized_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("claim-facts", "1212", "https://115cdn.com/s/claim-facts")
+            store.enqueue_task(task.id, TaskStage.MOVED, next_run_at=0)
+            store.write_facts(
+                task.id,
+                move={"dest_path": "/library/Claim", "move_status": "moved"},
+            )
+
+            claimed = store.claim_next_runnable("worker", now=1)
+
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed.id, task.id)
+            self.assertEqual(claimed.metadata.get("dest_path"), "/library/Claim")
+
+    def test_claim_task_lock_keeps_overlaid_dest_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("lock-facts", "1212", "https://115cdn.com/s/lock-facts")
+            store.enqueue_task(task.id, TaskStage.MOVED, next_run_at=0)
+            store.write_facts(
+                task.id,
+                move={"dest_path": "/library/Lock", "move_status": "moved"},
+            )
+            claimed = store.claim_next_runnable("worker", now=1)
+
+            locked = store.claim_task_lock(
+                claimed.id,
+                {
+                    "_lock_key": "dest:/library/Lock",
+                    "_lock_reason": "媒体库目录阶段",
+                    "_lock_waiting": False,
+                    "_lock_owner_task_id": "",
+                },
+                lambda _holder: False,
+                expected_stage=claimed.current_stage,
+                expected_claimed_by="worker",
+                expected_claimed_at=claimed.claimed_at,
+                expected_claim_token=claimed.claim_token,
+                expected_updated_at=claimed.updated_at,
+                wait_message="等待资源锁",
+                next_run_at=2,
+                now=1,
+            )
+
+            self.assertIsNotNone(locked.task)
+            self.assertEqual(locked.task.metadata.get("dest_path"), "/library/Lock")
+            self.assertEqual(locked.task.metadata.get("_lock_key"), "dest:/library/Lock")
+
+    def test_claim_task_lock_detects_holder_dest_path_from_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            holder_task = store.upsert_task("holder-facts", "1212", "https://115cdn.com/s/holder-facts")
+            waiter_task = store.upsert_task("waiter-facts", "3434", "https://115cdn.com/s/waiter-facts")
+            store.enqueue_task(holder_task.id, TaskStage.MOVED, next_run_at=0)
+            store.enqueue_task(waiter_task.id, TaskStage.MOVED, next_run_at=0)
+            store.write_facts(
+                holder_task.id,
+                move={"dest_path": "/library/Shared", "move_status": "moved"},
+            )
+            store.write_facts(
+                waiter_task.id,
+                move={"dest_path": "/library/Shared", "move_status": "moved"},
+            )
+            holder = store.claim_next_runnable("holder-worker", now=1)
+            waiter = store.claim_next_runnable("waiter-worker", now=2)
+
+            locked = store.claim_task_lock(
+                waiter.id,
+                {
+                    "_lock_key": "dest:/library/Shared",
+                    "_lock_reason": "媒体库目录阶段",
+                    "_lock_waiting": False,
+                    "_lock_owner_task_id": "",
+                },
+                lambda candidate: str(candidate.metadata.get("dest_path") or "") == "/library/Shared",
+                expected_stage=waiter.current_stage,
+                expected_claimed_by="waiter-worker",
+                expected_claimed_at=waiter.claimed_at,
+                expected_claim_token=waiter.claim_token,
+                expected_updated_at=waiter.updated_at,
+                wait_message="等待资源锁",
+                next_run_at=3,
+                now=2,
+            )
+
+            self.assertIsNotNone(locked.holder)
+            self.assertEqual(locked.holder.id, holder.id)
+            self.assertEqual(locked.holder.metadata.get("dest_path"), "/library/Shared")
+
+    def test_patch_claimed_metadata_keeps_overlaid_dest_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("patch-facts", "1212", "https://115cdn.com/s/patch-facts")
+            store.enqueue_task(task.id, TaskStage.RECEIVED, next_run_at=0)
+            store.write_facts(
+                task.id,
+                move={"dest_path": "/library/Patch", "move_status": "moved"},
+            )
+            claimed = store.claim_next_runnable("worker", now=1)
+
+            patched = store.patch_claimed_metadata(
+                claimed.id,
+                expected_claimed_by="worker",
+                expected_claimed_at=claimed.claimed_at,
+                expected_claim_token=claimed.claim_token,
+                expected_updated_at=claimed.updated_at,
+                patch={"receive_target_cid": "111"},
+            )
+
+            self.assertIsNotNone(patched)
+            self.assertEqual(patched.metadata.get("receive_target_cid"), "111")
+            self.assertEqual(patched.metadata.get("dest_path"), "/library/Patch")
+
     def test_record_stage_event_updates_current_task_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
@@ -1338,6 +1531,54 @@ class TaskStoreTests(unittest.TestCase):
                 [task.status for task in open_tasks],
                 [TaskStatus.NEEDS_ACTION, TaskStatus.FAILED, TaskStatus.RUNNING, TaskStatus.PENDING],
             )
+
+    def test_list_open_tasks_and_health_exclude_archived(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            pending = store.upsert_task("pending", "", "https://115cdn.com/s/pending")
+            store.enqueue_task(pending.id, TaskStage.RECEIVED, next_run_at=0)
+            failed = store.upsert_task("failed", "", "https://115cdn.com/s/failed")
+            failed = store.record_event(failed.id, TaskStage.FAILED, TaskStatus.FAILED, "failed")
+            self.assertTrue(
+                store.archive_task(
+                    failed.id,
+                    actor="test",
+                    reason="user_delete",
+                    expected_updated_at=failed.updated_at,
+                )
+            )
+
+            open_tasks = store.list_open_tasks()
+            health = store.aggregate_open_task_health(limit=10)
+
+            self.assertEqual([task.id for task in open_tasks], [pending.id])
+            self.assertEqual(health.failed_count, 0)
+            self.assertEqual(health.pending_count, 1)
+            self.assertEqual(health.problem_count, 0)
+
+    def test_upsert_after_archive_creates_a_new_live_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            done = store.upsert_task("same-share", "1212", "https://115cdn.com/s/same-share")
+            done = store.record_event(done.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            self.assertTrue(
+                store.archive_task(
+                    done.id,
+                    actor="test",
+                    reason="user_delete",
+                    expected_updated_at=done.updated_at,
+                )
+            )
+
+            live = store.upsert_task("same-share", "1212", "https://115cdn.com/s/same-share")
+            found = store.find_task_by_share_key("same-share", "1212")
+            archived = store.find_task(done.id)
+
+            self.assertNotEqual(live.id, done.id)
+            self.assertEqual(found.id, live.id)
+            self.assertEqual(float(live.archived_at or 0), 0)
+            self.assertGreater(float(archived.archived_at or 0), 0)
+            self.assertEqual(archived.share_code, "same-share")
 
     def test_list_open_tasks_searches_status_index(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2083,3 +2324,293 @@ class TaskStoreTests(unittest.TestCase):
             self.assertTrue(first_token)
             self.assertEqual(reopened.claim_token, first_token)
             self.assertEqual(reopened.claimed_by, "legacy-worker")
+
+    def _claim_running(self, store: TaskStore, share_code: str):
+        task = store.upsert_task(share_code, "", f"https://115cdn.com/s/{share_code}")
+        store.enqueue_task(task.id, TaskStage.MOVED, next_run_at=1.0)
+        claimed = store.claim_next_runnable("worker-1", now=1.0)
+        self.assertIsNotNone(claimed)
+        return claimed
+
+    def test_commit_claimed_result_writes_facts_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            claimed = self._claim_running(store, "checkpoint-ok")
+            result = StageResult.complete(
+                "moved",
+                {"dest_path": "/library/movie"},
+                checkpoint=StageCheckpoint(move={"dest_path": "/library/movie", "move_status": "moved"}),
+            )
+            updated = store.commit_claimed_result(
+                claimed,
+                "worker-1",
+                result,
+                next_stage=TaskStage.EMBY_CONFIRMED,
+                next_run_at=2.0,
+            )
+            self.assertEqual(updated.current_stage, TaskStage.EMBY_CONFIRMED)
+            with sqlite3.connect(store.db_path) as conn:
+                row = conn.execute("SELECT dest_path, move_status FROM task_moves WHERE task_id = ?", (claimed.id,)).fetchone()
+            self.assertEqual(row[0], "/library/movie")
+            self.assertEqual(row[1], "moved")
+
+    def test_commit_claimed_result_rolls_back_on_unknown_fact_column(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            claimed = self._claim_running(store, "checkpoint-bad")
+            result = StageResult.complete(
+                "moved",
+                checkpoint=StageCheckpoint(move={"not_a_column": "nope"}),
+            )
+            with self.assertRaises(ValueError):
+                store.commit_claimed_result(
+                    claimed,
+                    "worker-1",
+                    result,
+                    next_stage=TaskStage.EMBY_CONFIRMED,
+                    next_run_at=2.0,
+                )
+            current = store.find_task(claimed.id)
+            self.assertEqual(current.status, TaskStatus.RUNNING)
+            self.assertEqual(current.current_stage, TaskStage.MOVED)
+            with sqlite3.connect(store.db_path) as conn:
+                self.assertIsNone(conn.execute("SELECT 1 FROM task_moves WHERE task_id = ?", (claimed.id,)).fetchone())
+
+    def test_commit_claimed_result_discards_stale_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            claimed = self._claim_running(store, "checkpoint-stale")
+            stale = claimed
+            store.record_event(
+                claimed.id,
+                claimed.current_stage,
+                TaskStatus.RUNNING,
+                "heartbeat",
+                expected_stage=claimed.current_stage,
+                expected_status=TaskStatus.RUNNING,
+                expected_claimed_by="worker-1",
+                expected_claimed_at=claimed.claimed_at,
+                expected_claim_token=claimed.claim_token,
+                expected_updated_at=claimed.updated_at,
+            )
+            result = StageResult.complete("moved", checkpoint=StageCheckpoint(move={"move_status": "moved"}))
+            self.assertIsNone(
+                store.commit_claimed_result(
+                    stale,
+                    "worker-1",
+                    result,
+                    next_stage=TaskStage.EMBY_CONFIRMED,
+                    next_run_at=2.0,
+                )
+            )
+            with sqlite3.connect(store.db_path) as conn:
+                self.assertIsNone(conn.execute("SELECT 1 FROM task_moves WHERE task_id = ?", (claimed.id,)).fetchone())
+
+    def test_workflow_facts_projects_joined_rows_without_creating_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            missing = store.workflow_facts(99)
+            self.assertEqual(missing, {})
+            with sqlite3.connect(store.db_path) as conn:
+                before = conn.execute("SELECT COUNT(*) FROM task_media").fetchone()[0]
+
+            claimed = self._claim_running(store, "facts-ok")
+            empty = store.workflow_facts(claimed.id)
+            self.assertNotIn("submission_id", empty)
+            self.assertEqual(empty.get("id"), claimed.id)
+            self.assertEqual(empty.get("move_status"), "")
+
+            store.commit_claimed_result(
+                claimed,
+                "worker-1",
+                StageResult.complete(
+                    "moved",
+                    checkpoint=StageCheckpoint(
+                        media={"title": "Movie", "category": "华语电影", "tmdb_id": "123"},
+                        share={"canonical_name": "L-Movie-2016", "own_share_code": "own"},
+                        move={"dest_path": "/library/movie", "move_status": "moved"},
+                    ),
+                ),
+                next_stage=TaskStage.EMBY_CONFIRMED,
+                next_run_at=2.0,
+            )
+            facts = store.workflow_facts(claimed.id)
+            self.assertEqual(facts["id"], claimed.id)
+            self.assertNotIn("submission_id", facts)
+            self.assertEqual(facts["title"], "Movie")
+            self.assertEqual(facts["category_final"], "华语电影")
+            self.assertEqual(facts["own_share_file_name"], "L-Movie-2016")
+            self.assertEqual(facts["own_share_code"], "own")
+            self.assertEqual(facts["dest_path"], "/library/movie")
+            self.assertEqual(facts["move_status"], "moved")
+            with sqlite3.connect(store.db_path) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM task_media").fetchone()[0], before + 1)
+
+    def test_reprocess_clears_share_and_move_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            claimed = self._claim_running(store, "reprocess-facts")
+            store.commit_claimed_result(
+                claimed,
+                "worker-1",
+                StageResult.complete(
+                    "moved",
+                    checkpoint=StageCheckpoint(
+                        share={"canonical_name": "L-Movie", "own_share_code": "own"},
+                        move={"move_status": "moved", "dest_path": "/library/movie"},
+                    ),
+                ),
+                next_stage=TaskStage.EMBY_CONFIRMED,
+                next_run_at=2.0,
+            )
+            store.prepare_operation(claimed.id, "g0:u0:receive_share:abc:cid", "receive_share", {"cid": "cid"})
+            store.start_operation(claimed.id, "g0:u0:receive_share:abc:cid")
+            store.complete_operation(claimed.id, "g0:u0:receive_share:abc:cid", {"received_items_complete": True})
+            store.reprocess_task(claimed.id, next_run_at=0)
+            facts = store.workflow_facts(claimed.id)
+            self.assertFalse(facts.get("own_share_code"))
+            self.assertEqual(facts.get("move_status"), "")
+
+    def test_write_facts_refuses_live_foreign_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            claimed = self._claim_running(store, "claim-fence")
+            store.write_facts(
+                claimed.id,
+                move={"move_status": "moved", "dest_path": "/stolen"},
+                now=1.0,
+            )
+            facts = store.workflow_facts(claimed.id)
+            self.assertNotEqual(facts.get("dest_path"), "/stolen")
+            self.assertNotEqual(facts.get("move_status"), "moved")
+
+    def test_write_facts_allows_matching_claim_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            claimed = self._claim_running(store, "claim-holder")
+            store.write_facts(
+                claimed.id,
+                move={"move_status": "moved", "dest_path": "/library/movie"},
+                claimed_by=claimed.claimed_by,
+                claim_token=claimed.claim_token,
+                now=1.0,
+            )
+            facts = store.workflow_facts(claimed.id)
+            self.assertEqual(facts.get("dest_path"), "/library/movie")
+            self.assertEqual(facts.get("move_status"), "moved")
+
+    def test_write_facts_allows_unclaimed_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("unclaimed-facts", "", "https://115cdn.com/s/unclaimed-facts")
+            store.write_facts(task.id, probe={"last_probe_at": 9.0}, now=9.0)
+            facts = store.workflow_facts(task.id)
+            self.assertEqual(facts.get("share_probe_at"), 9.0)
+
+    def test_adapter_enqueues_missing_library_restore_without_moving(self):
+        from app.media.strm import enqueue_missing_self_share_restores, enqueue_stranded_self_share_repairs
+        from app.config import MoveConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "library" / "Movie"
+            store = TaskStore(root / "tasks.db")
+            adapter = WorkflowRowAdapter(store)
+            task = store.upsert_task("missing-dest", "", "https://115cdn.com/s/missing-dest")
+            store.write_facts(
+                task.id,
+                share={
+                    "canonical_name": "Movie",
+                    "own_share_code": "ownabc",
+                    "file_id": "fid",
+                },
+                move={
+                    "move_status": "moved",
+                    "dest_path": str(dest),
+                },
+            )
+            queued = enqueue_missing_self_share_restores(adapter, limit=10)
+            stranded = enqueue_stranded_self_share_repairs(
+                adapter,
+                MoveConfig(source_roots=[root / "share"], library_roots={"电影": root / "library"}),
+                limit=10,
+            )
+            self.assertEqual(queued, 1)
+            self.assertEqual(stranded, 0)
+            self.assertFalse(dest.exists())
+            command = store.claim_next_command("inspector")
+            self.assertEqual(command["command_type"], "restore")
+            self.assertEqual(store.find_task(task.id).id, task.id)
+
+    def test_adapter_reads_probe_identity_and_emby_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            adapter = WorkflowRowAdapter(store)
+            dest = "/library/Movie"
+            probed = store.upsert_task("probed", "", "https://115cdn.com/s/probed")
+            fresh = store.upsert_task("fresh", "", "https://115cdn.com/s/fresh")
+            other = store.upsert_task("other", "", "https://115cdn.com/s/other")
+            for task, share_code, tmdb in ((probed, "own-probed", "111"), (fresh, "own-fresh", "111"), (other, "own-other", "222")):
+                store.write_facts(
+                    task.id,
+                    media={"tmdb_id": tmdb, "category": "华语电影"},
+                    share={
+                        "canonical_name": "Movie",
+                        "own_share_code": share_code,
+                        "own_share_receive_code": "1212",
+                        "file_id": f"fid-{share_code}",
+                    },
+                    move={"move_status": "moved", "dest_path": dest},
+                    emby={"status": "confirmed", "path": f"{dest}/movie.strm"},
+                    cleanup={"status": "pending", "target_id": f"fid-{share_code}"},
+                )
+            adapter.update_share_probe(probed.id)
+
+            probes = adapter.self_share_probe_candidates(limit=10)
+            self.assertGreaterEqual(len(probes), 2)
+            self.assertNotEqual(probes[0]["id"], probed.id)
+            self.assertEqual(
+                set(adapter.live_self_share_identities(dest, "111")),
+                {("own-fresh", "1212"), ("own-probed", "1212")},
+            )
+            self.assertEqual(adapter.live_self_share_identities(dest, "222"), (("own-other", "1212"),))
+            self.assertIsNotNone(adapter.latest_self_share_identity(dest, "111"))
+            self.assertEqual(len(adapter.all_confirmed_with_emby_path()), 3)
+            self.assertEqual(len(adapter.pending_self_share_cleanup_candidates(limit=10)), 3)
+
+    def test_adapter_recent_and_clear_finished_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            adapter = WorkflowRowAdapter(store)
+            live = store.upsert_task("live", "", "https://115cdn.com/s/live")
+            store.enqueue_task(live.id, TaskStage.RECEIVED, next_run_at=0)
+            done = store.upsert_task("done", "", "https://115cdn.com/s/done")
+            store.record_event(done.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            failed = store.upsert_task("failed", "", "https://115cdn.com/s/failed")
+            store.record_event(failed.id, TaskStage.STRM_READY, TaskStatus.FAILED, "missing", error_summary="未找到 STRM")
+
+            rows = adapter.recent(limit=10)
+            ids = {row["id"] for row in rows}
+            self.assertEqual(ids, {live.id, done.id, failed.id})
+            self.assertTrue(any(row.get("last_error") == "未找到 STRM" for row in rows))
+
+            self.assertEqual(adapter.clear_finished_history(), 2)
+            remaining = {row["id"] for row in adapter.recent(limit=10)}
+            self.assertEqual(remaining, {live.id})
+            self.assertGreater(float(store.find_task(done.id).archived_at or 0), 0)
+            self.assertGreater(float(store.find_task(failed.id).archived_at or 0), 0)
+
+    def test_adapter_restore_sync_claim_is_fenced_for_retry_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            adapter = WorkflowRowAdapter(store)
+            task = store.upsert_task("restore-sync", "", "https://115cdn.com/s/restore-sync")
+            store.write_facts(task.id, share={"own_share_code": "own", "canonical_name": "Movie"})
+
+            self.assertTrue(adapter.claim_self_share_restore_sync(task.id, retry_seconds=60, now=100.0))
+            self.assertFalse(adapter.claim_self_share_restore_sync(task.id, retry_seconds=60, now=100.0))
+            self.assertFalse(adapter.claim_self_share_restore_sync(task.id, retry_seconds=60, now=150.0))
+            self.assertTrue(adapter.claim_self_share_restore_sync(task.id, retry_seconds=60, now=161.0))
+            facts = adapter.find_by_id(task.id)
+            self.assertEqual(facts["share_sync_status"], "restore_submitted")
+            self.assertEqual(facts["workflow_phase"], "restore_share_sync_submitted")

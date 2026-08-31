@@ -9,7 +9,8 @@ from app.models import TaskStage
 from app.task_runner import StageOutcome
 from app.task_store import TaskStore, operation_scope
 from app.workflows.direct import SourceShareTaskWorkflow
-from bridge import SubmissionStore
+from tests.legacy_submission_store import SubmissionStore
+
 
 
 class FakeCms:

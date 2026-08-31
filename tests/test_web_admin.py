@@ -32,6 +32,8 @@ from app.web import (
     render_task_list,
     start_web_server,
 )
+from tests.legacy_submission_store import SubmissionStore
+from tests.task_command_drain import drain_task_commands
 
 
 class _ManualActionRuleEngine:
@@ -62,7 +64,9 @@ class WebAdminTests(unittest.TestCase):
                     response = client.recv(4096)
 
                 self.assertTrue(response.startswith(b"HTTP/1.0 200"))
-                self.assertIsNone(store.find_task(task.id))
+                leftover = store.find_task(task.id)
+                self.assertIsNotNone(leftover)
+                self.assertGreater(leftover.archived_at, 0)
             finally:
                 bridge.stop_web_server(server)
 
@@ -243,7 +247,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(root / "tasks.db"),
+                database_path=str(root / "tasks.db"),
                 quality_auto_enabled=False,
             )
             quality = QualityAutomation(store, config, allowed_roots=[root])
@@ -290,7 +294,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(root / "tasks.db"),
+                database_path=str(root / "tasks.db"),
                 quality_auto_enabled=False,
             )
             quality = QualityAutomation(store, config, allowed_roots=[root])
@@ -333,7 +337,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(root / "tasks.db"),
+                database_path=str(root / "tasks.db"),
                 quality_auto_enabled=False,
             )
             quality = QualityAutomation(store, config, allowed_roots=[root])
@@ -354,7 +358,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(root / "tasks.db"),
+                database_path=str(root / "tasks.db"),
                 quality_auto_enabled=False,
             )
             quality = QualityAutomation(store, config, allowed_roots=[root / "allowed"])
@@ -393,7 +397,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(Path(tmp) / "tasks.db"),
+                database_path=str(Path(tmp) / "tasks.db"),
                 quality_auto_enabled=False,
             )
             quality = QualityAutomation(store, config, allowed_roots=(path for path in (root,)))
@@ -428,7 +432,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(root / "tasks.db"),
+                database_path=str(root / "tasks.db"),
                 quality_auto_enabled=False,
             )
             quality = QualityAutomation(store, config, allowed_roots=[root])
@@ -972,8 +976,10 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(status, 303)
             self.assertEqual(headers["Location"], "/")
             self.assertEqual(remaining, {"pending", "manual"})
-            self.assertEqual(store.list_events(done.id), [])
-            self.assertEqual(store.list_events(failed.id), [])
+            self.assertGreater(float(store.find_task(done.id).archived_at or 0), 0)
+            self.assertGreater(float(store.find_task(failed.id).archived_at or 0), 0)
+            self.assertTrue(store.list_events(done.id))
+            self.assertTrue(store.list_events(failed.id))
             self.assertEqual(body, b"")
 
     def test_render_task_detail_contains_event_timeline_and_retry_form(self):
@@ -1075,6 +1081,7 @@ class WebAdminTests(unittest.TestCase):
 
             page_html = render_task_detail(store, task.id)
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/retry", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
 
             self.assertIsNotNone(claimed)
@@ -1178,6 +1185,7 @@ class WebAdminTests(unittest.TestCase):
 
             page_html = render_task_detail(store, task.id)
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/reprocess", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
 
             self.assertIn(f'action="/task/{task.id}/reprocess"', page_html)
@@ -1304,6 +1312,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="")
 
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/retry", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             events = store.list_events(task.id)
             claimed = store.claim_next_runnable("worker", now=0)
@@ -1315,7 +1324,6 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(updated.claimed_by, "")
             self.assertEqual(updated.next_run_at, 0)
             self.assertEqual(updated.retry_count, 0)
-            self.assertTrue(any(event["message"] == "手动触发重试" for event in events))
             self.assertTrue(any(event["message"] == "手动重试已入队" for event in events))
             self.assertIsNotNone(claimed)
             self.assertEqual(claimed.id, task.id)
@@ -1362,6 +1370,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="")
 
             responses = self._run_concurrent_posts(app, f"/task/{task.id}/retry")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             events = store.list_events(task.id)
 
@@ -1369,7 +1378,6 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(updated.status, TaskStatus.PENDING)
             self.assertEqual(updated.current_stage, TaskStage.STRM_READY)
             self.assertEqual(updated.retry_count, 0)
-            self.assertEqual(sum(event["message"] == "手动触发重试" for event in events), 1)
             self.assertEqual(sum(event["message"] == "手动重试已入队" for event in events), 1)
 
     def test_concurrent_reprocess_requests_apply_once(self):
@@ -1380,6 +1388,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="")
 
             responses = self._run_concurrent_posts(app, f"/task/{task.id}/reprocess")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             events = store.list_events(task.id)
 
@@ -1405,7 +1414,7 @@ class WebAdminTests(unittest.TestCase):
                 "restore",
                 "restore",
                 TaskStage.CLEANED,
-                ("Web 触发 STRM 恢复", "Web STRM 恢复已入队"),
+                ("Web STRM 恢复已入队",),
                 TaskStage.EMBY_CONFIRMED,
                 0,
                 None,
@@ -1423,8 +1432,10 @@ class WebAdminTests(unittest.TestCase):
                     issue = QualityIssue(issue_code, "problem", f"/{name}", task.id, name)
                     with patch("app.web.scan_task_quality", return_value=[issue]):
                         responses = self._run_concurrent_posts(app, path)
+                        drain_task_commands(store)
                 else:
                     responses = self._run_concurrent_posts(app, path)
+                    drain_task_commands(store)
                 updated = store.find_task(task.id)
                 events = store.list_events(task.id)
 
@@ -1438,7 +1449,7 @@ class WebAdminTests(unittest.TestCase):
     def test_worker_claim_after_eligibility_snapshot_makes_web_action_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             row = submission_store.upsert_submission(
                 bridge.ShareKey("claim-race", ""),
                 "https://115cdn.com/s/claim-race",
@@ -1476,6 +1487,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="", submission_store=submission_store)
             with patch.object(store, "find_task", side_effect=find_then_claim):
                 status, headers, body = app.handle_request("POST", f"/task/{task.id}/reprocess", {}, b"")
+                drain_task_commands(store)
             updated = store.find_task(task.id)
 
             self.assertEqual(status, 303)
@@ -1494,7 +1506,7 @@ class WebAdminTests(unittest.TestCase):
     def test_reprocess_endpoint_requeues_task_from_received_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             task = store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
             row = submission_store.upsert_submission(
                 bridge.ShareKey("abc", "1234"),
@@ -1535,6 +1547,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="", submission_store=submission_store)
 
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/reprocess", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             events = store.list_events(task.id)
             claimed = store.claim_next_runnable("worker", now=0)
@@ -1595,6 +1608,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="")
 
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/reprocess", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             events = store.list_events(task.id)
             claimed = store.claim_next_runnable("worker", now=0)
@@ -1621,6 +1635,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="")
 
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/emby", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             claimed = store.claim_next_runnable("worker", now=0)
             events = store.list_events(task.id)
@@ -1649,6 +1664,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="")
 
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/restore", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             claimed = store.claim_next_runnable("worker", now=0)
             events = store.list_events(task.id)
@@ -1662,9 +1678,8 @@ class WebAdminTests(unittest.TestCase):
             self.assertIsNotNone(claimed)
             self.assertEqual(claimed.current_stage, TaskStage.EMBY_CONFIRMED)
             self.assertEqual(
-                [(event["stage"], event["status"], event["message"]) for event in events[-2:]],
+                [(event["stage"], event["status"], event["message"]) for event in events[-1:]],
                 [
-                    (TaskStage.EMBY_CONFIRMED.value, TaskStatus.PENDING.value, "Web 触发 STRM 恢复"),
                     (TaskStage.EMBY_CONFIRMED.value, TaskStatus.PENDING.value, "Web STRM 恢复已入队"),
                 ],
             )
@@ -1696,7 +1711,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(root / "tasks.db"),
+                database_path=str(root / "tasks.db"),
                 quality_auto_enabled=False,
             )
             quality = QualityAutomation(store, config, allowed_roots=[root])
@@ -1741,7 +1756,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(root / "tasks.db"),
+                database_path=str(root / "tasks.db"),
                 quality_auto_enabled=False,
             )
             quality = QualityAutomation(store, config, allowed_roots=[root])
@@ -2259,6 +2274,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="")
 
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/retry", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             claimed = store.claim_next_runnable("worker", now=0)
 
@@ -2279,6 +2295,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="")
 
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/retry", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             claimed = store.claim_next_runnable("worker", now=0)
 
@@ -2296,7 +2313,7 @@ class WebAdminTests(unittest.TestCase):
             task_store = TaskStore(Path(tmp) / "tasks.db")
             existing = task_store.upsert_task("existing", "", "https://115cdn.com/s/existing")
             task_store.record_event(existing.id, TaskStage.RECEIVED, TaskStatus.PENDING, "已有 TaskStore 任务")
-            submission_store = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
             submission_store.upsert_submission(
                 bridge.ShareKey("dummy-1", ""),
                 "https://115cdn.com/s/dummy-1",
@@ -2410,7 +2427,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(Path(tmp) / "tasks.db"),
+                database_path=str(Path(tmp) / "tasks.db"),
                 quality_auto_enabled=True,
             )
             automation = QualityAutomation(store, config, allowed_roots=[Path(tmp) / "library"])
@@ -2436,7 +2453,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(Path(tmp) / "tasks.db"),
+                database_path=str(Path(tmp) / "tasks.db"),
             )
             automation = QualityAutomation(store, config, allowed_roots=[Path(tmp) / "library"])
             app = WebApp(store, quality_automation=automation)

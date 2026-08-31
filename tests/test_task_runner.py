@@ -13,8 +13,9 @@ from app.clients.p115 import P115RiskControlError
 from app.models import TaskStage, TaskStatus
 from app.task_actions import available_task_actions
 from app.task_runner import StageResult, TaskRunner
-from app.task_store import TaskStore
+from app.task_store import TaskStore, command_key
 from app.web import WebApp
+from tests.task_command_drain import drain_task_commands
 
 
 class FakeWorkflow:
@@ -99,9 +100,9 @@ class TerminateBeforeResultStore(TaskStore):
             self.requested = True
             self.request_task_termination(task_id, "Web", now=3)
 
-    def complete_claimed_stage(self, task_id, **kwargs):
-        self._request_termination(task_id)
-        return super().complete_claimed_stage(task_id, **kwargs)
+    def commit_claimed_result(self, task, worker_id, result, **kwargs):
+        self._request_termination(task.id)
+        return super().commit_claimed_result(task, worker_id, result, **kwargs)
 
     def record_event(self, task_id, stage, status, message, **kwargs):
         if kwargs.get("expected_claimed_by") and status == self.event_status:
@@ -116,11 +117,11 @@ class TaskRunnerTests(unittest.TestCase):
                 super().__init__(db_path)
                 self.failed = False
 
-            def complete_claimed_stage(self, task_id, **kwargs):
+            def commit_claimed_result(self, task, worker_id, result, **kwargs):
                 if not self.failed:
                     self.failed = True
                     raise sqlite3.OperationalError("database is temporarily locked")
-                return super().complete_claimed_stage(task_id, **kwargs)
+                return super().commit_claimed_result(task, worker_id, result, **kwargs)
 
         with tempfile.TemporaryDirectory() as tmp:
             store = FailFirstCompletionStore(Path(tmp) / "tasks.db")
@@ -149,9 +150,9 @@ class TaskRunnerTests(unittest.TestCase):
             runner = None
             claim_active_during_completion = False
 
-            def complete_claimed_stage(self, task_id, **kwargs):
+            def commit_claimed_result(self, task, worker_id, result, **kwargs):
                 self.claim_active_during_completion = self.runner._active_claim is not None
-                return super().complete_claimed_stage(task_id, **kwargs)
+                return super().commit_claimed_result(task, worker_id, result, **kwargs)
 
         with tempfile.TemporaryDirectory() as tmp:
             store = InspectCompletionStore(Path(tmp) / "tasks.db")
@@ -1189,11 +1190,11 @@ class TaskRunnerTests(unittest.TestCase):
                 super().__init__(db_path)
                 self.raced = False
 
-            def complete_claimed_stage(self, task_id, **kwargs):
+            def commit_claimed_result(self, task, worker_id, result, **kwargs):
                 if not self.raced:
                     self.raced = True
-                    self.reprocess_task(task_id, message="用户从头重跑", next_run_at=0)
-                return super().complete_claimed_stage(task_id, **kwargs)
+                    self.reprocess_task(task.id, message="用户从头重跑", next_run_at=0)
+                return super().commit_claimed_result(task, worker_id, result, **kwargs)
 
         with tempfile.TemporaryDirectory() as tmp:
             store = RaceStore(Path(tmp) / "tasks.db")
@@ -1690,6 +1691,7 @@ class TaskRunnerTests(unittest.TestCase):
             )
             app = WebApp(store, web_token="")
             app.handle_request("POST", f"/task/{task.id}/retry", {}, b"")
+            drain_task_commands(store)
             self.assertEqual(store.find_task(task.id).retry_count, 0)
             runner = TaskRunner(
                 store,
@@ -1707,6 +1709,24 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.error_summary, "STRM missing")
             self.assertEqual(updated.retry_count, 1)
             self.assertEqual(updated.claimed_by, "")
+
+    def test_restore_command_keeps_payload_target_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("restore-moved", "", "https://115cdn.com/s/restore-moved")
+            store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            store.enqueue_command(
+                task.id,
+                "restore",
+                {"target_stage": "moved", "message": "自动恢复缺失媒体库 STRM"},
+                idempotency_key=command_key("restore", task.id, "/library/Movie"),
+                actor="maintenance",
+                source="missing-library",
+            )
+            drain_task_commands(store)
+            updated = store.find_task(task.id)
+            self.assertEqual(updated.current_stage, TaskStage.MOVED)
+            self.assertEqual(updated.metadata.get("retry_stage"), TaskStage.MOVED.value)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from app.clients.p115 import P115RiskControlError, P115ShareUnavailableError
 from app.models import TaskStage
 from app.self_share_health import probe_invalid_self_shares, probe_invalid_self_shares_if_idle
 from app.task_store import TaskStore
+from tests.legacy_submission_store import SubmissionStore
 
 
 class FakeEmby:
@@ -66,7 +67,7 @@ class BatchInvalidShareP115:
 
 class InvalidShareCleanupTests(unittest.TestCase):
     def _row_with_share_strm(self, root):
-        store = bridge.SubmissionStore(Path(root) / "submissions.db")
+        store = SubmissionStore(Path(root) / "submissions.db")
         destination = Path(root) / "library" / "华语电影" / "S-示例电影-2026-[tmdb=123]"
         destination.mkdir(parents=True)
         (destination / "movie.strm").write_text("http://cms/s/owncode_1212_movie.mkv", encoding="utf-8")

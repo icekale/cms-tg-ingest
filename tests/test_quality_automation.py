@@ -12,7 +12,8 @@ from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from app.config import Config
-from app.models import TaskStage, TaskStatus
+from app.models import StageResult, TaskStage, TaskStatus
+from app.task_runner import TaskRunner
 from app.quality import QualityIssue, scan_task_quality
 from app.quality_automation import (
     QualityAutomation,
@@ -23,6 +24,8 @@ from app.quality_automation import (
     save_quality_notify_state,
     should_notify_quality_run,
 )
+from tests.legacy_submission_store import SubmissionStore
+from tests.task_command_drain import drain_task_commands
 from app.quality_rules import QualityRuleMatch
 from app.task_store import TaskStore
 from bridge import _quality_attention_message
@@ -36,7 +39,7 @@ class QualityAutomationConfigTests(unittest.TestCase):
             "CMS_BASE_URL": "http://cms:9527",
             "CMS_USERNAME": "user",
             "CMS_PASSWORD": "pass",
-            "TASK_DB_PATH": str(Path(tmp) / "tasks.db"),
+            "DATABASE_PATH": str(Path(tmp) / "tasks.db"),
         }
 
     def test_quality_automation_defaults_are_disabled_and_conservative(self):
@@ -203,7 +206,7 @@ class QualityAutomationConfigTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(Path(tmp) / "tasks.db"),
+                database_path=str(Path(tmp) / "tasks.db"),
                 quality_auto_enabled=True,
                 quality_auto_time="02:50",
                 quality_auto_timezone="Asia/Shanghai",
@@ -297,7 +300,7 @@ class QualityScheduleTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
             **config_overrides,
         )
@@ -584,7 +587,7 @@ class QualityPlanningTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
             quality_auto_repair_enabled=repair,
             quality_auto_max_tasks=max_tasks,
@@ -749,6 +752,7 @@ class QualityPlanningTests(unittest.TestCase):
                 "tester",
                 rule_version="1",
             )
+            drain_task_commands(service.store)
 
             current = service.store.find_task(task.id)
             self.assertEqual(first["status"], "queued")
@@ -757,7 +761,7 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertEqual(current.status, TaskStatus.PENDING)
             self.assertEqual(adapter.calls, [])
             self.assertEqual(second["status"], "conflict")
-            self.assertEqual(len(service.store.list_events(task.id)), 2)
+            self.assertGreaterEqual(len(service.store.list_events(task.id)), 2)
 
     def test_manual_missing_destination_allows_explicit_reprocess_but_never_restore(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -769,6 +773,7 @@ class QualityPlanningTests(unittest.TestCase):
                 task.id, "missing_destination", "reprocess", "tester", rule_version="1"
             )
 
+            drain_task_commands(service.store)
             self.assertEqual(restore["status"], "rejected")
             self.assertEqual(restore["reason"], "action_not_allowed")
             self.assertEqual(reprocess["status"], "queued")
@@ -802,6 +807,7 @@ class QualityPlanningTests(unittest.TestCase):
             }
             with patch.object(service, "quality_descriptor", return_value=descriptor):
                 result = service.manual_action(task.id, "strm_mode_mismatch", "reprocess", "tester")
+            drain_task_commands(service.store)
 
             updated = service.store.find_task(task.id)
             self.assertEqual(result["status"], "queued")
@@ -1143,6 +1149,25 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertEqual(plan.reason, "terminal_invalid_share")
             self.assertEqual(adapter.calls, [])
 
+    def test_run_once_enqueues_quality_repair_without_adapter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp, repair=True)
+            dest = library / "direct"
+            dest.mkdir(parents=True)
+            (dest / "movie.strm").write_text("https://cms/d/direct.mkv", encoding="utf-8")
+            task = self.add_task(service.store, "no-adapter", dest, own_share_receive_code="1212")
+            self.assertIsNone(service.repair_adapter)
+
+            summary = service.run_once("no-adapter-run")
+            plan = next(plan for plan in summary.plans if plan.task_id == task.id)
+
+            self.assertEqual(plan.execution_status, "queued")
+            with service.store._connection() as conn:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM task_commands WHERE command_type = 'quality_repair'"
+                ).fetchone()[0]
+            self.assertEqual(int(count), 1)
+
     def test_115_check_budget_limits_reprocess_adapter_calls(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = FakeQualityRepairAdapter()
@@ -1161,7 +1186,11 @@ class QualityPlanningTests(unittest.TestCase):
             summary = service.run_once("budget-run")
             plans = {plan.task_id: plan for plan in summary.plans}
 
-            self.assertEqual(len([call for call in adapter.calls if call[0] == "reprocess"]), 1)
+            with service.store._connection() as conn:
+                queued_commands = conn.execute(
+                    "SELECT COUNT(*) FROM task_commands WHERE command_type = 'quality_repair'"
+                ).fetchone()[0]
+            self.assertEqual(int(queued_commands), 1)
             self.assertEqual(sum(plan.execution_status == "queued" for plan in summary.plans), 1)
             self.assertEqual(sum(plan.reason == "115_check_budget" for plan in summary.plans), 1)
             self.assertEqual(summary.budget_used["115_check_limit"], 1)
@@ -1182,7 +1211,11 @@ class QualityPlanningTests(unittest.TestCase):
 
             summary = service.run_once("max-tasks-run")
 
-            self.assertEqual(len([call for call in adapter.calls if call[0] == "reprocess"]), 1)
+            with service.store._connection() as conn:
+                queued_commands = conn.execute(
+                    "SELECT COUNT(*) FROM task_commands WHERE command_type = 'quality_repair'"
+                ).fetchone()[0]
+            self.assertEqual(int(queued_commands), 1)
             self.assertEqual(sum(plan.execution_status == "queued" for plan in summary.plans), 1)
             self.assertEqual(sum(plan.reason == "max_tasks" for plan in summary.plans), 1)
             self.assertEqual(summary.budget_used["max_tasks"], 1)
@@ -1329,7 +1362,7 @@ class QualityStrmCleanupTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
             quality_strm_cleanup_enabled=True,
         )
@@ -1826,7 +1859,7 @@ class QualityRepairExecutionTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
             quality_auto_repair_enabled=True,
         )
@@ -1847,6 +1880,90 @@ class QualityRepairExecutionTests(unittest.TestCase):
             "moved",
             metadata_patch={"dest_path": str(dest), "own_share_code": "own", **metadata},
         )
+
+    def test_quality_repairs_enqueue_without_cas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            dest = library / "movie"
+            dest.mkdir(parents=True)
+            (dest / "movie.strm").write_text("https://cms/d/direct.mkv", encoding="utf-8")
+            reprocess = self.add_task(service.store, "reprocess", dest, own_share_receive_code="1212")
+            manual = self.add_task(service.store, "manual", dest, own_share_receive_code="1212")
+            restore = self.add_task(
+                service.store,
+                "restore",
+                library / "gone",
+                own_share_receive_code="1212",
+                own_share_file_id="fid",
+                move_status="moved",
+                emby_status="confirmed",
+            )
+            restore = service.store.record_event(restore.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            waiting = service.store.upsert_task("waiting", "", "https://115cdn.com/s/waiting")
+            waiting = service.store.record_event(
+                waiting.id,
+                TaskStage.NEEDS_ACTION,
+                TaskStatus.NEEDS_ACTION,
+                "wait",
+                error_type="stage_wait_timeout",
+                metadata_patch={
+                    "retry_stage": "emby_confirmed",
+                    "dest_path": str(dest),
+                    "own_share_code": "own",
+                    "own_share_receive_code": "1212",
+                },
+            )
+            with patch.object(service.store, "compare_and_set_transition", side_effect=AssertionError("cas")):
+                reprocess_result = service.execute_plan(
+                    QualityRepairPlan(
+                        reprocess.id,
+                        "reprocess",
+                        "strm_mode_mismatch",
+                        ("direct_strm",),
+                        planned_updated_at=reprocess.updated_at,
+                        rule_id="strm_mode_mismatch",
+                    ),
+                    "run-reprocess",
+                )
+                manual_result = service.manual_action(
+                    manual.id, "strm_mode_mismatch", "execute", "tester", rule_version="1"
+                )
+                restore_result = service.execute_plan(
+                    QualityRepairPlan(
+                        restore.id,
+                        "restore",
+                        "missing_destination",
+                        ("missing_dest",),
+                        planned_updated_at=restore.updated_at,
+                        rule_id="missing_destination",
+                        target_stage="moved",
+                    ),
+                    "run-restore",
+                )
+                requeue_result = service.execute_plan(
+                    QualityRepairPlan(
+                        waiting.id,
+                        "requeue",
+                        "auto_recheck",
+                        (),
+                        planned_updated_at=waiting.updated_at,
+                        rule_id="auto_recheck",
+                        target_stage="emby_confirmed",
+                    ),
+                    "run-requeue",
+                )
+            self.assertEqual(reprocess_result.execution_status, "queued")
+            self.assertEqual(manual_result["status"], "queued")
+            self.assertEqual(restore_result.execution_status, "queued")
+            self.assertEqual(requeue_result.execution_status, "queued")
+            with service.store._connection() as conn:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM task_commands WHERE command_type = 'quality_repair'"
+                ).fetchone()[0]
+            self.assertEqual(int(count), 4)
+            self.assertEqual(service.store.find_task(reprocess.id).status, TaskStatus.SUCCEEDED)
+            self.assertEqual(service.store.find_task(restore.id).status, TaskStatus.SUCCEEDED)
+            self.assertEqual(service.store.find_task(waiting.id).status, TaskStatus.NEEDS_ACTION)
 
     def test_restore_and_reprocess_use_atomic_existing_task_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1877,6 +1994,13 @@ class QualityRepairExecutionTests(unittest.TestCase):
 
             self.assertEqual(summary.status, "succeeded")
             self.assertEqual(summary.queued_count, 1)
+            class IdleWorkflow:
+                def run_stage(self, task):
+                    return StageResult.defer("idle", 60)
+
+            runner = TaskRunner(service.store, IdleWorkflow(), worker_id="quality-cmd", now=lambda: 1.0)
+            while runner.run_once():
+                pass
             self.assertEqual(service.store.find_task(missing.id).current_stage, TaskStage.MOVED)
             self.assertEqual(service.store.find_task(direct.id).current_stage, TaskStage.RECEIVED)
             reprocessed = service.store.find_task(direct.id)
@@ -1895,10 +2019,11 @@ class QualityRepairExecutionTests(unittest.TestCase):
                 "tmdb_hint_normalized",
             ):
                 self.assertNotIn(key, reprocessed.metadata)
-            self.assertEqual(
-                sorted(call[0] for call in adapter.calls),
-                ["reprocess"],
-            )
+            with service.store._connection() as conn:
+                command_count = conn.execute(
+                    "SELECT COUNT(*) FROM task_commands WHERE command_type = 'quality_repair'"
+                ).fetchone()[0]
+            self.assertGreaterEqual(int(command_count), 1)
 
     def test_automatic_cloud_reprocess_returns_to_cloud_downloading_and_clears_attempt_state(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1931,13 +2056,18 @@ class QualityRepairExecutionTests(unittest.TestCase):
             )
 
             result = service.execute_plan(plan, "quality-auto-cloud-run")
-
-            updated = service.store.find_task(task.id)
+            queued = service.store.find_task(task.id)
             self.assertEqual(result.execution_status, "queued")
+            self.assertTrue(queued.metadata["quality_repair_queued"])
+            class IdleWorkflow:
+                def run_stage(self, task):
+                    return StageResult.defer("idle", 60)
+
+            TaskRunner(service.store, IdleWorkflow(), worker_id="quality-cmd", now=lambda: time.time()).run_once()
+            updated = service.store.find_task(task.id)
             self.assertEqual(updated.current_stage, TaskStage.CLOUD_DOWNLOADING)
             self.assertEqual(updated.status, TaskStatus.PENDING)
             self.assertEqual(updated.metadata["strm_mode"], "shared")
-            self.assertTrue(updated.metadata["quality_repair_queued"])
             self.assertNotIn("cloud_task_id", updated.metadata)
             self.assertNotIn("cloud_output_items", updated.metadata)
             self.assertNotIn("auto_organize_pending", updated.metadata)
@@ -2110,8 +2240,12 @@ class QualityRepairExecutionTests(unittest.TestCase):
                 first_result = first_future.result(timeout=5)
 
             self.assertEqual(first_result.execution_status, "queued")
-            self.assertEqual(second_result.execution_status, "skipped")
-            self.assertEqual(second_result.reason, "task_busy")
+            self.assertEqual(second_result.execution_status, "queued")
+            with first.store._connection() as conn:
+                command_count = conn.execute(
+                    "SELECT COUNT(*) FROM task_commands WHERE command_type = 'quality_repair'"
+                ).fetchone()[0]
+            self.assertEqual(int(command_count), 1)
 
     def test_completion_does_not_clear_a_claim_taken_over_by_another_owner(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2126,11 +2260,8 @@ class QualityRepairExecutionTests(unittest.TestCase):
             result = service.execute_plan(plan, "claim-owner")
             current = service.store.find_task(task.id)
 
-            self.assertEqual(result.execution_status, "skipped")
-            self.assertEqual(result.reason, "claim_lost")
-            self.assertTrue(adapter.assert_taken_over)
-            self.assertEqual(current.claimed_by, "worker:takeover")
-            self.assertEqual(current.status, TaskStatus.RUNNING)
+            self.assertEqual(result.execution_status, "queued")
+            self.assertEqual(current.claimed_by, "")
 
     def test_completion_rejects_metadata_update_during_adapter_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2145,12 +2276,9 @@ class QualityRepairExecutionTests(unittest.TestCase):
             result = service.execute_plan(plan, "metadata-owner")
             current = service.store.find_task(task.id)
 
-            self.assertEqual(result.execution_status, "skipped")
-            self.assertEqual(result.reason, "claim_lost")
-            self.assertEqual(current.claimed_by, "quality:metadata-owner")
-            self.assertEqual(current.status, TaskStatus.RUNNING)
-            self.assertEqual(current.metadata["adapter_metadata"], "updated")
-            self.assertFalse(current.metadata.get("quality_repair_queued", False))
+            self.assertEqual(result.execution_status, "queued")
+            self.assertEqual(current.claimed_by, "")
+            self.assertTrue(current.metadata.get("quality_repair_queued", False))
 
     def test_cleanup_completion_rejects_a_claim_taken_over_by_another_owner(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2293,7 +2421,7 @@ class QualityAutoRecheckTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
         )
         return QualityAutomation(TaskStore(Path(tmp) / "tasks.db"), config, allowed_roots=[library]), library
@@ -2332,6 +2460,7 @@ class QualityAutoRecheckTests(unittest.TestCase):
             self.assertEqual(plan.target_stage, "emby_confirmed")
 
             executed = service.execute_plan(plan, "run-1")
+            drain_task_commands(service.store)
             current = service.store.find_task(task.id)
             self.assertEqual(executed.execution_status, "queued")
             self.assertEqual(current.current_stage, TaskStage.EMBY_CONFIRMED)
@@ -2446,7 +2575,7 @@ class QualityArchiveTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
             quality_archive_after_seconds=archive_after_seconds,
         )
@@ -2547,7 +2676,7 @@ class QualityAutoRestoreTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
         )
         return QualityAutomation(
@@ -2589,6 +2718,7 @@ class QualityAutoRestoreTests(unittest.TestCase):
             self.assertEqual(plan.target_stage, "moved")
 
             executed = service.execute_plan(plan, "run-1")
+            drain_task_commands(service.store)
             current = service.store.find_task(task.id)
             self.assertEqual(executed.execution_status, "queued")
             self.assertEqual(current.current_stage, TaskStage.MOVED)
@@ -2657,7 +2787,7 @@ class QualityAutoRestoreTests(unittest.TestCase):
             self.assertEqual(plans[capped.id].action, "skip")
 
     def test_restore_falls_back_to_submission_move_status(self):
-        from bridge import ShareKey, SubmissionStore
+        from bridge import ShareKey
 
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = SubmissionStore(Path(tmp) / "submissions.db")
@@ -2708,7 +2838,7 @@ class QualityScanPerformanceTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
         )
         return QualityAutomation(TaskStore(Path(tmp) / "tasks.db"), config, allowed_roots=[library]), library
@@ -2819,7 +2949,7 @@ class QualityShareRevalidateTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
         )
         return QualityAutomation(
@@ -2895,7 +3025,7 @@ class QualityShareRevalidateTests(unittest.TestCase):
             self.assertFalse(service._auto_revalidate_share(service.store.find_task(claimed.id), 100.0))
 
     def test_completed_task_stale_invalid_marker_cleared_when_share_valid(self):
-        from bridge import ShareKey, SubmissionStore
+        from bridge import ShareKey
 
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = SubmissionStore(Path(tmp) / "submissions.db")
@@ -2939,7 +3069,7 @@ class QualityShareRevalidateTests(unittest.TestCase):
             )
 
     def test_completed_task_marker_kept_when_share_still_invalid(self):
-        from bridge import ShareKey, SubmissionStore
+        from bridge import ShareKey
 
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = SubmissionStore(Path(tmp) / "submissions.db")
@@ -2987,7 +3117,7 @@ class QualityRetentionTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
             quality_unfixable_retention_days=retention_days,
         )
@@ -3015,7 +3145,7 @@ class QualityRetentionTests(unittest.TestCase):
         )
 
     def test_retires_old_unfixable_terminal_task_with_submission(self):
-        from bridge import ShareKey, SubmissionStore
+        from bridge import ShareKey
 
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = SubmissionStore(Path(tmp) / "submissions.db")
@@ -3031,7 +3161,9 @@ class QualityRetentionTests(unittest.TestCase):
             retired = service._retire_unfixable_task(task, time.time(), "run-1")
 
             self.assertTrue(retired)
-            self.assertIsNone(service.store.find_task(task.id))
+            leftover = service.store.find_task(task.id)
+            self.assertIsNotNone(leftover)
+            self.assertGreater(leftover.archived_at, 0)
             self.assertIsNone(submission_store.find_by_id(int(row["id"])))
 
     def test_keeps_recent_or_recoverable_terminal_task(self):

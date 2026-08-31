@@ -181,11 +181,8 @@ def _check_required_env(env: Mapping[str, str]) -> CheckItem:
 def _check_optional_env(env: Mapping[str, str]) -> CheckItem:
     warnings: list[str] = []
     workflow = _env_value(env, "WORKFLOW_MODE") or "direct"
-    task_engine_enabled = _env_bool(env, "TASK_ENGINE_ENABLED")
     if workflow not in {"direct", "self_share_sync"}:
         warnings.append("WORKFLOW_MODE should be direct or self_share_sync")
-    if task_engine_enabled and workflow != "self_share_sync":
-        warnings.append("Task engine currently requires WORKFLOW_MODE=self_share_sync")
     if workflow == "self_share_sync" and not _env_value(env, "P115_COOKIE_PATH"):
         warnings.append("P115_COOKIE_PATH is required for self_share_sync")
     if workflow == "self_share_sync" and not _env_value(env, "SELF_SHARE_RECEIVE_CID"):
@@ -214,7 +211,7 @@ def _check_optional_env(env: Mapping[str, str]) -> CheckItem:
                 warnings.append("WEB_PORT must be between 1 and 65535")
         except ValueError:
             warnings.append("WEB_PORT must be an integer")
-    if task_engine_enabled and _env_value(env, "TASK_WORKER_INTERVAL_SECONDS"):
+    if _env_value(env, "TASK_WORKER_INTERVAL_SECONDS"):
         try:
             interval = float(_env_value(env, "TASK_WORKER_INTERVAL_SECONDS"))
             if interval <= 0:
@@ -275,14 +272,11 @@ def _check_runtime_safety(env: Mapping[str, str]) -> CheckItem:
 
 def _check_filesystem(env: Mapping[str, str], filesystem: Filesystem) -> CheckItem:
     problems: list[str] = []
-    db_path = Path(_env_value(env, "DB_PATH") or "/data/submissions.db")
-    if not filesystem.exists(db_path.parent):
-        problems.append(f"DB directory does not exist: {db_path.parent}")
-    task_db_path = Path(_env_value(env, "TASK_DB_PATH") or "/data/tasks.db")
-    if not filesystem.exists(task_db_path.parent):
-        problems.append(f"TASK_DB directory does not exist: {task_db_path.parent}")
-    elif _env_bool(env, "TASK_ENGINE_ENABLED") and not filesystem.is_writable(task_db_path.parent):
-        problems.append(f"TASK_DB directory is not writable: {task_db_path.parent}")
+    database_path = Path(_env_value(env, "DATABASE_PATH") or "/data/cms-tg-ingest.db")
+    if not filesystem.exists(database_path.parent):
+        problems.append(f"database directory does not exist: {database_path.parent}")
+    elif not filesystem.is_writable(database_path.parent):
+        problems.append(f"database directory is not writable: {database_path.parent}")
     workflow = _env_value(env, "WORKFLOW_MODE") or "direct"
     if _env_bool(env, "HDHIVE_ENABLED"):
         token_path = Path(_env_value(env, "HDHIVE_TOKEN_CONFIG_PATH") or "/config/cms-config/hdhive-openapi.json")
@@ -380,7 +374,7 @@ def _check_hdhive_subscriptions(env: Mapping[str, str], filesystem: Filesystem) 
         timezone = ZoneInfo("Asia/Shanghai")
         problems.append("HDHIVE_SUBSCRIPTION_TIMEZONE must be a valid IANA timezone")
 
-    db_path = Path(_env_value(env, "TASK_DB_PATH") or "/data/tasks.db")
+    db_path = Path(_env_value(env, "DATABASE_PATH") or "/data/cms-tg-ingest.db")
     active, pending, database_status = _hdhive_subscription_counts(db_path)
     if database_status.startswith("error:"):
         problems.append(f"HDHive subscription database cannot be read: {database_status[6:]}")
@@ -517,6 +511,47 @@ def _check_cms_os_strm_guard(
     )
 
 
+def _check_unified_database(env: Mapping[str, str], filesystem: Filesystem) -> CheckItem:
+    raw = _env_value(env, "DATABASE_PATH")
+    if not raw:
+        return CheckItem("unified_database", True, "unified database not configured")
+    path = Path(raw)
+    if not filesystem.is_file(path):
+        return CheckItem("unified_database", False, f"unified database does not exist: {path}")
+    try:
+        from app.unified_migration import validate_unified_database
+        from app.sqlite_utils import sqlite_quick_check
+
+        result = validate_unified_database(path)
+        sqlite_quick_check(path)
+        with closing(_read_only_connection(path)) as connection:
+            lease = connection.execute(
+                "SELECT owner, expires_at FROM runner_leases WHERE name = 'task_runner'"
+            ).fetchone()
+            pending = connection.execute(
+                "SELECT COUNT(*) FROM task_commands WHERE status = 'pending'"
+            ).fetchone()[0]
+            heartbeat = connection.execute(
+                "SELECT updated_at FROM runtime_state WHERE key = 'task_runner'"
+            ).fetchone()
+    except Exception as exc:
+        return CheckItem("unified_database", False, f"unified database invalid: {exc}")
+    lease_owner = str(lease["owner"]) if lease else "none"
+    lease_expires = float(lease["expires_at"] or 0) if lease else 0
+    heartbeat_at = float(heartbeat["updated_at"] or 0) if heartbeat else 0
+    return CheckItem(
+        "unified_database",
+        True,
+        (
+            f"schema={result['schema_version']} migration_id={result['migration_id']} "
+            f"write_gate={result['write_gate']} legacy_import_executable={result['legacy_import_executable']} "
+            f"scheduled_runnable={result.get('scheduled_runnable', 0)} "
+            f"lease_owner={lease_owner} lease_expires={lease_expires:.0f} "
+            f"runner_heartbeat={heartbeat_at:.0f} pending_commands={int(pending or 0)} integrity=ok"
+        ),
+    )
+
+
 def run_checks(
     env: Mapping[str, str] | None = None,
     filesystem: Filesystem | None = None,
@@ -533,6 +568,7 @@ def run_checks(
         _check_runtime_safety(env),
         _check_filesystem(env, filesystem),
         _check_hdhive_subscriptions(env, filesystem),
+        _check_unified_database(env, filesystem),
         _check_cms_strm_guard(env, log_reader=log_reader, logs=logs),
         _check_cms_direct_strm_guard(env, log_reader=log_reader, logs=logs),
         _check_cms_os_strm_guard(env, log_reader=log_reader, logs=logs),

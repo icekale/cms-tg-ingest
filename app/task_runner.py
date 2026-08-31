@@ -3,16 +3,18 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import socket
+import sqlite3
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
-from enum import Enum
+from pathlib import Path
+from dataclasses import replace
 from typing import Callable, Protocol
 
 from .clients.p115 import P115RiskControlError
-from .models import TaskSnapshot, TaskStage, TaskStatus, next_stage_after_success
+from .models import StageOutcome, StageResult, TaskSnapshot, TaskStage, TaskStatus, next_stage_after_success
 from .strm_mode import effective_task_strm_mode
 from .task_store import TaskStore
 
@@ -169,45 +171,6 @@ def _defer_delay(base_delay_seconds: float, count: int) -> float:
     return max(base_delay_seconds, 120.0)
 
 
-class StageOutcome(str, Enum):
-    COMPLETE = "complete"
-    DEFER = "defer"
-    NEEDS_ACTION = "needs_action"
-    FAILED = "failed"
-
-
-@dataclass(frozen=True)
-class StageResult:
-    outcome: StageOutcome
-    message: str
-    metadata: dict[str, object] = field(default_factory=dict)
-    delay_seconds: float = 0
-    error_type: str = ""
-    error_detail: str = ""
-
-    @classmethod
-    def complete(cls, message: str, metadata: dict[str, object] | None = None) -> "StageResult":
-        return cls(StageOutcome.COMPLETE, message, metadata or {})
-
-    @classmethod
-    def defer(cls, message: str, delay_seconds: float, metadata: dict[str, object] | None = None) -> "StageResult":
-        return cls(StageOutcome.DEFER, message, metadata or {}, delay_seconds=max(1.0, float(delay_seconds)))
-
-    @classmethod
-    def needs_action(cls, message: str, metadata: dict[str, object] | None = None) -> "StageResult":
-        return cls(StageOutcome.NEEDS_ACTION, message, metadata or {}, error_type="needs_action")
-
-    @classmethod
-    def failed(
-        cls,
-        message: str,
-        error_type: str = "stage_failed",
-        error_detail: str = "",
-        metadata: dict[str, object] | None = None,
-    ) -> "StageResult":
-        return cls(StageOutcome.FAILED, message, metadata or {}, error_type=error_type, error_detail=error_detail)
-
-
 class TaskWorkflow(Protocol):
     def run_stage(self, task: TaskSnapshot) -> StageResult:
         raise NotImplementedError
@@ -244,6 +207,7 @@ class TaskRunner:
         self._p115_risk_cooldown_until = self._load_p115_risk_cooldown()
         self._last_heartbeat_at = 0.0
         self._last_claim_attempt_at = 0.0
+        self._runner_lease_token = ""
 
     def _load_p115_risk_cooldown(self) -> float:
         try:
@@ -314,6 +278,8 @@ class TaskRunner:
             self._record_activity()
             try:
                 self._renew_active_claim()
+                if self._runner_lease_token:
+                    self.store.renew_runner_lease(self.worker_id, self._runner_lease_token)
             except Exception:
                 LOG.warning("Failed to renew active task claim; will retry", exc_info=True)
             self._stop.wait(_HEARTBEAT_INTERVAL_SECONDS)
@@ -377,6 +343,11 @@ class TaskRunner:
 
     def run_once(self) -> bool:
         self._last_claim_attempt_at = self.now()
+        claim_command = getattr(self.store, "claim_next_command", None)
+        if callable(claim_command):
+            command = claim_command(self.worker_id, now=self.now())
+            if isinstance(command, dict):
+                return self._run_command(command)
         if self._claim_release_pending:
             self.store.clear_worker_claims(self.worker_id, now=self.now())
             self._claim_release_pending = False
@@ -416,6 +387,9 @@ class TaskRunner:
             return True
         p115_before = _p115_request_count(self.p115_client)
         self._set_active_claim(task)
+        bind_claim = getattr(getattr(self.workflow, "store", None), "bind_claim", None)
+        if callable(bind_claim):
+            bind_claim(task)
         try:
             result = self.workflow.run_stage(task)
         except P115RiskControlError as exc:
@@ -494,9 +468,36 @@ class TaskRunner:
                 clear_claim=True,
             )
             return True
+        finally:
+            clear_claim = getattr(getattr(self.workflow, "store", None), "clear_claim", None)
+            if callable(clear_claim):
+                clear_claim()
         if self._settle_requested_termination(task):
             return True
-        self._apply_result(task, result, p115_before=p115_before, p115_after=_p115_request_count(self.p115_client))
+        try:
+            self._apply_result(task, result, p115_before=p115_before, p115_after=_p115_request_count(self.p115_client))
+        except sqlite3.OperationalError:
+            raise
+        except Exception as exc:
+            LOG.exception("Task stage failed task_id=%s stage=%s", task.id, task.current_stage.value)
+            error_summary = str(exc) or exc.__class__.__name__
+            if self._settle_requested_termination(
+                task,
+                error_type="stage_exception",
+                error_summary=error_summary,
+                error_detail=repr(exc),
+            ):
+                return True
+            self._record_claimed_event(
+                task,
+                task.current_stage,
+                TaskStatus.FAILED,
+                error_summary,
+                error_type="stage_exception",
+                error_summary=error_summary,
+                error_detail=repr(exc),
+                clear_claim=True,
+            )
         return True
 
     def _settle_requested_termination(
@@ -672,23 +673,21 @@ class TaskRunner:
             metadata_delete_keys = _DEFER_METADATA_KEYS
             if task.current_stage == TaskStage.CLEANED and task.metadata.get("quality_repair_queued"):
                 metadata_delete_keys += QUALITY_REPAIR_METADATA_KEYS
-            committed = self.store.complete_claimed_stage(
-                task.id,
-                expected_stage=task.current_stage,
-                expected_claimed_by=self.worker_id,
-                expected_claimed_at=task.claimed_at,
-                expected_claim_token=task.claim_token,
-                expected_updated_at=task.updated_at,
-                success_message=result.message,
-                success_metadata=_without_defer_metadata(
-                    result.metadata | timing_metadata | p115_metadata | observability_metadata
+            committed = self.store.commit_claimed_result(
+                task,
+                self.worker_id,
+                replace(
+                    result,
+                    metadata=_without_defer_metadata(
+                        result.metadata | timing_metadata | p115_metadata | observability_metadata
+                    ),
                 ),
-                metadata_delete_keys=metadata_delete_keys,
                 next_stage=next_stage_after_success(
                     task.current_stage,
                     effective_task_strm_mode(task),
                 ),
                 next_run_at=now,
+                metadata_delete_keys=metadata_delete_keys,
             )
             if committed is None:
                 LOG.warning("Discarded stale task result task_id=%s", task.id)
@@ -824,9 +823,166 @@ class TaskRunner:
             clear_claim=True,
         )
 
+    def _invalidate_share(self, task_id: int) -> None:
+        facts = self.store.workflow_facts(int(task_id)) if hasattr(self.store, "workflow_facts") else {}
+        dest_text = str((facts or {}).get("dest_path") or "").strip()
+        move_config = getattr(self.workflow, "move_config", None)
+        message = "115 自有分享已失效"
+        if dest_text and move_config is not None:
+            from .config import is_relative_to, safe_resolve
+            from .media.strm import validate_self_share_strm_destination
+
+            dest = safe_resolve(Path(dest_text))
+            library_roots = [safe_resolve(Path(path)) for path in (move_config.library_roots or {}).values()]
+            if dest.is_dir() and any(is_relative_to(dest, root) for root in library_roots):
+                issue = validate_self_share_strm_destination(dest, facts)
+                if not issue:
+                    shutil.rmtree(dest, ignore_errors=True)
+        mark = getattr(self.store, "mark_invalid_share_cleaned", None)
+        if callable(mark):
+            mark(int(task_id), message)
+        self.store.record_event(
+            int(task_id),
+            TaskStage.NEEDS_ACTION,
+            TaskStatus.NEEDS_ACTION,
+            message,
+            error_type="invalid_share",
+            error_summary=message,
+            clear_claim=True,
+            next_run_at=-1,
+        )
+
+    def _run_command(self, command: dict) -> bool:
+        command_id = int(command["id"])
+        token = str(command.get("claim_token") or "")
+        task_id = int(command.get("task_id") or 0)
+        command_type = str(command.get("command_type") or "")
+        try:
+            current = self.store.find_task(task_id)
+            if command_type != "terminate" and current is not None and str(current.claimed_by or "").strip():
+                self.store.complete_command(command_id, token, result={"applied": False, "reason": "claimed"})
+                return True
+            payload = {}
+            raw_payload = command.get("payload_json") or command.get("payload") or {}
+            if isinstance(raw_payload, str):
+                try:
+                    payload = json.loads(raw_payload)
+                except json.JSONDecodeError:
+                    payload = {}
+            elif isinstance(raw_payload, dict):
+                payload = raw_payload
+            extra_patch = None
+            extra_delete: tuple[str, ...] = ()
+            if command_type == "retry":
+                stage_name = str(payload.get("target_stage") or "")
+                stage = TaskStage(stage_name) if stage_name else None
+                self.store.enqueue_task(
+                    task_id,
+                    stage,
+                    message=str(payload.get("message") or "等待执行"),
+                    next_run_at=0,
+                    metadata_patch=extra_patch,
+                    metadata_delete_keys=extra_delete,
+                )
+            elif command_type == "reprocess":
+                self.store.reprocess_task(task_id, message=str(payload.get("message") or "从头重跑已入队"), next_run_at=0)
+            elif command_type == "terminate":
+                self.store.request_task_termination(task_id, str(command.get("actor") or "command"))
+            elif command_type in {"emby_check", "restore", "resume_organizing"}:
+                stage_name = str(payload.get("target_stage") or "")
+                stage = {
+                    "emby_check": TaskStage.EMBY_CONFIRMED,
+                    "restore": TaskStage.EMBY_CONFIRMED,
+                    "resume_organizing": TaskStage.ORGANIZING,
+                }[command_type]
+                if stage_name:
+                    stage = TaskStage(stage_name)
+                if command_type == "restore" and current is not None:
+                    extra_patch = {
+                        "retry_from_stage": current.current_stage.value,
+                        "retry_stage": stage.value,
+                    }
+                self.store.enqueue_task(
+                    task_id,
+                    stage,
+                    message=str(payload.get("message") or "等待执行"),
+                    next_run_at=0,
+                    metadata_patch=extra_patch,
+                    metadata_delete_keys=extra_delete,
+                )
+            elif command_type == "repair_move":
+                self.store.enqueue_task(task_id, TaskStage.STRM_READY, next_run_at=0)
+            elif command_type == "invalidate_share":
+                self._invalidate_share(task_id)
+            elif command_type == "quality_repair":
+                action = str(payload.get("action") or "")
+                message = str(payload.get("message") or "自动巡检已排队")
+                if action == "reprocess":
+                    self.store.reprocess_task(
+                        task_id,
+                        message=message,
+                        next_run_at=0,
+                        metadata_patch={"quality_repair_queued": True},
+                    )
+                elif action == "requeue":
+                    stage_name = str(payload.get("target_stage") or "")
+                    stage = TaskStage(stage_name) if stage_name else None
+                    attempts = 0
+                    if current is not None:
+                        try:
+                            attempts = int(current.metadata.get("quality_auto_recheck_count") or 0)
+                        except (TypeError, ValueError):
+                            attempts = 0
+                    now = self.now()
+                    self.store.enqueue_task(
+                        task_id,
+                        stage,
+                        message=message,
+                        next_run_at=0,
+                        metadata_patch={
+                            "quality_auto_recheck_count": attempts + 1,
+                            "quality_auto_recheck_last_at": now,
+                            "quality_auto_recheck_next_at": now + 6 * 60 * 60,
+                            "quality_auto_recheck_target_stage": stage.value if stage else "",
+                            "quality_repair_action": "requeue",
+                            "quality_rule_id": str(payload.get("rule_id") or "auto_recheck"),
+                        },
+                    )
+                elif action == "restore":
+                    from_stage = current.current_stage.value if current is not None else TaskStage.CLEANED.value
+                    self.store.enqueue_task(
+                        task_id,
+                        TaskStage.MOVED,
+                        message=message,
+                        next_run_at=0,
+                        metadata_patch={
+                            "retry_from_stage": from_stage,
+                            "retry_stage": TaskStage.MOVED.value,
+                            "quality_repair_queued": True,
+                            "quality_repair_action": "restore",
+                        },
+                    )
+            else:
+                self.store.fail_command(command_id, token, "unsupported command")
+                return True
+            self.store.complete_command(command_id, token, result={"applied": True})
+        except Exception as exc:
+            fail = getattr(self.store, "fail_command", None)
+            if callable(fail):
+                fail(command_id, token, str(exc))
+            else:
+                raise
+        return True
+
     def start(self) -> threading.Thread:
         if self._thread and self._thread.is_alive():
             return self._thread
+        acquire = getattr(self.store, "acquire_runner_lease", None)
+        if callable(acquire):
+            token = acquire(self.worker_id)
+            if not token:
+                raise RuntimeError("another TaskRunner already holds the runner lease")
+            self._runner_lease_token = str(token)
         self._stop.clear()
         self._last_heartbeat_at = 0.0
         self._thread = threading.Thread(target=self.run_forever, daemon=True)
@@ -837,6 +993,11 @@ class TaskRunner:
 
     def stop(self, join_timeout: float = 5) -> None:
         self._stop.set()
+        if self._runner_lease_token:
+            release = getattr(self.store, "release_runner_lease", None)
+            if callable(release):
+                release(self.worker_id, self._runner_lease_token)
+            self._runner_lease_token = ""
         deadline = time.monotonic() + max(0.0, float(join_timeout))
         for thread in (self._thread, self._heartbeat_thread):
             if thread and thread is not threading.current_thread():

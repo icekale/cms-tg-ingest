@@ -1,5 +1,6 @@
 from pathlib import Path
 import unittest
+from tests.legacy_submission_store import SubmissionStore
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -11,7 +12,7 @@ class V02DocsTests(unittest.TestCase):
         self.assertIn("任务引擎", readme)
         self.assertIn("Web 管理页", readme)
         self.assertIn("WEB_PORT", readme)
-        self.assertIn("TASK_DB_PATH", readme)
+        self.assertIn("DATABASE_PATH", readme)
         self.assertIn("SELF_SHARE_REVIEW_GRACE_SECONDS", readme)
         self.assertIn("SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS", readme)
         self.assertIn("SELF_SHARE_REVIEW_LIST_CACHE_SECONDS", readme)
@@ -19,7 +20,7 @@ class V02DocsTests(unittest.TestCase):
     def test_env_example_contains_v02_settings(self):
         env = (ROOT / ".env.example").read_text(encoding="utf-8")
 
-        self.assertIn("TASK_DB_PATH=/data/tasks.db", env)
+        self.assertIn("DATABASE_PATH=/data/cms-tg-ingest.db", env)
         self.assertIn("WEB_ENABLED=true", env)
         self.assertIn("WEB_PORT=8787", env)
         self.assertIn("TASK_MAX_RETRIES=3", env)
@@ -47,10 +48,9 @@ class V02DocsTests(unittest.TestCase):
     def test_readme_documents_cleanup_after_share_validation(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-        self.assertIn("在 `TASK_ENGINE_ENABLED=true` 的 TaskRunner 路径中", readme)
+        self.assertIn("TaskRunner", readme)
         self.assertIn("默认 24 小时观察期结束", readme)
         self.assertIn("后续 STRM 只使用自己的分享链接生成", readme)
-        self.assertIn("旧 SubmissionStore + 轮询路径仅保留兼容处理，不会自动删除源文件", readme)
         self.assertNotIn("只会在 STRM 已移动且 Emby 确认入库后删除", readme)
 
     def test_readme_leads_with_current_product_workflow(self):
@@ -67,9 +67,7 @@ class V02DocsTests(unittest.TestCase):
     def test_env_example_scopes_cleanup_safety_to_task_engine(self):
         env = (ROOT / ".env.example").read_text(encoding="utf-8")
 
-        self.assertIn("TASK_ENGINE_ENABLED=true", env)
-        self.assertIn("source cleanup is delayed", env)
-        self.assertIn("legacy SubmissionStore path does not automatically delete sources", env)
+        self.assertIn("Source cleanup is delayed", env)
         self.assertNotIn("deletes the 115 source immediately", env)
 
     def test_docs_describe_115_pressure_guards(self):

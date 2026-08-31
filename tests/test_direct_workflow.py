@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ from app.task_runner import StageOutcome, TaskRunner
 from app.task_store import TaskStore, operation_scope
 from app.workflows.direct import DirectTaskWorkflow
 import bridge
+from tests.legacy_submission_store import SubmissionStore
 
 
 class CmsFake:
@@ -108,7 +110,7 @@ class DirectWorkflowTests(unittest.TestCase):
 
     def _workflow(self, tmp, emby=None, source_roots=None, library_roots=None):
         cms = CmsFake()
-        submissions = bridge.SubmissionStore(Path(tmp) / "submissions.db")
+        submissions = SubmissionStore(Path(tmp) / "submissions.db")
         task_store = TaskStore(Path(tmp) / "tasks.db")
         move_config = MoveConfig(
             source_roots=source_roots or [],
@@ -571,6 +573,100 @@ class DirectWorkflowTests(unittest.TestCase):
         self.assertEqual(result.outcome, StageOutcome.COMPLETE)
         self.assertEqual(result.metadata["dest_path"], str(destination.resolve()))
         self.assertEqual(stored["move_status"], "moved")
+
+    def test_direct_move_checkpoint_waits_for_runner_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_root = root / "source"
+            library_root = root / "library"
+            source = source_root / "Example-[tmdb=123]"
+            source.mkdir(parents=True)
+            (source / "movie.strm").write_text("https://115.com/d/file-id/movie.mkv", encoding="utf-8")
+            workflow, _cms, submissions = self._workflow(
+                tmp,
+                source_roots=[source_root],
+                library_roots={"欧美电影": library_root},
+            )
+            tasks = TaskStore(root / "tasks.db")
+            row = self._row(
+                submissions,
+                {"title": "Example", "category": "欧美电影", "tmdb_id": "123", "type": "movie"},
+            )
+            claimed = self._task(
+                tasks,
+                TaskStage.MOVED,
+                row["id"],
+                {"source_path": str(source), "direct_strm": True, "strm_mode": "direct"},
+            )
+
+            result = workflow.run_stage(claimed)
+            facts_before = tasks.workflow_facts(claimed.id)
+            committed = tasks.commit_claimed_result(
+                claimed,
+                "worker",
+                result,
+                next_stage=TaskStage.EMBY_CONFIRMED,
+                next_run_at=2.0,
+            )
+            facts_after = tasks.workflow_facts(claimed.id)
+
+        self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+        self.assertEqual(result.checkpoint.move.get("move_status"), "moved")
+        self.assertEqual(facts_before.get("move_status"), "")
+        self.assertEqual(committed.current_stage, TaskStage.EMBY_CONFIRMED)
+        self.assertEqual(facts_after["move_status"], "moved")
+
+    def test_direct_stale_claim_cannot_apply_move_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_root = root / "source"
+            library_root = root / "library"
+            source = source_root / "Example-[tmdb=123]"
+            source.mkdir(parents=True)
+            (source / "movie.strm").write_text("https://115.com/d/file-id/movie.mkv", encoding="utf-8")
+            workflow, _cms, submissions = self._workflow(
+                tmp,
+                source_roots=[source_root],
+                library_roots={"欧美电影": library_root},
+            )
+            tasks = TaskStore(root / "tasks.db")
+            row = self._row(
+                submissions,
+                {"title": "Example", "category": "欧美电影", "tmdb_id": "123", "type": "movie"},
+            )
+            claimed = self._task(
+                tasks,
+                TaskStage.MOVED,
+                row["id"],
+                {"source_path": str(source), "direct_strm": True, "strm_mode": "direct"},
+            )
+            stale = claimed
+            tasks.record_event(
+                claimed.id,
+                claimed.current_stage,
+                TaskStatus.RUNNING,
+                "heartbeat",
+                expected_stage=claimed.current_stage,
+                expected_status=TaskStatus.RUNNING,
+                expected_claimed_by="worker",
+                expected_claimed_at=claimed.claimed_at,
+                expected_claim_token=claimed.claim_token,
+                expected_updated_at=claimed.updated_at,
+            )
+            result = workflow.run_stage(stale)
+            applied = tasks.commit_claimed_result(
+                stale,
+                "worker",
+                result,
+                next_stage=TaskStage.EMBY_CONFIRMED,
+                next_run_at=2.0,
+            )
+            with sqlite3.connect(tasks.db_path) as conn:
+                move_row = conn.execute("SELECT move_status FROM task_moves WHERE task_id = ?", (claimed.id,)).fetchone()
+
+        self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+        self.assertIsNone(applied)
+        self.assertIsNone(move_row)
 
     def test_direct_workflow_rejects_shared_mode_before_cms_submission(self):
         with tempfile.TemporaryDirectory() as tmp:
