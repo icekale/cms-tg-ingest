@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .models import TaskOperation, TaskSnapshot, TaskStage, TaskStatus
+from .models import StageResult, TaskOperation, TaskSnapshot, TaskStage, TaskStatus
 from .quality_rules import quality_attempt_count
 from .self_share_settings import normalize_receive_cid, normalize_self_share_review_mode
 from .strm_mode import is_strm_mode_locked, normalize_strm_mode
@@ -280,6 +280,8 @@ class TaskStore:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 30000")
         return conn
 
     @contextmanager
@@ -295,31 +297,10 @@ class TaskStore:
             conn.close()
 
     def _init_db(self) -> None:
+        from .database import Database
+
+        Database(self.db_path).initialize()
         with self._connection() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS tasks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    share_code TEXT NOT NULL,
-                    receive_code TEXT NOT NULL DEFAULT '',
-                    source_type TEXT NOT NULL DEFAULT 'share',
-                    source_key TEXT NOT NULL DEFAULT '',
-                    url TEXT NOT NULL,
-                    title TEXT NOT NULL DEFAULT '',
-                    tmdb_id TEXT NOT NULL DEFAULT '',
-                    category TEXT NOT NULL DEFAULT '',
-                    current_stage TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    error_type TEXT NOT NULL DEFAULT '',
-                    error_summary TEXT NOT NULL DEFAULT '',
-                    retry_count INTEGER NOT NULL DEFAULT 0,
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL,
-                    UNIQUE(share_code, receive_code)
-                )
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks(updated_at)")
             self._ensure_columns(conn)
             conn.execute(
                 """
@@ -1124,7 +1105,7 @@ class TaskStore:
                     current_stage, status, metadata_json, created_at, updated_at
                 )
                 VALUES (?, ?, 'share', ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(share_code, receive_code) DO UPDATE SET
+                ON CONFLICT(source_type, source_key) DO UPDATE SET
                     url = CASE WHEN tasks.claimed_by = '' THEN excluded.url ELSE tasks.url END,
                     chat_id = CASE
                         WHEN tasks.claimed_by = '' THEN COALESCE(NULLIF(excluded.chat_id, ''), tasks.chat_id)
@@ -1196,7 +1177,7 @@ class TaskStore:
                     current_stage, status, metadata_json, created_at, updated_at
                 )
                 VALUES (?, ?, 'share', ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(share_code, receive_code) DO NOTHING
+                ON CONFLICT(source_type, source_key) DO NOTHING
                 """,
                 (
                     share_code,
@@ -2355,6 +2336,158 @@ class TaskStore:
             )
             result = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return self._snapshot(result) if result else None
+
+    _FACT_COLUMNS = {
+        "task_media": frozenset(
+            {
+                "cms_task_id",
+                "title",
+                "media_type",
+                "tmdb_id",
+                "category",
+                "recognition_status",
+                "recognition_json",
+                "poster_path",
+                "backdrop_path",
+                "release_date",
+                "genres_json",
+            }
+        ),
+        "task_shares": frozenset(
+            {
+                "file_id",
+                "folder_id",
+                "own_share_code",
+                "own_share_receive_code",
+                "canonical_name",
+                "alias_name",
+                "canonical_manifest_json",
+                "validation_status",
+                "validation_error",
+                "share_sync_status",
+                "created_at",
+            }
+        ),
+        "task_moves": frozenset(
+            {
+                "source_path",
+                "dest_path",
+                "move_status",
+                "move_error",
+                "started_at",
+                "finished_at",
+                "validated_dest_path",
+                "validated_at",
+            }
+        ),
+        "task_emby": frozenset(
+            {"status", "item_id", "title", "path", "library", "refresh_requested_at", "confirmed_at"}
+        ),
+        "task_cleanups": frozenset({"target_id", "status", "error", "attempted_at", "finished_at"}),
+        "task_probes": frozenset({"last_probe_at", "invalid_at", "invalid_reason", "review_status", "next_check_at"}),
+    }
+
+    def _apply_checkpoint(self, conn: sqlite3.Connection, task_id: int, result: StageResult) -> None:
+        checkpoint = result.checkpoint
+        mapping = {
+            "task_media": checkpoint.media,
+            "task_shares": checkpoint.share,
+            "task_moves": checkpoint.move,
+            "task_emby": checkpoint.emby,
+            "task_cleanups": checkpoint.cleanup,
+            "task_probes": checkpoint.probe,
+        }
+        for table, payload in mapping.items():
+            if not payload:
+                continue
+            unknown = set(payload) - self._FACT_COLUMNS[table]
+            if unknown:
+                raise ValueError(f"unsupported {table} columns: {sorted(unknown)}")
+            columns = ["task_id", *payload.keys()]
+            values = [int(task_id), *payload.values()]
+            placeholders = ", ".join("?" for _ in columns)
+            assignments = ", ".join(f"{name} = excluded.{name}" for name in payload)
+            conn.execute(
+                f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) "
+                f"ON CONFLICT(task_id) DO UPDATE SET {assignments}",
+                values,
+            )
+        for target in checkpoint.targets:
+            if "target_key" not in target:
+                raise ValueError("task_targets require target_key")
+            conn.execute(
+                """
+                INSERT INTO task_targets (task_id, target_key, ordinal)
+                VALUES (?, ?, ?)
+                ON CONFLICT(task_id, target_key) DO UPDATE SET ordinal = excluded.ordinal
+                """,
+                (int(task_id), str(target["target_key"]), int(target.get("ordinal") or 0)),
+            )
+        for operation in checkpoint.operations:
+            assignments = ["status = ?", "updated_at = ?"]
+            values: list[Any] = [operation.status, time.time()]
+            if operation.result:
+                assignments.append("result_json = ?")
+                values.append(self._operation_json(operation.result))
+            if operation.last_error:
+                assignments.append("last_error = ?")
+                values.append(operation.last_error)
+            values.extend([int(task_id), operation.operation_key])
+            conn.execute(
+                f"UPDATE task_operations SET {', '.join(assignments)} "
+                "WHERE task_id = ? AND operation_key = ? AND status IN ('started', 'uncertain')",
+                values,
+            )
+
+    def commit_claimed_result(
+        self,
+        task: TaskSnapshot,
+        worker_id: str,
+        result: StageResult,
+        *,
+        next_stage: TaskStage | None,
+        next_run_at: float,
+        metadata_delete_keys: tuple[str, ...] = (),
+    ) -> TaskSnapshot | None:
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task.id),)).fetchone()
+            if row is None or not self._claim_matches(
+                row,
+                task.current_stage,
+                worker_id,
+                task.claimed_at,
+                task.claim_token,
+                task.updated_at,
+            ):
+                return None
+            self._apply_checkpoint(conn, int(task.id), result)
+            now = time.time()
+            if self._termination_requested(row):
+                settled = self._settle_requested_termination_in_transaction(conn, row, now=now)
+                return self._snapshot(settled)
+            metadata = self._merge_metadata(row["metadata_json"], result.metadata, metadata_delete_keys)
+            conn.execute(
+                "INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at) "
+                "VALUES (?, ?, ?, ?, '', '', ?)",
+                (int(task.id), task.current_stage.value, TaskStatus.SUCCEEDED.value, result.message, now),
+            )
+            target_stage = next_stage or task.current_stage
+            target_status = TaskStatus.PENDING if next_stage else TaskStatus.SUCCEEDED
+            if next_stage:
+                conn.execute(
+                    "INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at) "
+                    "VALUES (?, ?, ?, '等待执行', '', '', ?)",
+                    (int(task.id), next_stage.value, TaskStatus.PENDING.value, now),
+                )
+            conn.execute(
+                "UPDATE tasks SET current_stage = ?, status = ?, error_type = '', error_summary = '', "
+                "metadata_json = ?, next_run_at = ?, claimed_by = '', claimed_at = 0, claim_token = '', "
+                "claim_heartbeat_at = 0, updated_at = ? WHERE id = ?",
+                (target_stage.value, target_status.value, metadata, next_run_at, now, int(task.id)),
+            )
+            updated = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task.id),)).fetchone()
+        return self._snapshot(updated) if updated else None
 
     def record_event(
         self,

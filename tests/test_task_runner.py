@@ -99,9 +99,9 @@ class TerminateBeforeResultStore(TaskStore):
             self.requested = True
             self.request_task_termination(task_id, "Web", now=3)
 
-    def complete_claimed_stage(self, task_id, **kwargs):
-        self._request_termination(task_id)
-        return super().complete_claimed_stage(task_id, **kwargs)
+    def commit_claimed_result(self, task, worker_id, result, **kwargs):
+        self._request_termination(task.id)
+        return super().commit_claimed_result(task, worker_id, result, **kwargs)
 
     def record_event(self, task_id, stage, status, message, **kwargs):
         if kwargs.get("expected_claimed_by") and status == self.event_status:
@@ -116,11 +116,11 @@ class TaskRunnerTests(unittest.TestCase):
                 super().__init__(db_path)
                 self.failed = False
 
-            def complete_claimed_stage(self, task_id, **kwargs):
+            def commit_claimed_result(self, task, worker_id, result, **kwargs):
                 if not self.failed:
                     self.failed = True
                     raise sqlite3.OperationalError("database is temporarily locked")
-                return super().complete_claimed_stage(task_id, **kwargs)
+                return super().commit_claimed_result(task, worker_id, result, **kwargs)
 
         with tempfile.TemporaryDirectory() as tmp:
             store = FailFirstCompletionStore(Path(tmp) / "tasks.db")
@@ -149,9 +149,9 @@ class TaskRunnerTests(unittest.TestCase):
             runner = None
             claim_active_during_completion = False
 
-            def complete_claimed_stage(self, task_id, **kwargs):
+            def commit_claimed_result(self, task, worker_id, result, **kwargs):
                 self.claim_active_during_completion = self.runner._active_claim is not None
-                return super().complete_claimed_stage(task_id, **kwargs)
+                return super().commit_claimed_result(task, worker_id, result, **kwargs)
 
         with tempfile.TemporaryDirectory() as tmp:
             store = InspectCompletionStore(Path(tmp) / "tasks.db")
@@ -1189,11 +1189,11 @@ class TaskRunnerTests(unittest.TestCase):
                 super().__init__(db_path)
                 self.raced = False
 
-            def complete_claimed_stage(self, task_id, **kwargs):
+            def commit_claimed_result(self, task, worker_id, result, **kwargs):
                 if not self.raced:
                     self.raced = True
-                    self.reprocess_task(task_id, message="用户从头重跑", next_run_at=0)
-                return super().complete_claimed_stage(task_id, **kwargs)
+                    self.reprocess_task(task.id, message="用户从头重跑", next_run_at=0)
+                return super().commit_claimed_result(task, worker_id, result, **kwargs)
 
         with tempfile.TemporaryDirectory() as tmp:
             store = RaceStore(Path(tmp) / "tasks.db")

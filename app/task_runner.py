@@ -7,12 +7,11 @@ import socket
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
-from enum import Enum
+from dataclasses import replace
 from typing import Callable, Protocol
 
 from .clients.p115 import P115RiskControlError
-from .models import TaskSnapshot, TaskStage, TaskStatus, next_stage_after_success
+from .models import StageOutcome, StageResult, TaskSnapshot, TaskStage, TaskStatus, next_stage_after_success
 from .strm_mode import effective_task_strm_mode
 from .task_store import TaskStore
 
@@ -167,45 +166,6 @@ def _defer_delay(base_delay_seconds: float, count: int) -> float:
     if count <= 8:
         return max(base_delay_seconds, 60.0)
     return max(base_delay_seconds, 120.0)
-
-
-class StageOutcome(str, Enum):
-    COMPLETE = "complete"
-    DEFER = "defer"
-    NEEDS_ACTION = "needs_action"
-    FAILED = "failed"
-
-
-@dataclass(frozen=True)
-class StageResult:
-    outcome: StageOutcome
-    message: str
-    metadata: dict[str, object] = field(default_factory=dict)
-    delay_seconds: float = 0
-    error_type: str = ""
-    error_detail: str = ""
-
-    @classmethod
-    def complete(cls, message: str, metadata: dict[str, object] | None = None) -> "StageResult":
-        return cls(StageOutcome.COMPLETE, message, metadata or {})
-
-    @classmethod
-    def defer(cls, message: str, delay_seconds: float, metadata: dict[str, object] | None = None) -> "StageResult":
-        return cls(StageOutcome.DEFER, message, metadata or {}, delay_seconds=max(1.0, float(delay_seconds)))
-
-    @classmethod
-    def needs_action(cls, message: str, metadata: dict[str, object] | None = None) -> "StageResult":
-        return cls(StageOutcome.NEEDS_ACTION, message, metadata or {}, error_type="needs_action")
-
-    @classmethod
-    def failed(
-        cls,
-        message: str,
-        error_type: str = "stage_failed",
-        error_detail: str = "",
-        metadata: dict[str, object] | None = None,
-    ) -> "StageResult":
-        return cls(StageOutcome.FAILED, message, metadata or {}, error_type=error_type, error_detail=error_detail)
 
 
 class TaskWorkflow(Protocol):
@@ -672,23 +632,21 @@ class TaskRunner:
             metadata_delete_keys = _DEFER_METADATA_KEYS
             if task.current_stage == TaskStage.CLEANED and task.metadata.get("quality_repair_queued"):
                 metadata_delete_keys += QUALITY_REPAIR_METADATA_KEYS
-            committed = self.store.complete_claimed_stage(
-                task.id,
-                expected_stage=task.current_stage,
-                expected_claimed_by=self.worker_id,
-                expected_claimed_at=task.claimed_at,
-                expected_claim_token=task.claim_token,
-                expected_updated_at=task.updated_at,
-                success_message=result.message,
-                success_metadata=_without_defer_metadata(
-                    result.metadata | timing_metadata | p115_metadata | observability_metadata
+            committed = self.store.commit_claimed_result(
+                task,
+                self.worker_id,
+                replace(
+                    result,
+                    metadata=_without_defer_metadata(
+                        result.metadata | timing_metadata | p115_metadata | observability_metadata
+                    ),
                 ),
-                metadata_delete_keys=metadata_delete_keys,
                 next_stage=next_stage_after_success(
                     task.current_stage,
                     effective_task_strm_mode(task),
                 ),
                 next_run_at=now,
+                metadata_delete_keys=metadata_delete_keys,
             )
             if committed is None:
                 LOG.warning("Discarded stale task result task_id=%s", task.id)

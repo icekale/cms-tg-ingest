@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from app.models import TaskStage, TaskStatus
+from app.models import StageCheckpoint, StageResult, TaskStage, TaskStatus
 from app.strm_mode import effective_task_strm_mode
 from app.task_store import TaskStore, operation_scope
 
@@ -2083,3 +2083,84 @@ class TaskStoreTests(unittest.TestCase):
             self.assertTrue(first_token)
             self.assertEqual(reopened.claim_token, first_token)
             self.assertEqual(reopened.claimed_by, "legacy-worker")
+
+    def _claim_running(self, store: TaskStore, share_code: str):
+        task = store.upsert_task(share_code, "", f"https://115cdn.com/s/{share_code}")
+        store.enqueue_task(task.id, TaskStage.MOVED, next_run_at=1.0)
+        claimed = store.claim_next_runnable("worker-1", now=1.0)
+        self.assertIsNotNone(claimed)
+        return claimed
+
+    def test_commit_claimed_result_writes_facts_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            claimed = self._claim_running(store, "checkpoint-ok")
+            result = StageResult.complete(
+                "moved",
+                {"dest_path": "/library/movie"},
+                checkpoint=StageCheckpoint(move={"dest_path": "/library/movie", "move_status": "moved"}),
+            )
+            updated = store.commit_claimed_result(
+                claimed,
+                "worker-1",
+                result,
+                next_stage=TaskStage.EMBY_CONFIRMED,
+                next_run_at=2.0,
+            )
+            self.assertEqual(updated.current_stage, TaskStage.EMBY_CONFIRMED)
+            with sqlite3.connect(store.db_path) as conn:
+                row = conn.execute("SELECT dest_path, move_status FROM task_moves WHERE task_id = ?", (claimed.id,)).fetchone()
+            self.assertEqual(row[0], "/library/movie")
+            self.assertEqual(row[1], "moved")
+
+    def test_commit_claimed_result_rolls_back_on_unknown_fact_column(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            claimed = self._claim_running(store, "checkpoint-bad")
+            result = StageResult.complete(
+                "moved",
+                checkpoint=StageCheckpoint(move={"not_a_column": "nope"}),
+            )
+            with self.assertRaises(ValueError):
+                store.commit_claimed_result(
+                    claimed,
+                    "worker-1",
+                    result,
+                    next_stage=TaskStage.EMBY_CONFIRMED,
+                    next_run_at=2.0,
+                )
+            current = store.find_task(claimed.id)
+            self.assertEqual(current.status, TaskStatus.RUNNING)
+            self.assertEqual(current.current_stage, TaskStage.MOVED)
+            with sqlite3.connect(store.db_path) as conn:
+                self.assertIsNone(conn.execute("SELECT 1 FROM task_moves WHERE task_id = ?", (claimed.id,)).fetchone())
+
+    def test_commit_claimed_result_discards_stale_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            claimed = self._claim_running(store, "checkpoint-stale")
+            stale = claimed
+            store.record_event(
+                claimed.id,
+                claimed.current_stage,
+                TaskStatus.RUNNING,
+                "heartbeat",
+                expected_stage=claimed.current_stage,
+                expected_status=TaskStatus.RUNNING,
+                expected_claimed_by="worker-1",
+                expected_claimed_at=claimed.claimed_at,
+                expected_claim_token=claimed.claim_token,
+                expected_updated_at=claimed.updated_at,
+            )
+            result = StageResult.complete("moved", checkpoint=StageCheckpoint(move={"move_status": "moved"}))
+            self.assertIsNone(
+                store.commit_claimed_result(
+                    stale,
+                    "worker-1",
+                    result,
+                    next_stage=TaskStage.EMBY_CONFIRMED,
+                    next_run_at=2.0,
+                )
+            )
+            with sqlite3.connect(store.db_path) as conn:
+                self.assertIsNone(conn.execute("SELECT 1 FROM task_moves WHERE task_id = ?", (claimed.id,)).fetchone())

@@ -76,16 +76,10 @@ class UnifiedMigrationTests(unittest.TestCase):
     def test_aborts_duplicate_source_identity(self):
         def mutate(fixture):
             with sqlite3.connect(fixture.tasks_db) as conn:
-                conn.execute("DROP INDEX IF EXISTS idx_tasks_source_key")
-                conn.execute(
-                    """
-                    INSERT INTO tasks (
-                        id, share_code, receive_code, source_type, source_key, url,
-                        current_stage, status, created_at, updated_at
-                    ) VALUES (40, 'zzz', '9999', 'share', 'share:abc:1111', 'https://115cdn.com/s/zzz',
-                              'received', 'pending', 1, 1)
-                    """
-                )
+                conn.execute("CREATE TABLE tasks_copy AS SELECT * FROM tasks")
+                conn.execute("DROP TABLE tasks")
+                conn.execute("ALTER TABLE tasks_copy RENAME TO tasks")
+                conn.execute("UPDATE tasks SET source_key = 'share:abc:1111' WHERE id = 20")
 
         self._migrate_expecting_abort(mutate)
 

@@ -55,6 +55,102 @@ class RetryDecision:
     reason: str
 
 
+class StageOutcome(str, Enum):
+    COMPLETE = "complete"
+    DEFER = "defer"
+    NEEDS_ACTION = "needs_action"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class OperationCompletion:
+    operation_key: str
+    status: str
+    result: dict[str, Any] = field(default_factory=dict)
+    last_error: str = ""
+
+
+@dataclass(frozen=True)
+class StageCheckpoint:
+    media: dict[str, Any] = field(default_factory=dict)
+    share: dict[str, Any] = field(default_factory=dict)
+    move: dict[str, Any] = field(default_factory=dict)
+    emby: dict[str, Any] = field(default_factory=dict)
+    cleanup: dict[str, Any] = field(default_factory=dict)
+    probe: dict[str, Any] = field(default_factory=dict)
+    targets: tuple[dict[str, Any], ...] = ()
+    operations: tuple[OperationCompletion, ...] = ()
+
+
+@dataclass(frozen=True)
+class StageResult:
+    outcome: StageOutcome
+    message: str
+    metadata: dict[str, object] = field(default_factory=dict)
+    delay_seconds: float = 0
+    error_type: str = ""
+    error_detail: str = ""
+    checkpoint: StageCheckpoint = field(default_factory=StageCheckpoint)
+
+    @classmethod
+    def complete(
+        cls,
+        message: str,
+        metadata: dict[str, object] | None = None,
+        checkpoint: StageCheckpoint | None = None,
+    ) -> "StageResult":
+        return cls(StageOutcome.COMPLETE, message, metadata or {}, checkpoint=checkpoint or StageCheckpoint())
+
+    @classmethod
+    def defer(
+        cls,
+        message: str,
+        delay_seconds: float,
+        metadata: dict[str, object] | None = None,
+        checkpoint: StageCheckpoint | None = None,
+    ) -> "StageResult":
+        return cls(
+            StageOutcome.DEFER,
+            message,
+            metadata or {},
+            delay_seconds=max(1.0, float(delay_seconds)),
+            checkpoint=checkpoint or StageCheckpoint(),
+        )
+
+    @classmethod
+    def needs_action(
+        cls,
+        message: str,
+        metadata: dict[str, object] | None = None,
+        checkpoint: StageCheckpoint | None = None,
+    ) -> "StageResult":
+        return cls(
+            StageOutcome.NEEDS_ACTION,
+            message,
+            metadata or {},
+            error_type="needs_action",
+            checkpoint=checkpoint or StageCheckpoint(),
+        )
+
+    @classmethod
+    def failed(
+        cls,
+        message: str,
+        error_type: str = "stage_failed",
+        error_detail: str = "",
+        metadata: dict[str, object] | None = None,
+        checkpoint: StageCheckpoint | None = None,
+    ) -> "StageResult":
+        return cls(
+            StageOutcome.FAILED,
+            message,
+            metadata or {},
+            error_type=error_type,
+            error_detail=error_detail,
+            checkpoint=checkpoint or StageCheckpoint(),
+        )
+
+
 @dataclass(frozen=True)
 class TaskSnapshot:
     id: int

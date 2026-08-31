@@ -33,7 +33,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     receive_code TEXT NOT NULL DEFAULT '',
     url TEXT NOT NULL DEFAULT '',
     title TEXT NOT NULL DEFAULT '',
+    tmdb_id TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT '',
     chat_id TEXT NOT NULL DEFAULT '',
+    submission_id INTEGER,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
     origin TEXT NOT NULL DEFAULT 'runtime',
     is_executable INTEGER NOT NULL DEFAULT 1,
     current_stage TEXT NOT NULL,
@@ -55,6 +59,11 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_share_identity
     ON tasks(share_code, receive_code) WHERE source_type = 'share';
+CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks(updated_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(status, next_run_at, id);
+CREATE INDEX IF NOT EXISTS idx_tasks_claim ON tasks(claimed_by, claimed_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_claim_heartbeat ON tasks(claimed_by, claim_heartbeat_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_stage_status_next ON tasks(current_stage, status, next_run_at, id);
 
 CREATE TABLE IF NOT EXISTS task_media (
     task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
@@ -343,24 +352,44 @@ class Database:
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = self.connect()
+        created = False
         try:
-            connection.executescript(_SCHEMA_SQL)
-            existing = connection.execute("SELECT version FROM schema_meta WHERE id = 1").fetchone()
-            if existing is None:
-                connection.execute(
-                    """
-                    INSERT INTO schema_meta (id, version, compatible_from, compatible_to)
-                    VALUES (1, ?, ?, ?)
-                    """,
-                    (SCHEMA_VERSION, SCHEMA_VERSION, SCHEMA_VERSION),
-                )
+            tables = {
+                str(row[0])
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if "schema_meta" not in tables and "tasks" not in tables:
+                connection.executescript(_SCHEMA_SQL)
+                created = True
+            if created or "schema_meta" in tables:
+                existing = connection.execute("SELECT version FROM schema_meta WHERE id = 1").fetchone()
+                if existing is None:
+                    connection.execute(
+                        """
+                        INSERT INTO schema_meta (id, version, compatible_from, compatible_to)
+                        VALUES (1, ?, ?, ?)
+                        """,
+                        (SCHEMA_VERSION, SCHEMA_VERSION, SCHEMA_VERSION),
+                    )
             connection.commit()
         except Exception:
             connection.rollback()
             raise
         finally:
             connection.close()
-        self.verify()
+        if created or self._has_schema_meta():
+            self.verify()
+
+    def _has_schema_meta(self) -> bool:
+        connection = self.connect(read_only=self.path.is_file())
+        try:
+            tables = {
+                str(row[0])
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            return "schema_meta" in tables
+        finally:
+            connection.close()
 
     def verify(self) -> None:
         sqlite_quick_check(self.path)
