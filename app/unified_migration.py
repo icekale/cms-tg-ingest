@@ -159,8 +159,20 @@ def _set_sequence(destination: sqlite3.Connection, table: str) -> None:
     destination.execute("INSERT OR REPLACE INTO sqlite_sequence(name, seq) VALUES (?, ?)", (table, maximum))
 
 
+def _recognition_tmdb_id(submission: dict[str, Any]) -> str:
+    try:
+        recognition = json.loads(str(submission.get("recognition_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    if not isinstance(recognition, dict):
+        return ""
+    return str(recognition.get("tmdb_id") or "").strip()
+
+
 def _write_facts(destination: sqlite3.Connection, task_id: int, task: dict[str, Any], submission: dict[str, Any] | None) -> None:
     submission = submission or {}
+    tmdb_id = str(task.get("tmdb_id") or _recognition_tmdb_id(submission) or "")
+    category = str(submission.get("category_final") or task.get("category") or "")
     destination.execute(
         """
         INSERT OR REPLACE INTO task_media (
@@ -172,8 +184,8 @@ def _write_facts(destination: sqlite3.Connection, task_id: int, task: dict[str, 
             str(submission.get("cms_task_id") or ""),
             str(submission.get("title") or task.get("title") or ""),
             "",
-            str(task.get("tmdb_id") or ""),
-            str(submission.get("category_final") or task.get("category") or ""),
+            tmdb_id,
+            category,
             str(submission.get("category_status") or ""),
             str(submission.get("recognition_json") or "{}"),
         ),
@@ -418,12 +430,14 @@ def migrate_legacy_databases(
                 task_id = synthetic_ids[int(submission["id"])]
                 identity = _identity(submission)
                 source_key = f"share:{identity[0]}:{identity[1]}"
+                category = str(submission.get("category_final") or "")
+                tmdb_id = _recognition_tmdb_id(submission)
                 destination.execute(
                     """
                     INSERT INTO tasks (
-                        id, source_type, source_key, share_code, receive_code, url, title, origin, is_executable,
-                        current_stage, status, next_run_at, created_at, updated_at
-                    ) VALUES (?, 'share', ?, ?, ?, ?, ?, 'legacy_import', ?, 'cleaned', 'succeeded', -1, ?, ?)
+                        id, source_type, source_key, share_code, receive_code, url, title, tmdb_id, category,
+                        origin, is_executable, current_stage, status, next_run_at, created_at, updated_at
+                    ) VALUES (?, 'share', ?, ?, ?, ?, ?, ?, ?, 'legacy_import', ?, 'cleaned', 'succeeded', -1, ?, ?)
                     """,
                     (
                         task_id,
@@ -432,12 +446,19 @@ def migrate_legacy_databases(
                         identity[1],
                         str(submission.get("url") or ""),
                         str(submission.get("title") or ""),
+                        tmdb_id,
+                        category,
                         int(SYNTHETIC_EXECUTABLE),
                         float(submission.get("created_at") or now),
                         float(submission.get("updated_at") or now),
                     ),
                 )
-                _write_facts(destination, task_id, {"title": submission.get("title"), "tmdb_id": "", "category": ""}, submission)
+                _write_facts(
+                    destination,
+                    task_id,
+                    {"title": submission.get("title"), "tmdb_id": tmdb_id, "category": category},
+                    submission,
+                )
                 payload = _canonical(submission)
                 checksum = _sha256_text(payload)
                 destination.execute(

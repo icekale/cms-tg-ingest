@@ -52,7 +52,10 @@ class UnifiedMigrationTests(unittest.TestCase):
             self.assertEqual(matched["tmdb_id"], "100")
             self.assertEqual(matched["category"], "华语电影")
             self.assertIn("submission_id", matched["metadata_json"])
-            self.assertFalse(load_task(output, 31)["is_executable"])
+            synthetic = load_task(output, 31)
+            self.assertFalse(synthetic["is_executable"])
+            self.assertEqual(synthetic["category"], "华语电影")
+            self.assertEqual(synthetic["title"], "History Only")
             self.assertEqual(load_legacy_map(output, legacy_submission_id=9), 31)
             with sqlite3.connect(output) as conn:
                 conn.row_factory = sqlite3.Row
