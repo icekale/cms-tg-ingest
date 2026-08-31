@@ -1437,20 +1437,23 @@ class TaskStore:
         normalized = str(file_id or "").strip()
         if not normalized:
             return []
-        params: list[Any] = [normalized]
+        params: list[Any] = [normalized, normalized]
         exclude_clause = ""
         if exclude_task_id is not None:
-            exclude_clause = " AND id <> ?"
+            exclude_clause = " AND t.id <> ?"
             params.append(int(exclude_task_id))
         with self._lock, self._connection() as conn:
             rows = conn.execute(
                 f"""
-                SELECT * FROM tasks
-                WHERE json_valid(metadata_json)
-                  AND COALESCE(archived_at, 0) = 0
-                  AND CAST(json_extract(metadata_json, '$.own_share_file_id') AS TEXT) = ?
+                SELECT t.* FROM tasks t
+                LEFT JOIN task_shares s ON s.task_id = t.id
+                WHERE COALESCE(t.archived_at, 0) = 0
+                  AND (
+                    (json_valid(t.metadata_json) AND CAST(json_extract(t.metadata_json, '$.own_share_file_id') AS TEXT) = ?)
+                    OR s.file_id = ?
+                  )
                   {exclude_clause}
-                ORDER BY updated_at DESC, id DESC
+                ORDER BY t.updated_at DESC, t.id DESC
                 """,
                 params,
             ).fetchall()
@@ -1488,6 +1491,13 @@ class TaskStore:
                   AND COALESCE(json_extract(metadata_json, '$.source_deleted'), '')
                       NOT IN ('1', 'true', 'yes', 'on', 'enabled')
                   AND COALESCE(json_extract(metadata_json, '$.quality_archived_at'), 0) <= 0
+                UNION
+                SELECT s.own_share_code AS code
+                FROM tasks t
+                JOIN task_shares s ON s.task_id = t.id
+                WHERE COALESCE(t.archived_at, 0) = 0
+                  AND s.own_share_code != ''
+                  AND lower(COALESCE(s.validation_status, '')) NOT IN ('invalid', 'unavailable')
                 """
             ).fetchall()
         return {str(row["code"]).strip() for row in rows if str(row["code"] or "").strip()}

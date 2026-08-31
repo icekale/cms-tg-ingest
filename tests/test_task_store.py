@@ -1160,6 +1160,21 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual([task.id for task in owners], [live.id])
             self.assertEqual(live_codes, {"own-new"})
 
+    def test_share_identity_lookups_include_normalized_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("fact-owner", "1212", "https://115cdn.com/s/fact-owner")
+            store.write_facts(
+                task.id,
+                share={"file_id": "folder-fact", "own_share_code": "own-fact"},
+            )
+
+            owners = store.list_tasks_by_own_share_file_id("folder-fact")
+            live_codes = store.list_live_share_codes()
+
+            self.assertEqual([item.id for item in owners], [task.id])
+            self.assertEqual(live_codes, {"own-fact"})
+
     def test_record_stage_event_updates_current_task_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
