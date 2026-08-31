@@ -86,6 +86,8 @@ def _project_workflow_facts(
                 "workflow_mode": "self_share_sync",
             }
         )
+        if str(facts.get("share_sync_status") or "").lower() == "restore_submitted":
+            facts["workflow_phase"] = "restore_share_sync_submitted"
     if move is not None:
         facts.update(
             {
@@ -2767,6 +2769,25 @@ class TaskStore:
             ).fetchall()
         return [self.workflow_facts(int(row[0])) for row in rows]
 
+    def claim_self_share_restore_sync(
+        self,
+        row_id: int,
+        retry_seconds: float = 60,
+        now: float | None = None,
+    ) -> bool:
+        timestamp = time.time() if now is None else float(now)
+        facts = self.workflow_facts(int(row_id))
+        if not facts:
+            return False
+        if str(facts.get("share_sync_status") or "").lower() == "restore_submitted":
+            stale_before = timestamp - max(1.0, float(retry_seconds))
+            if float(facts.get("updated_at") or 0) > stale_before:
+                return False
+        self.write_facts(int(row_id), share={"share_sync_status": "restore_submitted"}, now=timestamp)
+        with self._lock, self._connection() as conn:
+            conn.execute("UPDATE tasks SET updated_at = ? WHERE id = ?", (timestamp, int(row_id)))
+        return True
+
     def recent_workflow_rows(self, limit: int = 5) -> list[dict[str, Any]]:
         with self._lock, self._connection() as conn:
             rows = conn.execute(
@@ -3907,4 +3928,4 @@ class WorkflowRowAdapter:
         return self.find_by_id(row_id)
 
     def claim_self_share_restore_sync(self, row_id: int, retry_seconds: float = 60, now: float | None = None) -> bool:
-        return True
+        return self._tasks.claim_self_share_restore_sync(row_id, retry_seconds=retry_seconds, now=now)

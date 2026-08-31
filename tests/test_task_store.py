@@ -2358,3 +2358,18 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(remaining, {live.id})
             self.assertGreater(float(store.find_task(done.id).archived_at or 0), 0)
             self.assertGreater(float(store.find_task(failed.id).archived_at or 0), 0)
+
+    def test_adapter_restore_sync_claim_is_fenced_for_retry_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            adapter = WorkflowRowAdapter(store)
+            task = store.upsert_task("restore-sync", "", "https://115cdn.com/s/restore-sync")
+            store.write_facts(task.id, share={"own_share_code": "own", "canonical_name": "Movie"})
+
+            self.assertTrue(adapter.claim_self_share_restore_sync(task.id, retry_seconds=60, now=100.0))
+            self.assertFalse(adapter.claim_self_share_restore_sync(task.id, retry_seconds=60, now=100.0))
+            self.assertFalse(adapter.claim_self_share_restore_sync(task.id, retry_seconds=60, now=150.0))
+            self.assertTrue(adapter.claim_self_share_restore_sync(task.id, retry_seconds=60, now=161.0))
+            facts = adapter.find_by_id(task.id)
+            self.assertEqual(facts["share_sync_status"], "restore_submitted")
+            self.assertEqual(facts["workflow_phase"], "restore_share_sync_submitted")
