@@ -83,6 +83,18 @@ class RefactorImportTests(unittest.TestCase):
         self.assertIs(bridge.format_status, format_status)
         self.assertIs(bridge.task_action_keyboard, task_action_keyboard)
 
+    def test_runtime_scripts_do_not_use_removed_submission_store(self):
+        import bridge
+
+        self.assertFalse(hasattr(bridge, "SubmissionStore"))
+        root = Path(__file__).resolve().parents[1]
+        offenders = []
+        for path in sorted((root / "scripts").glob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            if "bridge.SubmissionStore" in text or "from bridge import SubmissionStore" in text:
+                offenders.append(str(path.relative_to(root)))
+        self.assertEqual(offenders, [])
+
 
 
 if __name__ == "__main__":
