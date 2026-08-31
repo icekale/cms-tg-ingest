@@ -545,6 +545,7 @@ def _check_unified_database(env: Mapping[str, str], filesystem: Filesystem) -> C
         (
             f"schema={result['schema_version']} migration_id={result['migration_id']} "
             f"write_gate={result['write_gate']} legacy_import_executable={result['legacy_import_executable']} "
+            f"scheduled_runnable={result.get('scheduled_runnable', 0)} "
             f"lease_owner={lease_owner} lease_expires={lease_expires:.0f} "
             f"runner_heartbeat={heartbeat_at:.0f} pending_commands={int(pending or 0)} integrity=ok"
         ),

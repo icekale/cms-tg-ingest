@@ -379,10 +379,11 @@ def migrate_legacy_databases(
                 destination.execute(
                     """
                     INSERT INTO tasks (
-                        id, source_type, source_key, share_code, receive_code, url, title, chat_id, origin,
+                        id, source_type, source_key, share_code, receive_code, url, title, tmdb_id, category,
+                        chat_id, metadata_json, origin,
                         is_executable, current_stage, status, error_type, error_summary, retry_count, next_run_at,
                         claimed_by, claimed_at, claim_token, claim_heartbeat_at, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'runtime', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'runtime', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         int(task["id"]),
@@ -392,7 +393,10 @@ def migrate_legacy_databases(
                         str(task.get("receive_code") or ""),
                         str(task.get("url") or ""),
                         str(task.get("title") or ""),
+                        str(task.get("tmdb_id") or ""),
+                        str(task.get("category") or ""),
                         str(task.get("chat_id") or ""),
+                        str(task.get("metadata_json") or "{}"),
                         str(task.get("current_stage") or "received"),
                         str(task.get("status") or "pending"),
                         str(task.get("error_type") or ""),
@@ -657,6 +661,14 @@ def validate_unified_database(path: str | Path) -> dict[str, Any]:
         executable = connection.execute(
             "SELECT COUNT(*) FROM tasks WHERE origin = 'legacy_import' AND is_executable != 0"
         ).fetchone()[0]
+        scheduled = connection.execute(
+            """
+            SELECT COUNT(*) FROM tasks
+            WHERE archived_at IS NULL AND is_executable != 0
+              AND status IN ('pending', 'running')
+              AND next_run_at >= 0
+            """
+        ).fetchone()[0]
     finally:
         connection.close()
     if meta is None:
@@ -670,6 +682,7 @@ def validate_unified_database(path: str | Path) -> dict[str, Any]:
         "migration_id": migration_id,
         "write_gate": write_gate,
         "legacy_import_executable": int(executable or 0),
+        "scheduled_runnable": int(scheduled or 0),
     }
 
 
@@ -689,6 +702,16 @@ def open_runner_gate(path: str | Path, migration_id: str) -> None:
         row = _require_migration_run(connection, migration_id)
         if str(row["write_gate"]) != "closed":
             raise MigrationError(f"write gate is {row['write_gate']}, expected closed")
+        scheduled = connection.execute(
+            """
+            SELECT COUNT(*) FROM tasks
+            WHERE archived_at IS NULL AND is_executable != 0
+              AND status IN ('pending', 'running')
+              AND next_run_at >= 0
+            """
+        ).fetchone()[0]
+        if int(scheduled or 0):
+            raise MigrationError(f"{int(scheduled)} executable tasks remain")
         connection.execute(
             "UPDATE migration_runs SET write_gate = 'runner_open', runner_opened_at = ? WHERE id = ?",
             (time.time(), int(row["id"])),

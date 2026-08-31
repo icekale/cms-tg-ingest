@@ -113,6 +113,7 @@ SELF_SHARE_REVIEW_LIST_CACHE_SECONDS=300
 STRM_LIBRARY_MAP=华语电影=/mnt/user/Unraid/strm/转存/Movie/电影/华语电影,欧美电影=/mnt/user/Unraid/strm/转存/Movie/电影/欧美电影
 
 DATABASE_PATH=/data/cms-tg-ingest.db
+# Unified SQLite stays on rollback-journal (DELETE). WAL passed a short Unraid concurrent-reader test, but the app does not enable it.
 BACKUP_ENABLED=true
 BACKUP_TIME=03:30
 BACKUP_TIMEZONE=Asia/Shanghai

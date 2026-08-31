@@ -175,3 +175,56 @@ class UnifiedRuntimeGateTests(unittest.TestCase):
 
         self.assertEqual(captured["runner_starts"], 0)
         self.assertEqual(captured["updates"], 0)
+
+    def test_run_forever_does_not_start_media_strm_repair_loop(self):
+        captured = {"repair_starts": 0}
+
+        class FakeCmsClient:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+        class FakeTelegramClient:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_updates(self, **_kwargs):
+                return []
+
+        class FakeTaskRunner:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def start(self):
+                pass
+
+            def stop(self, **_kwargs):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "cms-tg-ingest.db"
+            TaskStore(database)
+            cms_db = Path(tmp) / "cms-online.db"
+            cms_db.write_bytes(b"")
+            stop_event = threading.Event()
+            stop_event.set()
+            config = Config(
+                tg_bot_token="token",
+                tg_allowed_chat_id="chat",
+                cms_base_url="http://cms.test",
+                cms_username="user",
+                cms_password="pass",
+                database_path=str(database),
+                cms_state_db_path=str(cms_db),
+                web_enabled=False,
+                backup_enabled=False,
+                media_strm_repair_enabled=True,
+            )
+            with patch.object(bridge, "CmsClient", FakeCmsClient), patch.object(
+                bridge, "TelegramClient", FakeTelegramClient
+            ), patch.object(bridge, "TaskRunner", FakeTaskRunner), patch.object(
+                bridge, "normalize_emby_parents", lambda *_args, **_kwargs: 0
+            ), patch.object(bridge, "write_metrics_snapshot", lambda *_args, **_kwargs: None), patch.object(
+                bridge, "start_media_strm_repair_loop", lambda *_a, **_k: captured.__setitem__("repair_starts", captured["repair_starts"] + 1)
+            ):
+                bridge.run_forever(config, stop_event=stop_event)
+        self.assertEqual(captured["repair_starts"], 0)

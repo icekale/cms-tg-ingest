@@ -3765,19 +3765,6 @@ def run_forever(
         write_metrics_snapshot(store, metrics_path_for_store(store))
     except Exception:
         LOG.debug("Failed to write startup metrics snapshot", exc_info=True)
-    if config.media_strm_repair_enabled and Path(config.cms_state_db_path).is_file():
-        cms_index = CmsCloudDataIndex(config.cms_state_db_path)
-        strm_source_root = Path(config.strm_source_roots.split(",")[0].strip())
-        host_strm_root = strm_source_root.parent  # /mnt/user/Unraid/strm, the host root for /media
-        start_media_strm_repair_loop(
-            config.cms_state_db_path,
-            host_strm_root,
-            direct_domain=config.media_strm_direct_domain or cms_index.direct_302_domain(),
-            interval_seconds=max(60, int(config.media_strm_repair_interval_seconds)),
-            limit=max(1, int(config.media_strm_repair_limit)),
-            stop_event=stop_event,
-        )
-
     def enqueue_hdhive_links(urls: list[str], chat_id: str) -> int | None:
         links = [str(url).strip() for url in urls if str(url).strip()]
         if not links:

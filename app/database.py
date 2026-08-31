@@ -428,18 +428,28 @@ class Database:
         return gate
 
     def set_write_gate(self, gate: str) -> None:
-        if gate not in {"closed", "runner_open", "open"}:
+        order = {"closed": 0, "runner_open": 1, "open": 2}
+        if gate not in order:
             raise ValueError(f"incompatible write gate: {gate}")
         now = time.time()
         with self.transaction(immediate=True) as connection:
-            row = connection.execute("SELECT id FROM migration_runs ORDER BY id DESC LIMIT 1").fetchone()
+            row = connection.execute(
+                "SELECT id, write_gate FROM migration_runs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
             if row is None:
+                if gate != "closed":
+                    raise ValueError(f"write gate must start closed, got {gate}")
                 connection.execute(
                     "INSERT INTO migration_runs (migration_id, write_gate, created_at) VALUES (?, ?, ?)",
                     ("runtime", gate, now),
                 )
-            else:
-                connection.execute(
-                    "UPDATE migration_runs SET write_gate = ? WHERE id = ?",
-                    (gate, int(row["id"])),
-                )
+                return
+            current = str(row["write_gate"] or "closed")
+            if gate == current:
+                return
+            if order[gate] != order.get(current, 0) + 1:
+                raise ValueError(f"cannot move write gate from {current} to {gate}")
+            connection.execute(
+                "UPDATE migration_runs SET write_gate = ? WHERE id = ?",
+                (gate, int(row["id"])),
+            )

@@ -177,7 +177,7 @@ class Config:
     status_repair_enabled: bool = True
     status_repair_interval_seconds: int = 300
     status_repair_limit: int = 50
-    media_strm_repair_enabled: bool = True
+    media_strm_repair_enabled: bool = False
     media_strm_repair_interval_seconds: int = 21600
     media_strm_repair_limit: int = 200
     media_strm_direct_domain: str = ""
@@ -321,7 +321,7 @@ class Config:
             status_repair_enabled=parse_bool_env(os.environ.get("STATUS_REPAIR_ENABLED"), True),
             status_repair_interval_seconds=env_int("STATUS_REPAIR_INTERVAL_SECONDS", 300),
             status_repair_limit=env_int("STATUS_REPAIR_LIMIT", 50),
-            media_strm_repair_enabled=parse_bool_env(os.environ.get("MEDIA_STRM_REPAIR_ENABLED"), True),
+            media_strm_repair_enabled=parse_bool_env(os.environ.get("MEDIA_STRM_REPAIR_ENABLED"), False),
             media_strm_repair_interval_seconds=env_int("MEDIA_STRM_REPAIR_INTERVAL_SECONDS", 21600),
             media_strm_repair_limit=env_int("MEDIA_STRM_REPAIR_LIMIT", 200),
             media_strm_direct_domain=os.environ.get("MEDIA_STRM_DIRECT_DOMAIN", "").strip(),

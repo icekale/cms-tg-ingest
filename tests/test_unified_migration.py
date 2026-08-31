@@ -48,6 +48,10 @@ class UnifiedMigrationTests(unittest.TestCase):
             self.assertEqual(report.unmapped_rows, 0)
             self.assertEqual(report.foreign_key_errors, ())
             self.assertEqual(load_task_ids(output), {10, 20, 30, 31})
+            matched = load_task(output, 10)
+            self.assertEqual(matched["tmdb_id"], "100")
+            self.assertEqual(matched["category"], "华语电影")
+            self.assertIn("submission_id", matched["metadata_json"])
             self.assertFalse(load_task(output, 31)["is_executable"])
             self.assertEqual(load_legacy_map(output, legacy_submission_id=9), 31)
             with sqlite3.connect(output) as conn:

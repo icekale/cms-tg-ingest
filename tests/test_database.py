@@ -121,6 +121,19 @@ class DatabaseSchemaTests(unittest.TestCase):
                         "INSERT INTO task_media (task_id, title) VALUES (99, 'orphan')"
                     )
 
+    def test_write_gate_transitions_are_one_way(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self._db(tmp)
+            database.set_write_gate("closed")
+            self.assertEqual(database.write_gate(), "closed")
+            database.set_write_gate("runner_open")
+            self.assertEqual(database.write_gate(), "runner_open")
+            database.set_write_gate("open")
+            self.assertEqual(database.write_gate(), "open")
+            with self.assertRaises(ValueError):
+                database.set_write_gate("closed")
+            self.assertEqual(database.write_gate(), "open")
+
     def test_unsupported_schema_version_fails_before_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = self._db(tmp)
