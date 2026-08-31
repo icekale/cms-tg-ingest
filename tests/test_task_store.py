@@ -1167,12 +1167,20 @@ class TaskStoreTests(unittest.TestCase):
             store.write_facts(
                 task.id,
                 share={"file_id": "folder-fact", "own_share_code": "own-fact"},
+                move={"dest_path": "/library/Movie", "move_status": "moved"},
+                emby={"library": "电影", "status": "confirmed"},
             )
 
             owners = store.list_tasks_by_own_share_file_id("folder-fact")
+            found = store.find_task(task.id)
+            recent = store.list_recent_tasks(limit=1)
             live_codes = store.list_live_share_codes()
 
             self.assertEqual([item.id for item in owners], [task.id])
+            self.assertEqual(owners[0].metadata.get("own_share_code"), "own-fact")
+            self.assertEqual(found.metadata.get("dest_path"), "/library/Movie")
+            self.assertEqual(found.metadata.get("emby_parent"), "电影")
+            self.assertEqual(recent[0].metadata.get("dest_path"), "/library/Movie")
             self.assertEqual(live_codes, {"own-fact"})
 
     def test_record_stage_event_updates_current_task_state(self):

@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -561,6 +561,38 @@ class TaskStore:
     @staticmethod
     def _snapshot(row: sqlite3.Row) -> TaskSnapshot:
         return TaskSnapshot.from_row(dict(row))
+
+    def _snapshot_with_facts(self, row: sqlite3.Row) -> TaskSnapshot:
+        task = self._snapshot(row)
+        try:
+            facts = self.workflow_facts(int(task.id))
+        except sqlite3.OperationalError:
+            return task
+        metadata = dict(task.metadata)
+        changed = False
+        skip = {
+            "id",
+            "share_code",
+            "receive_code",
+            "url",
+            "title",
+            "status",
+            "current_stage",
+            "created_at",
+            "updated_at",
+            "tmdb_id",
+            "error_type",
+            "last_error",
+            "error_summary",
+        }
+        empty = (None, "", [], {}, "[]", "{}")
+        for key, value in facts.items():
+            if key in skip or value in empty:
+                continue
+            if metadata.get(key) in empty:
+                metadata[key] = value
+                changed = True
+        return replace(task, metadata=metadata) if changed else task
 
     @staticmethod
     def _operation(row: sqlite3.Row) -> TaskOperation:
@@ -1415,7 +1447,7 @@ class TaskStore:
     def find_task(self, task_id: int) -> TaskSnapshot | None:
         with self._lock, self._connection() as conn:
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        return self._snapshot(row) if row else None
+        return self._snapshot_with_facts(row) if row else None
 
     def find_task_by_share_key(self, share_code: str, receive_code: str) -> TaskSnapshot | None:
         with self._lock, self._connection() as conn:
@@ -1426,7 +1458,7 @@ class TaskStore:
                 """,
                 (str(share_code), str(receive_code)),
             ).fetchone()
-        return self._snapshot(row) if row else None
+        return self._snapshot_with_facts(row) if row else None
 
     def list_tasks_by_own_share_file_id(
         self,
@@ -1457,7 +1489,7 @@ class TaskStore:
                 """,
                 params,
             ).fetchall()
-        return [self._snapshot(row) for row in rows]
+        return [self._snapshot_with_facts(row) for row in rows]
 
     def find_task_by_source(self, source_type: str, source_key: str) -> TaskSnapshot | None:
         with self._lock, self._connection() as conn:
@@ -1583,7 +1615,7 @@ class TaskStore:
                 """,
                 (limit,),
             ).fetchall()
-        return [self._snapshot(row) for row in rows]
+        return [self._snapshot_with_facts(row) for row in rows]
 
     def list_open_tasks(self) -> list[TaskSnapshot]:
         open_statuses = (
@@ -1602,7 +1634,7 @@ class TaskStore:
                 """,
                 open_statuses,
             ).fetchall()
-        return [self._snapshot(row) for row in rows]
+        return [self._snapshot_with_facts(row) for row in rows]
 
     def find_pending_stage(self, stage: TaskStage, *, exclude_task_id: int | None = None) -> TaskSnapshot | None:
         params: list[Any] = [stage.value, TaskStatus.PENDING.value, TaskStatus.RUNNING.value]
