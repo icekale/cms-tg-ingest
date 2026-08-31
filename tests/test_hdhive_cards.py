@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.hdhive_cards import TmdbDetailCache, build_hdhive_unlock_card, format_hdhive_subscription_completed
+from app.task_store import TaskStore
 
 
 class _TrackingConnection:
@@ -119,6 +120,19 @@ class HdhiveCardTests(unittest.TestCase):
         self.assertEqual(first, {"title": "缓存标题"})
         self.assertEqual(second, first)
         self.assertEqual(len(calls), 1)
+
+    def test_tmdb_cache_uses_unified_tmdb_details_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cms-tg-ingest.db"
+            TaskStore(path)
+            cache = TmdbDetailCache(path)
+            cache.get("tv", "1416", lambda: {"title": "Grey"})
+            with sqlite3.connect(path) as conn:
+                tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                count = conn.execute("SELECT COUNT(*) FROM tmdb_details").fetchone()[0]
+            self.assertIn("schema_meta", tables)
+            self.assertIn("tmdb_details", tables)
+            self.assertEqual(count, 1)
 
 
 if __name__ == "__main__":

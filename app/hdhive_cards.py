@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .database import Database
 from .sqlite_utils import sqlite_connection
 
 
@@ -15,6 +16,9 @@ class TmdbDetailCache:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.ttl_seconds = max(60, int(ttl_seconds))
+        database = Database(self.db_path)
+        if self.db_path.is_file() and database._has_schema_meta():
+            return
         with sqlite_connection(self.db_path) as connection:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS tmdb_details (cache_key TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at REAL NOT NULL)"

@@ -8,6 +8,7 @@ from contextlib import closing
 from pathlib import Path
 
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
+from app.task_store import TaskStore
 
 
 class HdhiveSubscriptionStoreTests(unittest.TestCase):
@@ -279,6 +280,20 @@ class HdhiveSubscriptionStoreTests(unittest.TestCase):
                 self.assertEqual(current.unlock_state, "unknown")
                 self.assertEqual(current.skip_reason, "unlock_outcome_unknown")
                 self.assertEqual(current.last_error, "解锁结果未知，禁止自动重复扣分")
+
+    def test_unified_database_reuses_hdhive_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cms-tg-ingest.db"
+            TaskStore(path)
+            store = HdhiveSubscriptionStore(path)
+            subscription = store.create_subscription("1", "tmdb_tv", "1416", "剧集", "1416")
+            with sqlite3.connect(path) as conn:
+                tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                count = conn.execute("SELECT COUNT(*) FROM hdhive_subscriptions").fetchone()[0]
+            self.assertIn("schema_meta", tables)
+            self.assertIn("hdhive_subscriptions", tables)
+            self.assertEqual(count, 1)
+            self.assertEqual(store.get_subscription(subscription.id).tmdb_id, "1416")
 
 
 if __name__ == "__main__":

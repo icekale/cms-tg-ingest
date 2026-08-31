@@ -347,7 +347,7 @@ class BackupTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(wait_seconds, [3600])
 
-    def test_bridge_builds_scheduler_for_both_runtime_databases(self):
+    def test_bridge_builds_scheduler_for_unified_database(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = Config(
@@ -368,16 +368,10 @@ class BackupTests(unittest.TestCase):
 
             scheduler = bridge.create_backup_scheduler(config, store)
 
-            self.assertEqual(
-                scheduler.sources,
-                (Path(config.db_path), Path(config.task_db_path)),
-            )
+            self.assertEqual(scheduler.sources, (Path(config.task_db_path),))
             self.assertEqual(
                 scheduler.named_sources,
-                {
-                    "submissions": Path(config.db_path),
-                    "tasks": Path(config.task_db_path),
-                },
+                {"cms-tg-ingest": Path(config.task_db_path)},
             )
             self.assertEqual(scheduler.destination, Path(config.backup_dir))
             self.assertEqual(scheduler.run_time.hour, 4)

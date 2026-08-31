@@ -442,8 +442,7 @@ def create_backup_scheduler(config: Config, task_store: TaskStore) -> BackupSche
     return BackupScheduler(
         task_store,
         {
-            "submissions": Path(config.db_path),
-            "tasks": Path(config.task_db_path),
+            "cms-tg-ingest": Path(config.task_db_path),
         },
         config.backup_dir,
         run_time=config.backup_time,
@@ -5068,7 +5067,7 @@ def run_forever(
                 return None
         return None
 
-    tmdb_card_cache = TmdbDetailCache(Path(config.task_db_path).with_name("tmdb-card-cache.db"))
+    tmdb_card_cache = TmdbDetailCache(Path(config.task_db_path))
 
     def notify_hdhive_item(subscription: Any, item: Any) -> None:
         details = {}
