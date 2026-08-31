@@ -134,6 +134,7 @@ from app.media.strm import (
     prepare_self_share_move_inputs,
     reconcile_self_share_move,
     remove_direct_strm_files,
+    enqueue_stranded_self_share_repairs,
     repair_stranded_self_share_moves,
     restore_missing_self_share_library_folder,
     restore_missing_self_share_library_folders,
@@ -3030,6 +3031,14 @@ def repair_stale_submission(store: Any, row: dict[str, Any], emby: Any | None, m
     return True
 
 
+def _observe_stranded_self_share_moves(store: Any, move_config: MoveConfig | None, limit: int) -> int:
+    if move_config is None:
+        return 0
+    if hasattr(store, "enqueue_command"):
+        return enqueue_stranded_self_share_repairs(store, move_config, limit=limit)
+    return repair_stranded_self_share_moves(store, move_config, limit=limit)
+
+
 def repair_stale_submissions(store: Any, emby: Any | None, move_config: MoveConfig | None = None, limit: int = 50) -> int:
     repaired = 0
     for row in store.stale_for_repair(limit=max(1, int(limit))):
@@ -3058,7 +3067,7 @@ def start_status_repair_loop(
         while True:
             try:
                 repaired = repair_stale_submissions(store, emby, move_config=move_config, limit=limit)
-                moved = repair_stranded_self_share_moves(store, move_config, limit=limit) if move_config else 0
+                moved = _observe_stranded_self_share_moves(store, move_config, limit)
                 restored = (
                     restore_missing_self_share_library_folders(
                         store,
@@ -3149,7 +3158,7 @@ def start_self_share_maintenance_loop(
     def loop() -> None:
         while not loop_stop_event.is_set():
             try:
-                moved = repair_stranded_self_share_moves(store, move_config, limit=limit)
+                moved = _observe_stranded_self_share_moves(store, move_config, limit)
                 restored = restore_missing_self_share_library_folders(
                     store,
                     cms,
