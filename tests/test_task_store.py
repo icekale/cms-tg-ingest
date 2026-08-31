@@ -1247,6 +1247,47 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(locked.task.metadata.get("dest_path"), "/library/Lock")
             self.assertEqual(locked.task.metadata.get("_lock_key"), "dest:/library/Lock")
 
+    def test_claim_task_lock_detects_holder_dest_path_from_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            holder_task = store.upsert_task("holder-facts", "1212", "https://115cdn.com/s/holder-facts")
+            waiter_task = store.upsert_task("waiter-facts", "3434", "https://115cdn.com/s/waiter-facts")
+            store.enqueue_task(holder_task.id, TaskStage.MOVED, next_run_at=0)
+            store.enqueue_task(waiter_task.id, TaskStage.MOVED, next_run_at=0)
+            store.write_facts(
+                holder_task.id,
+                move={"dest_path": "/library/Shared", "move_status": "moved"},
+            )
+            store.write_facts(
+                waiter_task.id,
+                move={"dest_path": "/library/Shared", "move_status": "moved"},
+            )
+            holder = store.claim_next_runnable("holder-worker", now=1)
+            waiter = store.claim_next_runnable("waiter-worker", now=2)
+
+            locked = store.claim_task_lock(
+                waiter.id,
+                {
+                    "_lock_key": "dest:/library/Shared",
+                    "_lock_reason": "媒体库目录阶段",
+                    "_lock_waiting": False,
+                    "_lock_owner_task_id": "",
+                },
+                lambda candidate: str(candidate.metadata.get("dest_path") or "") == "/library/Shared",
+                expected_stage=waiter.current_stage,
+                expected_claimed_by="waiter-worker",
+                expected_claimed_at=waiter.claimed_at,
+                expected_claim_token=waiter.claim_token,
+                expected_updated_at=waiter.updated_at,
+                wait_message="等待资源锁",
+                next_run_at=3,
+                now=2,
+            )
+
+            self.assertIsNotNone(locked.holder)
+            self.assertEqual(locked.holder.id, holder.id)
+            self.assertEqual(locked.holder.metadata.get("dest_path"), "/library/Shared")
+
     def test_patch_claimed_metadata_keeps_overlaid_dest_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

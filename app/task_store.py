@@ -562,9 +562,25 @@ class TaskStore:
     def _snapshot(row: sqlite3.Row) -> TaskSnapshot:
         return TaskSnapshot.from_row(dict(row))
 
-    def _overlay_facts_on_task(self, task: TaskSnapshot) -> TaskSnapshot:
+    def _workflow_facts_unlocked(self, conn: sqlite3.Connection, task_id: int) -> dict[str, Any]:
+        task = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+        if task is None:
+            return {}
+        media = conn.execute("SELECT * FROM task_media WHERE task_id = ?", (int(task_id),)).fetchone()
+        share = conn.execute("SELECT * FROM task_shares WHERE task_id = ?", (int(task_id),)).fetchone()
+        move = conn.execute("SELECT * FROM task_moves WHERE task_id = ?", (int(task_id),)).fetchone()
+        emby = conn.execute("SELECT * FROM task_emby WHERE task_id = ?", (int(task_id),)).fetchone()
+        cleanup = conn.execute("SELECT * FROM task_cleanups WHERE task_id = ?", (int(task_id),)).fetchone()
+        probe = conn.execute("SELECT * FROM task_probes WHERE task_id = ?", (int(task_id),)).fetchone()
+        return _project_workflow_facts(task, media, share, move, emby, cleanup, probe)
+
+    def _overlay_facts_on_task(self, task: TaskSnapshot, conn: sqlite3.Connection | None = None) -> TaskSnapshot:
         try:
-            facts = self.workflow_facts(int(task.id))
+            facts = (
+                self._workflow_facts_unlocked(conn, int(task.id))
+                if conn is not None
+                else self.workflow_facts(int(task.id))
+            )
         except sqlite3.OperationalError:
             return task
         metadata = dict(task.metadata)
@@ -1964,7 +1980,7 @@ class TaskStore:
                 (task_id, TaskStatus.RUNNING.value, stale_before, int(limit)),
             ).fetchall()
             for row in rows:
-                candidate = self._snapshot(row)
+                candidate = self._overlay_facts_on_task(self._snapshot(row), conn)
                 if candidate.metadata.get("_lock_waiting"):
                     continue
                 if conflicts_with_holder(candidate):
@@ -2821,16 +2837,7 @@ class TaskStore:
 
     def workflow_facts(self, task_id: int) -> dict[str, Any]:
         with self._lock, self._connection() as conn:
-            task = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
-            if task is None:
-                return {}
-            media = conn.execute("SELECT * FROM task_media WHERE task_id = ?", (int(task_id),)).fetchone()
-            share = conn.execute("SELECT * FROM task_shares WHERE task_id = ?", (int(task_id),)).fetchone()
-            move = conn.execute("SELECT * FROM task_moves WHERE task_id = ?", (int(task_id),)).fetchone()
-            emby = conn.execute("SELECT * FROM task_emby WHERE task_id = ?", (int(task_id),)).fetchone()
-            cleanup = conn.execute("SELECT * FROM task_cleanups WHERE task_id = ?", (int(task_id),)).fetchone()
-            probe = conn.execute("SELECT * FROM task_probes WHERE task_id = ?", (int(task_id),)).fetchone()
-        return _project_workflow_facts(task, media, share, move, emby, cleanup, probe)
+            return self._workflow_facts_unlocked(conn, int(task_id))
 
     def list_self_share_move_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._lock, self._connection() as conn:
