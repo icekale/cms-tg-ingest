@@ -3031,7 +3031,9 @@ class QualityRetentionTests(unittest.TestCase):
             retired = service._retire_unfixable_task(task, time.time(), "run-1")
 
             self.assertTrue(retired)
-            self.assertIsNone(service.store.find_task(task.id))
+            leftover = service.store.find_task(task.id)
+            self.assertIsNotNone(leftover)
+            self.assertGreater(leftover.archived_at, 0)
             self.assertIsNone(submission_store.find_by_id(int(row["id"])))
 
     def test_keeps_recent_or_recoverable_terminal_task(self):

@@ -62,7 +62,9 @@ class WebAdminTests(unittest.TestCase):
                     response = client.recv(4096)
 
                 self.assertTrue(response.startswith(b"HTTP/1.0 200"))
-                self.assertIsNone(store.find_task(task.id))
+                leftover = store.find_task(task.id)
+                self.assertIsNotNone(leftover)
+                self.assertGreater(leftover.archived_at, 0)
             finally:
                 bridge.stop_web_server(server)
 

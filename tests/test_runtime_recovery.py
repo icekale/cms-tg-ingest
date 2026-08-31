@@ -125,7 +125,7 @@ def inject_task_operation_crash(store: TaskStore, boundary: str):
         "intent": "prepare_operation",
         "start": "start_operation",
         "result": "complete_operation",
-        "stage_commit": "complete_claimed_stage",
+        "stage_commit": "commit_claimed_result",
     }[boundary]
     original = getattr(store, method_name)
     hits = []
