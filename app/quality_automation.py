@@ -584,7 +584,7 @@ class QualityAutomation:
                 max_tasks=limit,
                 check_limit=max(1, int(self.config.quality_auto_115_check_limit)),
             )
-            if repair_enabled and self.repair_adapter is not None:
+            if repair_enabled:
                 plans = [self.execute_plan(plan, run_id) if plan.action != "skip" else plan for plan in plans]
             elif not repair_enabled:
                 plans = [

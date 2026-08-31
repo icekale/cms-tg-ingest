@@ -1149,6 +1149,25 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertEqual(plan.reason, "terminal_invalid_share")
             self.assertEqual(adapter.calls, [])
 
+    def test_run_once_enqueues_quality_repair_without_adapter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp, repair=True)
+            dest = library / "direct"
+            dest.mkdir(parents=True)
+            (dest / "movie.strm").write_text("https://cms/d/direct.mkv", encoding="utf-8")
+            task = self.add_task(service.store, "no-adapter", dest, own_share_receive_code="1212")
+            self.assertIsNone(service.repair_adapter)
+
+            summary = service.run_once("no-adapter-run")
+            plan = next(plan for plan in summary.plans if plan.task_id == task.id)
+
+            self.assertEqual(plan.execution_status, "queued")
+            with service.store._connection() as conn:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM task_commands WHERE command_type = 'quality_repair'"
+                ).fetchone()[0]
+            self.assertEqual(int(count), 1)
+
     def test_115_check_budget_limits_reprocess_adapter_calls(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = FakeQualityRepairAdapter()
