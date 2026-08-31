@@ -38,7 +38,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.4.33`。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.5.0`。
 4. 拉取固定版本并启动：
 
 ```sh
@@ -358,7 +358,7 @@ QUALITY_UNFIXABLE_RETENTION_DAYS=0
 
 ## 数据库备份
 
-程序默认每天在 `03:30`（`Asia/Shanghai`）使用 SQLite 在线备份 API 快照 `/data/submissions.db` 和 `/data/tasks.db`，保存到 `/data/backups`，默认保留 14 天。备份文件分别命名为 `submissions-<UTC>.db` 和 `tasks-<UTC>.db`；临时快照通过 `PRAGMA quick_check` 后才会原子发布。`/health` 和 Web `/api/v1/health` 只显示最近一次备份的状态、文件数和错误摘要，不显示备份绝对路径或任何凭据。
+程序默认每天在 `03:30`（`Asia/Shanghai`）使用 SQLite 在线备份 API 快照 `/data/cms-tg-ingest.db`，保存到 `/data/backups`，默认保留 14 天。备份文件命名为 `cms-tg-ingest-<UTC>.db`；临时快照通过 `PRAGMA quick_check` 后才会原子发布。`/health` 和 Web `/api/v1/health` 只显示最近一次备份的状态、文件数和错误摘要，不显示备份绝对路径或任何凭据。
 
 ```env
 BACKUP_ENABLED=true
@@ -375,14 +375,12 @@ docker compose exec cms-tg-ingest python /app/doctor.py
 docker compose exec cms-tg-ingest sh -c 'ls -lh /data/backups'
 ```
 
-恢复前先停止容器并备份当前数据库；选择同一时间戳的两个快照复制回 `/data` 后再启动：
+恢复前先停止容器并备份当前数据库；将快照复制回 `/data/cms-tg-ingest.db` 后再启动：
 
 ```sh
 docker compose stop cms-tg-ingest
-cp data/submissions.db data/submissions.db.before-restore
-cp data/tasks.db data/tasks.db.before-restore
-cp data/backups/submissions-YYYYMMDDTHHMMSSZ.db data/submissions.db
-cp data/backups/tasks-YYYYMMDDTHHMMSSZ.db data/tasks.db
+cp data/cms-tg-ingest.db data/cms-tg-ingest.db.before-restore
+cp data/backups/cms-tg-ingest-YYYYMMDDTHHMMSSZ.db data/cms-tg-ingest.db
 docker compose up -d --no-build
 ```
 
@@ -419,10 +417,12 @@ STRM_STABLE_SECONDS=30
 更新固定版本：
 
 ```sh
-# 先备份 /data 中的 submissions.db、tasks.db 和 .env
+# 先备份 /data 中的 cms-tg-ingest.db 和 .env
 docker compose pull
 docker compose up -d --no-build
 ```
+
+从 0.4.x 升级到 0.5.0 必须先用 `scripts/migrate_unified_db.py` 导入遗留 `tasks.db`/`submissions.db`，确认 `write_gate=closed` 且无待执行任务后，再按 `closed → runner_open → open` 打开闸门。打开写入后只向前修，不能回退导出。
 
 查看日志和健康状态：
 
@@ -504,7 +504,7 @@ git push origin v0.2.90
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.4.33
+docker pull icekale/cms-tg-ingest:0.5.0
 docker pull icekale/cms-tg-ingest:latest
 ```
 

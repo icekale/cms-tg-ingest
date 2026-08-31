@@ -1,3 +1,9 @@
+## 0.5.0 - 2026-08-31
+
+- **统一任务库**：运行时只使用 `DATABASE_PATH=/data/cms-tg-ingest.db`；TaskRunner 是唯一工作流写入者，观察者只入队命令。`/cms/cms-online.db` 仍是外部 CMS 状态。
+- **切库迁移**：从遗留 `tasks.db`/`submissions.db` 一次性导入；写入闸门 `closed → runner_open → open` 单向。打开写入后只向前修，不能回退导出。
+- **删除即归档**：普通删除归档并释放分享身份，永久清除需显式 purge。
+
 ## 0.4.33 - 2026-08-31
 
 - **关闭竞争写入**：engine 模式不再由 self-share maintenance 移动/恢复任务文件，失效分享探测只记录观察，自动质量修复暂时只读。
