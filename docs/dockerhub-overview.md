@@ -6,6 +6,8 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 链接 -> 115 接收/云下载 -> CMS 整理 -> shared/direct STRM -> 媒体库 -> Emby
 ```
 
+**0.5.2** 使用一份 SQLite 任务库和唯一 TaskRunner 写入者；观察者只入队命令。当前镜像 `icekale/cms-tg-ingest:0.5.2`。
+
 ## 核心能力
 
 - Telegram 支持裸链接、多链接、任务状态和按钮式运维。
@@ -14,7 +16,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 - 自有分享保留 CMS 的标准目录名，历史 `asset-*` 分享继续兼容，不自动改名。
 - 支持一个任务包含多个 CMS 整理目标；每个目标独立维护自有分享、CMS 同步、STRM 和 Emby 状态，所有目标成功后才统一清理接收源，失败目标会保留源文件。
 - 整理冲突任务支持安全的 `resume_organizing`，只恢复已有接收结果，不重复接收或创建分享。
-- TaskStore 记录每个阶段、等待原因、失败、重试和耗时。
+- 统一任务库记录每个阶段、等待原因、失败、重试和耗时；TaskRunner 独占工作流副作用。
 - 115 调用有频率限制、扫描预算和风控冷却。
 - 支持磁力、ED2K 云下载，随后按 STRM 模式进入对应流程；direct 模式不会创建分享或清理源文件。
 - 磁力和 ED2K 始终锁定 shared STRM；云下载输出支持多文件，并在移动中断后幂等恢复。
