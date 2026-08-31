@@ -976,8 +976,10 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(status, 303)
             self.assertEqual(headers["Location"], "/")
             self.assertEqual(remaining, {"pending", "manual"})
-            self.assertEqual(store.list_events(done.id), [])
-            self.assertEqual(store.list_events(failed.id), [])
+            self.assertGreater(float(store.find_task(done.id).archived_at or 0), 0)
+            self.assertGreater(float(store.find_task(failed.id).archived_at or 0), 0)
+            self.assertTrue(store.list_events(done.id))
+            self.assertTrue(store.list_events(failed.id))
             self.assertEqual(body, b"")
 
     def test_render_task_detail_contains_event_timeline_and_retry_form(self):

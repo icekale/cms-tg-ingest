@@ -121,7 +121,7 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(completed.result, {"submission_id": 7, "accepted": True})
             self.assertEqual(reopened, completed)
 
-    def test_clear_finished_tasks_removes_operation_history(self):
+    def test_clear_finished_tasks_archives_without_removing_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
             task = store.upsert_task("operation-cleanup", "", "https://115cdn.com/s/operation-cleanup")
@@ -129,7 +129,11 @@ class TaskStoreTests(unittest.TestCase):
             store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
 
             self.assertEqual(store.clear_finished_tasks(), 1)
-            self.assertIsNone(store.find_operation(task.id, "g0:u0:submit"))
+            archived = store.find_task(task.id)
+            self.assertIsNotNone(archived)
+            self.assertGreater(float(archived.archived_at or 0), 0)
+            self.assertIsNotNone(store.find_operation(task.id, "g0:u0:submit"))
+            self.assertEqual(store.list_recent_tasks(limit=10), [])
 
     def test_delete_finished_task_removes_task_events_and_operations_atomically(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -166,7 +170,9 @@ class TaskStoreTests(unittest.TestCase):
             store.request_task_termination(task.id, "Web", now=10)
 
             self.assertEqual(store.clear_finished_tasks(), 1)
-            self.assertIsNone(store.find_task(task.id))
+            archived = store.find_task(task.id)
+            self.assertIsNotNone(archived)
+            self.assertGreater(float(archived.archived_at or 0), 0)
 
     def test_clear_finished_tasks_keeps_quality_claimed_terminal_task(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -183,9 +189,10 @@ class TaskStoreTests(unittest.TestCase):
 
             self.assertEqual(store.clear_finished_tasks(), 3)
             self.assertEqual(store.find_task(claimed.id).claimed_by, "quality-cleanup:cleanup-run")
-            self.assertIsNone(store.find_task(succeeded.id))
-            self.assertIsNone(store.find_task(failed.id))
-            self.assertIsNone(store.find_task(cancelled.id))
+            self.assertEqual(float(store.find_task(claimed.id).archived_at or 0), 0)
+            self.assertGreater(float(store.find_task(succeeded.id).archived_at or 0), 0)
+            self.assertGreater(float(store.find_task(failed.id).archived_at or 0), 0)
+            self.assertGreater(float(store.find_task(cancelled.id).archived_at or 0), 0)
 
     def test_unclaimed_task_termination_is_immediate_and_not_runnable(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1541,7 +1541,15 @@ class TaskStore:
 
     def list_recent_tasks(self, limit: int = 20) -> list[TaskSnapshot]:
         with self._lock, self._connection() as conn:
-            rows = conn.execute("SELECT * FROM tasks ORDER BY updated_at DESC, id DESC LIMIT ?", (limit,)).fetchall()
+            rows = conn.execute(
+                """
+                SELECT * FROM tasks
+                WHERE COALESCE(archived_at, 0) = 0
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
         return [self._snapshot(row) for row in rows]
 
     def list_open_tasks(self) -> list[TaskSnapshot]:
@@ -2159,28 +2167,19 @@ class TaskStore:
         )
 
     def clear_finished_tasks(self) -> int:
-        terminal_statuses = (
-            TaskStatus.SUCCEEDED.value,
-            TaskStatus.FAILED.value,
-            TaskStatus.CANCELLED.value,
-        )
-        with self._lock, self._connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute(
-                "SELECT id FROM tasks WHERE status IN (?, ?, ?) AND claimed_by = ''",
-                terminal_statuses,
-            ).fetchall()
-            task_ids = [int(row["id"]) for row in rows]
-            if not task_ids:
-                return 0
-            placeholders = ",".join("?" for _ in task_ids)
-            conn.execute(f"DELETE FROM task_events WHERE task_id IN ({placeholders})", task_ids)
-            conn.execute(f"DELETE FROM task_operations WHERE task_id IN ({placeholders})", task_ids)
-            cursor = conn.execute(
-                f"DELETE FROM tasks WHERE id IN ({placeholders}) AND claimed_by = ''",
-                task_ids,
-            )
-        return int(cursor.rowcount or 0)
+        removed = 0
+        for task in self.list_recent_tasks(limit=1000):
+            if str(task.claimed_by or "").strip():
+                continue
+            if task.status.value not in {
+                TaskStatus.SUCCEEDED.value,
+                TaskStatus.FAILED.value,
+                TaskStatus.CANCELLED.value,
+            }:
+                continue
+            if self.archive_task(task.id, actor="web", reason="clear_history", expected_updated_at=task.updated_at):
+                removed += 1
+        return removed
 
     def delete_finished_task(self, task_id: int, *, expected_updated_at: float) -> bool:
         with self._lock, self._connection() as conn:
