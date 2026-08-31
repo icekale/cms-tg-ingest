@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from app.models import StageCheckpoint, StageResult, TaskStage, TaskStatus
 from app.strm_mode import effective_task_strm_mode
-from app.task_store import TaskStore, operation_scope
+from app.task_store import TaskStore, WorkflowRowAdapter, operation_scope
 
 
 class TaskStoreTests(unittest.TestCase):
@@ -2265,3 +2265,38 @@ class TaskStoreTests(unittest.TestCase):
             store.write_facts(task.id, probe={"last_probe_at": 9.0}, now=9.0)
             facts = store.workflow_facts(task.id)
             self.assertEqual(facts.get("share_probe_at"), 9.0)
+
+    def test_adapter_enqueues_missing_library_restore_without_moving(self):
+        from app.media.strm import enqueue_missing_self_share_restores, enqueue_stranded_self_share_repairs
+        from app.config import MoveConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "library" / "Movie"
+            store = TaskStore(root / "tasks.db")
+            adapter = WorkflowRowAdapter(store)
+            task = store.upsert_task("missing-dest", "", "https://115cdn.com/s/missing-dest")
+            store.write_facts(
+                task.id,
+                share={
+                    "canonical_name": "Movie",
+                    "own_share_code": "ownabc",
+                    "file_id": "fid",
+                },
+                move={
+                    "move_status": "moved",
+                    "dest_path": str(dest),
+                },
+            )
+            queued = enqueue_missing_self_share_restores(adapter, limit=10)
+            stranded = enqueue_stranded_self_share_repairs(
+                adapter,
+                MoveConfig(source_roots=[root / "share"], library_roots={"电影": root / "library"}),
+                limit=10,
+            )
+            self.assertEqual(queued, 1)
+            self.assertEqual(stranded, 0)
+            self.assertFalse(dest.exists())
+            command = store.claim_next_command("inspector")
+            self.assertEqual(command["command_type"], "restore")
+            self.assertEqual(store.find_task(task.id).id, task.id)

@@ -135,6 +135,7 @@ from app.media.strm import (
     prepare_self_share_move_inputs,
     reconcile_self_share_move,
     remove_direct_strm_files,
+    enqueue_missing_self_share_restores,
     enqueue_stranded_self_share_repairs,
     restore_missing_self_share_library_folder,
     restore_missing_self_share_library_folders,
@@ -2249,20 +2250,11 @@ def start_self_share_maintenance_loop(
         while not loop_stop_event.is_set():
             try:
                 moved = _observe_stranded_self_share_moves(store, move_config, limit)
-                restored = restore_missing_self_share_library_folders(
-                    store,
-                    cms,
-                    self_share_config,
-                    move_config,
-                    emby=emby,
-                    limit=limit,
-                )
+                restored = enqueue_missing_self_share_restores(store, limit=limit)
                 if moved:
-                    LOG.info("Self-share maintenance reconciled %s stranded STRM moves", moved)
+                    LOG.info("Self-share maintenance queued %s stranded STRM repairs", moved)
                 if restored:
-                    LOG.info("Self-share maintenance restored %s missing STRM folders", restored)
-                if moved or restored:
-                    write_metrics_snapshot(store, metrics_path_for_store(store))
+                    LOG.info("Self-share maintenance queued %s missing library restores", restored)
             except Exception:
                 LOG.debug("Self-share maintenance loop failed", exc_info=True)
             if loop_stop_event.wait(interval_seconds):

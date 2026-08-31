@@ -2742,6 +2742,27 @@ class TaskStore:
             ).fetchall()
         return [self.workflow_facts(int(row[0])) for row in rows]
 
+    def missing_self_share_library_candidates(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.id FROM tasks t
+                JOIN task_shares s ON s.task_id = t.id
+                JOIN task_moves m ON m.task_id = t.id
+                WHERE COALESCE(t.archived_at, 0) = 0
+                  AND COALESCE(t.is_executable, 1) = 1
+                  AND lower(m.move_status) = 'moved'
+                  AND COALESCE(m.dest_path, '') <> ''
+                  AND s.canonical_name != ''
+                  AND s.own_share_code != ''
+                  AND lower(COALESCE(s.validation_status, '')) NOT IN ('invalid', 'unavailable')
+                ORDER BY t.updated_at DESC, t.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (max(1, int(limit)), max(0, int(offset))),
+            ).fetchall()
+        return [self.workflow_facts(int(row[0])) for row in rows]
+
     def record_event(
         self,
         task_id: int,
@@ -3721,8 +3742,14 @@ class WorkflowRowAdapter:
     def invalid_self_share_move_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
         return []
 
+    def enqueue_command(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self._tasks.enqueue_command(*args, **kwargs)
+
+    def list_self_share_move_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
+        return self._tasks.list_self_share_move_candidates(limit=limit)
+
     def missing_self_share_library_candidates(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-        return []
+        return self._tasks.missing_self_share_library_candidates(limit=limit, offset=offset)
 
     def pending_self_share_cleanup_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
         return []

@@ -1056,17 +1056,13 @@ class PostAutoOrganizeGuardTests(unittest.TestCase):
         self.ss_module = ss
         ss._post_organize_guard_last_scheduled_at = 0.0
 
-    def test_schedule_post_organize_restore_guard_zero_delay_invokes_restore(self):
+    def test_schedule_post_organize_restore_guard_zero_delay_enqueues_restore(self):
         from app.workflows.self_share import schedule_post_organize_restore_guard
 
         called = {}
 
-        def fake_restore(store, cms, self_share_config, move_config, emby=None, limit=50):
+        def fake_enqueue(store, limit=50):
             called["store"] = store
-            called["cms"] = cms
-            called["config"] = self_share_config
-            called["move_config"] = move_config
-            called["emby"] = emby
             called["limit"] = limit
             return 2
 
@@ -1075,7 +1071,9 @@ class PostAutoOrganizeGuardTests(unittest.TestCase):
         config = SelfShareConfig(enabled=True)
         move_config = MoveConfig(source_roots=[], library_roots={})
         emby = object()
-        with patch("app.workflows.self_share.restore_missing_self_share_library_folders", side_effect=fake_restore) as restore_mock:
+        with patch("app.workflows.self_share.enqueue_missing_self_share_restores", side_effect=fake_enqueue) as enqueue_mock, patch(
+            "app.workflows.self_share.restore_missing_self_share_library_folders"
+        ) as restore_mock:
             thread = schedule_post_organize_restore_guard(
                 store,
                 cms,
@@ -1088,12 +1086,9 @@ class PostAutoOrganizeGuardTests(unittest.TestCase):
             self.assertIsNotNone(thread)
             thread.join(timeout=5)
 
-        restore_mock.assert_called_once()
+        enqueue_mock.assert_called_once()
+        restore_mock.assert_not_called()
         self.assertEqual(called["store"], store)
-        self.assertEqual(called["cms"], cms)
-        self.assertEqual(called["config"], config)
-        self.assertEqual(called["move_config"], move_config)
-        self.assertEqual(called["emby"], emby)
         self.assertEqual(called["limit"], 10)
 
     def test_schedule_post_organize_restore_guard_dedupes_within_window(self):

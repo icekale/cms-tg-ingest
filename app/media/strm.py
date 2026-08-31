@@ -1272,6 +1272,39 @@ def enqueue_stranded_self_share_repairs(store: Any, move_config: MoveConfig, lim
     return queued
 
 
+def find_missing_self_share_library_folders(store: Any, limit: int = 50) -> list[dict[str, Any]]:
+    if not hasattr(store, "missing_self_share_library_candidates"):
+        return []
+    found: list[dict[str, Any]] = []
+    for facts in store.missing_self_share_library_candidates(limit=max(1, int(limit))):
+        dest = str(facts.get("dest_path") or facts.get("validated_dest_path") or "")
+        if not dest or Path(dest).exists():
+            continue
+        found.append({"task_id": int(facts["id"]), "expected_destination": dest})
+    return found
+
+
+def enqueue_missing_self_share_restores(store: Any, limit: int = 50) -> int:
+    queued = 0
+    enqueue = getattr(store, "enqueue_command", None)
+    if not callable(enqueue):
+        return 0
+    for item in find_missing_self_share_library_folders(store, limit=limit):
+        task_id = int(item["task_id"])
+        dest = str(item.get("expected_destination") or "")
+        enqueue(
+            task_id,
+            "restore",
+            {"target_stage": "moved", "message": "自动恢复缺失媒体库 STRM"},
+            idempotency_key=command_key("restore", task_id, dest),
+            actor="maintenance",
+            source="missing-library",
+        )
+        queued += 1
+        LOG.info("Enqueued missing library restore task_id=%s command_type=restore", task_id)
+    return queued
+
+
 def restore_missing_self_share_library_folder(
     store: Any,
     cms: Any,

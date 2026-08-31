@@ -67,6 +67,7 @@ from app.media.strm import (
     move_config_for_workflow_source,
     plan_strm_move,
     restore_canonical_strm_paths,
+    enqueue_missing_self_share_restores,
     restore_missing_self_share_library_folder,
     restore_missing_self_share_library_folders,
     _single_relative_directory_name,
@@ -158,16 +159,9 @@ def schedule_post_organize_restore_guard(
         try:
             if delay:
                 time.sleep(delay)
-            restored = restore_missing_self_share_library_folders(
-                store,
-                cms,
-                self_share_config,
-                move_config,
-                emby=emby,
-                limit=limit,
-            )
-            if restored:
-                LOG.info("Post-auto-organize guard restored %s missing self-share folders", restored)
+            queued = enqueue_missing_self_share_restores(store, limit=limit)
+            if queued:
+                LOG.info("Post-auto-organize guard queued %s missing library restores", queued)
         except Exception:
             LOG.warning("Post-auto-organize guard failed", exc_info=True)
 
