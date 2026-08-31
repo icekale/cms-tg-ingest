@@ -385,6 +385,9 @@ class TaskRunner:
             return True
         p115_before = _p115_request_count(self.p115_client)
         self._set_active_claim(task)
+        bind_claim = getattr(getattr(self.workflow, "store", None), "bind_claim", None)
+        if callable(bind_claim):
+            bind_claim(task)
         try:
             result = self.workflow.run_stage(task)
         except P115RiskControlError as exc:
@@ -463,6 +466,10 @@ class TaskRunner:
                 clear_claim=True,
             )
             return True
+        finally:
+            clear_claim = getattr(getattr(self.workflow, "store", None), "clear_claim", None)
+            if callable(clear_claim):
+                clear_claim()
         if self._settle_requested_termination(task):
             return True
         try:

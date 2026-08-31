@@ -3523,7 +3523,12 @@ class TaskStore:
         emby: dict[str, Any] | None = None,
         cleanup: dict[str, Any] | None = None,
         probe: dict[str, Any] | None = None,
+        claimed_by: str = "",
+        claim_token: str = "",
+        now: float | None = None,
+        stale_after_seconds: int = 21600,
     ) -> dict[str, Any]:
+        current_time = time.time() if now is None else float(now)
         result = StageResult.complete(
             "",
             checkpoint=StageCheckpoint(
@@ -3537,7 +3542,16 @@ class TaskStore:
         )
         with self._lock, self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._apply_checkpoint(conn, int(task_id), result)
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+            if row is None:
+                return {}
+            owner = str(row["claimed_by"] or "")
+            heartbeat = float(row["claim_heartbeat_at"] or row["claimed_at"] or 0)
+            live = bool(owner) and heartbeat > current_time - max(1, int(stale_after_seconds))
+            if not live or (
+                owner == str(claimed_by or "") and str(row["claim_token"] or "") == str(claim_token or "")
+            ):
+                self._apply_checkpoint(conn, int(task_id), result)
         return self.workflow_facts(int(task_id))
 
 
@@ -3547,6 +3561,25 @@ class WorkflowRowAdapter:
     def __init__(self, tasks: TaskStore):
         self._tasks = tasks
         self.db_path = tasks.db_path
+        self._claim_task_id = 0
+        self._claimed_by = ""
+        self._claim_token = ""
+
+    def bind_claim(self, task: Any) -> None:
+        self._claim_task_id = int(getattr(task, "id", 0) or 0)
+        self._claimed_by = str(getattr(task, "claimed_by", "") or "")
+        self._claim_token = str(getattr(task, "claim_token", "") or "")
+
+    def clear_claim(self) -> None:
+        self._claim_task_id = 0
+        self._claimed_by = ""
+        self._claim_token = ""
+
+    def write_facts(self, task_id: int, **kwargs: Any) -> dict[str, Any]:
+        if int(task_id) == self._claim_task_id:
+            kwargs.setdefault("claimed_by", self._claimed_by)
+            kwargs.setdefault("claim_token", self._claim_token)
+        return self._tasks.write_facts(int(task_id), **kwargs)
 
     def find_by_id(self, row_id: int) -> dict[str, Any] | None:
         facts = self._tasks.workflow_facts(int(row_id))
@@ -3570,19 +3603,19 @@ class WorkflowRowAdapter:
         if cms_task_id:
             media["cms_task_id"] = str(cms_task_id)
         if media:
-            self._tasks.write_facts(int(task.id), media=media)
+            self.write_facts(int(task.id), media=media)
         return self._tasks.workflow_facts(int(task.id))
 
     def update_status(self, row_id: int, status: str, title: str | None = None, last_error: str | None = None) -> dict[str, Any] | None:
         if title:
-            return self._tasks.write_facts(int(row_id), media={"title": str(title)})
+            return self.write_facts(int(row_id), media={"title": str(title)})
         return self.find_by_id(row_id)
 
     def update_category(self, row_id: int, choice: str | None, status: str) -> dict[str, Any] | None:
         media = {"recognition_status": str(status or "")}
         if choice:
             media["category"] = str(choice)
-        return self._tasks.write_facts(int(row_id), media=media)
+        return self.write_facts(int(row_id), media=media)
 
     def update_recognition(self, row_id: int, recognition: dict[str, Any], category_status: str) -> dict[str, Any] | None:
         recognition = recognition or {}
@@ -3593,7 +3626,7 @@ class WorkflowRowAdapter:
             "tmdb_id": str(recognition.get("tmdb_id") or ""),
             "category": str(recognition.get("category") or ""),
         }
-        return self._tasks.write_facts(int(row_id), media={k: v for k, v in payload.items() if v})
+        return self.write_facts(int(row_id), media={k: v for k, v in payload.items() if v})
 
     def update_emby(self, row_id: int, status: str, item_id: str | None = None, title: str | None = None, path: str | None = None, parent: str | None = None, **_kwargs: Any) -> dict[str, Any] | None:
         emby = {"status": str(status or "")}
@@ -3605,7 +3638,7 @@ class WorkflowRowAdapter:
             emby["path"] = str(path)
         if parent is not None:
             emby["library"] = str(parent)
-        return self._tasks.write_facts(int(row_id), emby=emby)
+        return self.write_facts(int(row_id), emby=emby)
 
     def update_move(self, row_id: int, status: str, source_path: str | None = None, dest_path: str | None = None, category_final: str | None = None, error: str | None = None, **_kwargs: Any) -> dict[str, Any] | None:
         move = {"move_status": str(status or "")}
@@ -3616,7 +3649,7 @@ class WorkflowRowAdapter:
         if error is not None:
             move["move_error"] = str(error)
         media = {"category": str(category_final)} if category_final else None
-        return self._tasks.write_facts(int(row_id), move=move, media=media)
+        return self.write_facts(int(row_id), move=move, media=media)
 
     def update_self_share(self, row_id: int, **fields: Any) -> dict[str, Any] | None:
         mapping = {
@@ -3633,7 +3666,7 @@ class WorkflowRowAdapter:
         share = {dest: str(fields[src]) for src, dest in mapping.items() if fields.get(src) is not None}
         if not share:
             return self.find_by_id(row_id)
-        return self._tasks.write_facts(int(row_id), share=share)
+        return self.write_facts(int(row_id), share=share)
 
     def update_cleanup(self, row_id: int, status: str, file_id: str | None = None, error: str | None = None, **_kwargs: Any) -> dict[str, Any] | None:
         cleanup = {"status": str(status or "")}
@@ -3641,10 +3674,10 @@ class WorkflowRowAdapter:
             cleanup["target_id"] = str(file_id)
         if error is not None:
             cleanup["error"] = str(error)
-        return self._tasks.write_facts(int(row_id), cleanup=cleanup)
+        return self.write_facts(int(row_id), cleanup=cleanup)
 
     def update_share_probe(self, row_id: int) -> dict[str, Any] | None:
-        return self._tasks.write_facts(int(row_id), probe={"last_probe_at": time.time()})
+        return self.write_facts(int(row_id), probe={"last_probe_at": time.time()})
 
     def remember_parent_category(self, parent_id: str, category: str, source: str = "manual") -> None:
         now = time.time()

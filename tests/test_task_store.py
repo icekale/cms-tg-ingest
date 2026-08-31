@@ -2229,3 +2229,39 @@ class TaskStoreTests(unittest.TestCase):
             facts = store.workflow_facts(claimed.id)
             self.assertFalse(facts.get("own_share_code"))
             self.assertEqual(facts.get("move_status"), "")
+
+    def test_write_facts_refuses_live_foreign_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            claimed = self._claim_running(store, "claim-fence")
+            store.write_facts(
+                claimed.id,
+                move={"move_status": "moved", "dest_path": "/stolen"},
+                now=1.0,
+            )
+            facts = store.workflow_facts(claimed.id)
+            self.assertNotEqual(facts.get("dest_path"), "/stolen")
+            self.assertNotEqual(facts.get("move_status"), "moved")
+
+    def test_write_facts_allows_matching_claim_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            claimed = self._claim_running(store, "claim-holder")
+            store.write_facts(
+                claimed.id,
+                move={"move_status": "moved", "dest_path": "/library/movie"},
+                claimed_by=claimed.claimed_by,
+                claim_token=claimed.claim_token,
+                now=1.0,
+            )
+            facts = store.workflow_facts(claimed.id)
+            self.assertEqual(facts.get("dest_path"), "/library/movie")
+            self.assertEqual(facts.get("move_status"), "moved")
+
+    def test_write_facts_allows_unclaimed_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("unclaimed-facts", "", "https://115cdn.com/s/unclaimed-facts")
+            store.write_facts(task.id, probe={"last_probe_at": 9.0}, now=9.0)
+            facts = store.workflow_facts(task.id)
+            self.assertEqual(facts.get("share_probe_at"), 9.0)
