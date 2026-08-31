@@ -402,7 +402,7 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             self.assertTrue(seen[0]["task_engine_enabled"])
 
     def test_run_forever_starts_task_runner_when_task_engine_and_self_share_enabled(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             env = self.required_env(tmp)
             env.update({
                 "WORKFLOW_MODE": "self_share_sync",
