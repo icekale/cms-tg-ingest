@@ -1447,6 +1447,7 @@ class TaskStore:
                 f"""
                 SELECT * FROM tasks
                 WHERE json_valid(metadata_json)
+                  AND COALESCE(archived_at, 0) = 0
                   AND CAST(json_extract(metadata_json, '$.own_share_file_id') AS TEXT) = ?
                   {exclude_clause}
                 ORDER BY updated_at DESC, id DESC
@@ -1478,6 +1479,7 @@ class TaskStore:
                 SELECT json_extract(metadata_json, '$.own_share_code') AS code
                 FROM tasks
                 WHERE json_valid(metadata_json)
+                  AND COALESCE(archived_at, 0) = 0
                   AND COALESCE(json_extract(metadata_json, '$.own_share_code'), '') <> ''
                   AND COALESCE(json_extract(metadata_json, '$.share_validation_status'), '')
                       NOT IN ('invalid', 'invalid_share_cleaned')

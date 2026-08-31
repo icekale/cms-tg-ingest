@@ -1126,6 +1126,40 @@ class TaskStoreTests(unittest.TestCase):
             )
             self.assertEqual(store.list_tasks_by_own_share_file_id(""), [])
 
+    def test_archived_tasks_do_not_own_live_share_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            archived = store.upsert_task("old", "1212", "https://115cdn.com/s/old")
+            archived = store.record_event(
+                archived.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "done",
+                metadata_patch={"own_share_file_id": "folder-1", "own_share_code": "own-old"},
+            )
+            live = store.upsert_task("new", "1212", "https://115cdn.com/s/new")
+            store.record_event(
+                live.id,
+                TaskStage.OWN_SHARE_CREATED,
+                TaskStatus.PENDING,
+                "live owner",
+                metadata_patch={"own_share_file_id": "folder-1", "own_share_code": "own-new"},
+            )
+            self.assertTrue(
+                store.archive_task(
+                    archived.id,
+                    actor="test",
+                    reason="user_delete",
+                    expected_updated_at=archived.updated_at,
+                )
+            )
+
+            owners = store.list_tasks_by_own_share_file_id("folder-1")
+            live_codes = store.list_live_share_codes()
+
+            self.assertEqual([task.id for task in owners], [live.id])
+            self.assertEqual(live_codes, {"own-new"})
+
     def test_record_stage_event_updates_current_task_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
