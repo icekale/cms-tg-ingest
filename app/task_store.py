@@ -591,7 +591,16 @@ class TaskStore:
             if metadata.get(key) in empty:
                 metadata[key] = value
                 changed = True
-        return replace(task, metadata=metadata) if changed else task
+        fields: dict[str, Any] = {"metadata": metadata} if changed else {}
+        if not str(task.tmdb_id or "").strip():
+            tmdb_id = facts.get("tmdb_id")
+            if tmdb_id not in empty:
+                fields["tmdb_id"] = str(tmdb_id)
+        if not str(task.category or "").strip():
+            category = facts.get("category_final") or facts.get("category")
+            if category not in empty:
+                fields["category"] = str(category)
+        return replace(task, **fields) if fields else task
 
     def _snapshot_with_facts(self, row: sqlite3.Row) -> TaskSnapshot:
         return self._overlay_facts_on_task(self._snapshot(row))

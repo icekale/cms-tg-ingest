@@ -1183,6 +1183,20 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(recent[0].metadata.get("dest_path"), "/library/Movie")
             self.assertEqual(live_codes, {"own-fact"})
 
+    def test_overlay_fills_category_and_tmdb_from_media_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("media-facts", "1212", "https://115cdn.com/s/media-facts")
+            store.write_facts(
+                task.id,
+                media={"tmdb_id": "345735", "category": "华语电影", "title": "老笠"},
+            )
+
+            found = store.find_task(task.id)
+
+            self.assertEqual(found.tmdb_id, "345735")
+            self.assertEqual(found.category, "华语电影")
+
     def test_claim_next_runnable_overlays_normalized_facts(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
