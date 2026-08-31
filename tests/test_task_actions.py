@@ -317,7 +317,8 @@ class TaskActionsTest(unittest.TestCase):
             result = delete_task_record_and_submission(task_store, submission_store, task.id)
 
             self.assertTrue(result.applied)
-            self.assertIsNone(task_store.find_task(task.id))
+            self.assertEqual(result.reason, "任务已归档")
+            self.assertIsNotNone(task_store.find_task(task.id))
             self.assertIsNone(submission_store.find_by_id(int(row["id"])))
 
     def test_delete_task_record_and_submission_uses_metadata_submission_id(self):
@@ -345,7 +346,8 @@ class TaskActionsTest(unittest.TestCase):
             result = delete_task_record_and_submission(task_store, submission_store, task.id)
 
             self.assertTrue(result.applied)
-            self.assertIsNone(task_store.find_task(task.id))
+            self.assertEqual(result.reason, "任务已归档")
+            self.assertIsNotNone(task_store.find_task(task.id))
             self.assertIsNone(submission_store.find_by_id(int(row["id"])))
 
 

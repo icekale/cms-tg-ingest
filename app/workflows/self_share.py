@@ -76,7 +76,7 @@ from app.self_share_settings import resolve_own_share_receive_code, resolve_self
 from app.task_bridge import reset_self_share_submission_for_reprocess
 from app.task_store import operation_scope
 from app.strm_mode import effective_task_strm_mode
-from app.task_runner import StageOutcome, StageResult
+from app.models import StageCheckpoint, StageOutcome, StageResult
 
 LOG = logging.getLogger("cms-tg-ingest")
 OPENAI_CATEGORY_LABELS = ["华语电影", "欧美电影", "亚洲电影", "动漫电影", "国产电视", "外国电视", "番剧", "纪录片"]
@@ -4462,6 +4462,13 @@ class BridgeSelfShareTaskWorkflow:
                         return StageResult.complete(
                             "STRM 已在目标目录，按已完成移动继续",
                             metadata,
+                            checkpoint=StageCheckpoint(
+                                move={
+                                    "dest_path": str(destination),
+                                    "move_status": "moved",
+                                    "validated_dest_path": str(destination),
+                                }
+                            ),
                         )
             folder_name = str(row.get("own_share_file_name") or "").strip()
             if folder_name:

@@ -204,6 +204,7 @@ class TaskRunner:
         self._p115_risk_cooldown_until = self._load_p115_risk_cooldown()
         self._last_heartbeat_at = 0.0
         self._last_claim_attempt_at = 0.0
+        self._runner_lease_token = ""
 
     def _load_p115_risk_cooldown(self) -> float:
         try:
@@ -274,6 +275,8 @@ class TaskRunner:
             self._record_activity()
             try:
                 self._renew_active_claim()
+                if self._runner_lease_token:
+                    self.store.renew_runner_lease(self.worker_id, self._runner_lease_token)
             except Exception:
                 LOG.warning("Failed to renew active task claim; will retry", exc_info=True)
             self._stop.wait(_HEARTBEAT_INTERVAL_SECONDS)
@@ -337,6 +340,11 @@ class TaskRunner:
 
     def run_once(self) -> bool:
         self._last_claim_attempt_at = self.now()
+        claim_command = getattr(self.store, "claim_next_command", None)
+        if callable(claim_command):
+            command = claim_command(self.worker_id, now=self.now())
+            if isinstance(command, dict):
+                return self._run_command(command)
         if self._claim_release_pending:
             self.store.clear_worker_claims(self.worker_id, now=self.now())
             self._claim_release_pending = False
@@ -782,9 +790,48 @@ class TaskRunner:
             clear_claim=True,
         )
 
+    def _run_command(self, command: dict) -> bool:
+        command_id = int(command["id"])
+        token = str(command.get("claim_token") or "")
+        task_id = int(command.get("task_id") or 0)
+        command_type = str(command.get("command_type") or "")
+        try:
+            if command_type == "retry":
+                self.store.enqueue_task(task_id)
+            elif command_type == "reprocess":
+                self.store.reprocess_task(task_id)
+            elif command_type == "terminate":
+                self.store.request_task_termination(task_id, str(command.get("actor") or "command"))
+            elif command_type in {"emby_check", "restore", "resume_organizing"}:
+                stage = {
+                    "emby_check": TaskStage.EMBY_CONFIRMED,
+                    "restore": TaskStage.EMBY_CONFIRMED,
+                    "resume_organizing": TaskStage.ORGANIZING,
+                }[command_type]
+                self.store.enqueue_task(task_id, stage)
+            elif command_type in {"repair_move", "invalidate_share", "quality_repair"}:
+                pass
+            else:
+                self.store.fail_command(command_id, token, "unsupported command")
+                return True
+            self.store.complete_command(command_id, token, result={"applied": True})
+        except Exception as exc:
+            fail = getattr(self.store, "fail_command", None)
+            if callable(fail):
+                fail(command_id, token, str(exc))
+            else:
+                raise
+        return True
+
     def start(self) -> threading.Thread:
         if self._thread and self._thread.is_alive():
             return self._thread
+        acquire = getattr(self.store, "acquire_runner_lease", None)
+        if callable(acquire):
+            token = acquire(self.worker_id)
+            if not token:
+                raise RuntimeError("another TaskRunner already holds the runner lease")
+            self._runner_lease_token = str(token)
         self._stop.clear()
         self._last_heartbeat_at = 0.0
         self._thread = threading.Thread(target=self.run_forever, daemon=True)
@@ -795,6 +842,11 @@ class TaskRunner:
 
     def stop(self, join_timeout: float = 5) -> None:
         self._stop.set()
+        if self._runner_lease_token:
+            release = getattr(self.store, "release_runner_lease", None)
+            if callable(release):
+                release(self.worker_id, self._runner_lease_token)
+            self._runner_lease_token = ""
         deadline = time.monotonic() + max(0.0, float(join_timeout))
         for thread in (self._thread, self._heartbeat_thread):
             if thread and thread is not threading.current_thread():

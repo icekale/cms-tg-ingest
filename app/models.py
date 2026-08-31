@@ -174,6 +174,7 @@ class TaskSnapshot:
     claimed_at: float = 0
     claim_token: str = ""
     claim_heartbeat_at: float = 0
+    archived_at: float = 0
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = 0
     updated_at: float = 0
@@ -211,6 +212,7 @@ class TaskSnapshot:
             claimed_at=float(row.get("claimed_at") or 0),
             claim_token=str(row.get("claim_token") or ""),
             claim_heartbeat_at=float(row.get("claim_heartbeat_at") or 0),
+            archived_at=float(row.get("archived_at") or 0),
             metadata=metadata,
             created_at=float(row.get("created_at") or 0),
             updated_at=float(row.get("updated_at") or 0),

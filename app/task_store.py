@@ -17,6 +17,19 @@ from .self_share_settings import normalize_receive_cid, normalize_self_share_rev
 from .strm_mode import is_strm_mode_locked, normalize_strm_mode
 
 
+COMMAND_TYPES = frozenset(
+    {
+        "retry",
+        "reprocess",
+        "resume_organizing",
+        "emby_check",
+        "restore",
+        "repair_move",
+        "invalidate_share",
+        "quality_repair",
+        "terminate",
+    }
+)
 STRM_DEFAULT_MODE_KEY = "strm_default_mode"
 OWN_SHARE_RECEIVE_CODE_KEY = "own_share_receive_code_override"
 SELF_SHARE_RECEIVE_CID_KEY = "self_share_receive_cid_override"
@@ -390,6 +403,11 @@ class TaskStore:
             "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
             "source_type": "TEXT NOT NULL DEFAULT 'share'",
             "source_key": "TEXT NOT NULL DEFAULT ''",
+            "archived_at": "REAL",
+            "archived_by": "TEXT NOT NULL DEFAULT ''",
+            "archive_reason": "TEXT NOT NULL DEFAULT ''",
+            "origin": "TEXT NOT NULL DEFAULT 'runtime'",
+            "is_executable": "INTEGER NOT NULL DEFAULT 1",
         }
         for name, definition in columns.items():
             if name not in existing:
@@ -2068,6 +2086,84 @@ class TaskStore:
             cursor = conn.execute("DELETE FROM tasks WHERE id = ?", (int(task_id),))
         return int(cursor.rowcount or 0) == 1
 
+    def archive_task(
+        self,
+        task_id: int,
+        *,
+        actor: str,
+        reason: str,
+        expected_updated_at: float,
+        now: float | None = None,
+    ) -> bool:
+        current_time = time.time() if now is None else float(now)
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+            if row is None or str(row["claimed_by"] or ""):
+                return False
+            if row["status"] not in _DELETABLE_TASK_STATUSES:
+                return False
+            if float(row["updated_at"] or 0) != float(expected_updated_at):
+                return False
+            if row["archived_at"] not in (None, "", 0):
+                return True
+            conn.execute(
+                "UPDATE task_commands SET status = 'cancelled', updated_at = ? WHERE task_id = ? AND status = 'pending'",
+                (current_time, int(task_id)),
+            )
+            conn.execute(
+                "INSERT INTO task_events (task_id, stage, status, message, created_at) VALUES (?, ?, ?, ?, ?)",
+                (int(task_id), row["current_stage"], row["status"], f"{actor} 已归档任务", current_time),
+            )
+            cursor = conn.execute(
+                """
+                UPDATE tasks
+                SET archived_at = ?, archived_by = ?, archive_reason = ?, next_run_at = -1, updated_at = ?
+                WHERE id = ? AND claimed_by = ''
+                """,
+                (current_time, str(actor), str(reason), current_time, int(task_id)),
+            )
+        return int(cursor.rowcount or 0) == 1
+
+    def purge_archived_task(self, task_id: int, *, actor: str, confirmation: str) -> bool:
+        if confirmation != f"PURGE TASK {int(task_id)}":
+            return False
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+            if row is None or str(row["claimed_by"] or ""):
+                return False
+            if row["status"] not in _DELETABLE_TASK_STATUSES:
+                return False
+            if row["archived_at"] in (None, "", 0):
+                return False
+            pending = conn.execute(
+                "SELECT COUNT(*) FROM task_commands WHERE task_id = ? AND status IN ('pending', 'claimed')",
+                (int(task_id),),
+            ).fetchone()[0]
+            if int(pending or 0):
+                return False
+            conn.execute(
+                """
+                INSERT INTO task_purge_audit (task_id, source_type, source_key, actor, reason, identity_json, purged_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(task_id),
+                    str(row["source_type"] or ""),
+                    str(row["source_key"] or ""),
+                    str(actor),
+                    str(row["archive_reason"] or ""),
+                    json.dumps({"title": row["title"]}, ensure_ascii=True, sort_keys=True),
+                    time.time(),
+                ),
+            )
+            conn.execute("DELETE FROM task_events WHERE task_id = ?", (int(task_id),))
+            conn.execute("DELETE FROM task_operations WHERE task_id = ?", (int(task_id),))
+            conn.execute("DELETE FROM task_commands WHERE task_id = ?", (int(task_id),))
+            cursor = conn.execute("DELETE FROM tasks WHERE id = ?", (int(task_id),))
+        return int(cursor.rowcount or 0) == 1
+
     def request_task_termination(
         self,
         task_id: int,
@@ -2997,6 +3093,8 @@ class TaskStore:
                   AND current_stage NOT IN (?, ?)
                   AND next_run_at >= 0
                   AND next_run_at <= ?
+                  AND COALESCE(archived_at, 0) = 0
+                  AND COALESCE(is_executable, 1) != 0
                   AND (claimed_by = '' OR COALESCE(NULLIF(claim_heartbeat_at, 0), claimed_at) <= ?)
                 ORDER BY updated_at ASC, id ASC
                 LIMIT 10
@@ -3022,6 +3120,8 @@ class TaskStore:
                       AND current_stage NOT IN (?, ?)
                       AND next_run_at >= 0
                       AND next_run_at <= ?
+                      AND COALESCE(archived_at, 0) = 0
+                      AND COALESCE(is_executable, 1) != 0
                       AND (claimed_by = '' OR COALESCE(NULLIF(claim_heartbeat_at, 0), claimed_at) <= ?)
                     """,
                     (
@@ -3069,5 +3169,177 @@ class TaskStore:
                     str(expected_claimed_by),
                     str(expected_claim_token),
                 ),
+            )
+        return int(cursor.rowcount or 0) == 1
+
+    def enqueue_command(
+        self,
+        task_id: int,
+        command_type: str,
+        payload: dict[str, Any],
+        *,
+        idempotency_key: str,
+        actor: str = "",
+        source: str = "",
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        if command_type not in COMMAND_TYPES:
+            raise ValueError(f"unsupported command type: {command_type}")
+        payload_json = self._operation_json(payload)
+        current_time = time.time() if now is None else float(now)
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT * FROM task_commands WHERE idempotency_key = ?",
+                (str(idempotency_key),),
+            ).fetchone()
+            if existing is not None:
+                if existing["command_type"] != command_type or existing["payload_json"] != payload_json:
+                    raise ValueError("command payload identity is immutable")
+                return dict(existing)
+            conn.execute(
+                """
+                INSERT INTO task_commands (
+                    idempotency_key, task_id, command_type, payload_json, actor, source,
+                    status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    str(idempotency_key),
+                    int(task_id),
+                    str(command_type),
+                    payload_json,
+                    str(actor),
+                    str(source),
+                    current_time,
+                    current_time,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM task_commands WHERE idempotency_key = ?",
+                (str(idempotency_key),),
+            ).fetchone()
+        return dict(row)
+
+    def claim_next_command(self, owner: str, now: float | None = None) -> dict[str, Any] | None:
+        current_time = time.time() if now is None else float(now)
+        token = str(uuid.uuid4())
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM task_commands WHERE status = 'pending' ORDER BY id ASC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            cursor = conn.execute(
+                """
+                UPDATE task_commands
+                SET status = 'claimed', claim_token = ?, claimed_by = ?, claimed_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (token, str(owner), current_time, current_time, int(row["id"])),
+            )
+            if cursor.rowcount != 1:
+                return None
+            claimed = conn.execute("SELECT * FROM task_commands WHERE id = ?", (int(row["id"]),)).fetchone()
+        return dict(claimed) if claimed else None
+
+    def complete_command(
+        self,
+        command_id: int,
+        claim_token: str,
+        *,
+        result: dict[str, Any] | None = None,
+        now: float | None = None,
+    ) -> bool:
+        current_time = time.time() if now is None else float(now)
+        with self._lock, self._connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE task_commands
+                SET status = 'completed', result_json = ?, updated_at = ?
+                WHERE id = ? AND claim_token = ? AND status = 'claimed'
+                """,
+                (self._operation_json(result or {}), current_time, int(command_id), str(claim_token)),
+            )
+        return int(cursor.rowcount or 0) == 1
+
+    def fail_command(
+        self,
+        command_id: int,
+        claim_token: str,
+        error: str,
+        now: float | None = None,
+    ) -> bool:
+        current_time = time.time() if now is None else float(now)
+        with self._lock, self._connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE task_commands
+                SET status = 'failed', error = ?, updated_at = ?
+                WHERE id = ? AND claim_token = ? AND status = 'claimed'
+                """,
+                (str(error), current_time, int(command_id), str(claim_token)),
+            )
+        return int(cursor.rowcount or 0) == 1
+
+    def cancel_pending_commands(self, task_id: int, now: float | None = None) -> int:
+        current_time = time.time() if now is None else float(now)
+        with self._lock, self._connection() as conn:
+            cursor = conn.execute(
+                "UPDATE task_commands SET status = 'cancelled', updated_at = ? WHERE task_id = ? AND status = 'pending'",
+                (current_time, int(task_id)),
+            )
+        return int(cursor.rowcount or 0)
+
+    def acquire_runner_lease(self, owner: str, now: float | None = None, ttl_seconds: int = 30) -> str | None:
+        current_time = time.time() if now is None else float(now)
+        token = str(uuid.uuid4())
+        expires = current_time + max(1, int(ttl_seconds))
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM runner_leases WHERE name = 'task_runner'").fetchone()
+            if row is not None and float(row["expires_at"] or 0) > current_time:
+                return None
+            conn.execute(
+                """
+                INSERT INTO runner_leases (name, owner, token, acquired_at, renew_at, expires_at)
+                VALUES ('task_runner', ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    owner = excluded.owner,
+                    token = excluded.token,
+                    acquired_at = excluded.acquired_at,
+                    renew_at = excluded.renew_at,
+                    expires_at = excluded.expires_at
+                """,
+                (str(owner), token, current_time, current_time, expires),
+            )
+        return token
+
+    def renew_runner_lease(
+        self,
+        owner: str,
+        token: str,
+        now: float | None = None,
+        ttl_seconds: int = 30,
+    ) -> bool:
+        current_time = time.time() if now is None else float(now)
+        expires = current_time + max(1, int(ttl_seconds))
+        with self._lock, self._connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE runner_leases
+                SET renew_at = ?, expires_at = ?
+                WHERE name = 'task_runner' AND owner = ? AND token = ?
+                """,
+                (current_time, expires, str(owner), str(token)),
+            )
+        return int(cursor.rowcount or 0) == 1
+
+    def release_runner_lease(self, owner: str, token: str) -> bool:
+        with self._lock, self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM runner_leases WHERE name = 'task_runner' AND owner = ? AND token = ?",
+                (str(owner), str(token)),
             )
         return int(cursor.rowcount or 0) == 1

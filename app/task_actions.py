@@ -39,6 +39,8 @@ def task_termination_requested(task: TaskSnapshot) -> bool:
 
 
 def available_lifecycle_actions(task: TaskSnapshot) -> frozenset[str]:
+    if float(getattr(task, "archived_at", 0) or 0) > 0:
+        return frozenset()
     requested = task_termination_requested(task)
     if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
         return frozenset() if requested else frozenset({"terminate"})
@@ -163,15 +165,15 @@ def _failed_result(task: TaskSnapshot, reason: str) -> TaskActionResult:
 def delete_task_record(store: TaskStore, task_id: int) -> TaskActionResult:
     """Delete one terminal, unclaimed task using its current snapshot."""
     task = store.find_task(task_id)
-    if task is None:
+    if task is None or float(getattr(task, "archived_at", 0) or 0) > 0:
         return TaskActionResult(False, None, "任务不存在或已过期")
     if "delete" not in available_lifecycle_actions(task):
         if str(task.claimed_by or "").strip():
             return _failed_result(task, "任务正在执行，请稍后再试")
         return _failed_result(task, "任务尚未结束，无法删除")
-    if not store.delete_finished_task(task.id, expected_updated_at=task.updated_at):
+    if not store.archive_task(task.id, actor="manual", reason="user_delete", expected_updated_at=task.updated_at):
         return _failed_result(task, "任务状态已变化，请刷新后重试")
-    return TaskActionResult(True, task, "任务已删除")
+    return TaskActionResult(True, task, "任务已归档")
 
 
 def delete_task_record_and_submission(

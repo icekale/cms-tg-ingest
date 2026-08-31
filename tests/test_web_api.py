@@ -77,7 +77,7 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertFalse(payload["dry_run"])
             self.assertEqual(payload["deleted"][0]["id"], task.id)
-            self.assertIsNone(store.find_task(task.id))
+            self.assertIsNotNone(store.find_task(task.id))
             self.assertIsNone(submission_store.find_by_id(int(row["id"])))
 
     def test_completed_task_exposes_missing_media_directory_drift(self):
