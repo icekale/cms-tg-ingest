@@ -1370,6 +1370,30 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(health.pending_count, 1)
             self.assertEqual(health.problem_count, 0)
 
+    def test_upsert_after_archive_creates_a_new_live_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            done = store.upsert_task("same-share", "1212", "https://115cdn.com/s/same-share")
+            done = store.record_event(done.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            self.assertTrue(
+                store.archive_task(
+                    done.id,
+                    actor="test",
+                    reason="user_delete",
+                    expected_updated_at=done.updated_at,
+                )
+            )
+
+            live = store.upsert_task("same-share", "1212", "https://115cdn.com/s/same-share")
+            found = store.find_task_by_share_key("same-share", "1212")
+            archived = store.find_task(done.id)
+
+            self.assertNotEqual(live.id, done.id)
+            self.assertEqual(found.id, live.id)
+            self.assertEqual(float(live.archived_at or 0), 0)
+            self.assertGreater(float(archived.archived_at or 0), 0)
+            self.assertEqual(archived.share_code, "same-share")
+
     def test_list_open_tasks_searches_status_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

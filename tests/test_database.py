@@ -111,6 +111,17 @@ class DatabaseSchemaTests(unittest.TestCase):
                                   'received', 'pending', 1, 1)
                         """
                     )
+            with database.transaction(immediate=True) as conn:
+                conn.execute("UPDATE tasks SET archived_at = 9, source_key = 'share:abc:1234#archived#1' WHERE id = 1")
+                conn.execute(
+                    """
+                    INSERT INTO tasks (
+                        id, source_type, source_key, share_code, receive_code, url,
+                        current_stage, status, created_at, updated_at
+                    ) VALUES (6, 'share', 'share:abc:1234', 'abc', '1234', 'https://115cdn.com/s/abc',
+                              'received', 'pending', 1, 1)
+                    """
+                )
 
     def test_child_fact_without_task_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

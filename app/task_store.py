@@ -545,6 +545,14 @@ class TaskStore:
             "UPDATE tasks SET source_key = 'share:' || share_code || ':' || receive_code WHERE source_key IS NULL OR source_key = ''"
         )
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_source_key ON tasks(source_type, source_key)")
+        conn.execute("DROP INDEX IF EXISTS idx_tasks_share_identity")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_share_identity
+            ON tasks(share_code, receive_code)
+            WHERE source_type = 'share' AND COALESCE(archived_at, 0) = 0
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(status, next_run_at, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_claim ON tasks(claimed_by, claimed_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_claim_heartbeat ON tasks(claimed_by, claim_heartbeat_at)")
@@ -1259,7 +1267,10 @@ class TaskStore:
             )
             if explicit_mode:
                 current = conn.execute(
-                    "SELECT metadata_json FROM tasks WHERE share_code = ? AND receive_code = ?",
+                    """
+                    SELECT metadata_json FROM tasks
+                    WHERE share_code = ? AND receive_code = ? AND COALESCE(archived_at, 0) = 0
+                    """,
                     (share_code, receive_code),
                 ).fetchone()
                 try:
@@ -1275,11 +1286,15 @@ class TaskStore:
                         """
                         UPDATE tasks SET metadata_json = ?
                         WHERE share_code = ? AND receive_code = ? AND claimed_by = ''
+                          AND COALESCE(archived_at, 0) = 0
                         """,
                         (merged_metadata, share_code, receive_code),
                     )
             row = conn.execute(
-                "SELECT * FROM tasks WHERE share_code = ? AND receive_code = ?",
+                """
+                SELECT * FROM tasks
+                WHERE share_code = ? AND receive_code = ? AND COALESCE(archived_at, 0) = 0
+                """,
                 (share_code, receive_code),
             ).fetchone()
         return self._snapshot(row)
@@ -1324,7 +1339,10 @@ class TaskStore:
                 ),
             )
             row = conn.execute(
-                "SELECT * FROM tasks WHERE share_code = ? AND receive_code = ?",
+                """
+                SELECT * FROM tasks
+                WHERE share_code = ? AND receive_code = ? AND COALESCE(archived_at, 0) = 0
+                """,
                 (share_code, receive_code),
             ).fetchone()
         return self._snapshot(row)
@@ -1402,7 +1420,10 @@ class TaskStore:
     def find_task_by_share_key(self, share_code: str, receive_code: str) -> TaskSnapshot | None:
         with self._lock, self._connection() as conn:
             row = conn.execute(
-                "SELECT * FROM tasks WHERE share_code = ? AND receive_code = ?",
+                """
+                SELECT * FROM tasks
+                WHERE share_code = ? AND receive_code = ? AND COALESCE(archived_at, 0) = 0
+                """,
                 (str(share_code), str(receive_code)),
             ).fetchone()
         return self._snapshot(row) if row else None
@@ -2235,13 +2256,18 @@ class TaskStore:
                 "INSERT INTO task_events (task_id, stage, status, message, created_at) VALUES (?, ?, ?, ?, ?)",
                 (int(task_id), row["current_stage"], row["status"], f"{actor} 已归档任务", current_time),
             )
+            source_key = str(row["source_key"] or "")
+            marker = f"#archived#{int(task_id)}"
+            if marker not in source_key:
+                source_key = f"{source_key}{marker}"
             cursor = conn.execute(
                 """
                 UPDATE tasks
-                SET archived_at = ?, archived_by = ?, archive_reason = ?, next_run_at = -1, updated_at = ?
+                SET archived_at = ?, archived_by = ?, archive_reason = ?, next_run_at = -1, updated_at = ?,
+                    source_key = ?
                 WHERE id = ? AND claimed_by = ''
                 """,
-                (current_time, str(actor), str(reason), current_time, int(task_id)),
+                (current_time, str(actor), str(reason), current_time, source_key, int(task_id)),
             )
         return int(cursor.rowcount or 0) == 1
 

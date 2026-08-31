@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     UNIQUE(source_type, source_key)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_share_identity
-    ON tasks(share_code, receive_code) WHERE source_type = 'share';
+    ON tasks(share_code, receive_code) WHERE source_type = 'share' AND COALESCE(archived_at, 0) = 0;
 CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks(updated_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(status, next_run_at, id);
 CREATE INDEX IF NOT EXISTS idx_tasks_claim ON tasks(claimed_by, claimed_at);
@@ -372,6 +372,16 @@ class Database:
                         """,
                         (SCHEMA_VERSION, SCHEMA_VERSION, SCHEMA_VERSION),
                     )
+            task_columns = {row[1] for row in connection.execute("PRAGMA table_info(tasks)")} if ("tasks" in tables or created) else set()
+            if {"source_type", "archived_at"} <= task_columns:
+                connection.execute("DROP INDEX IF EXISTS idx_tasks_share_identity")
+                connection.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_share_identity
+                    ON tasks(share_code, receive_code)
+                    WHERE source_type = 'share' AND COALESCE(archived_at, 0) = 0
+                    """
+                )
             connection.commit()
         except Exception:
             connection.rollback()
