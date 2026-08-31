@@ -1,3 +1,7 @@
+## 0.5.2 - 2026-08-31
+
+- **接收后不再因 title 崩溃**：adapter `upsert_submission` 不再把 `title` 传给 `upsert_task`，真实 115 入库可以过 `received`。
+
 ## 0.5.1 - 2026-08-31
 
 - **doctor 只读检查**：统一库 `runtime_state` 行用 sqlite Row 读取，避免 write_gate=closed 时健康检查崩溃。

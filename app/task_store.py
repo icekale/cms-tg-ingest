@@ -3897,7 +3897,7 @@ class WorkflowRowAdapter:
     def upsert_submission(self, key: Any, url: str, status: str, title: str = "", cms_task_id: str | None = None, **_kwargs: Any) -> dict[str, Any]:
         share_code = str(getattr(key, "share_code", "") or "")
         receive_code = str(getattr(key, "receive_code", "") or "")
-        task = self._tasks.upsert_task(share_code, receive_code, str(url or ""), title=str(title or "") or None)
+        task = self._tasks.upsert_task(share_code, receive_code, str(url or ""))
         media: dict[str, Any] = {}
         if title:
             media["title"] = str(title)

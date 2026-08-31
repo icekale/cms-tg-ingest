@@ -2507,6 +2507,23 @@ class TaskStoreTests(unittest.TestCase):
             facts = store.workflow_facts(task.id)
             self.assertEqual(facts.get("share_probe_at"), 9.0)
 
+    def test_adapter_upsert_submission_accepts_title(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            adapter = WorkflowRowAdapter(store)
+            key = type("Key", (), {"share_code": "title-share", "receive_code": "1212"})()
+
+            row = adapter.upsert_submission(
+                key,
+                "https://115cdn.com/s/title-share?password=1212",
+                "received",
+                title="老笠",
+            )
+
+            task = store.find_task_by_share_key("title-share", "1212")
+            self.assertEqual(row["title"], "老笠")
+            self.assertEqual(task.id, int(row["id"]))
+
     def test_adapter_enqueues_missing_library_restore_without_moving(self):
         from app.media.strm import enqueue_missing_self_share_restores, enqueue_stranded_self_share_repairs
         from app.config import MoveConfig
