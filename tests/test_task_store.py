@@ -1199,6 +1199,40 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(claimed.id, task.id)
             self.assertEqual(claimed.metadata.get("dest_path"), "/library/Claim")
 
+    def test_claim_task_lock_keeps_overlaid_dest_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("lock-facts", "1212", "https://115cdn.com/s/lock-facts")
+            store.enqueue_task(task.id, TaskStage.MOVED, next_run_at=0)
+            store.write_facts(
+                task.id,
+                move={"dest_path": "/library/Lock", "move_status": "moved"},
+            )
+            claimed = store.claim_next_runnable("worker", now=1)
+
+            locked = store.claim_task_lock(
+                claimed.id,
+                {
+                    "_lock_key": "dest:/library/Lock",
+                    "_lock_reason": "媒体库目录阶段",
+                    "_lock_waiting": False,
+                    "_lock_owner_task_id": "",
+                },
+                lambda _holder: False,
+                expected_stage=claimed.current_stage,
+                expected_claimed_by="worker",
+                expected_claimed_at=claimed.claimed_at,
+                expected_claim_token=claimed.claim_token,
+                expected_updated_at=claimed.updated_at,
+                wait_message="等待资源锁",
+                next_run_at=2,
+                now=1,
+            )
+
+            self.assertIsNotNone(locked.task)
+            self.assertEqual(locked.task.metadata.get("dest_path"), "/library/Lock")
+            self.assertEqual(locked.task.metadata.get("_lock_key"), "dest:/library/Lock")
+
     def test_record_stage_event_updates_current_task_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

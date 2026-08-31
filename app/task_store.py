@@ -1936,6 +1936,9 @@ class TaskStore:
     ) -> TaskLockClaimResult:
         current_time = time.time() if now is None else float(now)
         stale_before = current_time - max(1, int(stale_after_seconds))
+        locked_task: TaskSnapshot | None = None
+        locked_holder: TaskSnapshot | None = None
+        stale = False
         with self._lock, self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             holder: TaskSnapshot | None = None
@@ -1970,56 +1973,65 @@ class TaskStore:
                 expected_claim_token,
                 expected_updated_at,
             ):
-                return TaskLockClaimResult(stale=True)
-            metadata_patch = dict(lock_metadata)
-            if holder is not None:
-                metadata_patch.update({"_lock_waiting": True, "_lock_owner_task_id": holder.id})
-            merged_metadata = self._merge_metadata(current["metadata_json"], metadata_patch)
-            if holder is None:
-                conn.execute(
-                    "UPDATE tasks SET metadata_json = ?, updated_at = ? WHERE id = ?",
-                    (merged_metadata, current_time, task_id),
-                )
-                row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-                return TaskLockClaimResult(task=self._snapshot(row) if row else None)
-
-            last_event = conn.execute(
-                """
-                SELECT stage, status, message, error_type, error_detail
-                FROM task_events
-                WHERE task_id = ?
-                ORDER BY id DESC
-                LIMIT 1
-                """,
-                (task_id,),
-            ).fetchone()
-            duplicate_running_event = bool(
-                last_event
-                and last_event["stage"] == current["current_stage"]
-                and last_event["status"] == TaskStatus.RUNNING.value
-                and last_event["message"] == wait_message
-                and last_event["error_type"] == ""
-                and last_event["error_detail"] == ""
-            )
-            if not duplicate_running_event:
-                conn.execute(
-                    """
-                    INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (task_id, current["current_stage"], TaskStatus.RUNNING.value, wait_message, "", "", current_time),
-                )
-            conn.execute(
-                """
-                UPDATE tasks
-                SET status = ?, metadata_json = ?, next_run_at = ?, claimed_by = '', claimed_at = 0,
-                    claim_token = '', claim_heartbeat_at = 0, updated_at = ?
-                WHERE id = ?
-                """,
-                (TaskStatus.RUNNING.value, merged_metadata, float(next_run_at), current_time, task_id),
-            )
-            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        return TaskLockClaimResult(task=self._snapshot(row) if row else None, holder=holder)
+                stale = True
+            else:
+                metadata_patch = dict(lock_metadata)
+                if holder is not None:
+                    metadata_patch.update({"_lock_waiting": True, "_lock_owner_task_id": holder.id})
+                merged_metadata = self._merge_metadata(current["metadata_json"], metadata_patch)
+                if holder is None:
+                    conn.execute(
+                        "UPDATE tasks SET metadata_json = ?, updated_at = ? WHERE id = ?",
+                        (merged_metadata, current_time, task_id),
+                    )
+                    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                    locked_task = self._snapshot(row) if row else None
+                else:
+                    last_event = conn.execute(
+                        """
+                        SELECT stage, status, message, error_type, error_detail
+                        FROM task_events
+                        WHERE task_id = ?
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (task_id,),
+                    ).fetchone()
+                    duplicate_running_event = bool(
+                        last_event
+                        and last_event["stage"] == current["current_stage"]
+                        and last_event["status"] == TaskStatus.RUNNING.value
+                        and last_event["message"] == wait_message
+                        and last_event["error_type"] == ""
+                        and last_event["error_detail"] == ""
+                    )
+                    if not duplicate_running_event:
+                        conn.execute(
+                            """
+                            INSERT INTO task_events (task_id, stage, status, message, error_type, error_detail, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (task_id, current["current_stage"], TaskStatus.RUNNING.value, wait_message, "", "", current_time),
+                        )
+                    conn.execute(
+                        """
+                        UPDATE tasks
+                        SET status = ?, metadata_json = ?, next_run_at = ?, claimed_by = '', claimed_at = 0,
+                            claim_token = '', claim_heartbeat_at = 0, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (TaskStatus.RUNNING.value, merged_metadata, float(next_run_at), current_time, task_id),
+                    )
+                    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                    locked_task = self._snapshot(row) if row else None
+                    locked_holder = holder
+        if stale:
+            return TaskLockClaimResult(stale=True)
+        if locked_task is not None:
+            locked_task = self._overlay_facts_on_task(locked_task)
+        if locked_holder is not None:
+            locked_holder = self._overlay_facts_on_task(locked_holder)
+        return TaskLockClaimResult(task=locked_task, holder=locked_holder)
 
     def list_events(self, task_id: int) -> list[dict[str, Any]]:
         with self._lock, self._connection() as conn:
