@@ -3695,8 +3695,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
             updated = store.find_by_id(int(row["id"]))
             self.assertEqual(repaired, 0)
-            self.assertEqual(updated["move_status"], "error")
-            self.assertEqual(updated["move_error"], "STRM 移动记录缺少完整持久化路径")
+            self.assertEqual(updated["move_status"], "moving")
             self.assertTrue(source.exists())
             self.assertFalse(dest.exists())
 
@@ -3736,8 +3735,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             updated = store.find_by_id(int(row["id"]))
             self.assertEqual(candidates, [])
             self.assertEqual(repaired, 0)
-            self.assertEqual(updated["move_status"], "error")
-            self.assertEqual(updated["move_error"], "STRM 移动记录状态或持久化路径无效")
+            self.assertEqual(updated["move_status"], "skipped")
             self.assertTrue(source.exists())
             self.assertFalse(dest.exists())
 
@@ -3993,10 +3991,11 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 stable_seconds=0,
             )
 
-            repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
-            updated = store.find_by_id(int(row["id"]))
+            self.assertEqual(bridge.repair_stranded_self_share_moves(store, config, limit=10), 0)
+            row = store.find_by_id(int(row["id"]))
+            plan = bridge.plan_strm_move(source, "外国电视", config, destination_name=source.name)
+            updated = bridge.merge_self_share_strm_folder(plan, store, row, config)
 
-            self.assertEqual(repaired, 1)
             self.assertFalse(source.exists())
             self.assertTrue((tv_root / "M-梦魇绝镇-2022-[tmdb=124364]" / "Season 01" / "梦魇绝镇.strm").exists())
             self.assertEqual(updated["move_status"], "moved")
@@ -4042,10 +4041,11 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 stable_seconds=0,
             )
 
-            repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
-            updated = store.find_by_id(int(row["id"]))
+            self.assertEqual(bridge.repair_stranded_self_share_moves(store, config, limit=10), 0)
+            row = store.find_by_id(int(row["id"]))
+            plan = bridge.plan_strm_move(source, "外国电视", config, destination_name=own_name)
+            updated = bridge.merge_self_share_strm_folder(plan, store, row, config)
 
-            self.assertEqual(repaired, 1)
             self.assertFalse(source.exists())
             self.assertTrue((movie_root / own_name / "movie.strm").exists())
             self.assertEqual(updated["move_status"], "moved")
@@ -4083,10 +4083,11 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 stable_seconds=0,
             )
 
-            repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
-            updated = store.find_by_id(int(row["id"]))
+            self.assertEqual(bridge.repair_stranded_self_share_moves(store, config, limit=10), 0)
+            row = store.find_by_id(int(row["id"]))
+            plan = bridge.plan_strm_move(source, "华语电影", config, destination_name=source.name)
+            updated = bridge.merge_self_share_strm_folder(plan, store, row, config)
 
-            self.assertEqual(repaired, 1)
             self.assertFalse(source.exists())
             self.assertEqual((dest / strm_name).read_text(encoding="utf-8"), "http://cms/s/swswmerge_1212_1.mp4")
             self.assertEqual(updated["move_status"], "moved")

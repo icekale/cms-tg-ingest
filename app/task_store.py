@@ -2620,11 +2620,32 @@ class TaskStore:
                 raise ValueError("task_targets require target_key")
             conn.execute(
                 """
-                INSERT INTO task_targets (task_id, target_key, ordinal)
-                VALUES (?, ?, ?)
-                ON CONFLICT(task_id, target_key) DO UPDATE SET ordinal = excluded.ordinal
+                INSERT INTO task_targets (
+                    task_id, target_key, ordinal, folder_id, recognition_json, share_json,
+                    strm_json, move_json, emby_json, cleanup_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id, target_key) DO UPDATE SET
+                    ordinal = excluded.ordinal,
+                    folder_id = excluded.folder_id,
+                    recognition_json = excluded.recognition_json,
+                    share_json = excluded.share_json,
+                    strm_json = excluded.strm_json,
+                    move_json = excluded.move_json,
+                    emby_json = excluded.emby_json,
+                    cleanup_json = excluded.cleanup_json
                 """,
-                (int(task_id), str(target["target_key"]), int(target.get("ordinal") or 0)),
+                (
+                    int(task_id),
+                    str(target["target_key"]),
+                    int(target.get("ordinal") or 0),
+                    str(target.get("folder_id") or ""),
+                    str(target.get("recognition_json") or "{}"),
+                    str(target.get("share_json") or "{}"),
+                    str(target.get("strm_json") or "{}"),
+                    str(target.get("move_json") or "{}"),
+                    str(target.get("emby_json") or "{}"),
+                    str(target.get("cleanup_json") or "{}"),
+                ),
             )
         for operation in checkpoint.operations:
             assignments = ["status = ?", "updated_at = ?"]
@@ -3197,6 +3218,7 @@ class TaskStore:
             operation.operation_type == "receive_share" and operation.status == "succeeded"
             for operation in self.list_operations(task.id)
         )
+        self._clear_reprocess_facts(int(task.id), preserve_received_snapshot=preserve_received_snapshot)
         return self.record_event(
             task_id,
             target_stage,
@@ -3210,6 +3232,17 @@ class TaskStore:
             next_run_at=next_run_at,
             clear_claim=True,
         )
+
+    def _clear_reprocess_facts(self, task_id: int, *, preserve_received_snapshot: bool) -> None:
+        with self._lock, self._connection() as conn:
+            conn.execute("DELETE FROM task_shares WHERE task_id = ?", (int(task_id),))
+            conn.execute("DELETE FROM task_moves WHERE task_id = ?", (int(task_id),))
+            conn.execute("DELETE FROM task_emby WHERE task_id = ?", (int(task_id),))
+            conn.execute("DELETE FROM task_cleanups WHERE task_id = ?", (int(task_id),))
+            conn.execute("DELETE FROM task_probes WHERE task_id = ?", (int(task_id),))
+            conn.execute("DELETE FROM task_targets WHERE task_id = ?", (int(task_id),))
+            if not preserve_received_snapshot:
+                conn.execute("DELETE FROM task_media WHERE task_id = ?", (int(task_id),))
 
     def claim_next_runnable(
         self,

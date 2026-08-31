@@ -7720,6 +7720,14 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
             self.assertEqual(result.metadata["organized_folder"]["file_id"], "folder-id")
             self.assertEqual(self.cms.auto_organize_calls, 0)
+            self.assertEqual(result.checkpoint.share.get("file_id"), "folder-id")
+
+            self.tasks.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            runner = TaskRunner(self.tasks, workflow, worker_id="organize-facts", now=lambda: 2.0)
+            runner.run_once()
+            facts = self.tasks.workflow_facts(task.id)
+            self.assertEqual(facts["own_share_file_id"], "folder-id")
+            self.assertEqual(facts["own_share_file_name"], "S-双喜-2025-[tmdb=123456]")
 
     def test_organizing_stage_uses_cms_cloud_index_for_new_direct_strm_in_old_series_root(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -2204,3 +2204,28 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(facts["move_status"], "moved")
             with sqlite3.connect(store.db_path) as conn:
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM task_media").fetchone()[0], before + 1)
+
+    def test_reprocess_clears_share_and_move_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            claimed = self._claim_running(store, "reprocess-facts")
+            store.commit_claimed_result(
+                claimed,
+                "worker-1",
+                StageResult.complete(
+                    "moved",
+                    checkpoint=StageCheckpoint(
+                        share={"canonical_name": "L-Movie", "own_share_code": "own"},
+                        move={"move_status": "moved", "dest_path": "/library/movie"},
+                    ),
+                ),
+                next_stage=TaskStage.EMBY_CONFIRMED,
+                next_run_at=2.0,
+            )
+            store.prepare_operation(claimed.id, "g0:u0:receive_share:abc:cid", "receive_share", {"cid": "cid"})
+            store.start_operation(claimed.id, "g0:u0:receive_share:abc:cid")
+            store.complete_operation(claimed.id, "g0:u0:receive_share:abc:cid", {"received_items_complete": True})
+            store.reprocess_task(claimed.id, next_run_at=0)
+            facts = store.workflow_facts(claimed.id)
+            self.assertFalse(facts.get("own_share_code"))
+            self.assertEqual(facts.get("move_status"), "")
