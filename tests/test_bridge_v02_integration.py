@@ -574,7 +574,7 @@ class BridgeV02IntegrationTests(unittest.TestCase):
 
                 self.assertEqual(task_runner_started, [True])
                 self.assertEqual(repair_calls, [])
-                self.assertEqual(maintenance_calls, [])
+                self.assertEqual(len(maintenance_calls), 1)
 
     def test_run_forever_starts_invalid_self_share_probe_only_when_explicitly_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:

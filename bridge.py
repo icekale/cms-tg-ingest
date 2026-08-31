@@ -3748,6 +3748,16 @@ def run_forever(
             config.tg_allowed_chat_id,
             stop_event,
         )
+        start_self_share_maintenance_loop(
+            store,
+            cms,
+            self_share_config,
+            move_config,
+            interval_seconds=15,
+            limit=50,
+            stop_event=stop_event,
+            emby=emby,
+        )
     offset = None
     LOG.info("cms-tg-ingest started database_path=%s write_gate=%s", config.database_path, write_gate)
     try:

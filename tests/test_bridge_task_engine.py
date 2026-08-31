@@ -9610,7 +9610,7 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
         self.assertEqual(worker_parts[-2], str(os.getpid()))
         self.assertEqual(len(worker_parts[-1]), 12)
 
-    def test_engine_mode_does_not_start_self_share_maintenance(self):
+    def test_open_write_gate_starts_self_share_maintenance_observer(self):
         captured = {"runner_starts": 0, "maintenance_starts": 0}
 
         class FakeCmsClient:
@@ -9701,7 +9701,7 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
                 bridge.run_forever(config, stop_event=stop_event)
 
         self.assertEqual(captured["runner_starts"], 1)
-        self.assertEqual(captured["maintenance_starts"], 0)
+        self.assertEqual(captured["maintenance_starts"], 1)
         self.assertIsNone(captured["quality_repair_adapter"])
         self.assertTrue(captured["quality_repair_enabled"])
 
