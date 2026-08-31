@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from app.unified_migration import MigrationError, migrate_legacy_databases
 from tests.fixtures.legacy_databases import build_legacy_databases
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CLI = REPO_ROOT / "scripts" / "migrate_unified_db.py"
 
 
 def load_task_ids(path: Path) -> set[int]:
@@ -170,6 +176,84 @@ class UnifiedMigrationTests(unittest.TestCase):
             with patch("app.unified_migration.SYNTHETIC_EXECUTABLE", 1):
                 with self.assertRaises(MigrationError):
                     migrate_legacy_databases(fixture.tasks_db, fixture.submissions_db, output)
+            self.assertFalse(output.exists())
+
+
+class UnifiedMigrationCliTests(unittest.TestCase):
+    def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
+        return subprocess.run(
+            [sys.executable, str(CLI), *args],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(REPO_ROOT),
+        )
+
+    def test_cli_writes_report_and_one_way_gates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = build_legacy_databases(tmp)
+            output = Path(tmp) / "cms-tg-ingest.db"
+            report = Path(tmp) / "report.json"
+            result = self._run(
+                [
+                    "--tasks",
+                    str(fixture.tasks_db),
+                    "--submissions",
+                    str(fixture.submissions_db),
+                    "--output",
+                    str(output),
+                    "--report",
+                    str(report),
+                ]
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(report.is_file())
+            self.assertEqual(oct(report.stat().st_mode & 0o777), oct(0o600))
+            payload = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(payload["matched_submissions"], 2)
+            self.assertNotIn("115cdn.com", result.stdout)
+            self.assertNotIn("115cdn.com", result.stderr)
+            refused = self._run(
+                [
+                    "--tasks",
+                    str(fixture.tasks_db),
+                    "--submissions",
+                    str(fixture.submissions_db),
+                    "--output",
+                    str(output),
+                    "--report",
+                    str(Path(tmp) / "report2.json"),
+                ]
+            )
+            self.assertEqual(refused.returncode, 2)
+            printed = self._run(["--validate", str(output), "--print-migration-id"])
+            self.assertEqual(printed.returncode, 0, printed.stderr)
+            migration_id = printed.stdout.strip()
+            self.assertTrue(migration_id)
+            self.assertEqual(self._run(["--open-runner-gate", str(output), "--migration-id", migration_id]).returncode, 0)
+            self.assertEqual(self._run(["--open-intake-gate", str(output), "--migration-id", migration_id]).returncode, 0)
+            self.assertEqual(self._run(["--open-runner-gate", str(output), "--migration-id", migration_id]).returncode, 2)
+
+    def test_cli_exits_nonzero_on_ambiguous_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = build_legacy_databases(tmp)
+            with sqlite3.connect(fixture.submissions_db) as conn:
+                conn.execute("ALTER TABLE submissions ADD COLUMN mystery_flag TEXT")
+            output = Path(tmp) / "cms-tg-ingest.db"
+            result = self._run(
+                [
+                    "--tasks",
+                    str(fixture.tasks_db),
+                    "--submissions",
+                    str(fixture.submissions_db),
+                    "--output",
+                    str(output),
+                    "--report",
+                    str(Path(tmp) / "report.json"),
+                ]
+            )
+            self.assertEqual(result.returncode, 2)
             self.assertFalse(output.exists())
 
 

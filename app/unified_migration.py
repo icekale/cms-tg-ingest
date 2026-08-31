@@ -4,9 +4,10 @@ import hashlib
 import json
 import sqlite3
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+import time
 
 from .database import Database
 from .sqlite_utils import sqlite_foreign_key_check, sqlite_quick_check
@@ -79,6 +80,7 @@ class MigrationReport:
     unmapped_rows: int
     logical_checksums: dict[str, str]
     foreign_key_errors: tuple[str, ...]
+    migration_id: str = ""
 
 
 def _canonical(value: Any) -> str:
@@ -591,6 +593,28 @@ def migrate_legacy_databases(
                 "task_operations": destination.execute("SELECT COUNT(*) FROM task_operations").fetchone()[0],
             }
             checksums = _logical_checksums(destination)
+            migration_id = _sha256_text(_canonical(source_hashes))
+            now_ts = time.time()
+            destination.execute(
+                "UPDATE schema_meta SET migration_id = ?, migrated_at = ? WHERE id = 1",
+                (migration_id, now_ts),
+            )
+            destination.execute(
+                """
+                INSERT INTO migration_runs (
+                    migration_id, source_hashes_json, source_counts_json, destination_counts_json,
+                    validation_json, write_gate, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'closed', ?)
+                """,
+                (
+                    migration_id,
+                    _canonical(source_hashes),
+                    _canonical(source_counts),
+                    _canonical(destination_counts),
+                    _canonical({"foreign_key_errors": []}),
+                    now_ts,
+                ),
+            )
         sqlite_foreign_key_check(output_db)
         return MigrationReport(
             source_hashes=source_hashes,
@@ -601,6 +625,7 @@ def migrate_legacy_databases(
             unmapped_rows=0,
             logical_checksums=checksums,
             foreign_key_errors=(),
+            migration_id=migration_id,
         )
     except Exception:
         if created:
@@ -611,3 +636,72 @@ def migrate_legacy_databases(
     finally:
         source.close()
         submissions_source.close()
+
+
+def report_dict(report: MigrationReport) -> dict[str, Any]:
+    payload = asdict(report)
+    payload["foreign_key_errors"] = list(report.foreign_key_errors)
+    return payload
+
+
+def validate_unified_database(path: str | Path) -> dict[str, Any]:
+    database = Database(path)
+    database.verify()
+    sqlite_foreign_key_check(database.path)
+    connection = database.connect(read_only=True)
+    try:
+        meta = connection.execute("SELECT version, migration_id FROM schema_meta WHERE id = 1").fetchone()
+        run = connection.execute(
+            "SELECT migration_id, write_gate FROM migration_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        executable = connection.execute(
+            "SELECT COUNT(*) FROM tasks WHERE origin = 'legacy_import' AND is_executable != 0"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    if meta is None:
+        raise MigrationError("schema_meta is missing")
+    if int(executable or 0):
+        raise MigrationError("legacy_import tasks are executable")
+    migration_id = str((run["migration_id"] if run else meta["migration_id"]) or "")
+    write_gate = str(run["write_gate"] if run else "closed")
+    return {
+        "schema_version": int(meta["version"]),
+        "migration_id": migration_id,
+        "write_gate": write_gate,
+        "legacy_import_executable": int(executable or 0),
+    }
+
+
+def _require_migration_run(connection: sqlite3.Connection, migration_id: str) -> sqlite3.Row:
+    row = connection.execute(
+        "SELECT * FROM migration_runs WHERE migration_id = ? ORDER BY id DESC LIMIT 1",
+        (str(migration_id),),
+    ).fetchone()
+    if row is None:
+        raise MigrationError("migration id does not match")
+    return row
+
+
+def open_runner_gate(path: str | Path, migration_id: str) -> None:
+    database = Database(path)
+    with database.transaction(immediate=True) as connection:
+        row = _require_migration_run(connection, migration_id)
+        if str(row["write_gate"]) != "closed":
+            raise MigrationError(f"write gate is {row['write_gate']}, expected closed")
+        connection.execute(
+            "UPDATE migration_runs SET write_gate = 'runner_open', runner_opened_at = ? WHERE id = ?",
+            (time.time(), int(row["id"])),
+        )
+
+
+def open_intake_gate(path: str | Path, migration_id: str) -> None:
+    database = Database(path)
+    with database.transaction(immediate=True) as connection:
+        row = _require_migration_run(connection, migration_id)
+        if str(row["write_gate"]) != "runner_open":
+            raise MigrationError(f"write gate is {row['write_gate']}, expected runner_open")
+        connection.execute(
+            "UPDATE migration_runs SET write_gate = 'open', intake_opened_at = ? WHERE id = ?",
+            (time.time(), int(row["id"])),
+        )

@@ -517,6 +517,29 @@ def _check_cms_os_strm_guard(
     )
 
 
+def _check_unified_database(env: Mapping[str, str], filesystem: Filesystem) -> CheckItem:
+    raw = _env_value(env, "DATABASE_PATH")
+    if not raw:
+        return CheckItem("unified_database", True, "unified database not configured")
+    path = Path(raw)
+    if not filesystem.is_file(path):
+        return CheckItem("unified_database", False, f"unified database does not exist: {path}")
+    try:
+        from app.unified_migration import validate_unified_database
+
+        result = validate_unified_database(path)
+    except Exception as exc:
+        return CheckItem("unified_database", False, f"unified database invalid: {exc}")
+    return CheckItem(
+        "unified_database",
+        True,
+        (
+            f"schema={result['schema_version']} migration_id={result['migration_id']} "
+            f"write_gate={result['write_gate']} legacy_import_executable={result['legacy_import_executable']}"
+        ),
+    )
+
+
 def run_checks(
     env: Mapping[str, str] | None = None,
     filesystem: Filesystem | None = None,
@@ -533,6 +556,7 @@ def run_checks(
         _check_runtime_safety(env),
         _check_filesystem(env, filesystem),
         _check_hdhive_subscriptions(env, filesystem),
+        _check_unified_database(env, filesystem),
         _check_cms_strm_guard(env, log_reader=log_reader, logs=logs),
         _check_cms_direct_strm_guard(env, log_reader=log_reader, logs=logs),
         _check_cms_os_strm_guard(env, log_reader=log_reader, logs=logs),

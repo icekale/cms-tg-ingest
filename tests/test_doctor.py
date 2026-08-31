@@ -625,6 +625,34 @@ class CmsStrmGuardCheckTests(unittest.TestCase):
         self.assertTrue(direct_guard.ok)
         self.assertTrue(os_guard.ok)
 
+    def test_unified_database_reports_schema_and_nonrunnable_legacy_imports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from app.unified_migration import migrate_legacy_databases
+            from tests.fixtures.legacy_databases import build_legacy_databases
+
+            fixture = build_legacy_databases(tmp)
+            unified = Path(tmp) / "cms-tg-ingest.db"
+            migrate_legacy_databases(fixture.tasks_db, fixture.submissions_db, unified)
+            env = {
+                "TG_BOT_TOKEN": "123456:secret-token",
+                "TG_ALLOWED_CHAT_ID": "464100862",
+                "CMS_BASE_URL": "http://cms:9527",
+                "CMS_USERNAME": "user",
+                "CMS_PASSWORD": "secret-password",
+                "DB_PATH": str(Path(tmp) / "submissions.db"),
+                "TASK_DB_PATH": str(Path(tmp) / "tasks.db"),
+                "DATABASE_PATH": str(unified),
+                "BACKUP_DIR": str(Path(tmp) / "backups"),
+                "STRM_SOURCE_ROOTS": tmp,
+            }
+            Path(tmp, "backups").mkdir()
+            report = doctor.run_checks(env=env)
+            item = next(entry for entry in report.items if entry.name == "unified_database")
+            self.assertTrue(item.ok, item.message)
+            self.assertIn("schema=1", item.message)
+            self.assertIn("legacy_import_executable=0", item.message)
+            self.assertIn("write_gate=closed", item.message)
+
 
 if __name__ == "__main__":
     unittest.main()
