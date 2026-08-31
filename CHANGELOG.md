@@ -1,3 +1,7 @@
+## 0.5.1 - 2026-08-31
+
+- **doctor 只读检查**：统一库 `runtime_state` 行用 sqlite Row 读取，避免 write_gate=closed 时健康检查崩溃。
+
 ## 0.5.0 - 2026-08-31
 
 - **统一任务库**：运行时只使用 `DATABASE_PATH=/data/cms-tg-ingest.db`；TaskRunner 是唯一工作流写入者，观察者只入队命令。`/cms/cms-online.db` 仍是外部 CMS 状态。

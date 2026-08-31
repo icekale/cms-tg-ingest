@@ -600,6 +600,37 @@ class CmsStrmGuardCheckTests(unittest.TestCase):
             self.assertIn("legacy_import_executable=0", item.message)
             self.assertIn("write_gate=closed", item.message)
 
+    def test_unified_database_check_survives_tuple_runtime_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from app.unified_migration import migrate_legacy_databases
+            from tests.fixtures.legacy_databases import build_legacy_databases
+
+            fixture = build_legacy_databases(tmp)
+            unified = Path(tmp) / "cms-tg-ingest.db"
+            migrate_legacy_databases(fixture.tasks_db, fixture.submissions_db, unified)
+            import sqlite3
+
+            with sqlite3.connect(unified) as connection:
+                connection.execute(
+                    "INSERT OR REPLACE INTO runtime_state (key, value, updated_at) VALUES ('task_runner', '{}', 1)"
+                )
+            env = {
+                "TG_BOT_TOKEN": "123456:secret-token",
+                "TG_ALLOWED_CHAT_ID": "464100862",
+                "CMS_BASE_URL": "http://cms:9527",
+                "CMS_USERNAME": "user",
+                "CMS_PASSWORD": "secret-password",
+                "DATABASE_PATH": str(unified),
+                "BACKUP_DIR": str(Path(tmp) / "backups"),
+                "STRM_SOURCE_ROOTS": tmp,
+            }
+            Path(tmp, "backups").mkdir()
+            report = doctor.run_checks(env=env)
+            item = next(entry for entry in report.items if entry.name == "unified_database")
+            self.assertTrue(item.ok, item.message)
+            self.assertIn("write_gate=closed", item.message)
+            self.assertIn("runner_heartbeat=1", item.message)
+
 
 if __name__ == "__main__":
     unittest.main()

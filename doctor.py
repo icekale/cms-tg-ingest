@@ -115,7 +115,9 @@ def _read_only_connection(db_path: Path) -> sqlite3.Connection:
     process's write lock, so it opens with mode=ro instead of a plain rw
     connection.
     """
-    return sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    connection = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    return connection
 
 
 @dataclass(frozen=True)
