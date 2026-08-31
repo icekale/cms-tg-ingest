@@ -2300,3 +2300,39 @@ class TaskStoreTests(unittest.TestCase):
             command = store.claim_next_command("inspector")
             self.assertEqual(command["command_type"], "restore")
             self.assertEqual(store.find_task(task.id).id, task.id)
+
+    def test_adapter_reads_probe_identity_and_emby_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            adapter = WorkflowRowAdapter(store)
+            dest = "/library/Movie"
+            probed = store.upsert_task("probed", "", "https://115cdn.com/s/probed")
+            fresh = store.upsert_task("fresh", "", "https://115cdn.com/s/fresh")
+            other = store.upsert_task("other", "", "https://115cdn.com/s/other")
+            for task, share_code, tmdb in ((probed, "own-probed", "111"), (fresh, "own-fresh", "111"), (other, "own-other", "222")):
+                store.write_facts(
+                    task.id,
+                    media={"tmdb_id": tmdb, "category": "华语电影"},
+                    share={
+                        "canonical_name": "Movie",
+                        "own_share_code": share_code,
+                        "own_share_receive_code": "1212",
+                        "file_id": f"fid-{share_code}",
+                    },
+                    move={"move_status": "moved", "dest_path": dest},
+                    emby={"status": "confirmed", "path": f"{dest}/movie.strm"},
+                    cleanup={"status": "pending", "target_id": f"fid-{share_code}"},
+                )
+            adapter.update_share_probe(probed.id)
+
+            probes = adapter.self_share_probe_candidates(limit=10)
+            self.assertGreaterEqual(len(probes), 2)
+            self.assertNotEqual(probes[0]["id"], probed.id)
+            self.assertEqual(
+                set(adapter.live_self_share_identities(dest, "111")),
+                {("own-fresh", "1212"), ("own-probed", "1212")},
+            )
+            self.assertEqual(adapter.live_self_share_identities(dest, "222"), (("own-other", "1212"),))
+            self.assertIsNotNone(adapter.latest_self_share_identity(dest, "111"))
+            self.assertEqual(len(adapter.all_confirmed_with_emby_path()), 3)
+            self.assertEqual(len(adapter.pending_self_share_cleanup_candidates(limit=10)), 3)

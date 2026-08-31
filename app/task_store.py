@@ -2763,6 +2763,109 @@ class TaskStore:
             ).fetchall()
         return [self.workflow_facts(int(row[0])) for row in rows]
 
+    def self_share_probe_candidates(self, limit: int = 3) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.id FROM tasks t
+                JOIN task_shares s ON s.task_id = t.id
+                JOIN task_moves m ON m.task_id = t.id
+                JOIN task_emby e ON e.task_id = t.id
+                LEFT JOIN task_probes p ON p.task_id = t.id
+                WHERE COALESCE(t.archived_at, 0) = 0
+                  AND COALESCE(t.is_executable, 1) = 1
+                  AND lower(m.move_status) = 'moved'
+                  AND lower(e.status) = 'confirmed'
+                  AND COALESCE(m.dest_path, '') <> ''
+                  AND s.own_share_code != ''
+                ORDER BY CASE WHEN COALESCE(p.last_probe_at, 0) = 0 THEN 0 ELSE 1 END ASC,
+                         t.created_at DESC,
+                         COALESCE(p.last_probe_at, 0) ASC,
+                         t.id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [self.workflow_facts(int(row[0])) for row in rows]
+
+    def live_self_share_identities(self, dest_path: str, tmdb_id: str = "") -> tuple[tuple[str, str], ...]:
+        dest_path = str(dest_path or "").strip()
+        target_tmdb = str(tmdb_id or "").strip()
+        if not dest_path:
+            return ()
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.id FROM tasks t
+                JOIN task_shares s ON s.task_id = t.id
+                JOIN task_moves m ON m.task_id = t.id
+                WHERE COALESCE(t.archived_at, 0) = 0
+                  AND lower(m.move_status) = 'moved'
+                  AND COALESCE(m.dest_path, '') = ?
+                  AND s.own_share_code != ''
+                  AND lower(COALESCE(s.validation_status, '')) NOT IN ('invalid', 'unavailable')
+                ORDER BY t.updated_at DESC, t.id DESC
+                """,
+                (dest_path,),
+            ).fetchall()
+        identities: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for row in rows:
+            facts = self.workflow_facts(int(row[0]))
+            candidate_tmdb = str(facts.get("tmdb_id") or "").strip()
+            if target_tmdb and candidate_tmdb != target_tmdb:
+                continue
+            share_code = str(facts.get("own_share_code") or "").strip()
+            if not share_code:
+                continue
+            receive_code = str(facts.get("own_share_receive_code") or "1212").strip() or "1212"
+            identity = (share_code, receive_code)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            identities.append(identity)
+        return tuple(identities)
+
+    def latest_self_share_identity(self, dest_path: str, tmdb_id: str = "") -> tuple[str, str] | None:
+        identities = self.live_self_share_identities(dest_path, tmdb_id)
+        return identities[0] if identities else None
+
+    def all_confirmed_with_emby_path(self) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.id FROM tasks t
+                JOIN task_emby e ON e.task_id = t.id
+                WHERE COALESCE(t.archived_at, 0) = 0
+                  AND e.status = 'confirmed'
+                  AND COALESCE(e.path, '') <> ''
+                ORDER BY t.updated_at DESC, t.id DESC
+                """
+            ).fetchall()
+        return [self.workflow_facts(int(row[0])) for row in rows]
+
+    def pending_self_share_cleanup_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.id FROM tasks t
+                JOIN task_shares s ON s.task_id = t.id
+                JOIN task_moves m ON m.task_id = t.id
+                JOIN task_emby e ON e.task_id = t.id
+                JOIN task_cleanups c ON c.task_id = t.id
+                WHERE COALESCE(t.archived_at, 0) = 0
+                  AND lower(m.move_status) = 'moved'
+                  AND lower(e.status) = 'confirmed'
+                  AND lower(c.status) IN ('pending', 'error')
+                  AND s.file_id != ''
+                  AND s.own_share_code != ''
+                ORDER BY t.updated_at DESC, t.id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [self.workflow_facts(int(row[0])) for row in rows]
+
     def record_event(
         self,
         task_id: int,
@@ -3752,22 +3855,22 @@ class WorkflowRowAdapter:
         return self._tasks.missing_self_share_library_candidates(limit=limit, offset=offset)
 
     def pending_self_share_cleanup_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
-        return []
+        return self._tasks.pending_self_share_cleanup_candidates(limit=limit)
 
     def self_share_probe_candidates(self, limit: int = 3) -> list[dict[str, Any]]:
-        return []
+        return self._tasks.self_share_probe_candidates(limit=limit)
 
     def stale_for_repair(self, limit: int = 50) -> list[dict[str, Any]]:
         return []
 
-    def live_self_share_identities(self, dest_path: str, tmdb_id: str = "") -> tuple:
-        return ()
+    def live_self_share_identities(self, dest_path: str, tmdb_id: str = "") -> tuple[tuple[str, str], ...]:
+        return self._tasks.live_self_share_identities(dest_path, tmdb_id)
 
-    def latest_self_share_identity(self, dest_path: str, tmdb_id: str = "") -> tuple:
-        return ()
+    def latest_self_share_identity(self, dest_path: str, tmdb_id: str = "") -> tuple[str, str] | None:
+        return self._tasks.latest_self_share_identity(dest_path, tmdb_id)
 
     def all_confirmed_with_emby_path(self) -> list[dict[str, Any]]:
-        return []
+        return self._tasks.all_confirmed_with_emby_path()
 
     def clear_finished_history(self) -> int:
         return 0
