@@ -541,6 +541,127 @@ def find_emby_match(emby: Any, recognition: dict[str, Any], row: dict[str, Any] 
     return match_emby_item(emby.recent_items(limit=recent_limit), recognition, row)
 
 
+def checkpoint_json_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value or "{}"
+    return json.dumps(value or {}, ensure_ascii=True, sort_keys=True)
+
+
+def checkpoint_from_row(row: dict[str, Any] | None, targets: list[dict[str, Any]] | None = None) -> StageCheckpoint:
+    row = row or {}
+    media: dict[str, Any] = {}
+    title = str(row.get("title") or "").strip()
+    category = str(row.get("category_final") or row.get("category_choice") or "").strip()
+    recognition = row.get("recognition_json")
+    recognition_text = checkpoint_json_text(recognition)
+    if recognition_text in {"", "{}", "null"}:
+        recognition_text = ""
+    if title or category or recognition_text or row.get("cms_task_id") or row.get("tmdb_id"):
+        media = {
+            "cms_task_id": str(row.get("cms_task_id") or ""),
+            "title": title,
+            "tmdb_id": str(row.get("tmdb_id") or ""),
+            "category": category,
+            "recognition_status": str(row.get("category_status") or ""),
+        }
+        if recognition_text:
+            media["recognition_json"] = recognition_text
+    share: dict[str, Any] = {}
+    if any(str(row.get(key) or "").strip() for key in ("own_share_file_id", "own_share_file_name", "own_share_code", "share_alias_name", "share_sync_status")):
+        created_at = row.get("share_created_at") or 0
+        try:
+            created_at = float(created_at or 0)
+        except (TypeError, ValueError):
+            created_at = 0
+        share = {
+            "file_id": str(row.get("own_share_file_id") or ""),
+            "canonical_name": str(row.get("own_share_file_name") or ""),
+            "own_share_code": str(row.get("own_share_code") or ""),
+            "own_share_receive_code": str(row.get("own_share_receive_code") or ""),
+            "alias_name": str(row.get("share_alias_name") or ""),
+            "canonical_manifest_json": checkpoint_json_text(row.get("canonical_manifest_json")),
+            "validation_status": str(row.get("share_validation_status") or ""),
+            "validation_error": str(row.get("share_validation_error") or ""),
+            "share_sync_status": str(row.get("share_sync_status") or ""),
+            "created_at": created_at,
+        }
+    move: dict[str, Any] = {}
+    if any(str(row.get(key) or "").strip() for key in ("move_status", "dest_path", "source_path")):
+        move = {
+            "source_path": str(row.get("source_path") or ""),
+            "dest_path": str(row.get("dest_path") or ""),
+            "move_status": str(row.get("move_status") or ""),
+            "move_error": str(row.get("move_error") or ""),
+        }
+    emby: dict[str, Any] = {}
+    if any(str(row.get(key) or "").strip() for key in ("emby_status", "emby_item_id")):
+        emby = {
+            "status": str(row.get("emby_status") or ""),
+            "item_id": str(row.get("emby_item_id") or ""),
+            "title": str(row.get("emby_title") or ""),
+            "path": str(row.get("emby_path") or ""),
+            "library": str(row.get("emby_parent") or ""),
+        }
+    cleanup: dict[str, Any] = {}
+    if any(str(row.get(key) or "").strip() for key in ("cleanup_status", "cleanup_file_id")):
+        cleanup = {
+            "target_id": str(row.get("cleanup_file_id") or ""),
+            "status": str(row.get("cleanup_status") or ""),
+            "error": str(row.get("cleanup_error") or ""),
+        }
+    checkpoint_targets: list[dict[str, Any]] = []
+    for index, target in enumerate(targets or []):
+        if not isinstance(target, dict):
+            continue
+        key = str(target.get("target_id") or target.get("target_key") or "").strip()
+        if not key:
+            continue
+        folder = dict(target.get("folder") or {})
+        checkpoint_targets.append(
+            {
+                "target_key": key,
+                "ordinal": int(target.get("ordinal") or index),
+                "folder_id": str(folder.get("file_id") or ""),
+                "recognition_json": checkpoint_json_text(target.get("recognition")),
+                "share_json": checkpoint_json_text(target.get("share")),
+                "strm_json": checkpoint_json_text(target.get("strm")),
+                "move_json": checkpoint_json_text((target.get("strm") or {}).get("move") or target.get("strm")),
+                "emby_json": checkpoint_json_text({"status": str((target.get("strm") or {}).get("emby_status") or "")}),
+                "cleanup_json": checkpoint_json_text(target.get("cleanup")),
+            }
+        )
+    return StageCheckpoint(
+        media=media,
+        share=share,
+        move=move,
+        emby=emby,
+        cleanup=cleanup,
+        targets=tuple(checkpoint_targets),
+    )
+
+
+def checkpoint_is_populated(checkpoint: StageCheckpoint) -> bool:
+    return bool(
+        checkpoint.media
+        or checkpoint.share
+        or checkpoint.move
+        or checkpoint.emby
+        or checkpoint.cleanup
+        or checkpoint.probe
+        or checkpoint.targets
+        or checkpoint.operations
+    )
+
+
+def attach_row_checkpoint(result: StageResult, row: dict[str, Any] | None, targets: list[dict[str, Any]] | None = None) -> StageResult:
+    if result.outcome != StageOutcome.COMPLETE or checkpoint_is_populated(result.checkpoint):
+        return result
+    attached = checkpoint_from_row(row, targets)
+    if not checkpoint_is_populated(attached):
+        return result
+    return replace(result, checkpoint=attached)
+
+
 class SelfShareWorkflow:
     def __init__(
         self,
@@ -756,131 +877,25 @@ class BridgeSelfShareTaskWorkflow:
         return self._with_row_checkpoint(task, result)
 
     def _json_text(self, value: Any) -> str:
-        if isinstance(value, str):
-            return value or "{}"
-        return json.dumps(value or {}, ensure_ascii=True, sort_keys=True)
+        return checkpoint_json_text(value)
 
     def _checkpoint_for_row(self, row: dict[str, Any] | None, targets: list[dict[str, Any]] | None = None) -> StageCheckpoint:
-        row = row or {}
-        media: dict[str, Any] = {}
-        title = str(row.get("title") or "").strip()
-        category = str(row.get("category_final") or row.get("category_choice") or "").strip()
-        recognition = row.get("recognition_json")
-        recognition_text = self._json_text(recognition)
-        if recognition_text in {"", "{}", "null"}:
-            recognition_text = ""
-        if title or category or recognition_text or row.get("cms_task_id") or row.get("tmdb_id"):
-            media = {
-                "cms_task_id": str(row.get("cms_task_id") or ""),
-                "title": title,
-                "tmdb_id": str(row.get("tmdb_id") or ""),
-                "category": category,
-                "recognition_status": str(row.get("category_status") or ""),
-            }
-            if recognition_text:
-                media["recognition_json"] = recognition_text
-        share: dict[str, Any] = {}
-        if any(str(row.get(key) or "").strip() for key in ("own_share_file_id", "own_share_file_name", "own_share_code", "share_alias_name", "share_sync_status")):
-            created_at = row.get("share_created_at") or 0
-            try:
-                created_at = float(created_at or 0)
-            except (TypeError, ValueError):
-                created_at = 0
-            share = {
-                "file_id": str(row.get("own_share_file_id") or ""),
-                "canonical_name": str(row.get("own_share_file_name") or ""),
-                "own_share_code": str(row.get("own_share_code") or ""),
-                "own_share_receive_code": str(row.get("own_share_receive_code") or ""),
-                "alias_name": str(row.get("share_alias_name") or ""),
-                "canonical_manifest_json": self._json_text(row.get("canonical_manifest_json")),
-                "validation_status": str(row.get("share_validation_status") or ""),
-                "validation_error": str(row.get("share_validation_error") or ""),
-                "share_sync_status": str(row.get("share_sync_status") or ""),
-                "created_at": created_at,
-            }
-        move: dict[str, Any] = {}
-        if any(str(row.get(key) or "").strip() for key in ("move_status", "dest_path", "source_path")):
-            move = {
-                "source_path": str(row.get("source_path") or ""),
-                "dest_path": str(row.get("dest_path") or ""),
-                "move_status": str(row.get("move_status") or ""),
-                "move_error": str(row.get("move_error") or ""),
-            }
-        emby: dict[str, Any] = {}
-        if any(str(row.get(key) or "").strip() for key in ("emby_status", "emby_item_id")):
-            emby = {
-                "status": str(row.get("emby_status") or ""),
-                "item_id": str(row.get("emby_item_id") or ""),
-                "title": str(row.get("emby_title") or ""),
-                "path": str(row.get("emby_path") or ""),
-                "library": str(row.get("emby_parent") or ""),
-            }
-        cleanup: dict[str, Any] = {}
-        if any(str(row.get(key) or "").strip() for key in ("cleanup_status", "cleanup_file_id")):
-            cleanup = {
-                "target_id": str(row.get("cleanup_file_id") or ""),
-                "status": str(row.get("cleanup_status") or ""),
-                "error": str(row.get("cleanup_error") or ""),
-            }
-        checkpoint_targets: list[dict[str, Any]] = []
-        for index, target in enumerate(targets or []):
-            if not isinstance(target, dict):
-                continue
-            key = str(target.get("target_id") or target.get("target_key") or "").strip()
-            if not key:
-                continue
-            folder = dict(target.get("folder") or {})
-            checkpoint_targets.append(
-                {
-                    "target_key": key,
-                    "ordinal": int(target.get("ordinal") or index),
-                    "folder_id": str(folder.get("file_id") or ""),
-                    "recognition_json": self._json_text(target.get("recognition")),
-                    "share_json": self._json_text(target.get("share")),
-                    "strm_json": self._json_text(target.get("strm")),
-                    "move_json": self._json_text((target.get("strm") or {}).get("move") or target.get("strm")),
-                    "emby_json": self._json_text({"status": str((target.get("strm") or {}).get("emby_status") or "")}),
-                    "cleanup_json": self._json_text(target.get("cleanup")),
-                }
-            )
-        return StageCheckpoint(
-            media=media,
-            share=share,
-            move=move,
-            emby=emby,
-            cleanup=cleanup,
-            targets=tuple(checkpoint_targets),
-        )
+        return checkpoint_from_row(row, targets)
 
     def _checkpoint_is_populated(self, checkpoint: StageCheckpoint) -> bool:
-        return bool(
-            checkpoint.media
-            or checkpoint.share
-            or checkpoint.move
-            or checkpoint.emby
-            or checkpoint.cleanup
-            or checkpoint.probe
-            or checkpoint.targets
-            or checkpoint.operations
-        )
+        return checkpoint_is_populated(checkpoint)
 
     def _with_row_checkpoint(self, task, result: StageResult) -> StageResult:
-        if result.outcome != StageOutcome.COMPLETE or self._checkpoint_is_populated(result.checkpoint):
-            return result
-        row = self._submission_row(task)
         targets: list[dict[str, Any]] = []
         organized = result.metadata.get("organized_targets") if isinstance(result.metadata, dict) else None
         if isinstance(organized, list):
             targets = [item for item in organized if isinstance(item, dict)]
-        elif row is not None:
+        elif result.outcome == StageOutcome.COMPLETE:
             try:
                 targets = list(self._organized_targets(task) or [])
             except Exception:
                 targets = []
-        attached = self._checkpoint_for_row(row, targets)
-        if not self._checkpoint_is_populated(attached):
-            return result
-        return replace(result, checkpoint=attached)
+        return attach_row_checkpoint(result, self._submission_row(task), targets)
 
     def _trigger_cloud_auto_organize(self, task, row_id: int, metadata: dict[str, Any]) -> StageResult:
         operation = None
