@@ -1564,6 +1564,7 @@ class TaskStore:
                 """
                 SELECT * FROM tasks INDEXED BY idx_tasks_next_run
                 WHERE status IN (?, ?, ?, ?)
+                  AND COALESCE(archived_at, 0) = 0
                 ORDER BY updated_at DESC, id DESC
                 """,
                 open_statuses,
@@ -1622,6 +1623,7 @@ class TaskStore:
                 SELECT COUNT(*) AS recent_count
                 FROM (
                     SELECT id FROM tasks
+                    WHERE COALESCE(archived_at, 0) = 0
                     ORDER BY updated_at DESC, id DESC
                     LIMIT ?
                 )
@@ -1648,6 +1650,7 @@ class TaskStore:
                     COALESCE(MAX({p115_cooldown_value}), 0) AS p115_cooldown_until
                 FROM tasks INDEXED BY idx_tasks_next_run
                 WHERE status IN (?, ?, ?, ?)
+                  AND COALESCE(archived_at, 0) = 0
                 """,
                 (
                     TaskStatus.PENDING.value,
@@ -1668,6 +1671,7 @@ class TaskStore:
                 """
                 SELECT * FROM tasks INDEXED BY idx_tasks_next_run
                 WHERE status IN (?, ?)
+                  AND COALESCE(archived_at, 0) = 0
                 ORDER BY updated_at DESC, id DESC
                 LIMIT ?
                 """,
@@ -1676,8 +1680,11 @@ class TaskStore:
             latest_problem_row = conn.execute(
                 """
                 SELECT * FROM tasks INDEXED BY idx_tasks_next_run
-                WHERE status IN (?, ?)
-                   OR (status IN (?, ?) AND next_run_at < 0 AND TRIM(claimed_by) = '')
+                WHERE COALESCE(archived_at, 0) = 0
+                  AND (
+                    status IN (?, ?)
+                    OR (status IN (?, ?) AND next_run_at < 0 AND TRIM(claimed_by) = '')
+                  )
                 ORDER BY updated_at DESC, id DESC
                 LIMIT 1
                 """,
@@ -1692,6 +1699,7 @@ class TaskStore:
                 f"""
                 SELECT * FROM tasks INDEXED BY idx_tasks_next_run
                 WHERE status = ? AND {lock_wait_condition}
+                  AND COALESCE(archived_at, 0) = 0
                 ORDER BY updated_at DESC, id DESC
                 LIMIT 1
                 """,

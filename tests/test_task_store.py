@@ -1346,6 +1346,30 @@ class TaskStoreTests(unittest.TestCase):
                 [TaskStatus.NEEDS_ACTION, TaskStatus.FAILED, TaskStatus.RUNNING, TaskStatus.PENDING],
             )
 
+    def test_list_open_tasks_and_health_exclude_archived(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            pending = store.upsert_task("pending", "", "https://115cdn.com/s/pending")
+            store.enqueue_task(pending.id, TaskStage.RECEIVED, next_run_at=0)
+            failed = store.upsert_task("failed", "", "https://115cdn.com/s/failed")
+            failed = store.record_event(failed.id, TaskStage.FAILED, TaskStatus.FAILED, "failed")
+            self.assertTrue(
+                store.archive_task(
+                    failed.id,
+                    actor="test",
+                    reason="user_delete",
+                    expected_updated_at=failed.updated_at,
+                )
+            )
+
+            open_tasks = store.list_open_tasks()
+            health = store.aggregate_open_task_health(limit=10)
+
+            self.assertEqual([task.id for task in open_tasks], [pending.id])
+            self.assertEqual(health.failed_count, 0)
+            self.assertEqual(health.pending_count, 1)
+            self.assertEqual(health.problem_count, 0)
+
     def test_list_open_tasks_searches_status_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
