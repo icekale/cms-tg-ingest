@@ -13,7 +13,7 @@ from app.clients.p115 import P115RiskControlError
 from app.models import TaskStage, TaskStatus
 from app.task_actions import available_task_actions
 from app.task_runner import StageResult, TaskRunner
-from app.task_store import TaskStore
+from app.task_store import TaskStore, command_key
 from app.web import WebApp
 from tests.task_command_drain import drain_task_commands
 
@@ -1709,6 +1709,24 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.error_summary, "STRM missing")
             self.assertEqual(updated.retry_count, 1)
             self.assertEqual(updated.claimed_by, "")
+
+    def test_restore_command_keeps_payload_target_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("restore-moved", "", "https://115cdn.com/s/restore-moved")
+            store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            store.enqueue_command(
+                task.id,
+                "restore",
+                {"target_stage": "moved", "message": "自动恢复缺失媒体库 STRM"},
+                idempotency_key=command_key("restore", task.id, "/library/Movie"),
+                actor="maintenance",
+                source="missing-library",
+            )
+            drain_task_commands(store)
+            updated = store.find_task(task.id)
+            self.assertEqual(updated.current_stage, TaskStage.MOVED)
+            self.assertEqual(updated.metadata.get("retry_stage"), TaskStage.MOVED.value)
 
 
 if __name__ == "__main__":

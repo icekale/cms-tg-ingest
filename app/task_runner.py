@@ -873,11 +873,6 @@ class TaskRunner:
                 payload = raw_payload
             extra_patch = None
             extra_delete: tuple[str, ...] = ()
-            if command_type == "restore" and current is not None:
-                extra_patch = {
-                    "retry_from_stage": current.current_stage.value,
-                    "retry_stage": TaskStage.EMBY_CONFIRMED.value,
-                }
             if command_type == "retry":
                 stage_name = str(payload.get("target_stage") or "")
                 stage = TaskStage(stage_name) if stage_name else None
@@ -902,6 +897,11 @@ class TaskRunner:
                 }[command_type]
                 if stage_name:
                     stage = TaskStage(stage_name)
+                if command_type == "restore" and current is not None:
+                    extra_patch = {
+                        "retry_from_stage": current.current_stage.value,
+                        "retry_stage": stage.value,
+                    }
                 self.store.enqueue_task(
                     task_id,
                     stage,
