@@ -33,6 +33,7 @@ from app.web import (
     start_web_server,
 )
 from tests.legacy_submission_store import SubmissionStore
+from tests.task_command_drain import drain_task_commands
 
 
 class _ManualActionRuleEngine:
@@ -1078,6 +1079,7 @@ class WebAdminTests(unittest.TestCase):
 
             page_html = render_task_detail(store, task.id)
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/retry", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
 
             self.assertIsNotNone(claimed)
@@ -1181,6 +1183,7 @@ class WebAdminTests(unittest.TestCase):
 
             page_html = render_task_detail(store, task.id)
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/reprocess", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
 
             self.assertIn(f'action="/task/{task.id}/reprocess"', page_html)
@@ -1307,6 +1310,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="")
 
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/retry", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             events = store.list_events(task.id)
             claimed = store.claim_next_runnable("worker", now=0)
@@ -1318,7 +1322,6 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(updated.claimed_by, "")
             self.assertEqual(updated.next_run_at, 0)
             self.assertEqual(updated.retry_count, 0)
-            self.assertTrue(any(event["message"] == "手动触发重试" for event in events))
             self.assertTrue(any(event["message"] == "手动重试已入队" for event in events))
             self.assertIsNotNone(claimed)
             self.assertEqual(claimed.id, task.id)
@@ -1365,6 +1368,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="")
 
             responses = self._run_concurrent_posts(app, f"/task/{task.id}/retry")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             events = store.list_events(task.id)
 
@@ -1372,7 +1376,6 @@ class WebAdminTests(unittest.TestCase):
             self.assertEqual(updated.status, TaskStatus.PENDING)
             self.assertEqual(updated.current_stage, TaskStage.STRM_READY)
             self.assertEqual(updated.retry_count, 0)
-            self.assertEqual(sum(event["message"] == "手动触发重试" for event in events), 1)
             self.assertEqual(sum(event["message"] == "手动重试已入队" for event in events), 1)
 
     def test_concurrent_reprocess_requests_apply_once(self):
@@ -1383,6 +1386,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="")
 
             responses = self._run_concurrent_posts(app, f"/task/{task.id}/reprocess")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             events = store.list_events(task.id)
 
@@ -1408,7 +1412,7 @@ class WebAdminTests(unittest.TestCase):
                 "restore",
                 "restore",
                 TaskStage.CLEANED,
-                ("Web 触发 STRM 恢复", "Web STRM 恢复已入队"),
+                ("Web STRM 恢复已入队",),
                 TaskStage.EMBY_CONFIRMED,
                 0,
                 None,
@@ -1426,8 +1430,10 @@ class WebAdminTests(unittest.TestCase):
                     issue = QualityIssue(issue_code, "problem", f"/{name}", task.id, name)
                     with patch("app.web.scan_task_quality", return_value=[issue]):
                         responses = self._run_concurrent_posts(app, path)
+                        drain_task_commands(store)
                 else:
                     responses = self._run_concurrent_posts(app, path)
+                    drain_task_commands(store)
                 updated = store.find_task(task.id)
                 events = store.list_events(task.id)
 
@@ -1479,6 +1485,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="", submission_store=submission_store)
             with patch.object(store, "find_task", side_effect=find_then_claim):
                 status, headers, body = app.handle_request("POST", f"/task/{task.id}/reprocess", {}, b"")
+                drain_task_commands(store)
             updated = store.find_task(task.id)
 
             self.assertEqual(status, 303)
@@ -1538,6 +1545,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="", submission_store=submission_store)
 
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/reprocess", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             events = store.list_events(task.id)
             claimed = store.claim_next_runnable("worker", now=0)
@@ -1598,6 +1606,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="")
 
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/reprocess", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             events = store.list_events(task.id)
             claimed = store.claim_next_runnable("worker", now=0)
@@ -1624,6 +1633,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="")
 
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/emby", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             claimed = store.claim_next_runnable("worker", now=0)
             events = store.list_events(task.id)
@@ -1652,6 +1662,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="")
 
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/restore", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             claimed = store.claim_next_runnable("worker", now=0)
             events = store.list_events(task.id)
@@ -1665,9 +1676,8 @@ class WebAdminTests(unittest.TestCase):
             self.assertIsNotNone(claimed)
             self.assertEqual(claimed.current_stage, TaskStage.EMBY_CONFIRMED)
             self.assertEqual(
-                [(event["stage"], event["status"], event["message"]) for event in events[-2:]],
+                [(event["stage"], event["status"], event["message"]) for event in events[-1:]],
                 [
-                    (TaskStage.EMBY_CONFIRMED.value, TaskStatus.PENDING.value, "Web 触发 STRM 恢复"),
                     (TaskStage.EMBY_CONFIRMED.value, TaskStatus.PENDING.value, "Web STRM 恢复已入队"),
                 ],
             )
@@ -2262,6 +2272,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="")
 
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/retry", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             claimed = store.claim_next_runnable("worker", now=0)
 
@@ -2282,6 +2293,7 @@ class WebAdminTests(unittest.TestCase):
             app = WebApp(store, web_token="")
 
             status, headers, body = app.handle_request("POST", f"/task/{task.id}/retry", {}, b"")
+            drain_task_commands(store)
             updated = store.find_task(task.id)
             claimed = store.claim_next_runnable("worker", now=0)
 

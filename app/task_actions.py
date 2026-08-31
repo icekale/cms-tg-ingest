@@ -8,15 +8,17 @@ from typing import Any
 from .models import RetryAction, TaskSnapshot, TaskStage, TaskStatus
 from .task_diagnostics import is_unscheduled_active_task
 from .task_engine import decide_retry
-from .task_store import (
-    TaskStore,
-    build_reprocess_metadata,
-    reprocess_delete_keys_for,
-    reprocess_stage_for,
-)
+from .task_store import TaskStore, command_key, reprocess_stage_for
 
 
 TASK_ACTIONS = frozenset({"retry", "emby", "restore", "reprocess", "resume_organizing", "terminate"})
+_ACTION_COMMANDS = {
+    "retry": "retry",
+    "reprocess": "reprocess",
+    "emby": "emby_check",
+    "restore": "restore",
+    "resume_organizing": "resume_organizing",
+}
 _DOWNSTREAM_RECOVERY_STAGES = frozenset({TaskStage.MOVED, TaskStage.EMBY_CONFIRMED, TaskStage.CLEANED})
 _TERMINAL_ACTION_STATUSES = frozenset({TaskStatus.FAILED, TaskStatus.NEEDS_ACTION, TaskStatus.SUCCEEDED})
 
@@ -239,65 +241,30 @@ def apply_task_action(
             reason = "当前任务不支持该操作"
         return TaskActionResult(False, task, reason)
 
-    initial_message, target_message = _messages(actor, action)
+    _, target_message = _messages(actor, action)
     target_stage = task.current_stage
-    metadata_patch: dict[str, Any] | None = None
-    metadata_delete_keys: tuple[str, ...] | None = None
-    increment_retry = False
     if action == "retry":
-        decision = decide_retry(task, max_retries=max_retries)
-        target_stage = decision.stage  # available_task_actions guarantees this is present.
-        metadata_patch = {
-            "retry_from_stage": task.current_stage.value,
-            "retry_stage": target_stage.value,
-        }
-    elif action == "emby":
+        target_stage = decide_retry(task, max_retries=max_retries).stage
+    elif action in {"emby", "restore"}:
         target_stage = TaskStage.EMBY_CONFIRMED
-    elif action == "restore":
-        target_stage = TaskStage.EMBY_CONFIRMED
-        metadata_patch = {
-            "retry_from_stage": task.current_stage.value,
-            "retry_stage": TaskStage.EMBY_CONFIRMED.value,
-        }
-    if action == "resume_organizing":
+    elif action == "resume_organizing":
         target_stage = TaskStage.ORGANIZING
-        metadata_patch = {
-            "resume_from_stage": task.current_stage.value,
-            "resume_stage": TaskStage.ORGANIZING.value,
-            "_defer_stage": "",
-            "_defer_message": "",
-            "_defer_count": 0,
-        }
     elif action == "reprocess":
         target_stage = reprocess_stage_for(task)
-        preserve_received_snapshot = any(
-            operation.operation_type == "receive_share" and operation.status == "succeeded"
-            for operation in store.list_operations(task.id)
-        )
-        metadata_patch = build_reprocess_metadata(task)
-        metadata_delete_keys = reprocess_delete_keys_for(
-            task,
-            preserve_received_snapshot=preserve_received_snapshot,
-        )
 
-    updated = store.compare_and_set_transition(
+    command_type = _ACTION_COMMANDS[action]
+    store.enqueue_command(
         task.id,
-        task.current_stage,
-        {task.status},
-        require_unclaimed=True,
-        target_stage=target_stage,
-        target_status=TaskStatus.PENDING,
-        target_event_message=target_message,
-        initial_event_message=initial_message,
-        initial_event_stage=TaskStage.EMBY_CONFIRMED if action == "restore" else None,
-        increment_retry=increment_retry,
-        metadata_patch=metadata_patch,
-        metadata_delete_keys=metadata_delete_keys,
-        next_run_at=0,
-        clear_errors=True,
-        clear_claim=True,
-        expected_updated_at=task.updated_at,
+        command_type,
+        {"target_stage": target_stage.value, "message": target_message},
+        idempotency_key=command_key(
+            command_type,
+            task.id,
+            task.current_stage.value,
+            task.status.value,
+            f"{float(task.updated_at):.6f}",
+        ),
+        actor=actor,
+        source="task-action",
     )
-    if updated is None:
-        return _failed_result(task, "操作未执行，任务状态已变化")
-    return TaskActionResult(True, updated, target_message)
+    return TaskActionResult(True, task, target_message)

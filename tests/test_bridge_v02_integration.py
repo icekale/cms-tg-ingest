@@ -12,6 +12,7 @@ import bridge
 from app.models import TaskStage, TaskStatus
 from app.task_store import TaskStore
 from tests.legacy_submission_store import SubmissionStore
+from tests.task_command_drain import drain_task_commands
 
 
 class BridgeV02IntegrationTests(unittest.TestCase):
@@ -3094,6 +3095,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 task_store=task_store,
             )
 
+            drain_task_commands(task_store)
             updated = task_store.find_task(task.id)
             claimed = task_store.claim_next_runnable("worker", now=0)
             self.assertEqual(updated.status, TaskStatus.PENDING)
@@ -3138,6 +3140,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             update["callback_query"]["id"] = "task-retry-allowed"
             update["callback_query"]["data"] = f"task_retry:{allowed.id}"
             bridge.handle_update(update, FakeCmsSubmit(), telegram, "464100862", submission_store, task_store=task_store, task_engine_enabled=True, max_retries=5)
+            drain_task_commands(task_store)
             self.assertEqual(task_store.find_task(allowed.id).status, TaskStatus.PENDING)
             self.assertIn("已重新入队", telegram.answers[-1][1])
 
@@ -3189,6 +3192,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 task_store=task_store,
             )
 
+            drain_task_commands(task_store)
             updated = task_store.find_task(task.id)
             claimed = task_store.claim_next_runnable("worker", now=0)
             events = task_store.list_events(task.id)
@@ -3238,6 +3242,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                     task_store=task_store,
                 )
 
+            drain_task_commands(task_store)
             updated_emby = task_store.find_task(emby_task.id)
             updated_restore = task_store.find_task(restore_task.id)
             self.assertEqual(updated_emby.status, TaskStatus.PENDING)

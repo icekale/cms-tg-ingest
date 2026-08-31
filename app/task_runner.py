@@ -827,19 +827,58 @@ class TaskRunner:
         task_id = int(command.get("task_id") or 0)
         command_type = str(command.get("command_type") or "")
         try:
+            current = self.store.find_task(task_id)
+            if command_type != "terminate" and current is not None and str(current.claimed_by or "").strip():
+                self.store.complete_command(command_id, token, result={"applied": False, "reason": "claimed"})
+                return True
+            payload = {}
+            raw_payload = command.get("payload_json") or command.get("payload") or {}
+            if isinstance(raw_payload, str):
+                try:
+                    payload = json.loads(raw_payload)
+                except json.JSONDecodeError:
+                    payload = {}
+            elif isinstance(raw_payload, dict):
+                payload = raw_payload
+            extra_patch = None
+            extra_delete: tuple[str, ...] = ()
+            if command_type == "restore" and current is not None:
+                extra_patch = {
+                    "retry_from_stage": current.current_stage.value,
+                    "retry_stage": TaskStage.EMBY_CONFIRMED.value,
+                }
             if command_type == "retry":
-                self.store.enqueue_task(task_id)
+                stage_name = str(payload.get("target_stage") or "")
+                stage = TaskStage(stage_name) if stage_name else None
+                self.store.enqueue_task(
+                    task_id,
+                    stage,
+                    message=str(payload.get("message") or "等待执行"),
+                    next_run_at=0,
+                    metadata_patch=extra_patch,
+                    metadata_delete_keys=extra_delete,
+                )
             elif command_type == "reprocess":
-                self.store.reprocess_task(task_id)
+                self.store.reprocess_task(task_id, message=str(payload.get("message") or "从头重跑已入队"), next_run_at=0)
             elif command_type == "terminate":
                 self.store.request_task_termination(task_id, str(command.get("actor") or "command"))
             elif command_type in {"emby_check", "restore", "resume_organizing"}:
+                stage_name = str(payload.get("target_stage") or "")
                 stage = {
                     "emby_check": TaskStage.EMBY_CONFIRMED,
                     "restore": TaskStage.EMBY_CONFIRMED,
                     "resume_organizing": TaskStage.ORGANIZING,
                 }[command_type]
-                self.store.enqueue_task(task_id, stage)
+                if stage_name:
+                    stage = TaskStage(stage_name)
+                self.store.enqueue_task(
+                    task_id,
+                    stage,
+                    message=str(payload.get("message") or "等待执行"),
+                    next_run_at=0,
+                    metadata_patch=extra_patch,
+                    metadata_delete_keys=extra_delete,
+                )
             elif command_type == "repair_move":
                 self.store.enqueue_task(task_id, TaskStage.STRM_READY, next_run_at=0)
             elif command_type == "invalidate_share":

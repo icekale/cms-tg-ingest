@@ -28,6 +28,7 @@ from app.web_api import (
     serialize_task,
 )
 from tests.legacy_submission_store import SubmissionStore
+from tests.task_command_drain import drain_task_commands
 
 
 class WebApiTests(unittest.TestCase):
@@ -1439,11 +1440,10 @@ class WebApiTests(unittest.TestCase):
 
             status, _headers, body = app.handle_request("POST", f"/api/v1/tasks/{task.id}/actions/retry", {}, b"")
             missing_status, _headers, missing_body = app.handle_request("POST", "/api/v1/tasks/999/actions/retry", {}, b"")
-
+            drain_task_commands(store)
             succeeded = store.find_task(task.id)
 
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["status"], "pending")
         self.assertEqual(succeeded.status, TaskStatus.PENDING)
         self.assertEqual(missing_status, 404)
         self.assertEqual(json.loads(missing_body)["error"], "task_not_found")
@@ -1470,9 +1470,9 @@ class WebApiTests(unittest.TestCase):
             app = WebApp(store, max_retries=5)
 
             status, _headers, body = app.handle_request("POST", f"/api/v1/tasks/{task.id}/actions/retry", {}, b"")
-
-        self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["status"], "pending")
+            drain_task_commands(store)
+            self.assertEqual(status, 200)
+            self.assertEqual(store.find_task(task.id).status, TaskStatus.PENDING)
 
     def test_history_and_quality_action_api(self):
         with tempfile.TemporaryDirectory() as tmp:

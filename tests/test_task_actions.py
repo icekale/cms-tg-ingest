@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from app.models import TaskStage, TaskStatus
 from app.task_actions import apply_task_action, available_lifecycle_actions, available_task_actions
+from app.task_runner import TaskRunner
 from app.task_store import TaskStore
 from tests.legacy_submission_store import SubmissionStore
 
@@ -14,6 +15,30 @@ class TaskActionsTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         return TaskStore(Path(tmp.name) / "tasks.db")
+
+    def drain_commands(self, store: TaskStore) -> None:
+        class IdleWorkflow:
+            def run_stage(self, task):
+                raise AssertionError("stage should not run while draining commands")
+
+        runner = TaskRunner(store, IdleWorkflow(), worker_id="test-runner")
+        while True:
+            command = store.claim_next_command(runner.worker_id)
+            if not command:
+                return
+            runner._run_command(command)
+
+    def test_retry_enqueues_command_instead_of_cas(self):
+        store = self.make_store()
+        task = store.upsert_task("retry-queue", "", "https://115cdn.com/s/retry-queue")
+        task = store.record_event(task.id, TaskStage.STRM_READY, TaskStatus.FAILED, "failed")
+        with patch.object(store, "compare_and_set_transition", side_effect=AssertionError("cas")):
+            result = apply_task_action(store, task.id, "retry", max_retries=3, actor="Web")
+        self.assertTrue(result.applied)
+        self.assertEqual(store.find_task(task.id).status, TaskStatus.FAILED)
+        command = store.claim_next_command("inspector")
+        self.assertEqual(command["command_type"], "retry")
+        self.assertEqual(command["actor"], "Web")
 
     def test_resume_organizing_requeues_without_new_receive_generation(self):
         store = self.make_store()
@@ -35,10 +60,11 @@ class TaskActionsTest(unittest.TestCase):
 
         result = apply_task_action(store, task.id, "resume_organizing", max_retries=3, actor="Web")
         self.assertTrue(result.applied)
+        self.drain_commands(store)
         resumed = store.find_task(task.id)
         self.assertEqual(resumed.current_stage, TaskStage.ORGANIZING)
         self.assertEqual(resumed.status, TaskStatus.PENDING)
-        self.assertEqual(resumed.metadata.get("_defer_stage"), "")
+        self.assertFalse(resumed.metadata.get("_defer_stage"))
         self.assertEqual(len([op for op in store.list_operations(task.id) if op.operation_type == "receive_share"]), 1)
         self.assertNotIn("own_share_code", resumed.metadata)
 
@@ -83,6 +109,7 @@ class TaskActionsTest(unittest.TestCase):
         result = apply_task_action(store, task.id, "resume_organizing", max_retries=3, actor="Web")
 
         self.assertTrue(result.applied)
+        self.drain_commands(store)
         resumed = store.find_task(task.id)
         self.assertEqual(resumed.current_stage, TaskStage.ORGANIZING)
         self.assertEqual(resumed.status, TaskStatus.PENDING)
@@ -169,6 +196,7 @@ class TaskActionsTest(unittest.TestCase):
         result = apply_task_action(store, task.id, "reprocess", max_retries=3, actor="Web")
 
         self.assertTrue(result.applied)
+        self.drain_commands(store)
         updated = store.find_task(task.id)
         self.assertEqual(updated.metadata["intake_identity"]["root_ids"], ["received-root"])
         self.assertEqual(updated.metadata["received_items"][0]["file_id"], "received-root")
@@ -208,8 +236,10 @@ class TaskActionsTest(unittest.TestCase):
         self.assertEqual(available_task_actions(task, 3), frozenset({"retry", "reprocess"}))
         result = apply_task_action(store, task.id, "retry", max_retries=3, actor="test")
         self.assertTrue(result.applied)
-        self.assertEqual(result.task.current_stage, TaskStage.STRM_READY)
-        self.assertEqual(result.task.status, TaskStatus.PENDING)
+        self.drain_commands(store)
+        updated = store.find_task(task.id)
+        self.assertEqual(updated.current_stage, TaskStage.STRM_READY)
+        self.assertEqual(updated.status, TaskStatus.PENDING)
 
     def test_needs_action_allows_only_reprocess(self):
         store = self.make_store()
@@ -239,8 +269,10 @@ class TaskActionsTest(unittest.TestCase):
         self.assertEqual(available_task_actions(task, 3), frozenset({"retry", "reprocess"}))
         result = apply_task_action(store, task.id, "reprocess", max_retries=3, actor="test")
         self.assertTrue(result.applied)
-        self.assertEqual(result.task.current_stage, TaskStage.CLOUD_DOWNLOADING)
-        self.assertEqual(result.task.metadata.get("strm_mode"), "shared")
+        self.drain_commands(store)
+        updated = store.find_task(task.id)
+        self.assertEqual(updated.current_stage, TaskStage.CLOUD_DOWNLOADING)
+        self.assertEqual(updated.metadata.get("strm_mode"), "shared")
 
     def test_retry_count_at_limit_rejects_retry(self):
         store = self.make_store()
@@ -269,28 +301,22 @@ class TaskActionsTest(unittest.TestCase):
 
         self.assertNotIn("retry", available_task_actions(task, 3))
 
-    def test_stale_snapshot_cas_does_not_clear_new_claim(self):
+    def test_queued_retry_does_not_clear_new_claim(self):
         store = self.make_store()
         task = store.upsert_task("race", "", "https://115cdn.com/s/race")
         task = store.record_event(task.id, TaskStage.STRM_READY, TaskStatus.FAILED, "failed")
-        original = store.compare_and_set_transition
-
-        def claim_then_compare(*args, **kwargs):
-            store.record_event(
-                task.id,
-                TaskStage.STRM_READY,
-                TaskStatus.PENDING,
-                "requeued by another actor",
-                clear_claim=True,
-                next_run_at=0,
-            )
-            store.claim_next_runnable("new-worker", now=0)
-            return original(*args, **kwargs)
-
-        with patch.object(store, "compare_and_set_transition", side_effect=claim_then_compare):
-            result = apply_task_action(store, task.id, "retry", max_retries=3, actor="test")
-
-        self.assertFalse(result.applied)
+        result = apply_task_action(store, task.id, "retry", max_retries=3, actor="test")
+        self.assertTrue(result.applied)
+        store.record_event(
+            task.id,
+            TaskStage.STRM_READY,
+            TaskStatus.PENDING,
+            "requeued by another actor",
+            clear_claim=True,
+            next_run_at=0,
+        )
+        store.claim_next_runnable("new-worker", now=0)
+        self.drain_commands(store)
         self.assertEqual(store.find_task(task.id).claimed_by, "new-worker")
 
     def test_delete_task_record_and_submission_removes_task_and_row(self):

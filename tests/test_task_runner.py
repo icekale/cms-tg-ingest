@@ -15,6 +15,7 @@ from app.task_actions import available_task_actions
 from app.task_runner import StageResult, TaskRunner
 from app.task_store import TaskStore
 from app.web import WebApp
+from tests.task_command_drain import drain_task_commands
 
 
 class FakeWorkflow:
@@ -1690,6 +1691,7 @@ class TaskRunnerTests(unittest.TestCase):
             )
             app = WebApp(store, web_token="")
             app.handle_request("POST", f"/task/{task.id}/retry", {}, b"")
+            drain_task_commands(store)
             self.assertEqual(store.find_task(task.id).retry_count, 0)
             runner = TaskRunner(
                 store,

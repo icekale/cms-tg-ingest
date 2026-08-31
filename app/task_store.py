@@ -3188,6 +3188,8 @@ class TaskStore:
         stage: TaskStage | None = None,
         message: str = "等待执行",
         next_run_at: float | None = None,
+        metadata_patch: dict[str, Any] | None = None,
+        metadata_delete_keys: tuple[str, ...] = (),
     ) -> TaskSnapshot:
         task = self.find_task(task_id)
         if task is None:
@@ -3198,7 +3200,8 @@ class TaskStore:
             target_stage,
             TaskStatus.PENDING,
             message,
-            metadata_delete_keys=("_defer_stage", "_defer_message", "_defer_count"),
+            metadata_patch=metadata_patch,
+            metadata_delete_keys=("_defer_stage", "_defer_message", "_defer_count") + tuple(metadata_delete_keys),
             next_run_at=time.time() if next_run_at is None else float(next_run_at),
             clear_claim=True,
         )
