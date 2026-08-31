@@ -884,16 +884,53 @@ class TaskRunner:
             elif command_type == "invalidate_share":
                 pass
             elif command_type == "quality_repair":
-                payload = json.loads(command.get("payload_json") or "{}")
                 action = str(payload.get("action") or "")
+                message = str(payload.get("message") or "自动巡检已排队")
                 if action == "reprocess":
-                    self.store.reprocess_task(task_id)
+                    self.store.reprocess_task(
+                        task_id,
+                        message=message,
+                        next_run_at=0,
+                        metadata_patch={"quality_repair_queued": True},
+                    )
                 elif action == "requeue":
                     stage_name = str(payload.get("target_stage") or "")
                     stage = TaskStage(stage_name) if stage_name else None
-                    self.store.enqueue_task(task_id, stage, next_run_at=0)
+                    attempts = 0
+                    if current is not None:
+                        try:
+                            attempts = int(current.metadata.get("quality_auto_recheck_count") or 0)
+                        except (TypeError, ValueError):
+                            attempts = 0
+                    now = self.now()
+                    self.store.enqueue_task(
+                        task_id,
+                        stage,
+                        message=message,
+                        next_run_at=0,
+                        metadata_patch={
+                            "quality_auto_recheck_count": attempts + 1,
+                            "quality_auto_recheck_last_at": now,
+                            "quality_auto_recheck_next_at": now + 6 * 60 * 60,
+                            "quality_auto_recheck_target_stage": stage.value if stage else "",
+                            "quality_repair_action": "requeue",
+                            "quality_rule_id": str(payload.get("rule_id") or "auto_recheck"),
+                        },
+                    )
                 elif action == "restore":
-                    self.store.enqueue_task(task_id, TaskStage.MOVED, next_run_at=0)
+                    from_stage = current.current_stage.value if current is not None else TaskStage.CLEANED.value
+                    self.store.enqueue_task(
+                        task_id,
+                        TaskStage.MOVED,
+                        message=message,
+                        next_run_at=0,
+                        metadata_patch={
+                            "retry_from_stage": from_stage,
+                            "retry_stage": TaskStage.MOVED.value,
+                            "quality_repair_queued": True,
+                            "quality_repair_action": "restore",
+                        },
+                    )
             else:
                 self.store.fail_command(command_id, token, "unsupported command")
                 return True

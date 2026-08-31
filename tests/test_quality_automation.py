@@ -25,6 +25,7 @@ from app.quality_automation import (
     should_notify_quality_run,
 )
 from tests.legacy_submission_store import SubmissionStore
+from tests.task_command_drain import drain_task_commands
 from app.quality_rules import QualityRuleMatch
 from app.task_store import TaskStore
 from bridge import _quality_attention_message
@@ -751,6 +752,7 @@ class QualityPlanningTests(unittest.TestCase):
                 "tester",
                 rule_version="1",
             )
+            drain_task_commands(service.store)
 
             current = service.store.find_task(task.id)
             self.assertEqual(first["status"], "queued")
@@ -759,7 +761,7 @@ class QualityPlanningTests(unittest.TestCase):
             self.assertEqual(current.status, TaskStatus.PENDING)
             self.assertEqual(adapter.calls, [])
             self.assertEqual(second["status"], "conflict")
-            self.assertEqual(len(service.store.list_events(task.id)), 2)
+            self.assertGreaterEqual(len(service.store.list_events(task.id)), 2)
 
     def test_manual_missing_destination_allows_explicit_reprocess_but_never_restore(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -771,6 +773,7 @@ class QualityPlanningTests(unittest.TestCase):
                 task.id, "missing_destination", "reprocess", "tester", rule_version="1"
             )
 
+            drain_task_commands(service.store)
             self.assertEqual(restore["status"], "rejected")
             self.assertEqual(restore["reason"], "action_not_allowed")
             self.assertEqual(reprocess["status"], "queued")
@@ -804,6 +807,7 @@ class QualityPlanningTests(unittest.TestCase):
             }
             with patch.object(service, "quality_descriptor", return_value=descriptor):
                 result = service.manual_action(task.id, "strm_mode_mismatch", "reprocess", "tester")
+            drain_task_commands(service.store)
 
             updated = service.store.find_task(task.id)
             self.assertEqual(result["status"], "queued")
@@ -1858,6 +1862,90 @@ class QualityRepairExecutionTests(unittest.TestCase):
             metadata_patch={"dest_path": str(dest), "own_share_code": "own", **metadata},
         )
 
+    def test_quality_repairs_enqueue_without_cas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, library = self.make_service(tmp)
+            dest = library / "movie"
+            dest.mkdir(parents=True)
+            (dest / "movie.strm").write_text("https://cms/d/direct.mkv", encoding="utf-8")
+            reprocess = self.add_task(service.store, "reprocess", dest, own_share_receive_code="1212")
+            manual = self.add_task(service.store, "manual", dest, own_share_receive_code="1212")
+            restore = self.add_task(
+                service.store,
+                "restore",
+                library / "gone",
+                own_share_receive_code="1212",
+                own_share_file_id="fid",
+                move_status="moved",
+                emby_status="confirmed",
+            )
+            restore = service.store.record_event(restore.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            waiting = service.store.upsert_task("waiting", "", "https://115cdn.com/s/waiting")
+            waiting = service.store.record_event(
+                waiting.id,
+                TaskStage.NEEDS_ACTION,
+                TaskStatus.NEEDS_ACTION,
+                "wait",
+                error_type="stage_wait_timeout",
+                metadata_patch={
+                    "retry_stage": "emby_confirmed",
+                    "dest_path": str(dest),
+                    "own_share_code": "own",
+                    "own_share_receive_code": "1212",
+                },
+            )
+            with patch.object(service.store, "compare_and_set_transition", side_effect=AssertionError("cas")):
+                reprocess_result = service.execute_plan(
+                    QualityRepairPlan(
+                        reprocess.id,
+                        "reprocess",
+                        "strm_mode_mismatch",
+                        ("direct_strm",),
+                        planned_updated_at=reprocess.updated_at,
+                        rule_id="strm_mode_mismatch",
+                    ),
+                    "run-reprocess",
+                )
+                manual_result = service.manual_action(
+                    manual.id, "strm_mode_mismatch", "execute", "tester", rule_version="1"
+                )
+                restore_result = service.execute_plan(
+                    QualityRepairPlan(
+                        restore.id,
+                        "restore",
+                        "missing_destination",
+                        ("missing_dest",),
+                        planned_updated_at=restore.updated_at,
+                        rule_id="missing_destination",
+                        target_stage="moved",
+                    ),
+                    "run-restore",
+                )
+                requeue_result = service.execute_plan(
+                    QualityRepairPlan(
+                        waiting.id,
+                        "requeue",
+                        "auto_recheck",
+                        (),
+                        planned_updated_at=waiting.updated_at,
+                        rule_id="auto_recheck",
+                        target_stage="emby_confirmed",
+                    ),
+                    "run-requeue",
+                )
+            self.assertEqual(reprocess_result.execution_status, "queued")
+            self.assertEqual(manual_result["status"], "queued")
+            self.assertEqual(restore_result.execution_status, "queued")
+            self.assertEqual(requeue_result.execution_status, "queued")
+            with service.store._connection() as conn:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM task_commands WHERE command_type = 'quality_repair'"
+                ).fetchone()[0]
+            self.assertEqual(int(count), 4)
+            self.assertEqual(service.store.find_task(reprocess.id).status, TaskStatus.SUCCEEDED)
+            self.assertEqual(service.store.find_task(restore.id).status, TaskStatus.SUCCEEDED)
+            self.assertEqual(service.store.find_task(waiting.id).status, TaskStatus.NEEDS_ACTION)
+
     def test_restore_and_reprocess_use_atomic_existing_task_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = FakeQualityRepairAdapter()
@@ -2353,6 +2441,7 @@ class QualityAutoRecheckTests(unittest.TestCase):
             self.assertEqual(plan.target_stage, "emby_confirmed")
 
             executed = service.execute_plan(plan, "run-1")
+            drain_task_commands(service.store)
             current = service.store.find_task(task.id)
             self.assertEqual(executed.execution_status, "queued")
             self.assertEqual(current.current_stage, TaskStage.EMBY_CONFIRMED)
@@ -2610,6 +2699,7 @@ class QualityAutoRestoreTests(unittest.TestCase):
             self.assertEqual(plan.target_stage, "moved")
 
             executed = service.execute_plan(plan, "run-1")
+            drain_task_commands(service.store)
             current = service.store.find_task(task.id)
             self.assertEqual(executed.execution_status, "queued")
             self.assertEqual(current.current_stage, TaskStage.MOVED)

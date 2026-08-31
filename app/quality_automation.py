@@ -27,14 +27,7 @@ from .quality_rules import (
 )
 from .strm_mode import effective_task_strm_mode
 from .task_actions import delete_task_record_and_submission
-from .task_store import (
-    TaskStore,
-    build_reprocess_metadata,
-    command_key,
-    reprocess_delete_keys_for,
-    reprocess_stage_for,
-)
-from .task_runner import QUALITY_REPAIR_WAIT_SECONDS
+from .task_store import TaskStore, command_key, reprocess_stage_for
 
 
 LOG = logging.getLogger("cms-tg-ingest")
@@ -864,47 +857,22 @@ class QualityAutomation:
                 return {"status": "conflict", "task": latest or task, "action": normalized_action, "reason": "task_changed"}
             return {"status": "resumed", "task": updated, "action": normalized_action, "reason": "manual_resume"}
 
-        attempts = quality_attempt_count(task)
-        started_at = time.time()
-        metadata = build_reprocess_metadata(
+        queued = self._enqueue_quality_command(
+            QualityRepairPlan(
+                task.id,
+                "reprocess",
+                str(descriptor["rule_id"]),
+                tuple(descriptor.get("issue_codes") or ()),
+                rule_id=str(descriptor["rule_id"]),
+                planned_updated_at=task.updated_at,
+                target_stage=reprocess_stage_for(task).value,
+            ),
             task,
-            {
-                "quality_manual_status": "open",
-                "quality_repair_queued": True,
-                "quality_repair_action": normalized_action,
-                "quality_repair_reason": str(descriptor["rule_id"]),
-                "quality_rule_id": str(descriptor["rule_id"]),
-                "quality_rule_version": QUALITY_RULE_VERSION,
-                "quality_last_actor": actor,
-                "quality_last_attempt_at": started_at,
-                "quality_repair_attempts": attempts + 1,
-                "quality_repair_started_at": started_at,
-                "quality_next_eligible_at": started_at + int(self.rule_config["cooldown_seconds"]),
-            },
+            f"manual:{actor}",
         )
-        target_stage = reprocess_stage_for(task)
-        updated = self.store.compare_and_set_transition(
-            task.id,
-            task.current_stage,
-            {TaskStatus.PENDING, TaskStatus.SUCCEEDED},
-            require_unclaimed=True,
-            target_stage=target_stage,
-            target_status=TaskStatus.PENDING,
-            target_event_message=(
-                f"人工质量操作已入队：{normalized_action}"
-                f"（rule={descriptor['rule_id']}; action={normalized_action}; actor={actor}）"
-            ),
-            metadata_patch=metadata,
-            metadata_delete_keys=tuple(
-                key for key in reprocess_delete_keys_for(task) if key != "quality_repair_queued"
-            ),
-            next_run_at=0,
-            clear_errors=True,
-            expected_updated_at=task.updated_at,
-        )
-        if updated is None:
-            latest = self.store.find_task(task.id)
-            return {"status": "conflict", "task": latest or task, "action": normalized_action, "reason": "task_changed"}
+        updated = self.store.find_task(task.id) or task
+        if queued.execution_status != "queued":
+            return {"status": "conflict", "task": updated, "action": normalized_action, "reason": queued.reason}
         return {"status": "queued", "task": updated, "action": normalized_action, "reason": "manual_reprocess"}
 
     def _persist_summary(self, summary: QualityRunSummary, updated_at: float) -> bool:
@@ -2011,6 +1979,10 @@ class QualityAutomation:
                 "rule_id": plan.rule_id,
                 "rule_version": str(plan.rule_version or QUALITY_RULE_VERSION),
                 "target_stage": str(plan.target_stage or ""),
+                "message": {
+                    "requeue": "自动复检：目标 STRM/媒体目录已恢复，重新入队",
+                    "restore": "自动巡检已排队：restore",
+                }.get(plan.action, "自动巡检已排队"),
             },
             idempotency_key=command_key(
                 "quality",
@@ -2106,123 +2078,6 @@ class QualityAutomation:
             return replace(plan, execution_status="skipped", reason="rule_version_changed")
         return self._enqueue_quality_command(plan, task, run_id)
 
-        target_stage = reprocess_stage_for(task)
-        metadata = {
-            "quality_run_id": str(run_id),
-            "quality_repair_action": plan.action,
-            "quality_repair_reason": plan.reason,
-            "quality_rule_id": plan.rule_id,
-            "quality_rule_version": QUALITY_RULE_VERSION,
-            "quality_last_run_id": str(run_id),
-            "quality_last_attempt_at": time.time(),
-            "quality_repair_attempts": attempts + 1,
-        }
-        repair_started_at = time.time()
-        next_eligible_at = repair_started_at + min(
-            int(self.rule_config["cooldown_seconds"]) * (2**attempts),
-            self.MAX_COOLDOWN_SECONDS,
-        )
-        metadata.update(
-            {
-                "quality_repair_started_at": repair_started_at,
-                "quality_repair_deadline_at": repair_started_at + QUALITY_REPAIR_WAIT_SECONDS,
-                "quality_next_eligible_at": next_eligible_at,
-            }
-        )
-        metadata = build_reprocess_metadata(task, metadata)
-        metadata_delete_keys = reprocess_delete_keys_for(task)
-        reserved = self.store.compare_and_set_transition(
-            task.id,
-            task.current_stage,
-            {TaskStatus.PENDING, TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.NEEDS_ACTION},
-            require_unclaimed=True,
-            target_stage=target_stage,
-            target_status=TaskStatus.RUNNING,
-            target_event_message=f"自动巡检已排队：{plan.action}",
-            metadata_patch=metadata,
-            metadata_delete_keys=metadata_delete_keys,
-            next_run_at=time.time(),
-            clear_errors=True,
-            claim_by=f"quality:{run_id}",
-            expected_updated_at=task.updated_at,
-        )
-        if reserved is None:
-            return replace(plan, execution_status="skipped", reason="task_busy")
-
-        handler_name = plan.action
-        handler = getattr(self.repair_adapter, handler_name, None) if self.repair_adapter is not None else None
-        if not callable(handler):
-            if self._record_owned_repair_event(
-                reserved.id,
-                target_stage,
-                TaskStatus.FAILED,
-                "自动巡检没有可用的修复适配器",
-                owner_run_id=run_id,
-                claimed_at=reserved.claimed_at,
-                claim_token=reserved.claim_token,
-                reserved_updated_at=reserved.updated_at,
-                error_type="quality_repair_adapter_missing",
-                error_summary="repair adapter missing",
-                clear_claim=True,
-                metadata_patch=self._failure_quality_patch(attempts + 1),
-            ) is None:
-                return replace(plan, execution_status="skipped", reason="claim_lost")
-            return replace(plan, execution_status="failed", reason="repair_adapter_missing")
-        try:
-            if handler(reserved, str(run_id)) is False:
-                if self._record_owned_repair_event(
-                    reserved.id,
-                    target_stage,
-                    TaskStatus.FAILED,
-                    "自动巡检修复适配器拒绝执行",
-                    owner_run_id=run_id,
-                    claimed_at=reserved.claimed_at,
-                    claim_token=reserved.claim_token,
-                    reserved_updated_at=reserved.updated_at,
-                    error_type="quality_repair_rejected",
-                    error_summary="repair rejected",
-                    clear_claim=True,
-                    metadata_patch=self._failure_quality_patch(attempts + 1),
-                ) is None:
-                    return replace(plan, execution_status="skipped", reason="claim_lost")
-                return replace(plan, execution_status="failed", reason="repair_rejected")
-            if self._record_owned_repair_event(
-                reserved.id,
-                target_stage,
-                TaskStatus.PENDING,
-                f"自动巡检修复已入队：{plan.action}",
-                owner_run_id=run_id,
-                claimed_at=reserved.claimed_at,
-                claim_token=reserved.claim_token,
-                reserved_updated_at=reserved.updated_at,
-                metadata_patch={"quality_repair_queued": True, "quality_last_actor": "quality-auto"},
-                next_run_at=time.time(),
-                clear_claim=True,
-            ) is None:
-                return replace(plan, execution_status="skipped", reason="claim_lost")
-        except Exception as exc:
-            try:
-                if self._record_owned_repair_event(
-                    reserved.id,
-                    target_stage,
-                    TaskStatus.FAILED,
-                    f"自动巡检修复失败：{exc}",
-                    owner_run_id=run_id,
-                    claimed_at=reserved.claimed_at,
-                    claim_token=reserved.claim_token,
-                    reserved_updated_at=reserved.updated_at,
-                    error_type="quality_repair_failed",
-                    error_summary=str(exc),
-                    error_detail=repr(exc),
-                    clear_claim=True,
-                    metadata_patch=self._failure_quality_patch(attempts + 1),
-                ) is None:
-                    return replace(plan, execution_status="skipped", reason="claim_lost")
-            except Exception:
-                pass
-            return replace(plan, execution_status="failed", reason="repair_failed")
-        return replace(plan, execution_status="queued")
-
     def _execute_auto_recheck(
         self,
         plan: QualityRepairPlan,
@@ -2247,32 +2102,6 @@ class QualityAutomation:
             attempts = 0
         if attempts >= self.MAX_AUTO_RECHECK_ATTEMPTS:
             return replace(plan, execution_status="skipped", reason="manual_required")
-        now = time.time()
-        next_at = now + self.AUTO_RECHECK_COOLDOWN_SECONDS
-        updated = self.store.compare_and_set_transition(
-            task.id,
-            TaskStage.NEEDS_ACTION,
-            {TaskStatus.NEEDS_ACTION},
-            require_unclaimed=True,
-            target_stage=target_stage,
-            target_status=TaskStatus.PENDING,
-            target_event_message="自动复检：目标 STRM/媒体目录已恢复，重新入队",
-            metadata_patch={
-                "quality_auto_recheck_count": attempts + 1,
-                "quality_auto_recheck_last_at": now,
-                "quality_auto_recheck_next_at": next_at,
-                "quality_auto_recheck_target_stage": target_stage.value,
-                "quality_repair_action": "requeue",
-                "quality_rule_id": "auto_recheck",
-                "quality_last_run_id": str(run_id),
-            },
-            next_run_at=0,
-            clear_errors=True,
-            clear_claim=True,
-            expected_updated_at=task.updated_at,
-        )
-        if updated is None:
-            return replace(plan, execution_status="skipped", reason="task_changed")
         return replace(plan, execution_status="queued")
 
     def _execute_auto_restore(
@@ -2289,81 +2118,7 @@ class QualityAutomation:
             return replace(plan, execution_status="skipped", reason="task_busy")
         if not self._restore_eligible(task, time.time()):
             return replace(plan, execution_status="skipped", reason="missing_source_evidence")
-        now = time.time()
-        attempts = quality_attempt_count(task)
-        next_eligible_at = now + min(
-            int(self.rule_config["cooldown_seconds"]) * (2**attempts),
-            self.MAX_COOLDOWN_SECONDS,
-        )
-        metadata = {
-            "retry_from_stage": task.current_stage.value,
-            "retry_stage": TaskStage.MOVED.value,
-            "quality_repair_action": "restore",
-            "quality_repair_reason": plan.reason,
-            "quality_rule_id": plan.rule_id,
-            "quality_rule_version": QUALITY_RULE_VERSION,
-            "quality_last_run_id": str(run_id),
-            "quality_last_attempt_at": now,
-            "quality_repair_attempts": attempts + 1,
-            "quality_repair_started_at": now,
-            "quality_repair_deadline_at": now + QUALITY_REPAIR_WAIT_SECONDS,
-            "quality_next_eligible_at": next_eligible_at,
-            "quality_repair_queued": True,
-        }
-        updated = self.store.compare_and_set_transition(
-            task.id,
-            task.current_stage,
-            {TaskStatus.SUCCEEDED},
-            require_unclaimed=True,
-            target_stage=TaskStage.MOVED,
-            target_status=TaskStatus.PENDING,
-            target_event_message="自动巡检已排队：restore",
-            metadata_patch=metadata,
-            next_run_at=0,
-            clear_errors=True,
-            clear_claim=True,
-            expected_updated_at=task.updated_at,
-        )
-        if updated is None:
-            return replace(plan, execution_status="skipped", reason="task_changed")
         return replace(plan, execution_status="queued")
-
-    def _record_owned_repair_event(
-        self,
-        task_id: int,
-        target_stage: TaskStage,
-        status: TaskStatus,
-        message: str,
-        *,
-        owner_run_id: str,
-        claimed_at: float,
-        claim_token: str,
-        reserved_updated_at: float,
-        **kwargs: object,
-    ) -> TaskSnapshot | None:
-        return self.store.record_event(
-            task_id,
-            target_stage,
-            status,
-            message,
-            expected_stage=target_stage,
-            expected_status=TaskStatus.RUNNING,
-            expected_claimed_by=f"quality:{owner_run_id}",
-            expected_claimed_at=claimed_at,
-            expected_claim_token=claim_token,
-            expected_updated_at=reserved_updated_at,
-            **kwargs,
-        )
-
-    def _failure_quality_patch(self, attempts: int) -> dict[str, object]:
-        patch: dict[str, object] = {
-            "quality_repair_attempts": int(attempts),
-            "quality_last_attempt_at": time.time(),
-        }
-        if int(attempts) >= int(self.rule_config["max_attempts"]):
-            patch["quality_manual_status"] = "manual_required"
-            patch["quality_rule_reason"] = "manual_required"
-        return patch
 
     def cleanup_if_safe(self, task: TaskSnapshot, run_id: str) -> QualityCleanupResult:
         """Run cleanup only after the local, share, Emby, and event gates pass."""

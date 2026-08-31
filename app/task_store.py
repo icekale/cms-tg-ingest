@@ -3222,16 +3222,22 @@ class TaskStore:
             for operation in self.list_operations(task.id)
         )
         self._clear_reprocess_facts(int(task.id), preserve_received_snapshot=preserve_received_snapshot)
+        extra_patch = dict(metadata_patch or {})
+        delete_keys = tuple(
+            key
+            for key in reprocess_delete_keys_for(
+                task,
+                preserve_received_snapshot=preserve_received_snapshot,
+            )
+            if key not in extra_patch
+        )
         return self.record_event(
             task_id,
             target_stage,
             TaskStatus.PENDING,
             message,
-            metadata_patch=build_reprocess_metadata(task, metadata_patch),
-            metadata_delete_keys=reprocess_delete_keys_for(
-                task,
-                preserve_received_snapshot=preserve_received_snapshot,
-            ),
+            metadata_patch=build_reprocess_metadata(task, extra_patch),
+            metadata_delete_keys=delete_keys,
             next_run_at=next_run_at,
             clear_claim=True,
         )
