@@ -3862,7 +3862,7 @@ class WorkflowRowAdapter:
         return self.find_by_id(row_id)
 
     def delete_submission(self, row_id: int) -> bool:
-        return False
+        return True
 
     def recent(self, limit: int = 5) -> list[dict[str, Any]]:
         return self._tasks.recent_workflow_rows(limit=limit)

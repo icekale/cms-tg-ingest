@@ -6,7 +6,7 @@ from unittest.mock import patch
 from app.models import TaskStage, TaskStatus
 from app.task_actions import apply_task_action, available_lifecycle_actions, available_task_actions
 from app.task_runner import TaskRunner
-from app.task_store import TaskStore
+from app.task_store import TaskStore, WorkflowRowAdapter
 from tests.legacy_submission_store import SubmissionStore
 
 
@@ -376,6 +376,24 @@ class TaskActionsTest(unittest.TestCase):
             self.assertEqual(result.reason, "任务已归档")
             self.assertIsNotNone(task_store.find_task(task.id))
             self.assertIsNone(submission_store.find_by_id(int(row["id"])))
+
+    def test_delete_with_unified_adapter_does_not_report_missing_submission(self):
+        from app.task_actions import delete_task_record_and_submission
+
+        store = self.make_store()
+        adapter = WorkflowRowAdapter(store)
+        task = store.upsert_task("unified-del", "", "https://115cdn.com/s/unified-del")
+        task = store.record_event(
+            task.id,
+            TaskStage.CLEANED,
+            TaskStatus.SUCCEEDED,
+            "done",
+            metadata_patch={"submission_id": task.id},
+        )
+        result = delete_task_record_and_submission(store, adapter, task.id)
+        self.assertTrue(result.applied)
+        self.assertEqual(result.reason, "任务已归档")
+        self.assertGreater(float(store.find_task(task.id).archived_at or 0), 0)
 
 
 if __name__ == "__main__":
