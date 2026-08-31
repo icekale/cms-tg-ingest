@@ -2164,3 +2164,43 @@ class TaskStoreTests(unittest.TestCase):
             )
             with sqlite3.connect(store.db_path) as conn:
                 self.assertIsNone(conn.execute("SELECT 1 FROM task_moves WHERE task_id = ?", (claimed.id,)).fetchone())
+
+    def test_workflow_facts_projects_joined_rows_without_creating_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            missing = store.workflow_facts(99)
+            self.assertEqual(missing, {})
+            with sqlite3.connect(store.db_path) as conn:
+                before = conn.execute("SELECT COUNT(*) FROM task_media").fetchone()[0]
+
+            claimed = self._claim_running(store, "facts-ok")
+            empty = store.workflow_facts(claimed.id)
+            self.assertNotIn("submission_id", empty)
+            self.assertEqual(empty.get("id"), claimed.id)
+            self.assertEqual(empty.get("move_status"), "")
+
+            store.commit_claimed_result(
+                claimed,
+                "worker-1",
+                StageResult.complete(
+                    "moved",
+                    checkpoint=StageCheckpoint(
+                        media={"title": "Movie", "category": "华语电影", "tmdb_id": "123"},
+                        share={"canonical_name": "L-Movie-2016", "own_share_code": "own"},
+                        move={"dest_path": "/library/movie", "move_status": "moved"},
+                    ),
+                ),
+                next_stage=TaskStage.EMBY_CONFIRMED,
+                next_run_at=2.0,
+            )
+            facts = store.workflow_facts(claimed.id)
+            self.assertEqual(facts["id"], claimed.id)
+            self.assertNotIn("submission_id", facts)
+            self.assertEqual(facts["title"], "Movie")
+            self.assertEqual(facts["category_final"], "华语电影")
+            self.assertEqual(facts["own_share_file_name"], "L-Movie-2016")
+            self.assertEqual(facts["own_share_code"], "own")
+            self.assertEqual(facts["dest_path"], "/library/movie")
+            self.assertEqual(facts["move_status"], "moved")
+            with sqlite3.connect(store.db_path) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM task_media").fetchone()[0], before + 1)

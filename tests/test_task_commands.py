@@ -5,7 +5,7 @@ import time
 import unittest
 from pathlib import Path
 
-from app.task_store import TaskStore
+from app.task_store import TaskStore, command_key
 
 
 class TaskCommandAndLeaseTests(unittest.TestCase):
@@ -45,6 +45,14 @@ class TaskCommandAndLeaseTests(unittest.TestCase):
             self.assertTrue(expired)
             self.assertFalse(a.release_runner_lease("owner-a", first))
             self.assertTrue(b.release_runner_lease("owner-b", expired))
+
+    def test_command_key_hashes_material(self):
+        key = command_key("repair-move", 447, "/library/L-movie")
+        self.assertTrue(key.startswith("repair-move:"))
+        self.assertNotIn("447", key)
+        self.assertNotIn("/library/L-movie", key)
+        self.assertEqual(key, command_key("repair-move", 447, "/library/L-movie"))
+        self.assertNotEqual(key, command_key("repair-move", 447, "/library/other"))
 
 
 if __name__ == "__main__":

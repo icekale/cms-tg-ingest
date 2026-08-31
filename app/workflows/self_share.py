@@ -55,8 +55,10 @@ from app.media.intake_identity import (
     snapshot_files,
 )
 from app.media.strm import (
+    canonical_self_share_root_name,
     category_from_existing_library_folder,
     category_from_existing_library_match,
+    destination_for_category,
     find_recent_direct_library_strm_source_dir,
     dest_missing_source_strms,
     find_self_share_strm_source_dir,
@@ -76,7 +78,7 @@ from app.self_share_settings import resolve_own_share_receive_code, resolve_self
 from app.task_bridge import reset_self_share_submission_for_reprocess
 from app.task_store import operation_scope
 from app.strm_mode import effective_task_strm_mode
-from app.models import StageCheckpoint, StageOutcome, StageResult
+from app.models import OperationCompletion, StageCheckpoint, StageOutcome, StageResult
 
 LOG = logging.getLogger("cms-tg-ingest")
 OPENAI_CATEGORY_LABELS = ["华语电影", "欧美电影", "亚洲电影", "动漫电影", "国产电视", "外国电视", "番剧", "纪录片"]
@@ -1112,9 +1114,26 @@ class BridgeSelfShareTaskWorkflow:
 
     def _submission_row(self, task) -> dict[str, Any] | None:
         submission_id = task.metadata.get("submission_id") or task.submission_id
+        row = None
         if submission_id not in (None, ""):
-            return self.store.find_by_id(int(submission_id))
-        return self.store.find_by_key(_ShareKey(task.share_code, task.receive_code))
+            row = self.store.find_by_id(int(submission_id))
+        if row is None:
+            row = self.store.find_by_key(_ShareKey(task.share_code, task.receive_code))
+        facts = {}
+        if self.task_store is not None and hasattr(self.task_store, "workflow_facts"):
+            facts = self.task_store.workflow_facts(int(task.id))
+        if not facts:
+            return row
+        if row is None:
+            if facts.get("own_share_file_name") or facts.get("dest_path") or facts.get("move_status"):
+                return facts
+            return None
+        merged = dict(row)
+        for key, value in facts.items():
+            if key == "id" or value in (None, "", [], {}):
+                continue
+            merged[key] = value
+        return merged
 
     def _find_organized_folder(self, recognition, title, find_kwargs, scan_cursor, max_requests=8):
         try:
@@ -4451,8 +4470,17 @@ class BridgeSelfShareTaskWorkflow:
             required_relative_path = ""
             if task.metadata.get("direct_file_share"):
                 required_relative_path = str(task.metadata.get("direct_file_share_relative_path") or "").strip()
-            if str(row.get("move_status") or "").lower() == "moved":
-                destination = safe_resolve(Path(str(row.get("dest_path") or "")))
+            destination = None
+            dest_value = str(row.get("dest_path") or row.get("validated_dest_path") or "").strip()
+            if dest_value:
+                destination = safe_resolve(Path(dest_value))
+            elif str(row.get("move_status") or "").lower() != "moved":
+                planned_name = canonical_self_share_root_name(row)
+                planned_category = str(metadata.get("category") or final_category_for_move(row, recognition) or "").strip()
+                planned = destination_for_category(planned_category, planned_name, self.move_config) if planned_name and planned_category else None
+                if planned is not None:
+                    destination = planned
+            if destination is not None:
                 library_roots = list(self.move_config.library_roots.values())
                 if is_under_any_root(destination, library_roots):
                     issue = validate_self_share_strm_destination(destination, row, required_relative_path)
@@ -4659,6 +4687,45 @@ class BridgeSelfShareTaskWorkflow:
             )
         return StageResult.complete("全部目标 STRM 已移动到媒体库", self._multi_target_metadata(row, targets, move_status="moved"))
 
+    def _move_strm_operation(self, task, source, dest):
+        key = f"{operation_scope(task)}:move_strm:{source}:{dest}"
+        operation = self.task_store.find_operation(int(task.id), key)
+        if operation is None:
+            for existing in self.task_store.list_operations(int(task.id)):
+                if existing.operation_type == "move_strm":
+                    return existing
+            return self.task_store.prepare_operation(
+                int(task.id),
+                key,
+                "move_strm",
+                {"source": str(source or ""), "dest": str(dest or "")},
+            )
+        return operation
+
+    def _moved_stage_result(self, message, metadata, operation, source, dest):
+        operations = ()
+        if operation is not None:
+            operations = (
+                OperationCompletion(
+                    operation.operation_key,
+                    "succeeded",
+                    {"dest_path": str(dest or "")},
+                ),
+            )
+        return StageResult.complete(
+            message,
+            metadata,
+            checkpoint=StageCheckpoint(
+                move={
+                    "source_path": str(source or ""),
+                    "dest_path": str(dest or ""),
+                    "move_status": "moved",
+                    "validated_dest_path": str(dest or ""),
+                },
+                operations=operations,
+            ),
+        )
+
     def _stage_moved(self, task):
         row = self._submission_row(task)
         if not row:
@@ -4679,7 +4746,13 @@ class BridgeSelfShareTaskWorkflow:
             if not (source and dest_path and dest_missing_source_strms(source, Path(dest_path))):
                 if self._strm_destination_ready(dest_path, row, task.metadata):
                     metadata.update(self._request_emby_refresh_once(task, dest_path))
-                    return StageResult.complete("STRM 已移动到媒体库", metadata)
+                    source_path = str(metadata.get("source_path") or source or "")
+                    operation = self._move_strm_operation(task, source_path, dest_path)
+                    if operation.status == "prepared":
+                        started = self.task_store.start_operation(int(task.id), operation.operation_key)
+                        if started is not None:
+                            operation = started
+                    return self._moved_stage_result("STRM 已移动到媒体库", metadata, operation, source_path, dest_path)
                 return self._restore_missing_moved_destination(task, row, metadata)
         category = final_category_for_move(row, recognition)
         existing_category = "" if has_authoritative_category(row, recognition) else category_from_existing_library_match(self.move_config, row, recognition, share_name)
@@ -4697,12 +4770,41 @@ class BridgeSelfShareTaskWorkflow:
         }
         if plan.metadata:
             metadata.update(plan.metadata)
+        source_path = str(plan.source_path or source or metadata.get("source_path") or "")
+        dest_path = str(plan.dest_path or metadata.get("dest_path") or "")
+        if dest_path and self._strm_destination_ready(dest_path, row, task.metadata) and (source is None or not Path(str(source)).exists()):
+            operation = self._move_strm_operation(task, source_path, dest_path)
+            if operation.status == "prepared":
+                started = self.task_store.start_operation(int(task.id), operation.operation_key)
+                if started is not None:
+                    operation = started
+            metadata["move_status"] = "moved"
+            metadata.update(self._request_emby_refresh_once(task, dest_path))
+            return self._moved_stage_result("STRM 已移动到媒体库", metadata, operation, source_path, dest_path)
         if is_move_plan_retryable(plan):
             return StageResult.defer(
                 plan.reason,
                 self.self_share_config.auto_organize_retry_seconds or 30,
                 metadata,
             )
+        operation = self._move_strm_operation(task, source_path, dest_path)
+        execute_authorized = False
+        if operation.status == "prepared":
+            started = self.task_store.start_operation(int(task.id), operation.operation_key)
+            if started is not None:
+                operation = started
+                execute_authorized = True
+        if not execute_authorized:
+            if dest_path and self._strm_destination_ready(dest_path, row, task.metadata):
+                metadata["move_status"] = "moved"
+                metadata.update(self._request_emby_refresh_once(task, dest_path))
+                return self._moved_stage_result("STRM 已移动到媒体库", metadata, operation, source_path, dest_path)
+            if source is None or not Path(str(source)).exists():
+                return StageResult.defer(
+                    "等待确认 STRM 移动结果",
+                    self.self_share_config.auto_organize_retry_seconds or 30,
+                    metadata,
+                )
         moved_row = merge_self_share_strm_folder(plan, self.store, row, move_config)
         move_status = str(moved_row.get("move_status") or "").lower()
         metadata.update(
@@ -4715,7 +4817,13 @@ class BridgeSelfShareTaskWorkflow:
         if move_status == "moved":
             send_move_result(self.telegram, self.chat_id, plan, moved_row)
             metadata.update(self._request_emby_refresh_once(task, str(metadata.get("dest_path") or "")))
-            return StageResult.complete("STRM 已移动到媒体库", metadata)
+            return self._moved_stage_result(
+                "STRM 已移动到媒体库",
+                metadata,
+                operation,
+                metadata["source_path"],
+                metadata["dest_path"],
+            )
         error = str(moved_row.get("move_error") or plan.reason or "STRM 移动失败")
         return StageResult.failed(error, error_type="strm_move_failed", metadata=metadata)
 

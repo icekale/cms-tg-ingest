@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from app.config import DEFAULT_OWN_SHARE_RECEIVE_CODE, MoveConfig, MovePlan, SelfShareConfig, is_relative_to, is_under_any_root, safe_resolve
+from app.task_store import command_key
 from app.media.classify import (
     candidate_tokens,
     explicit_task_tmdb_id,
@@ -1215,6 +1216,60 @@ def _single_relative_directory_name(value: str) -> str | None:
     ):
         return None
     return name
+
+
+def find_stranded_self_share_moves(store: Any, move_config: MoveConfig, limit: int = 50) -> list[dict[str, Any]]:
+    if not hasattr(store, "list_self_share_move_candidates"):
+        return []
+    found: list[dict[str, Any]] = []
+    for facts in store.list_self_share_move_candidates(limit=max(1, int(limit))):
+        name = canonical_self_share_root_name(facts)
+        category = category_for_self_share_row(facts)
+        if not name or not category:
+            continue
+        dest = destination_for_category(category, name, move_config)
+        source = None
+        for root in move_config.source_roots:
+            candidate = safe_resolve(Path(root) / name)
+            if candidate.is_dir() and has_strm_file(candidate):
+                source = candidate
+                break
+        if source is None:
+            continue
+        if str(facts.get("move_status") or "").lower() == "moved":
+            dest_value = str(facts.get("validated_dest_path") or facts.get("dest_path") or dest or "")
+            if dest_value and Path(dest_value).exists():
+                continue
+        found.append(
+            {
+                "task_id": int(facts["id"]),
+                "source_path": str(source),
+                "expected_destination": str(dest or ""),
+                "canonical_name": name,
+            }
+        )
+    return found
+
+
+def enqueue_stranded_self_share_repairs(store: Any, move_config: MoveConfig, limit: int = 50) -> int:
+    queued = 0
+    enqueue = getattr(store, "enqueue_command", None)
+    if not callable(enqueue):
+        return 0
+    for item in find_stranded_self_share_moves(store, move_config, limit=limit):
+        task_id = int(item["task_id"])
+        dest = str(item.get("expected_destination") or "")
+        enqueue(
+            task_id,
+            "repair_move",
+            {"expected_destination": dest},
+            idempotency_key=command_key("repair-move", task_id, dest),
+            actor="maintenance",
+            source="stranded-move",
+        )
+        queued += 1
+        LOG.info("Enqueued stranded STRM repair task_id=%s command_type=repair_move", task_id)
+    return queued
 
 
 def repair_stranded_self_share_moves(store: Any, move_config: MoveConfig, limit: int = 50) -> int:

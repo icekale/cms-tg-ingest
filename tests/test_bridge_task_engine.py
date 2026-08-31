@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 import bridge
 from app.clients import cms as cms_client
-from app.models import TaskStage, TaskStatus
+from app.models import StageCheckpoint, StageResult, TaskStage, TaskStatus
 from app.task_runner import StageOutcome, TaskRunner
 from app.task_store import TaskStore, operation_scope
 
@@ -7474,6 +7474,132 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(self.cms.share_sync_calls, [])
             self.assertFalse((self.config.strm_root / row["own_share_file_name"]).exists())
             self.assertTrue((destination / "movie.strm").exists())
+
+    def test_task_447_observer_enqueues_repair_move_without_moving(self):
+        from app.media.strm import enqueue_stranded_self_share_repairs, find_stranded_self_share_moves
+
+        with tempfile.TemporaryDirectory() as tmp:
+            library_root = Path(tmp) / "library" / "华语电影"
+            share_root = Path(tmp) / "share-strm"
+            move_config = bridge.MoveConfig(
+                source_roots=[share_root],
+                library_roots={"华语电影": library_root},
+            )
+            workflow = self._workflow(tmp, move_config=move_config)
+            row = self._self_share_row()
+            source = share_root / row["own_share_file_name"]
+            dest = library_root / row["own_share_file_name"]
+            self._write_strm(source)
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            self.tasks.enqueue_task(task.id, TaskStage.SHARE_SYNC_SUBMITTED, next_run_at=0)
+            claimed = self.tasks.claim_next_runnable("seed-447", now=1.0)
+            self.tasks.commit_claimed_result(
+                claimed,
+                "seed-447",
+                StageResult.complete(
+                    "seed",
+                    checkpoint=StageCheckpoint(
+                        media={"category": "华语电影", "tmdb_id": "123456"},
+                        share={
+                            "canonical_name": row["own_share_file_name"],
+                            "own_share_code": "owncode",
+                            "file_id": "folder-id",
+                        },
+                    ),
+                ),
+                next_stage=TaskStage.STRM_READY,
+                next_run_at=0,
+            )
+
+            found = find_stranded_self_share_moves(self.tasks, move_config, limit=10)
+            enqueue_stranded_self_share_repairs(self.tasks, move_config, limit=10)
+            enqueue_stranded_self_share_repairs(self.tasks, move_config, limit=10)
+
+            self.assertEqual([item["task_id"] for item in found], [task.id])
+            self.assertTrue(source.exists())
+            self.assertFalse(dest.exists())
+            with sqlite3.connect(self.tasks.db_path) as conn:
+                commands = list(conn.execute("SELECT command_type, idempotency_key FROM task_commands"))
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0][0], "repair_move")
+            self.assertNotIn(str(dest), commands[0][1])
+            self.assertNotIn(row["own_share_file_name"], commands[0][1])
+
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            source.rename(dest)
+            self.assertFalse(source.exists())
+            self._write_strm(dest)
+            runner = TaskRunner(self.tasks, workflow, worker_id="task-447", now=lambda: 2.0)
+            runner.run_once()
+            runner.run_once()
+            updated = self.tasks.find_task(task.id)
+            facts = self.tasks.workflow_facts(task.id)
+            self.assertNotEqual(updated.error_type, "stage_wait_timeout")
+            self.assertEqual(facts["move_status"], "moved")
+            self.assertEqual(facts["dest_path"], str(bridge.safe_resolve(dest)))
+            self.assertNotEqual(updated.current_stage, TaskStage.STRM_READY)
+
+    def test_strm_move_crash_reconciles_destination_without_second_move(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            library_root = Path(tmp) / "library" / "movies"
+            share_root = Path(tmp) / "share-strm"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(
+                    source_roots=[share_root],
+                    library_roots={"华语电影": library_root},
+                ),
+            )
+            row = self._self_share_row()
+            source = share_root / row["own_share_file_name"]
+            dest = library_root / row["own_share_file_name"]
+            self._write_strm(source)
+            task = self.tasks.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234")
+            self.tasks.record_event(
+                task.id,
+                TaskStage.MOVED,
+                TaskStatus.PENDING,
+                "setup",
+                submission_id=int(row["id"]),
+                metadata_patch={"submission_id": int(row["id"])},
+            )
+            self.tasks.enqueue_task(task.id, TaskStage.MOVED, next_run_at=0)
+            runner = TaskRunner(self.tasks, workflow, worker_id="move-crash", now=lambda: 1.0)
+            original_commit = self.tasks.commit_claimed_result
+            commits = {"n": 0}
+            move_calls = {"n": 0}
+            real_move = __import__("shutil").move
+
+            def count_move(src, dst, *args, **kwargs):
+                move_calls["n"] += 1
+                return real_move(src, dst, *args, **kwargs)
+
+            def fail_first_commit(*args, **kwargs):
+                commits["n"] += 1
+                if commits["n"] == 1:
+                    raise RuntimeError("simulated crash before move checkpoint")
+                return original_commit(*args, **kwargs)
+
+            with patch("shutil.move", side_effect=count_move), patch.object(
+                self.tasks, "commit_claimed_result", side_effect=fail_first_commit
+            ):
+                runner.run_once()
+                self.tasks.enqueue_task(task.id, TaskStage.MOVED, next_run_at=0)
+                runner.run_once()
+
+            recovered = self.tasks.find_task(task.id)
+            facts = self.tasks.workflow_facts(task.id)
+            operation = self.tasks.find_operation(
+                task.id,
+                f"{operation_scope(recovered)}:move_strm:{bridge.safe_resolve(source)}:{bridge.safe_resolve(dest)}",
+            )
+            self.assertEqual(move_calls["n"], 1)
+            self.assertFalse(source.exists())
+            self.assertTrue((dest / "movie.strm").exists())
+            self.assertEqual(facts["move_status"], "moved")
+            self.assertEqual(operation.status, "succeeded")
+            self.assertEqual(operation.attempt_count, 1)
+            self.assertNotEqual(recovered.current_stage, TaskStage.MOVED)
 
     def test_strm_ready_stage_ignores_direct_strm_source_roots_while_waiting_for_share_strm(self):
         with tempfile.TemporaryDirectory() as tmp:

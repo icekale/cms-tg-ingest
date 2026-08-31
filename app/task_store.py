@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sqlite3
@@ -15,6 +16,112 @@ from .models import StageResult, TaskOperation, TaskSnapshot, TaskStage, TaskSta
 from .quality_rules import quality_attempt_count
 from .self_share_settings import normalize_receive_cid, normalize_self_share_review_mode
 from .strm_mode import is_strm_mode_locked, normalize_strm_mode
+
+
+def command_key(kind: str, *parts: object) -> str:
+    material = "\0".join(str(part) for part in parts).encode("utf-8")
+    return f"{kind}:{hashlib.sha256(material).hexdigest()}"
+
+
+def _row_value(row: Any, key: str, default: str | float = "") -> Any:
+    if row is None:
+        return default
+    try:
+        value = row[key]
+    except (KeyError, IndexError):
+        return default
+    return default if value is None else value
+
+
+def _project_workflow_facts(
+    task: Any,
+    media: Any,
+    share: Any,
+    move: Any,
+    emby: Any,
+    cleanup: Any,
+    probe: Any,
+) -> dict[str, Any]:
+    facts: dict[str, Any] = {
+        "id": int(task["id"]),
+        "share_code": str(_row_value(task, "share_code")),
+        "receive_code": str(_row_value(task, "receive_code")),
+        "url": str(_row_value(task, "url")),
+        "title": str(_row_value(task, "title")),
+        "status": str(_row_value(task, "status")),
+        "created_at": float(_row_value(task, "created_at", 0) or 0),
+        "updated_at": float(_row_value(task, "updated_at", 0) or 0),
+        "tmdb_id": str(_row_value(task, "tmdb_id")),
+        "move_status": "",
+    }
+    if media is not None:
+        category = str(_row_value(media, "category"))
+        facts.update(
+            {
+                "title": str(_row_value(media, "title") or facts["title"]),
+                "cms_task_id": str(_row_value(media, "cms_task_id")),
+                "category_choice": category,
+                "category_status": str(_row_value(media, "recognition_status")),
+                "recognition_json": str(_row_value(media, "recognition_json") or "{}"),
+                "tmdb_id": str(_row_value(media, "tmdb_id") or facts["tmdb_id"]),
+                "category_final": category,
+            }
+        )
+    if share is not None:
+        facts.update(
+            {
+                "own_share_file_id": str(_row_value(share, "file_id")),
+                "own_share_file_name": str(_row_value(share, "canonical_name")),
+                "own_share_code": str(_row_value(share, "own_share_code")),
+                "own_share_receive_code": str(_row_value(share, "own_share_receive_code")),
+                "share_alias_name": str(_row_value(share, "alias_name")),
+                "canonical_manifest_json": str(_row_value(share, "canonical_manifest_json") or "{}"),
+                "share_validation_status": str(_row_value(share, "validation_status")),
+                "share_validation_error": str(_row_value(share, "validation_error")),
+                "share_sync_status": str(_row_value(share, "share_sync_status")),
+                "workflow_mode": "self_share_sync",
+            }
+        )
+    if move is not None:
+        facts.update(
+            {
+                "source_path": str(_row_value(move, "source_path")),
+                "dest_path": str(_row_value(move, "dest_path") or _row_value(move, "validated_dest_path")),
+                "move_status": str(_row_value(move, "move_status")),
+                "move_error": str(_row_value(move, "move_error")),
+                "move_started_at": float(_row_value(move, "started_at", 0) or 0),
+                "move_finished_at": float(_row_value(move, "finished_at", 0) or 0),
+                "validated_dest_path": str(_row_value(move, "validated_dest_path")),
+            }
+        )
+    if emby is not None:
+        facts.update(
+            {
+                "emby_status": str(_row_value(emby, "status")),
+                "emby_item_id": str(_row_value(emby, "item_id")),
+                "emby_title": str(_row_value(emby, "title")),
+                "emby_path": str(_row_value(emby, "path")),
+                "emby_parent": str(_row_value(emby, "library")),
+            }
+        )
+    if cleanup is not None:
+        facts.update(
+            {
+                "cleanup_status": str(_row_value(cleanup, "status")),
+                "cleanup_file_id": str(_row_value(cleanup, "target_id")),
+                "cleanup_error": str(_row_value(cleanup, "error")),
+                "cleanup_finished_at": float(_row_value(cleanup, "finished_at", 0) or 0),
+            }
+        )
+    if probe is not None:
+        facts.update(
+            {
+                "share_probe_at": float(_row_value(probe, "last_probe_at", 0) or 0),
+                "share_invalid_at": float(_row_value(probe, "invalid_at", 0) or 0),
+                "share_invalid_reason": str(_row_value(probe, "invalid_reason")),
+            }
+        )
+    return facts
 
 
 COMMAND_TYPES = frozenset(
@@ -2584,6 +2691,35 @@ class TaskStore:
             )
             updated = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task.id),)).fetchone()
         return self._snapshot(updated) if updated else None
+
+    def workflow_facts(self, task_id: int) -> dict[str, Any]:
+        with self._lock, self._connection() as conn:
+            task = conn.execute("SELECT * FROM tasks WHERE id = ?", (int(task_id),)).fetchone()
+            if task is None:
+                return {}
+            media = conn.execute("SELECT * FROM task_media WHERE task_id = ?", (int(task_id),)).fetchone()
+            share = conn.execute("SELECT * FROM task_shares WHERE task_id = ?", (int(task_id),)).fetchone()
+            move = conn.execute("SELECT * FROM task_moves WHERE task_id = ?", (int(task_id),)).fetchone()
+            emby = conn.execute("SELECT * FROM task_emby WHERE task_id = ?", (int(task_id),)).fetchone()
+            cleanup = conn.execute("SELECT * FROM task_cleanups WHERE task_id = ?", (int(task_id),)).fetchone()
+            probe = conn.execute("SELECT * FROM task_probes WHERE task_id = ?", (int(task_id),)).fetchone()
+        return _project_workflow_facts(task, media, share, move, emby, cleanup, probe)
+
+    def list_self_share_move_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.id FROM tasks t
+                JOIN task_shares s ON s.task_id = t.id
+                WHERE COALESCE(t.archived_at, 0) = 0
+                  AND COALESCE(t.is_executable, 1) = 1
+                  AND s.canonical_name != ''
+                ORDER BY t.id
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [self.workflow_facts(int(row[0])) for row in rows]
 
     def record_event(
         self,

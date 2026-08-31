@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import socket
+import sqlite3
 import threading
 import time
 import uuid
@@ -464,7 +465,30 @@ class TaskRunner:
             return True
         if self._settle_requested_termination(task):
             return True
-        self._apply_result(task, result, p115_before=p115_before, p115_after=_p115_request_count(self.p115_client))
+        try:
+            self._apply_result(task, result, p115_before=p115_before, p115_after=_p115_request_count(self.p115_client))
+        except sqlite3.OperationalError:
+            raise
+        except Exception as exc:
+            LOG.exception("Task stage failed task_id=%s stage=%s", task.id, task.current_stage.value)
+            error_summary = str(exc) or exc.__class__.__name__
+            if self._settle_requested_termination(
+                task,
+                error_type="stage_exception",
+                error_summary=error_summary,
+                error_detail=repr(exc),
+            ):
+                return True
+            self._record_claimed_event(
+                task,
+                task.current_stage,
+                TaskStatus.FAILED,
+                error_summary,
+                error_type="stage_exception",
+                error_summary=error_summary,
+                error_detail=repr(exc),
+                clear_claim=True,
+            )
         return True
 
     def _settle_requested_termination(
