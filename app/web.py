@@ -1902,6 +1902,8 @@ class WebApp:
             return self._serve_frontend(path, auth_headers)
         if path.startswith("/api/v1/"):
             return self._handle_api(method, path, headers, body, auth_headers)
+        if method == "POST" and not self.task_engine_enabled:
+            return self._write_gate_rejection(auth_headers, api=False)
         if method == "GET" and path == "/":
             return 302, {"Location": "/app/", **auth_headers}, b""
         if method == "GET" and path == "/legacy":
@@ -2034,8 +2036,6 @@ class WebApp:
                 )
                 return 303, {"Location": "/hdhive", **auth_headers}, b""
         if method == "POST" and path == "/history/clear":
-            if not self.task_engine_enabled:
-                return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, WRITE_GATE_REASON.encode("utf-8")
             self.store.clear_finished_tasks()
             return 303, {"Location": "/", **auth_headers}, b""
         if method == "GET" and path.startswith("/task/"):
@@ -2051,12 +2051,6 @@ class WebApp:
         task_action = parse_task_action_path(path) if method == "POST" else None
         if task_action is not None:
             task_id, action = task_action
-            if not self.task_engine_enabled:
-                return (
-                    409,
-                    {"Content-Type": "text/plain; charset=utf-8", **auth_headers},
-                    LEGACY_LIFECYCLE_REASON.encode("utf-8"),
-                )
             task = self.store.find_task(task_id)
             if task:
                 apply_task_action(self.store, task_id, action, max_retries=self.max_retries, actor="Web")
@@ -2123,6 +2117,20 @@ class WebApp:
         values = parse_qs(text, keep_blank_values=True)
         return {key: items[0] if items else "" for key, items in values.items()}
 
+    def _write_gate_rejection(
+        self,
+        auth_headers: dict[str, str],
+        *,
+        api: bool,
+    ) -> tuple[int, dict[str, str], bytes]:
+        if api:
+            status, headers, body = api_response(
+                {"error": "write_gate_closed", "reason": WRITE_GATE_REASON},
+                status=409,
+            )
+            return status, {**headers, **auth_headers}, body
+        return 409, {"Content-Type": "text/plain; charset=utf-8", **auth_headers}, WRITE_GATE_REASON.encode("utf-8")
+
     def _handle_api(
         self,
         method: str,
@@ -2131,6 +2139,8 @@ class WebApp:
         body: bytes,
         auth_headers: dict[str, str],
     ) -> tuple[int, dict[str, str], bytes]:
+        if method == "POST" and not self.task_engine_enabled:
+            return self._write_gate_rejection(auth_headers, api=True)
         if method == "POST" and path == "/api/v1/tasks/purge":
             try:
                 values = self._api_body(body, headers)
@@ -2185,16 +2195,6 @@ class WebApp:
                         status=404,
                     )
                     return status, {**response_headers, **auth_headers}, response_body
-                if not self.task_engine_enabled:
-                    status, response_headers, response_body = api_response(
-                        {
-                            "error": "action_not_allowed",
-                            "action": action,
-                            "reason": LEGACY_LIFECYCLE_REASON,
-                        },
-                        status=409,
-                    )
-                    return status, {**response_headers, **auth_headers}, response_body
                 result = apply_task_action(self.store, task_id, action, max_retries=self.max_retries, actor="Web") if action in TASK_ACTIONS else None
                 if result is None or not result.applied:
                     status, response_headers, response_body = api_response(
@@ -2246,12 +2246,6 @@ class WebApp:
                 status, response_headers, response_body = api_response({"deleted": int(raw_id), "message": result.reason})
                 return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path == "/api/v1/history/clear":
-            if not self.task_engine_enabled:
-                status, response_headers, response_body = api_response(
-                    {"error": "write_gate_closed", "reason": WRITE_GATE_REASON},
-                    status=409,
-                )
-                return status, {**response_headers, **auth_headers}, response_body
             cleared = self.store.clear_finished_tasks()
             status, response_headers, response_body = api_response({"cleared": cleared})
             return status, {**response_headers, **auth_headers}, response_body

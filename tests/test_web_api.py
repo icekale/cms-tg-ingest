@@ -203,7 +203,7 @@ class WebApiTests(unittest.TestCase):
             self.assertEqual(tasks[active.id]["available_actions"], [])
             self.assertEqual(tasks[finished.id]["available_actions"], [])
             self.assertEqual(terminate_status, 409)
-            self.assertIn("旧版任务引擎", json.loads(terminate_body)["reason"])
+            self.assertIn("写入闸门", json.loads(terminate_body)["reason"])
             self.assertEqual(legacy_terminate_status, 409)
             self.assertEqual(delete_status, 409)
             self.assertIn("旧版任务引擎", json.loads(delete_body)["reason"])
@@ -217,7 +217,7 @@ class WebApiTests(unittest.TestCase):
                 "POST", f"/task/{finished.id}/reprocess", {}, b""
             )
             self.assertEqual(reprocess_status, 409)
-            self.assertIn("旧版任务引擎", json.loads(reprocess_body)["reason"])
+            self.assertIn("写入闸门", json.loads(reprocess_body)["reason"])
             self.assertEqual(html_reprocess_status, 409)
             self.assertIsNone(store.claim_next_command("worker", now=1))
             clear_status, _headers, clear_body = app.handle_request(
@@ -227,6 +227,31 @@ class WebApiTests(unittest.TestCase):
             self.assertIn("写入闸门", json.loads(clear_body)["reason"])
             self.assertIsNotNone(store.find_task(finished.id))
             self.assertEqual(getattr(store.find_task(finished.id), "archived_at", 0) or 0, 0)
+
+    def test_closed_write_gate_rejects_settings_and_quality_posts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            before = store.get_default_strm_mode()
+            app = WebApp(store, task_engine_enabled=False)
+            settings_status, _headers, settings_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/strm-mode",
+                {"Content-Type": "application/json"},
+                b'{"mode":"direct"}',
+            )
+            quality_status, _headers, quality_body = app.handle_request(
+                "POST", "/api/v1/quality/run", {}, b""
+            )
+            html_quality_status, _headers, _body = app.handle_request(
+                "POST", "/quality/settings/reset", {}, b""
+            )
+
+            self.assertEqual(settings_status, 409)
+            self.assertIn("写入闸门", json.loads(settings_body)["reason"])
+            self.assertEqual(store.get_default_strm_mode(), before)
+            self.assertEqual(quality_status, 409)
+            self.assertIn("写入闸门", json.loads(quality_body)["reason"])
+            self.assertEqual(html_quality_status, 409)
 
     def test_legacy_engine_delete_does_not_recheck_or_mutate_after_missing_lookup(self):
         with tempfile.TemporaryDirectory() as tmp:
