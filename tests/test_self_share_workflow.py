@@ -3692,7 +3692,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             ) or row
             config = bridge.MoveConfig(source_roots=[root / "share"], library_roots={"欧美电影": root / "library"})
 
-            repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
+            repaired = bridge.enqueue_stranded_self_share_repairs(store, config, limit=10)
 
             updated = store.find_by_id(int(row["id"]))
             self.assertEqual(repaired, 0)
@@ -3731,7 +3731,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             config = bridge.MoveConfig(source_roots=[root / "share"], library_roots={"欧美电影": root / "library"})
 
             candidates = store.stranded_self_share_move_candidates(limit=10)
-            repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
+            repaired = bridge.enqueue_stranded_self_share_repairs(store, config, limit=10)
 
             updated = store.find_by_id(int(row["id"]))
             self.assertEqual(candidates, [])
@@ -3777,7 +3777,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
 
             with patch.object(store, "update_move", wraps=store.update_move) as update_move:
                 candidates = store.invalid_self_share_move_candidates(limit=10)
-                repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
+                repaired = bridge.enqueue_stranded_self_share_repairs(store, config, limit=10)
 
             updated = store.find_by_id(int(row["id"]))
             self.assertEqual(candidates, [])
@@ -3819,7 +3819,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             config = bridge.MoveConfig(source_roots=[share_root], library_roots={"欧美电影": root / "library"})
 
             with patch("app.media.strm.Path.replace") as replace:
-                repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
+                repaired = bridge.enqueue_stranded_self_share_repairs(store, config, limit=10)
 
             self.assertEqual(repaired, 0)
             replace.assert_not_called()
@@ -3861,7 +3861,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             )
 
             with patch("app.media.strm.Path.replace") as replace:
-                repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
+                repaired = bridge.enqueue_stranded_self_share_repairs(store, config, limit=10)
 
             self.assertEqual(repaired, 0)
             replace.assert_not_called()
@@ -3905,7 +3905,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
             )
 
             with patch("app.media.strm.Path.replace") as replace:
-                repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
+                repaired = bridge.enqueue_stranded_self_share_repairs(store, config, limit=10)
 
             self.assertEqual(repaired, 0)
             replace.assert_not_called()
@@ -3951,7 +3951,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 )
 
                 with patch("app.media.strm.Path.replace") as replace, patch("app.media.strm.shutil.move") as move:
-                    repaired = bridge.repair_stranded_self_share_moves(store, config, limit=10)
+                    repaired = bridge.enqueue_stranded_self_share_repairs(store, config, limit=10)
 
                 updated = store.find_by_id(int(row["id"]))
                 self.assertEqual(repaired, 0)
@@ -3992,7 +3992,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 stable_seconds=0,
             )
 
-            self.assertEqual(bridge.repair_stranded_self_share_moves(store, config, limit=10), 0)
+            self.assertEqual(bridge.enqueue_stranded_self_share_repairs(store, config, limit=10), 0)
             row = store.find_by_id(int(row["id"]))
             plan = bridge.plan_strm_move(source, "外国电视", config, destination_name=source.name)
             updated = bridge.merge_self_share_strm_folder(plan, store, row, config)
@@ -4042,7 +4042,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 stable_seconds=0,
             )
 
-            self.assertEqual(bridge.repair_stranded_self_share_moves(store, config, limit=10), 0)
+            self.assertEqual(bridge.enqueue_stranded_self_share_repairs(store, config, limit=10), 0)
             row = store.find_by_id(int(row["id"]))
             plan = bridge.plan_strm_move(source, "外国电视", config, destination_name=own_name)
             updated = bridge.merge_self_share_strm_folder(plan, store, row, config)
@@ -4084,7 +4084,7 @@ class SelfShareWorkflowTests(unittest.TestCase):
                 stable_seconds=0,
             )
 
-            self.assertEqual(bridge.repair_stranded_self_share_moves(store, config, limit=10), 0)
+            self.assertEqual(bridge.enqueue_stranded_self_share_repairs(store, config, limit=10), 0)
             row = store.find_by_id(int(row["id"]))
             plan = bridge.plan_strm_move(source, "华语电影", config, destination_name=source.name)
             updated = bridge.merge_self_share_strm_folder(plan, store, row, config)

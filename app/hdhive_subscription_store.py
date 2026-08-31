@@ -178,10 +178,9 @@ class HdhiveSubscriptionStore:
 
     def _init_db(self) -> None:
         database = Database(self.db_path)
-        if self.db_path.is_file() and database._has_schema_meta():
-            return
         with self._lock, self._connection() as connection:
-            connection.executescript(
+            if not (self.db_path.is_file() and database._has_schema_meta()):
+                connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS hdhive_subscriptions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -9517,7 +9517,6 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
                 submissions,
                 poll_status=False,
                 task_store=task_store,
-                task_engine_enabled=True,
             )
 
             task = task_store.find_task_by_share_key("direct", "1234")
@@ -9580,9 +9579,7 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
                 "http://cms.test",
                 "user",
                 "password",
-                db_path=str(Path(tmp) / "submissions.db"),
-                task_db_path=str(Path(tmp) / "tasks.db"),
-                task_engine_enabled=True,
+                database_path=str(Path(tmp) / "tasks.db"),
                 strm_default_mode="direct",
                 status_repair_enabled=False,
                 web_enabled=False,
@@ -9596,8 +9593,6 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
                 bridge, "write_metrics_snapshot", lambda *_args, **_kwargs: None
             ), patch.object(bridge, "call_maybe_start_web_server", capture_web_server), patch.object(
                 bridge, "handle_update", capture_update
-            ), patch.object(
-                bridge, "start_status_repair_loop", lambda *_args, **_kwargs: None
             ):
                 bridge.run_forever(config, stop_event=stop_event, log_hub=hub)
 
@@ -9679,9 +9674,7 @@ class DirectTaskEngineBridgeTests(unittest.TestCase):
                 "http://cms.test",
                 "user",
                 "password",
-                db_path=str(Path(tmp) / "submissions.db"),
-                task_db_path=str(Path(tmp) / "tasks.db"),
-                task_engine_enabled=True,
+                database_path=str(Path(tmp) / "tasks.db"),
                 strm_default_mode="shared",
                 status_repair_enabled=True,
                 quality_auto_repair_enabled=True,

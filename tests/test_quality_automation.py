@@ -38,7 +38,7 @@ class QualityAutomationConfigTests(unittest.TestCase):
             "CMS_BASE_URL": "http://cms:9527",
             "CMS_USERNAME": "user",
             "CMS_PASSWORD": "pass",
-            "TASK_DB_PATH": str(Path(tmp) / "tasks.db"),
+            "DATABASE_PATH": str(Path(tmp) / "tasks.db"),
         }
 
     def test_quality_automation_defaults_are_disabled_and_conservative(self):
@@ -205,7 +205,7 @@ class QualityAutomationConfigTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(Path(tmp) / "tasks.db"),
+                database_path=str(Path(tmp) / "tasks.db"),
                 quality_auto_enabled=True,
                 quality_auto_time="02:50",
                 quality_auto_timezone="Asia/Shanghai",
@@ -299,7 +299,7 @@ class QualityScheduleTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
             **config_overrides,
         )
@@ -586,7 +586,7 @@ class QualityPlanningTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
             quality_auto_repair_enabled=repair,
             quality_auto_max_tasks=max_tasks,
@@ -1339,7 +1339,7 @@ class QualityStrmCleanupTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
             quality_strm_cleanup_enabled=True,
         )
@@ -1836,7 +1836,7 @@ class QualityRepairExecutionTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
             quality_auto_repair_enabled=True,
         )
@@ -2314,7 +2314,7 @@ class QualityAutoRecheckTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
         )
         return QualityAutomation(TaskStore(Path(tmp) / "tasks.db"), config, allowed_roots=[library]), library
@@ -2467,7 +2467,7 @@ class QualityArchiveTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
             quality_archive_after_seconds=archive_after_seconds,
         )
@@ -2568,7 +2568,7 @@ class QualityAutoRestoreTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
         )
         return QualityAutomation(
@@ -2729,7 +2729,7 @@ class QualityScanPerformanceTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
         )
         return QualityAutomation(TaskStore(Path(tmp) / "tasks.db"), config, allowed_roots=[library]), library
@@ -2840,7 +2840,7 @@ class QualityShareRevalidateTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
         )
         return QualityAutomation(
@@ -3008,7 +3008,7 @@ class QualityRetentionTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=True,
             quality_unfixable_retention_days=retention_days,
         )

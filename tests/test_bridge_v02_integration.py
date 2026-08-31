@@ -23,7 +23,7 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             "CMS_USERNAME": "user",
             "CMS_PASSWORD": "pass",
             "DB_PATH": str(Path(tmp) / "submissions.db"),
-            "TASK_DB_PATH": str(Path(tmp) / "tasks.db"),
+            "DATABASE_PATH": str(Path(tmp) / "tasks.db"),
             "WEB_ENABLED": "true",
             "WEB_HOST": "127.0.0.1",
             "WEB_PORT": "8787",
@@ -39,7 +39,7 @@ class BridgeV02IntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):
             cfg = bridge.Config.from_env()
 
-            self.assertEqual(cfg.task_db_path, str(Path(tmp) / "tasks.db"))
+            self.assertEqual(cfg.database_path, str(Path(tmp) / "tasks.db"))
             self.assertTrue(cfg.web_enabled)
             self.assertEqual(cfg.web_host, "127.0.0.1")
             self.assertEqual(cfg.web_port, 8787)
@@ -51,12 +51,6 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             self.assertFalse(cfg.self_share_invalid_cleanup_enabled)
             self.assertEqual(cfg.self_share_invalid_check_interval_seconds, 21600)
             self.assertEqual(cfg.self_share_invalid_check_limit, 3)
-
-    def test_config_reads_task_engine_enabled(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):
-            cfg = bridge.Config.from_env()
-
-            self.assertTrue(cfg.task_engine_enabled)
 
     def test_config_normalizes_invalid_task_max_retries(self):
         for raw_value in ("0", "-1", "not-a-number"):
@@ -97,7 +91,7 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
 
             self.assertEqual(task.share_code, "abc")
-            self.assertTrue(Path(cfg.task_db_path).exists())
+            self.assertTrue(Path(cfg.database_path).exists())
 
     def test_completion_drift_rechecks_direct_file_share_target_not_any_strm(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -145,7 +139,7 @@ class BridgeV02IntegrationTests(unittest.TestCase):
                 server = bridge.maybe_start_web_server(cfg, task_store, starter=fake_start)
 
                 self.assertEqual(server, "server")
-                self.assertEqual(calls, [(task_store, "127.0.0.1", 8787, "secret", False)])
+                self.assertEqual(calls, [(task_store, "127.0.0.1", 8787, "secret", True)])
 
     def test_maybe_start_web_server_returns_none_when_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -396,7 +390,6 @@ class BridgeV02IntegrationTests(unittest.TestCase):
                  patch.object(bridge, "OpenAIClassifier", lambda config: None), \
                  patch.object(bridge, "TmdbWebResolver", lambda timeout=20: None), \
                  patch.object(bridge, "maybe_start_web_server", lambda config, task_store: None), \
-                 patch.object(bridge, "start_status_repair_loop", lambda *args, **kwargs: None), \
                  patch.object(bridge, "write_metrics_snapshot", lambda *args, **kwargs: None), \
                  patch.object(bridge, "normalize_emby_parents", lambda *args, **kwargs: 0), \
                  patch.object(bridge, "handle_update", fake_handle_update):
@@ -455,7 +448,6 @@ class BridgeV02IntegrationTests(unittest.TestCase):
                      patch.object(bridge, "TmdbWebResolver", lambda timeout=20: object()), \
                      patch.object(bridge, "P115WebClient", lambda *args, **kwargs: p115), \
                      patch.object(bridge, "maybe_start_web_server", lambda config, task_store: None), \
-                     patch.object(bridge, "start_status_repair_loop", lambda *args, **kwargs: None), \
                      patch.object(bridge, "write_metrics_snapshot", lambda *args, **kwargs: None), \
                      patch.object(bridge, "normalize_emby_parents", lambda *args, **kwargs: 0), \
                      patch.object(bridge, "TaskRunner", FakeTaskRunner):
@@ -519,7 +511,6 @@ class BridgeV02IntegrationTests(unittest.TestCase):
                      patch.object(bridge, "TmdbWebResolver", lambda timeout=20: object()), \
                      patch.object(bridge, "P115WebClient", lambda *args, **kwargs: p115), \
                      patch.object(bridge, "maybe_start_web_server", lambda config, task_store: None), \
-                     patch.object(bridge, "start_status_repair_loop", lambda *args, **kwargs: None), \
                      patch.object(bridge, "write_metrics_snapshot", lambda *args, **kwargs: None), \
                      patch.object(bridge, "normalize_emby_parents", lambda *args, **kwargs: 0), \
                      patch.object(bridge, "TaskRunner", FakeTaskRunner):
@@ -573,7 +564,6 @@ class BridgeV02IntegrationTests(unittest.TestCase):
                      patch.object(bridge, "TmdbWebResolver", lambda timeout=20: object()), \
                      patch.object(bridge, "P115WebClient", lambda *args, **kwargs: p115), \
                      patch.object(bridge, "maybe_start_web_server", lambda config, task_store: None), \
-                     patch.object(bridge, "start_status_repair_loop", lambda *args, **kwargs: repair_calls.append((args, kwargs))), \
                      patch.object(bridge, "start_self_share_maintenance_loop", lambda *args, **kwargs: maintenance_calls.append((args, kwargs)), create=True), \
                      patch.object(bridge, "write_metrics_snapshot", lambda *args, **kwargs: None), \
                      patch.object(bridge, "normalize_emby_parents", lambda *args, **kwargs: 0), \
@@ -628,7 +618,6 @@ class BridgeV02IntegrationTests(unittest.TestCase):
                      patch.object(bridge, "TmdbWebResolver", lambda timeout=20: object()), \
                      patch.object(bridge, "P115WebClient", lambda *args, **kwargs: p115), \
                      patch.object(bridge, "maybe_start_web_server", lambda config, task_store: None), \
-                     patch.object(bridge, "start_status_repair_loop", lambda *args, **kwargs: None), \
                      patch.object(bridge, "start_invalid_self_share_probe_loop", lambda *args, **kwargs: probe_calls.append((args, kwargs)), create=True), \
                      patch.object(bridge, "write_metrics_snapshot", lambda *args, **kwargs: None), \
                      patch.object(bridge, "normalize_emby_parents", lambda *args, **kwargs: 0), \
@@ -641,49 +630,6 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             self.assertIs(args[2], p115)
             self.assertEqual(kwargs["interval_seconds"], 21600)
             self.assertEqual(kwargs["limit"], 3)
-
-    def test_run_forever_starts_status_repair_when_task_engine_disabled(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            env = self.required_env(tmp)
-            env.update({
-                "WORKFLOW_MODE": "self_share_sync",
-                "TASK_ENGINE_ENABLED": "false",
-                "STATUS_REPAIR_ENABLED": "true",
-                "SELF_SHARE_RECEIVE_CID": "pending-cid",
-            })
-            with patch.dict(os.environ, env, clear=True):
-                cfg = bridge.Config.from_env()
-                repair_calls = []
-                p115 = object()
-
-                class OneUpdateTelegram:
-                    def __init__(self, token, timeout=60):
-                        self.calls = 0
-
-                    def get_updates(self, offset=None, timeout=30):
-                        if self.calls:
-                            raise KeyboardInterrupt()
-                        self.calls += 1
-                        return []
-
-                    def send_message(self, *args, **kwargs):
-                        return {"ok": True}
-
-                with patch.object(bridge, "TelegramClient", OneUpdateTelegram), \
-                     patch.object(bridge, "CmsClient", lambda config: object()), \
-                     patch.object(bridge, "EmbyClient", lambda *args, **kwargs: object()), \
-                     patch.object(bridge, "OpenAIClassifier", lambda config: object()), \
-                     patch.object(bridge, "TmdbWebResolver", lambda timeout=20: object()), \
-                     patch.object(bridge, "P115WebClient", lambda *args, **kwargs: p115), \
-                     patch.object(bridge, "maybe_start_web_server", lambda config, task_store: None), \
-                     patch.object(bridge, "start_status_repair_loop", lambda *args, **kwargs: repair_calls.append((args, kwargs))), \
-                     patch.object(bridge, "write_metrics_snapshot", lambda *args, **kwargs: None), \
-                     patch.object(bridge, "normalize_emby_parents", lambda *args, **kwargs: 0):
-                    with self.assertRaises(KeyboardInterrupt):
-                        bridge.run_forever(cfg)
-
-                self.assertEqual(len(repair_calls), 1)
-
 
 class FakeTelegram:
     def __init__(self):
@@ -893,11 +839,9 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(len(tasks), 1)
             self.assertEqual(tasks[0].share_code, "abc")
             self.assertEqual(tasks[0].receive_code, "1234")
-            self.assertEqual(tasks[0].current_stage, TaskStage.CMS_SUBMITTED)
-            self.assertEqual(tasks[0].status, TaskStatus.RUNNING)
-            events = task_store.list_events(tasks[0].id)
-            self.assertEqual([event["stage"] for event in events], ["received", "cms_submitted"])
-            self.assertEqual(cms.submitted, ["https://115cdn.com/s/abc?password=1234"])
+            self.assertEqual(tasks[0].current_stage, TaskStage.RECEIVED)
+            self.assertEqual(tasks[0].status, TaskStatus.PENDING)
+            self.assertEqual(cms.submitted, [])
 
     def test_duplicate_link_does_not_resubmit_but_keeps_taskstore_consistent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -912,49 +856,8 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
             tasks = task_store.list_recent_tasks(limit=10)
             self.assertEqual(len(tasks), 1)
-            self.assertEqual(len(cms.submitted), 1)
-            self.assertIn("cms_submitted", [event["stage"] for event in task_store.list_events(tasks[0].id)])
-
-    def test_cms_submit_exception_records_failure_without_retry_count(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
-            task_store = TaskStore(Path(tmp) / "tasks.db")
-            telegram = FakeTelegram()
-
-            bridge.handle_update(
-                self.update("https://115cdn.com/s/abc"),
-                FailingCmsSubmit(),
-                telegram,
-                "464100862",
-                submission_store,
-                poll_status=False,
-                task_store=task_store,
-            )
-
-            task = task_store.find_task_by_share_key("abc", "")
-            events = task_store.list_events(task.id)
-            self.assertEqual(task.status, TaskStatus.FAILED)
-            self.assertEqual(task.error_type, "cms_submit_failed")
-            self.assertEqual(task.retry_count, 0)
-            self.assertEqual([event["stage"] for event in events], ["received", "cms_submitted"])
-
-    def test_handle_update_without_task_store_preserves_existing_behavior(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
-            cms = FakeCmsSubmit()
-            telegram = FakeTelegram()
-
-            bridge.handle_update(
-                self.update("https://115cdn.com/s/abc"),
-                cms,
-                telegram,
-                "464100862",
-                submission_store,
-                poll_status=False,
-            )
-
-            self.assertEqual(len(cms.submitted), 1)
-            self.assertEqual(submission_store.recent(limit=1)[0]["share_code"], "abc")
+            self.assertEqual(len(cms.submitted), 0)
+            self.assertEqual(tasks[0].current_stage, TaskStage.RECEIVED)
 
     def test_handle_update_with_polling_accepts_task_store(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -974,39 +877,10 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 task_store=task_store,
             )
 
-            self.assertEqual(len(cms.submitted), 1)
+            self.assertEqual(len(cms.submitted), 0)
             self.assertNotIn("失败", telegram.messages[-1][1])
-            self.assertEqual(submission_store.recent(limit=1)[0]["status"], "submitted")
-
-    def test_self_share_update_receives_115_share_without_cms_plain_submit(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
-            task_store = TaskStore(Path(tmp) / "tasks.db")
-            cms = FakeCmsSubmit()
-            telegram = FakeTelegram()
-            p115 = FakeP115Receive()
-
-            bridge.handle_update(
-                self.update("https://115cdn.com/s/abc?password=1234"),
-                cms,
-                telegram,
-                "464100862",
-                submission_store,
-                poll_status=False,
-                task_store=task_store,
-                self_share_workflow=object(),
-                cleanup_client=p115,
-                self_share_receive_cid="pending-cid",
-            )
-
-            row = submission_store.recent(limit=1)[0]
-            self.assertEqual(cms.submitted, [])
-            self.assertEqual(p115.received, [("abc", "1234", "pending-cid")])
-            self.assertEqual(row["status"], "received")
-            self.assertEqual(row["workflow_mode"], "self_share_sync")
-            self.assertEqual(row["workflow_phase"], "received_to_pending")
-            self.assertEqual(row["title"], "示例电影")
-            self.assertIn("已接收", telegram.messages[-1][1])
+            tasks = task_store.list_recent_tasks(limit=1)
+            self.assertEqual(tasks[0].current_stage, TaskStage.RECEIVED)
 
     def test_task_engine_self_share_intake_enqueues_without_receiving_immediately(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1017,7 +891,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             p115 = FakeP115Receive()
 
             poll_calls = []
-            with patch.object(bridge, "start_status_poll", lambda *args, **kwargs: poll_calls.append((args, kwargs))):
+            with patch.object(bridge, "start_status_poll", create=True, side_effect=lambda *args, **kwargs: poll_calls.append((args, kwargs))):
                 bridge.handle_update(
                     self.update("https://115cdn.com/s/abc?password=1234"),
                     cms,
@@ -1029,7 +903,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                     self_share_workflow=object(),
                     cleanup_client=p115,
                     self_share_receive_cid="pending-cid",
-                    task_engine_enabled=True,
                 )
 
             self.assertEqual(cms.submitted, [])
@@ -1050,7 +923,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             p115 = FakeP115Receive()
             poll_calls = []
 
-            with patch.object(bridge, "start_status_poll", lambda *args, **kwargs: poll_calls.append((args, kwargs))):
+            with patch.object(bridge, "start_status_poll", create=True, side_effect=lambda *args, **kwargs: poll_calls.append((args, kwargs))):
                 bridge.handle_update(
                     self.update("https://115cdn.com/s/abc?password=1234"),
                     cms,
@@ -1062,7 +935,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                     self_share_workflow=object(),
                     cleanup_client=p115,
                     self_share_receive_cid="pending-cid",
-                    task_engine_enabled=True,
                 )
 
             row = submission_store.find_by_key(bridge.ShareKey("abc", "1234"))
@@ -1072,36 +944,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
             self.assertEqual(row["status"], "failed")
             self.assertIn("TaskStore", row["last_error"])
             self.assertIn("失败", telegram.messages[-1][1])
-
-    def test_task_engine_disabled_self_share_still_allows_legacy_polling(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
-            cms = FakeCmsSubmit()
-            telegram = FakeTelegram()
-            p115 = FakeP115Receive()
-            poll_calls = []
-
-            with patch.object(bridge, "start_status_poll", lambda *args, **kwargs: poll_calls.append((args, kwargs))):
-                bridge.handle_update(
-                    self.update("https://115cdn.com/s/abc?password=1234"),
-                    cms,
-                    telegram,
-                    "464100862",
-                    submission_store,
-                    poll_status=True,
-                    task_store=None,
-                    self_share_workflow=object(),
-                    cleanup_client=p115,
-                    self_share_receive_cid="pending-cid",
-                    task_engine_enabled=False,
-                )
-
-            row = submission_store.find_by_key(bridge.ShareKey("abc", "1234"))
-            self.assertEqual(cms.submitted, [])
-            self.assertEqual(p115.received, [("abc", "1234", "pending-cid")])
-            self.assertEqual(len(poll_calls), 1)
-            self.assertEqual(row["status"], "received")
-            self.assertIn("已接收", telegram.messages[-1][1])
 
     def test_task_engine_duplicate_running_link_reports_current_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1124,7 +966,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 self_share_workflow=object(),
                 cleanup_client=p115,
                 self_share_receive_cid="pending-cid",
-                task_engine_enabled=True,
             )
 
             self.assertEqual(cms.submitted, [])
@@ -1158,7 +999,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 self_share_workflow=object(),
                 cleanup_client=p115,
                 self_share_receive_cid="pending-cid",
-                task_engine_enabled=True,
             )
 
             updated = task_store.find_task(task.id)
@@ -1201,7 +1041,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=task_store,
-                task_engine_enabled=True,
             )
 
             self.assertEqual(len(telegram.rich_messages), 1)
@@ -1237,7 +1076,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=task_store,
-                task_engine_enabled=True,
             )
 
             self.assertEqual(len(telegram.rich_messages), 1)
@@ -1276,7 +1114,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=task_store,
-                task_engine_enabled=True,
             )
 
             self.assertEqual(len(telegram.rich_messages), 1)
@@ -1311,7 +1148,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=task_store,
-                task_engine_enabled=True,
             )
 
             self.assertEqual(len(telegram.rich_messages), 1)
@@ -1357,7 +1193,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=task_store,
-                task_engine_enabled=True,
             )
 
             self.assertEqual(len(telegram.rich_messages), 1)
@@ -1395,7 +1230,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=task_store,
-                task_engine_enabled=True,
             )
             self.assertEqual(len(telegram.rich_messages), 1)
             taskstore_message = telegram.rich_messages[-1][1].to_plain()
@@ -1409,7 +1243,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=empty_task_store,
-                task_engine_enabled=True,
             )
             self.assertEqual(len(telegram.rich_messages), 2)
             fallback_message = telegram.rich_messages[-1][1].to_plain()
@@ -1444,7 +1277,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=task_store,
-                task_engine_enabled=True,
             )
 
             self.assertEqual(len(telegram.rich_messages), 1)
@@ -1517,7 +1349,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=task_store,
-                task_engine_enabled=True,
                 self_share_workflow=object(),
             )
 
@@ -1567,7 +1398,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                     submission_store,
                     poll_status=False,
                     task_store=task_store,
-                    task_engine_enabled=True,
                     self_share_workflow=object(),
                 )
 
@@ -2800,7 +2630,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 poll_status=False,
                 task_store=task_store,
                 self_share_workflow=object(),
-                task_engine_enabled=True,
             )
 
             updated = task_store.find_task(task.id)
@@ -2825,7 +2654,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 poll_status=False,
                 task_store=task_store,
                 self_share_workflow=object(),
-                task_engine_enabled=True,
             )
 
             updated = task_store.find_task(task.id)
@@ -2848,7 +2676,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 poll_status=False,
                 task_store=task_store,
                 self_share_workflow=object(),
-                task_engine_enabled=True,
             )
 
             self.assertIsNone(task_store.find_task_by_share_key("new", "1234"))
@@ -2870,7 +2697,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 poll_status=False,
                 task_store=task_store,
                 self_share_workflow=object(),
-                task_engine_enabled=True,
             )
 
             child = task_store.find_task_by_share_key("new", "1212")
@@ -2899,7 +2725,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 poll_status=False,
                 task_store=task_store,
                 self_share_workflow=object(),
-                task_engine_enabled=True,
             )
 
             self.assertIsNone(task_store.find_task_by_share_key("new", "1212"))
@@ -2926,7 +2751,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 poll_status=False,
                 task_store=task_store,
                 self_share_workflow=object(),
-                task_engine_enabled=True,
             )
 
             self.assertIsNone(task_store.find_task_by_share_key("new", "1212"))
@@ -2947,7 +2771,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 poll_status=False,
                 task_store=task_store,
                 self_share_workflow=object(),
-                task_engine_enabled=True,
             )
 
             self.assertIsNone(task_store.find_task_by_share_key("new", "1212"))
@@ -2972,7 +2795,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 poll_status=False,
                 task_store=task_store,
                 self_share_workflow=object(),
-                task_engine_enabled=True,
             )
 
             self.assertIsNone(task_store.find_task_by_share_key("new", "1212"))
@@ -2995,7 +2817,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 poll_status=False,
                 task_store=task_store,
                 self_share_workflow=object(),
-                task_engine_enabled=True,
             )
 
             self.assertIsNone(task_store.find_task_by_share_key("new", "1212"))
@@ -3019,7 +2840,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 poll_status=False,
                 task_store=task_store,
                 self_share_workflow=object(),
-                task_engine_enabled=True,
             )
 
             self.assertIsNone(task_store.find_task_by_share_key("new", "1212"))
@@ -3042,7 +2862,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 poll_status=False,
                 task_store=task_store,
                 self_share_workflow=object(),
-                task_engine_enabled=True,
             )
 
             self.assertEqual([task.id for task in task_store.list_recent_tasks(limit=10)], [target.id])
@@ -3106,7 +2925,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=task_store,
-                task_engine_enabled=True,
             )
 
             self.assertEqual(len(telegram.rich_messages), 1)
@@ -3147,7 +2965,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=task_store,
-                task_engine_enabled=True,
             )
 
             updated_task = task_store.find_task(task.id)
@@ -3275,7 +3092,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=task_store,
-                task_engine_enabled=True,
             )
 
             updated = task_store.find_task(task.id)
@@ -3371,7 +3187,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=task_store,
-                task_engine_enabled=True,
             )
 
             updated = task_store.find_task(task.id)
@@ -3421,7 +3236,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                     submission_store,
                     poll_status=False,
                     task_store=task_store,
-                    task_engine_enabled=True,
                 )
 
             updated_emby = task_store.find_task(emby_task.id)
@@ -3456,7 +3270,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=task_store,
-                task_engine_enabled=True,
                 move_config=move_config,
             )
 
@@ -3637,7 +3450,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 self_share_workflow=object(),
                 cleanup_client=p115,
                 self_share_receive_cid="pending-cid",
-                task_engine_enabled=True,
             )
 
             updated = task_store.find_task(task.id)
@@ -3683,7 +3495,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 self_share_workflow=object(),
                 cleanup_client=p115,
                 self_share_receive_cid="pending-cid",
-                task_engine_enabled=True,
             )
 
             updated = task_store.find_task(task.id)
@@ -3714,7 +3525,6 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 self_share_workflow=object(),
                 cleanup_client=p115,
                 self_share_receive_cid="pending-cid",
-                task_engine_enabled=True,
             )
 
             updated = task_store.find_task(task.id)
@@ -3729,6 +3539,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
     def test_duplicate_self_share_received_link_does_not_receive_again(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = SubmissionStore(Path(tmp) / "submissions.db")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
             cms = FakeCmsSubmit()
             telegram = FakeTelegram()
             p115 = FakeP115Receive()
@@ -3742,21 +3553,22 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                     "464100862",
                     submission_store,
                     poll_status=False,
+                    task_store=task_store,
                     self_share_workflow=object(),
                     cleanup_client=p115,
                     self_share_receive_cid="pending-cid",
                 )
 
             self.assertEqual(cms.submitted, [])
-            self.assertEqual(p115.received, [("abc", "1234", "pending-cid")])
-            self.assertIn("已存在", telegram.messages[-1][1])
+            self.assertEqual(p115.received, [])
+            self.assertEqual(len(task_store.list_recent_tasks(limit=10)), 1)
 
     def test_duplicate_self_share_numeric_completed_status_does_not_receive_again(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = SubmissionStore(Path(tmp) / "submissions.db")
-            key = bridge.ShareKey("abc", "1234")
-            row = submission_store.upsert_submission(key, "https://115cdn.com/s/abc?password=1234", "1", title="已完成影片")
-            submission_store.update_self_share(row["id"], workflow_mode="self_share_sync", workflow_phase="share_sync_submitted")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            task = task_store.upsert_task("abc", "1234", "https://115cdn.com/s/abc?password=1234", chat_id="464100862")
+            task_store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "已完成")
             cms = FakeCmsSubmit()
             telegram = FakeTelegram()
             p115 = FakeP115Receive()
@@ -3768,6 +3580,7 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 "464100862",
                 submission_store,
                 poll_status=False,
+                task_store=task_store,
                 self_share_workflow=object(),
                 cleanup_client=p115,
                 self_share_receive_cid="pending-cid",
@@ -3775,13 +3588,12 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
 
             self.assertEqual(cms.submitted, [])
             self.assertEqual(p115.received, [])
-            self.assertIn("已存在", telegram.messages[-1][1])
+            self.assertEqual(task_store.find_task(task.id).status, TaskStatus.SUCCEEDED)
 
     def test_self_share_reprocesses_legacy_plain_submitted_row(self):
         with tempfile.TemporaryDirectory() as tmp:
             submission_store = SubmissionStore(Path(tmp) / "submissions.db")
-            key = bridge.ShareKey("abc", "1234")
-            submission_store.upsert_submission(key, "https://115cdn.com/s/abc?password=1234", "submitted")
+            task_store = TaskStore(Path(tmp) / "tasks.db")
             cms = FakeCmsSubmit()
             telegram = FakeTelegram()
             p115 = FakeP115Receive()
@@ -3793,17 +3605,16 @@ class BridgeTaskStoreHandleUpdateTests(unittest.TestCase):
                 "464100862",
                 submission_store,
                 poll_status=False,
+                task_store=task_store,
                 self_share_workflow=object(),
                 cleanup_client=p115,
                 self_share_receive_cid="pending-cid",
             )
 
-            row = submission_store.find_by_key(key)
+            tasks = task_store.list_recent_tasks(limit=1)
             self.assertEqual(cms.submitted, [])
-            self.assertEqual(p115.received, [("abc", "1234", "pending-cid")])
-            self.assertEqual(row["status"], "received")
-            self.assertEqual(row["workflow_mode"], "self_share_sync")
-            self.assertIn("已接收", telegram.messages[-1][1])
+            self.assertEqual(p115.received, [])
+            self.assertEqual(tasks[0].current_stage, TaskStage.RECEIVED)
 
 
 if __name__ == "__main__":

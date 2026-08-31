@@ -112,8 +112,7 @@ SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS=600,3600,21600,86400
 SELF_SHARE_REVIEW_LIST_CACHE_SECONDS=300
 STRM_LIBRARY_MAP=华语电影=/mnt/user/Unraid/strm/转存/Movie/电影/华语电影,欧美电影=/mnt/user/Unraid/strm/转存/Movie/电影/欧美电影
 
-TASK_ENGINE_ENABLED=true
-TASK_DB_PATH=/data/tasks.db
+DATABASE_PATH=/data/cms-tg-ingest.db
 BACKUP_ENABLED=true
 BACKUP_TIME=03:30
 BACKUP_TIMEZONE=Asia/Shanghai
@@ -291,7 +290,7 @@ API 位于 `/api/v1/overview`、`/api/v1/tasks`、`/api/v1/health`、`/api/v1/qu
 
 **重要安全门槛**：只有在自有分享、STRM marker、媒体库路径、Emby 入库、TaskStore 成功事件和 115 异步审核检查点均满足条件时，程序才会执行安全清理；风控、未知状态、路径不明确或验证失败都会保留源文件。
 
-在 `TASK_ENGINE_ENABLED=true` 的 TaskRunner 路径中，自己的永久分享状态验证通过后仍会继续生成分享 STRM、移动和 Emby 入库，但源文件会保留到默认 24 小时观察期结束；后续 STRM 只使用自己的分享链接生成。旧 SubmissionStore + 轮询路径仅保留兼容处理，不会自动删除源文件；需要自动清理时请启用 TaskRunner。
+在 TaskRunner 路径中，自己的永久分享状态验证通过后仍会继续生成分享 STRM、移动和 Emby 入库，但源文件会保留到默认 24 小时观察期结束；后续 STRM 只使用自己的分享链接生成。
 
 ## TaskStore 和 Web 管理
 
@@ -303,7 +302,7 @@ v0.2 的任务引擎让真实 Telegram/CMS 工作流的新自分享链接默认�
 
 - Web 管理页读取 TaskStore，显示当前阶段、等待原因、重试次数和最近错误。
 - Telegram 新链接接收回复会返回任务 ID和当前阶段。
-- `/status` 和 `/history` 优先读取 TaskStore，旧 SubmissionStore 记录为空时兜底显示。
+- `/status` 和 `/history` 优先读取 TaskStore。
 - /status 会附带详情、重试、查 Emby、恢复 STRM、从头重跑按钮。
 - Web 任务详情页提供重试、查 Emby、恢复 STRM、从头重跑按钮。
 - Web 和 Telegram 使用相同的状态保护和 `TASK_MAX_RETRIES` 重试上限；云任务从头重跑会清除旧的云下载尝试元数据后重新提交。
@@ -311,21 +310,18 @@ v0.2 的任务引擎让真实 Telegram/CMS 工作流的新自分享链接默认�
 - /health 会显示 TaskStore 本地队列健康、worker 心跳和 115 风控冷却。
 - /quality 会先执行 TaskStore 本地轻量巡检。
 - Web `/quality` 页面只读取本地 TaskStore 和 STRM 文件；Vue 和旧版页面都支持本地巡检和只读报表，不扫描 115，默认不入队修复。
-- TaskEngine 开启时，新 self-share 链接不会回退到旧 start_status_poll 轮询路径。
+- 新链接由 TaskRunner 执行，不再回退旧轮询路径。
 
 关键设置：
 
 ```env
-TASK_ENGINE_ENABLED=true
-TASK_DB_PATH=/data/tasks.db
+DATABASE_PATH=/data/cms-tg-ingest.db
 WEB_ENABLED=true
 WEB_HOST=0.0.0.0
 WEB_PORT=8787
 TASK_WORKER_INTERVAL_SECONDS=5
 TASK_MAX_RETRIES=3
 ```
-
-如需回滚，设置 `TASK_ENGINE_ENABLED=false` 并重启；旧 SubmissionStore + 轮询路径是兼容回滚路径，不提供 TaskRunner 的同等清理顺序保证。
 
 ### Web 管理台页面
 

@@ -73,7 +73,7 @@ class QualityTelegramTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=False,
         )
         store = TaskStore(Path(tmp) / "tasks.db")
@@ -138,7 +138,6 @@ class QualityTelegramTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=service.store,
-                task_engine_enabled=True,
                 quality_automation=service,
             )
 
@@ -169,7 +168,6 @@ class QualityTelegramTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=service.store,
-                task_engine_enabled=True,
                 quality_automation=service,
             )
 
@@ -196,7 +194,6 @@ class QualityTelegramTests(unittest.TestCase):
                 SubmissionStore(Path(tmp) / "submissions.db"),
                 poll_status=False,
                 task_store=service.store,
-                task_engine_enabled=True,
                 quality_automation=service,
             )
 
@@ -247,7 +244,6 @@ class QualityTelegramTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=service.store,
-                task_engine_enabled=True,
                 quality_automation=service,
             )
 
@@ -278,7 +274,6 @@ class QualityTelegramTests(unittest.TestCase):
                 submission_store,
                 poll_status=False,
                 task_store=service.store,
-                task_engine_enabled=True,
                 quality_automation=service,
             )
 

@@ -246,7 +246,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(root / "tasks.db"),
+                database_path=str(root / "tasks.db"),
                 quality_auto_enabled=False,
             )
             quality = QualityAutomation(store, config, allowed_roots=[root])
@@ -293,7 +293,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(root / "tasks.db"),
+                database_path=str(root / "tasks.db"),
                 quality_auto_enabled=False,
             )
             quality = QualityAutomation(store, config, allowed_roots=[root])
@@ -336,7 +336,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(root / "tasks.db"),
+                database_path=str(root / "tasks.db"),
                 quality_auto_enabled=False,
             )
             quality = QualityAutomation(store, config, allowed_roots=[root])
@@ -357,7 +357,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(root / "tasks.db"),
+                database_path=str(root / "tasks.db"),
                 quality_auto_enabled=False,
             )
             quality = QualityAutomation(store, config, allowed_roots=[root / "allowed"])
@@ -396,7 +396,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(Path(tmp) / "tasks.db"),
+                database_path=str(Path(tmp) / "tasks.db"),
                 quality_auto_enabled=False,
             )
             quality = QualityAutomation(store, config, allowed_roots=(path for path in (root,)))
@@ -431,7 +431,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(root / "tasks.db"),
+                database_path=str(root / "tasks.db"),
                 quality_auto_enabled=False,
             )
             quality = QualityAutomation(store, config, allowed_roots=[root])
@@ -1699,7 +1699,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(root / "tasks.db"),
+                database_path=str(root / "tasks.db"),
                 quality_auto_enabled=False,
             )
             quality = QualityAutomation(store, config, allowed_roots=[root])
@@ -1744,7 +1744,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(root / "tasks.db"),
+                database_path=str(root / "tasks.db"),
                 quality_auto_enabled=False,
             )
             quality = QualityAutomation(store, config, allowed_roots=[root])
@@ -2413,7 +2413,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(Path(tmp) / "tasks.db"),
+                database_path=str(Path(tmp) / "tasks.db"),
                 quality_auto_enabled=True,
             )
             automation = QualityAutomation(store, config, allowed_roots=[Path(tmp) / "library"])
@@ -2439,7 +2439,7 @@ class WebAdminTests(unittest.TestCase):
                 cms_base_url="http://cms",
                 cms_username="user",
                 cms_password="pass",
-                task_db_path=str(Path(tmp) / "tasks.db"),
+                database_path=str(Path(tmp) / "tasks.db"),
             )
             automation = QualityAutomation(store, config, allowed_roots=[Path(tmp) / "library"])
             app = WebApp(store, quality_automation=automation)

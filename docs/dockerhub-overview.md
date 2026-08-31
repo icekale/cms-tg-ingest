@@ -81,7 +81,7 @@ SELF_SHARE_STRM_ROOT=/mnt/user/Unraid/strm/share
 SELF_SHARE_OWN_SHARE_PASSWORD=1212
 STRM_LIBRARY_MAP=华语电影=/mnt/user/Unraid/strm/转存/Movie/电影/华语电影,欧美电影=/mnt/user/Unraid/strm/转存/Movie/电影/欧美电影
 STRM_DEFAULT_MODE=shared
-TASK_ENGINE_ENABLED=true
+DATABASE_PATH=/data/cms-tg-ingest.db
 WEB_ENABLED=true
 # Web 认证（推荐用户名密码，与 WEB_TOKEN 二选一）
 WEB_USERNAME=admin

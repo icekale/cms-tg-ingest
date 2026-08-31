@@ -1035,7 +1035,6 @@ class CloudIntakeTests(unittest.TestCase):
                 submissions,
                 poll_status=False,
                 task_store=tasks,
-                task_engine_enabled=True,
                 self_share_workflow=object(),
                 self_share_receive_cid=TARGET_CID,
             )

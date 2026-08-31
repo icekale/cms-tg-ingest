@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -410,3 +411,35 @@ class Database:
             raise SchemaVersionError(
                 f"unsupported schema version {version}; binary supports {SCHEMA_VERSION}"
             )
+
+    def write_gate(self) -> str:
+        connection = self.connect(read_only=self.path.is_file())
+        try:
+            row = connection.execute(
+                "SELECT write_gate FROM migration_runs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            return "open"
+        gate = str(row["write_gate"] or "")
+        if gate not in {"closed", "runner_open", "open"}:
+            raise RuntimeError(f"incompatible write gate: {gate}")
+        return gate
+
+    def set_write_gate(self, gate: str) -> None:
+        if gate not in {"closed", "runner_open", "open"}:
+            raise ValueError(f"incompatible write gate: {gate}")
+        now = time.time()
+        with self.transaction(immediate=True) as connection:
+            row = connection.execute("SELECT id FROM migration_runs ORDER BY id DESC LIMIT 1").fetchone()
+            if row is None:
+                connection.execute(
+                    "INSERT INTO migration_runs (migration_id, write_gate, created_at) VALUES (?, ?, ?)",
+                    ("runtime", gate, now),
+                )
+            else:
+                connection.execute(
+                    "UPDATE migration_runs SET write_gate = ? WHERE id = ?",
+                    (gate, int(row["id"])),
+                )

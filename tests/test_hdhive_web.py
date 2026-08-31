@@ -124,7 +124,6 @@ class HdhiveWebTests(unittest.TestCase):
         config = SimpleNamespace(
             web_enabled=True,
             web_token="secret",
-            task_engine_enabled=True,
             task_max_retries=3,
             web_host="127.0.0.1",
             web_port=0,
@@ -147,7 +146,6 @@ class HdhiveWebTests(unittest.TestCase):
         config = SimpleNamespace(
             web_enabled=True,
             web_token="secret",
-            task_engine_enabled=True,
             task_max_retries=3,
             web_host="127.0.0.1",
             web_port=0,
@@ -185,7 +183,6 @@ class HdhiveWebTests(unittest.TestCase):
         config = SimpleNamespace(
             web_enabled=True,
             web_token="secret",
-            task_engine_enabled=True,
             task_max_retries=3,
             web_host="127.0.0.1",
             web_port=0,
@@ -243,7 +240,6 @@ class HdhiveWebTests(unittest.TestCase):
         config = SimpleNamespace(
             web_enabled=True,
             web_token="secret",
-            task_engine_enabled=True,
             web_host="127.0.0.1",
             web_port=8787,
         )

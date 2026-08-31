@@ -123,7 +123,6 @@ class Config:
     cms_password: str
     poll_timeout: int = 30
     http_timeout: int = 60
-    db_path: str = "/data/submissions.db"
     status_poll_seconds: int = 300
     status_poll_interval: int = 20
     emby_base_url: str = ""
@@ -185,9 +184,7 @@ class Config:
     cms_parent_cid_category_map: str = ""
     self_share_organized_scan_parent_ids: str = ""
     cms_state_db_path: str = "/cms/cms-online.db"
-    task_db_path: str = "/data/tasks.db"
-    database_path: str = ""
-    task_engine_enabled: bool = False
+    database_path: str = "/data/cms-tg-ingest.db"
     web_enabled: bool = False
     web_host: str = "0.0.0.0"
     web_port: int = 8787
@@ -256,7 +253,6 @@ class Config:
             cms_password=os.environ["CMS_PASSWORD"],
             poll_timeout=env_int("TG_POLL_TIMEOUT", 30),
             http_timeout=env_int("HTTP_TIMEOUT", 60),
-            db_path=os.environ.get("DB_PATH", "/data/submissions.db"),
             status_poll_seconds=env_int("STATUS_POLL_SECONDS", 300),
             status_poll_interval=env_int("STATUS_POLL_INTERVAL", 20),
             emby_base_url=(os.environ.get("EMBY_BASE_URL") or os.environ.get("EMBY_HOST_PORT") or "").rstrip("/"),
@@ -332,9 +328,7 @@ class Config:
             cms_parent_cid_category_map=os.environ.get("CMS_PARENT_CID_CATEGORY_MAP", ""),
             self_share_organized_scan_parent_ids=os.environ.get("SELF_SHARE_ORGANIZED_SCAN_PARENT_IDS", ""),
             cms_state_db_path=os.environ.get("CMS_STATE_DB_PATH", "/cms/cms-online.db"),
-            task_db_path=os.environ.get("TASK_DB_PATH", "/data/tasks.db"),
-            database_path=os.environ.get("DATABASE_PATH", ""),
-            task_engine_enabled=parse_bool_env(os.environ.get("TASK_ENGINE_ENABLED"), False),
+            database_path=os.environ.get("DATABASE_PATH", "/data/cms-tg-ingest.db"),
             web_enabled=parse_bool_env(os.environ.get("WEB_ENABLED"), False),
             web_host=os.environ.get("WEB_HOST", "0.0.0.0"),
             web_port=env_int("WEB_PORT", 8787),

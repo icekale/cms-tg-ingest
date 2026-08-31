@@ -495,7 +495,7 @@ class HdhiveBridgeTests(unittest.TestCase):
             callback = lambda _urls, _chat: None
             config = SimpleNamespace(
                 hdhive_enabled=True,
-                task_db_path=str(Path(directory) / "tasks.db"),
+                database_path=str(Path(directory) / "tasks.db"),
                 hdhive_auto_unlock_max_points=20,
                 tg_allowed_chat_id="464100862",
             )
@@ -513,7 +513,7 @@ class HdhiveBridgeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config = SimpleNamespace(
                 hdhive_enabled=True,
-                task_db_path=str(Path(directory) / "tasks.db"),
+                database_path=str(Path(directory) / "tasks.db"),
                 hdhive_auto_unlock_max_points=20,
             )
             tmdb = object()
@@ -535,7 +535,7 @@ class HdhiveBridgeTests(unittest.TestCase):
             completed = lambda *_args: None
             config = SimpleNamespace(
                 hdhive_enabled=True,
-                task_db_path=str(Path(directory) / "tasks.db"),
+                database_path=str(Path(directory) / "tasks.db"),
                 hdhive_auto_unlock_max_points=20,
             )
 

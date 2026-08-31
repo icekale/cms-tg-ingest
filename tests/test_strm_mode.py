@@ -123,7 +123,7 @@ class ConfigStrmModeTests(unittest.TestCase):
     def test_create_task_store_uses_config_strm_default_mode_without_runtime_state(self):
         env = {**self.REQUIRED, "STRM_DEFAULT_MODE": "direct"}
         with tempfile.TemporaryDirectory() as tmp:
-            env["TASK_DB_PATH"] = str(Path(tmp) / "tasks.db")
+            env["DATABASE_PATH"] = str(Path(tmp) / "tasks.db")
             with patch.dict(os.environ, env, clear=True):
                 config = Config.from_env()
                 store = bridge.create_task_store(config)
@@ -140,7 +140,6 @@ class ConfigStrmModeTests(unittest.TestCase):
             "password",
             31,
             61,
-            "/tmp/submissions.db",
             301,
             21,
             "http://emby.test",

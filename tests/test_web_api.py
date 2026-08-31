@@ -400,7 +400,7 @@ class WebApiTests(unittest.TestCase):
             cms_base_url="http://cms",
             cms_username="user",
             cms_password="pass",
-            task_db_path=str(Path(tmp) / "tasks.db"),
+            database_path=str(Path(tmp) / "tasks.db"),
             quality_auto_enabled=False,
         )
         return QualityAutomation(store, config, allowed_roots=[root]), root

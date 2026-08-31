@@ -1272,10 +1272,6 @@ def enqueue_stranded_self_share_repairs(store: Any, move_config: MoveConfig, lim
     return queued
 
 
-def repair_stranded_self_share_moves(store: Any, move_config: MoveConfig, limit: int = 50) -> int:
-    return enqueue_stranded_self_share_repairs(store, move_config, limit=limit)
-
-
 def restore_missing_self_share_library_folder(
     store: Any,
     cms: Any,

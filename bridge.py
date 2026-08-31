@@ -45,6 +45,7 @@ from app.clients.p115 import (
     select_source_residue_115_files,
 )
 from app.backup import BackupScheduler, start_backup_loop
+from app.database import Database
 from app.background_jobs import BackgroundJobCoordinator
 from app.cms_updater import CmsVersionChecker, start_cms_version_check_loop
 from app.logging_system import LogHub, configure_logging
@@ -135,7 +136,6 @@ from app.media.strm import (
     reconcile_self_share_move,
     remove_direct_strm_files,
     enqueue_stranded_self_share_repairs,
-    repair_stranded_self_share_moves,
     restore_missing_self_share_library_folder,
     restore_missing_self_share_library_folders,
     select_move_source_for_workflow,
@@ -435,15 +435,14 @@ def normalize_share_link(url: str) -> ShareKey:
 
 
 def create_task_store(config: Config) -> TaskStore:
-    path = str(getattr(config, "database_path", "") or config.task_db_path)
-    return TaskStore(path, default_strm_mode=getattr(config, "strm_default_mode", "shared"))
+    return TaskStore(config.database_path, default_strm_mode=getattr(config, "strm_default_mode", "shared"))
 
 
 def create_backup_scheduler(config: Config, task_store: TaskStore) -> BackupScheduler:
     return BackupScheduler(
         task_store,
         {
-            "cms-tg-ingest": Path(str(getattr(config, "database_path", "") or config.task_db_path)),
+            "cms-tg-ingest": Path(config.database_path),
         },
         config.backup_dir,
         run_time=config.backup_time,
@@ -485,7 +484,7 @@ def create_hdhive_subscription_service(
         return None
     return HdhiveSubscriptionService(
         proxy=hdhive_workflow.proxy,
-        store=HdhiveSubscriptionStore(getattr(config, "task_db_path", "/data/tasks.db")),
+        store=HdhiveSubscriptionStore(getattr(config, "database_path", "/data/cms-tg-ingest.db")),
         enqueue_links=enqueue_links,
         auto_unlock_max_points=int(getattr(config, "hdhive_auto_unlock_max_points", 20)),
         on_item_enqueued=on_item_enqueued,
@@ -533,7 +532,11 @@ def maybe_start_web_server(
         "web_token": config.web_token,
         "web_username": web_username,
         "web_password": web_password,
-        "task_engine_enabled": config.task_engine_enabled,
+        "task_engine_enabled": (
+            Database(task_store.db_path).write_gate() == "open"
+            if getattr(task_store, "db_path", None)
+            else True
+        ),
         "max_retries": int(getattr(config, "task_max_retries", 3)),
         "frontend_dist_path": frontend_dist_path or getattr(config, "frontend_dist_path", "/app/frontend/dist"),
         "cms_guard_container": "cloud-media-sync",
@@ -2173,9 +2176,7 @@ def repair_stale_submission(store: Any, row: dict[str, Any], emby: Any | None, m
 def _observe_stranded_self_share_moves(store: Any, move_config: MoveConfig | None, limit: int) -> int:
     if move_config is None:
         return 0
-    if hasattr(store, "enqueue_command"):
-        return enqueue_stranded_self_share_repairs(store, move_config, limit=limit)
-    return repair_stranded_self_share_moves(store, move_config, limit=limit)
+    return enqueue_stranded_self_share_repairs(store, move_config, limit=limit)
 
 
 def repair_stale_submissions(store: Any, emby: Any | None, move_config: MoveConfig | None = None, limit: int = 50) -> int:
@@ -2187,56 +2188,6 @@ def repair_stale_submissions(store: Any, emby: Any | None, move_config: MoveConf
         except Exception:
             LOG.debug("Status repair failed for row id=%s", row.get("id"), exc_info=True)
     return repaired
-
-
-def start_status_repair_loop(
-    store: Any,
-    emby: Any | None,
-    move_config: MoveConfig | None = None,
-    cms: Any | None = None,
-    self_share_config: SelfShareConfig | None = None,
-    cleanup_client: Any | None = None,
-    interval_seconds: int = 300,
-    limit: int = 50,
-) -> threading.Thread | None:
-    if interval_seconds <= 0:
-        return None
-
-    def loop() -> None:
-        while True:
-            try:
-                repaired = repair_stale_submissions(store, emby, move_config=move_config, limit=limit)
-                moved = _observe_stranded_self_share_moves(store, move_config, limit)
-                restored = (
-                    restore_missing_self_share_library_folders(
-                        store,
-                        cms,
-                        self_share_config,
-                        move_config,
-                        emby=emby,
-                        limit=limit,
-                    )
-                    if cms and self_share_config and move_config
-                    else 0
-                )
-                cleaned = cleanup_pending_self_share_sources(store, cleanup_client, limit=limit)
-                if repaired:
-                    LOG.info("Status repair fixed %s stale submissions", repaired)
-                if moved:
-                    LOG.info("Status repair moved %s stranded self-share STRM folders", moved)
-                if restored:
-                    LOG.info("Status repair restored %s missing self-share STRM folders", restored)
-                if cleaned:
-                    LOG.info("Status repair cleaned %s pending self-share source folders", cleaned)
-                if repaired or moved or restored or cleaned:
-                    write_metrics_snapshot(store, metrics_path_for_store(store))
-            except Exception:
-                LOG.debug("Status repair loop failed", exc_info=True)
-            time.sleep(interval_seconds)
-
-    thread = threading.Thread(target=loop, name="status-repair", daemon=True)
-    thread.start()
-    return thread
 
 
 def start_media_strm_repair_loop(
@@ -3252,246 +3203,6 @@ def should_skip_existing_submission(row: dict[str, Any] | None, self_share_enabl
     return any(row.get(key) for key in progress_keys)
 
 
-def _start_status_poll_impl(
-    cms: CmsClient,
-    telegram: TelegramClient,
-    chat_id: int | str,
-    store: Any,
-    row: dict[str, Any],
-    max_seconds: int = 300,
-    interval: int = 20,
-    emby: EmbyClient | None = None,
-    move_config: MoveConfig | None = None,
-    openai_classifier: OpenAIClassifier | None = None,
-    tmdb_resolver: Any | None = None,
-    self_share_workflow: SelfShareWorkflow | None = None,
-    cleanup_client: Any | None = None,
-    task_store: TaskStore | None = None,
-) -> None:
-    task_id = row.get("cms_task_id")
-    if max_seconds <= 0:
-        return
-
-    def worker() -> None:
-        nonlocal task_id, row
-        deadline = time.time() + max_seconds
-        last_status = row.get("status") or "submitted"
-        recognition: dict[str, Any] = {"title": row.get("title") or row.get("share_code") or ""}
-        recognition_checked = False
-        while time.time() < deadline:
-            time.sleep(max(1, interval))
-            try:
-                if self_share_workflow and not task_id:
-                    title = row.get("title") or row.get("share_code") or ""
-                    updated = store.update_status(int(row["id"]), "organizing", title=str(title or "")) or row
-                    sync_cms_status_task_event(task_store, updated, "organizing", title=str(title or ""))
-                    recognition = normalize_recognition({"code": 500, "msg": "waiting for CMS organize"})
-                    recognition["share_name"] = str(title or "")
-                    recognition_checked = True
-                    current_row = store.find_by_id(int(row["id"])) or updated
-                    if move_config and should_attempt_strm_move(current_row, self_share_enabled=True):
-                        current_row, recognition = resolve_self_share_recognition_before_prepare(
-                            store,
-                            current_row,
-                            recognition,
-                            str(title or ""),
-                            openai_classifier=openai_classifier,
-                            tmdb_resolver=tmdb_resolver,
-                        )
-                        source_dir = safe_resolve(Path(str(recognition.get("source_path")))) if recognition.get("source_path") else None
-                        current_row, source_dir, category = prepare_self_share_move_inputs(
-                            current_row,
-                            recognition,
-                            str(title or ""),
-                            self_share_workflow,
-                            source_dir,
-                        )
-                        sync_self_share_task_events(task_store, current_row)
-                        if not source_dir:
-                            row = current_row
-                            continue
-                        active_move_config = move_config_for_workflow_source(move_config, source_dir, self_share_workflow.config)
-                        move_plan = plan_strm_move(source_dir, category, active_move_config)
-                        sync_strm_ready_task_event(task_store, current_row, move_plan)
-                        if is_move_plan_retryable(move_plan):
-                            row = current_row
-                            continue
-                        moved_row = merge_self_share_strm_folder(move_plan, store, current_row, active_move_config)
-                        sync_move_task_event(task_store, moved_row)
-                        send_move_result(telegram, chat_id, move_plan, moved_row)
-                        row = moved_row
-                        if moved_row.get("dest_path"):
-                            recognition["dest_path"] = moved_row.get("dest_path")
-                    if emby and emby.enabled:
-                        try:
-                            match = find_emby_match(emby, recognition, store.find_by_id(int(row["id"])) or updated, recent_limit=30)
-                            if match:
-                                confirmed_row = store.find_by_id(int(row["id"])) or updated
-                                send_emby_confirmed(telegram, chat_id, store, confirmed_row, match, emby, cleanup_client=cleanup_client)
-                                latest_row = store.find_by_id(int(row["id"])) or confirmed_row
-                                sync_emby_task_event(task_store, latest_row)
-                                sync_cleanup_task_event(task_store, latest_row)
-                                return
-                        except Exception:
-                            LOG.debug("Emby confirmation probe failed", exc_info=True)
-                    last_status = "organizing"
-                    continue
-                if not task_id:
-                    key = ShareKey(str(row.get("share_code") or ""), str(row.get("receive_code") or ""))
-                    found_task = cms.get_share_down_by_key(key)
-                    found_task_id = found_task.get("id") or found_task.get("task_id") or found_task.get("taskId")
-                    if found_task_id:
-                        task_id = str(found_task_id)
-                        row = store.upsert_submission(
-                            key,
-                            str(row.get("url") or ""),
-                            str(row.get("status") or "submitted"),
-                            cms_task_id=task_id,
-                            title=found_task.get("share_name") or found_task.get("name") or row.get("title"),
-                        )
-                        _sync_task_store(
-                            "late_cms_task_id",
-                            record_submission_event,
-                            task_store,
-                            row,
-                            TaskStage.CMS_SUBMITTED,
-                            TaskStatus.RUNNING,
-                            "已找到 CMS 任务 ID",
-                        )
-                    else:
-                        continue
-                detail = cms.get_share_down_detail(str(task_id))
-                status = str(detail.get("status") or detail.get("state") or detail.get("task_status") or last_status)
-                title = detail.get("name") or detail.get("title") or detail.get("share_name") or row.get("title")
-                updated = store.update_status(int(row["id"]), status, title=title) or row
-                sync_cms_status_task_event(task_store, updated, status, title=str(title or ""))
-                if title and not recognition_checked:
-                    recognition_checked = True
-                    try:
-                        recognition_resp = cms.recognize_media(str(title))
-                        recognition = normalize_recognition(recognition_resp)
-                    except Exception:
-                        LOG.debug("CMS recognition failed", exc_info=True)
-                        recognition = normalize_recognition({"code": 500, "msg": "recognition failed"})
-                    recognition["share_name"] = str(title)
-                    recognition, should_prompt = decide_category_prompt(store, updated, recognition, move_config, str(title))
-                    if should_prompt:
-                        sync_needs_action_task_event(task_store, updated, "等待人工确认分类")
-                        recognition, _should_prompt = resolve_category_or_existing_import(
-                            telegram,
-                            chat_id,
-                            store,
-                            updated,
-                            recognition,
-                            str(title),
-                            move_config=move_config,
-                            emby=emby,
-                            openai_classifier=openai_classifier,
-                            tmdb_resolver=tmdb_resolver,
-                        )
-                if move_config and recognition_checked:
-                    current_row = store.find_by_id(int(row["id"])) or updated
-                    if should_attempt_strm_move(current_row, self_share_enabled=bool(self_share_workflow)):
-                        if should_defer_for_probing(current_row, recognition, self_share_enabled=bool(self_share_workflow)):
-                            recognition, should_prompt = decide_category_prompt(store, current_row, recognition, move_config, str(title or ""))
-                            if not should_prompt:
-                                row = current_row
-                                continue
-                            sync_needs_action_task_event(task_store, current_row, "等待人工确认分类")
-                            recognition, _should_prompt = resolve_category_or_existing_import(
-                                telegram,
-                                chat_id,
-                                store,
-                                current_row,
-                                recognition,
-                                str(title or ""),
-                                move_config=move_config,
-                                emby=emby,
-                                openai_classifier=openai_classifier,
-                                tmdb_resolver=tmdb_resolver,
-                            )
-                            current_row = store.find_by_id(int(row["id"])) or current_row
-                        if should_wait_for_category(current_row):
-                            row = current_row
-                            continue
-                        source_dir = safe_resolve(Path(str(recognition.get("source_path")))) if recognition.get("source_path") else None
-                        if self_share_workflow:
-                            current_row, recognition = resolve_self_share_recognition_before_prepare(
-                                store,
-                                current_row,
-                                recognition,
-                                str(title or ""),
-                                openai_classifier=openai_classifier,
-                                tmdb_resolver=tmdb_resolver,
-                            )
-                            current_row, source_dir, category = prepare_self_share_move_inputs(
-                                current_row,
-                                recognition,
-                                str(title or ""),
-                                self_share_workflow,
-                                source_dir,
-                            )
-                            sync_self_share_task_events(task_store, current_row)
-                        else:
-                            category = final_category_for_move(current_row, recognition)
-                        if not source_dir and not self_share_workflow:
-                            source_dir = find_strm_source_dir(move_config, recognition, share_name=str(title or ""))
-                        if not source_dir:
-                            row = current_row
-                            continue
-                        active_move_config = move_config_for_workflow_source(
-                            move_config,
-                            source_dir,
-                            self_share_workflow.config if self_share_workflow else None,
-                        )
-                        move_plan = plan_strm_move(source_dir, category, active_move_config)
-                        sync_strm_ready_task_event(task_store, current_row, move_plan)
-                        if is_move_plan_retryable(move_plan):
-                            row = current_row
-                            continue
-                        moved_row = (
-                            merge_self_share_strm_folder(move_plan, store, current_row, active_move_config)
-                            if self_share_workflow
-                            else execute_strm_move(move_plan, store, current_row)
-                        )
-                        sync_move_task_event(task_store, moved_row)
-                        send_move_result(telegram, chat_id, move_plan, moved_row)
-                        row = moved_row
-                        if moved_row.get("dest_path"):
-                            recognition["dest_path"] = moved_row.get("dest_path")
-                if emby and emby.enabled:
-                    try:
-                        match = find_emby_match(emby, recognition, store.find_by_id(int(row["id"])) or updated, recent_limit=30)
-                        if match:
-                            confirmed_row = store.find_by_id(int(row["id"])) or updated
-                            send_emby_confirmed(telegram, chat_id, store, confirmed_row, match, emby, cleanup_client=cleanup_client)
-                            latest_row = store.find_by_id(int(row["id"])) or confirmed_row
-                            sync_emby_task_event(task_store, latest_row)
-                            sync_cleanup_task_event(task_store, latest_row)
-                            return
-                    except Exception:
-                        LOG.debug("Emby confirmation probe failed", exc_info=True)
-                if updated and status != last_status and is_terminal_status(status):
-                    telegram.send_message(chat_id, safe_telegram_text(f"CMS 任务状态更新：{format_task_label(updated)}：{status}", 240))
-                last_status = status
-            except Exception:
-                LOG.debug("Status poll failed", exc_info=True)
-        updated = store.update_status(int(row["id"]), last_status) or row
-        if emby and emby.enabled:
-            send_emby_timeout(telegram, chat_id, store, updated)
-            sync_emby_task_event(task_store, store.find_by_id(int(row["id"])) or updated)
-        else:
-            disabled_row = store.update_emby(int(row["id"]), "disabled") or row
-            sync_emby_task_event(task_store, disabled_row)
-            telegram.send_message(chat_id, safe_telegram_text(f"CMS 已提交：{format_task_label(updated)}。Emby 确认未启用，后续请看 CMS/Emby 后台状态。", 280))
-
-    threading.Thread(target=worker, daemon=True).start()
-
-
-# Import after the implementation exists so app.legacy_polling can avoid
-# importing bridge at module load time.
-from app.legacy_polling import start_status_poll
-
 def handle_update(
     update: dict,
     cms: CmsClient,
@@ -3606,7 +3317,7 @@ def handle_update(
     ):
         return
     if command == "/status":
-        if task_engine_enabled and task_store is not None:
+        if task_store is not None:
             tasks = task_store.list_recent_tasks(limit=8)
             taskstore_status = format_taskstore_status(tasks)
             if taskstore_status:
@@ -3620,7 +3331,7 @@ def handle_update(
         telegram.send_rich_message(chat_id, format_metrics(payload))
         return
     if command == "/history":
-        if task_engine_enabled and task_store is not None:
+        if task_store is not None:
             taskstore_history = format_taskstore_history(task_store.list_recent_tasks(limit=10))
             if taskstore_history:
                 telegram.send_rich_message(chat_id, taskstore_history)
@@ -3628,7 +3339,7 @@ def handle_update(
         telegram.send_rich_message(chat_id, format_history(store.recent(limit=10)))
         return
     if command == "/quality":
-        if task_engine_enabled and task_store is not None:
+        if task_store is not None:
             if quality_automation is not None:
                 send_quality_manual_queue(telegram, chat_id, quality_automation)
                 return
@@ -3663,8 +3374,8 @@ def handle_update(
                 hdhive_ok=hdhive_workflow.proxy.healthcheck() if hdhive_workflow is not None else False,
                 task_health=format_taskstore_health(
                     task_store,
-                    enabled=bool(task_engine_enabled),
-                ) if task_engine_enabled and task_store is not None else None,
+                    enabled=True,
+                ) if task_store is not None else None,
             ),
         )
         return
@@ -3716,7 +3427,7 @@ def handle_update(
     if explicit_series_update:
         text = series_update_payload
     sources = parse_media_sources(text)
-    if explicit_series_update and not (self_share_workflow and task_engine_enabled and task_store is not None):
+    if explicit_series_update and not (self_share_workflow and task_store is not None):
         telegram.send_message(chat_id, "追更需要启用 TaskStore 自分享工作流")
         return
     if explicit_target_task_id is not None:
@@ -3767,7 +3478,7 @@ def handle_update(
                 add_display_row(index, source, "新分享链接追更需指定历史任务号，例如：追更 #328 <115链接>")
                 continue
             if source.source_type in {"magnet", "ed2k"}:
-                if not (self_share_workflow and task_engine_enabled and task_store is not None):
+                if not (self_share_workflow and task_store is not None):
                     add_display_row(index, source, "云下载链接需要启用 TaskStore 自分享工作流")
                     continue
                 task = task_store.upsert_cloud_task(
@@ -3782,147 +3493,57 @@ def handle_update(
                 LOG.info("Enqueued cloud source in TaskStore: type=%s key=%s task_id=%s", source.source_type, source.source_key, task.id)
                 continue
             key = normalize_share_link(link)
-            if task_engine_enabled and task_store is None:
-                raise RuntimeError("TaskStore is required when TASK_ENGINE_ENABLED=true")
-            if task_engine_enabled and task_store is not None:
-                if explicit_series_update:
-                    existing_task = task_store.find_task_by_share_key(key.share_code, key.receive_code)
-                    updated_task, update_result = start_series_update_task(
-                        existing_task,
-                        store,
-                        task_store,
-                        source="文本追更",
-                    )
-                    if update_result == "started":
-                        add_display_row(index, source, f"已开始追更：{format_task_snapshot(updated_task)}")
-                        continue
-                    if update_result == "failed":
-                        add_display_row(index, source, f"追更失败：{format_task_snapshot(updated_task)}")
-                        continue
-                    add_display_row(index, source, "新分享链接追更需指定历史任务号，例如：追更 #328 <115链接>")
-                    continue
-                task = task_store.upsert_task(key.share_code, key.receive_code, link, chat_id=str(chat_id or ""))
-                submission = None
-                submission_id = task.submission_id or task.metadata.get("submission_id")
-                if submission_id not in (None, ""):
-                    try:
-                        submission = store.find_by_id(int(submission_id))
-                    except (TypeError, ValueError):
-                        submission = None
-                drift_stage = completion_drift_retry_stage(task, submission)
-                if drift_stage:
-                    task = task_store.record_event(
-                        task.id,
-                        drift_stage,
-                        TaskStatus.RUNNING,
-                        "已完成任务状态漂移，准备重新检查",
-                        metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": drift_stage.value},
-                    )
-                    task = task_store.enqueue_task(task.id, drift_stage, message="重新检查入库状态")
-                elif task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {TaskStage.FAILED, TaskStage.NEEDS_ACTION}:
-                    retry_stage = retry_stage_for_intake(task)
-                    task = task_store.record_event(
-                        task.id,
-                        retry_stage,
-                        task.status,
-                        "准备重新入队",
-                        metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": retry_stage.value},
-                    )
-                    task = task_store.enqueue_task(task.id, retry_stage, message="重新入队")
-                elif task.current_stage == TaskStage.RECEIVED and task.status == TaskStatus.PENDING and not task_store.list_events(task.id):
-                    task = task_store.enqueue_task(task.id, TaskStage.RECEIVED, message="等待执行")
-                add_display_row(index, source, format_task_intake_reply(task))
-                LOG.info("Enqueued self-share link in TaskStore: share_code=%s task_id=%s stage=%s status=%s", key.share_code, task.id, task.current_stage.value, task.status.value)
-                continue
-            _sync_task_store(
-                "received",
-                ensure_task_for_link,
-                task_store,
-                key.share_code,
-                key.receive_code,
-                link,
-            )
-            existing = store.find_by_key(key)
-            if should_skip_existing_submission(existing, self_share_enabled=bool(self_share_workflow)):
-                _sync_task_store("existing_submission", sync_task_from_submission, task_store, existing, "链接已存在")
-                add_display_row(index, source, "已存在：" + format_task_label(existing))
-                continue
-            if self_share_workflow:
-                if not cleanup_client or not hasattr(cleanup_client, "receive_share_to_cid"):
-                    raise RuntimeError("self_share_sync requires P115 receive client")
-                if not str(self_share_receive_cid or "").strip():
-                    raise RuntimeError("SELF_SHARE_RECEIVE_CID is required for self_share_sync")
-                received = cleanup_client.receive_share_to_cid(key.share_code, key.receive_code, str(self_share_receive_cid).strip())
-                row = store.upsert_submission(key, link, "received", title=received.get("title"))
-                row = store.update_self_share(row["id"], workflow_mode="self_share_sync", workflow_phase="received_to_pending") or row
-                _sync_task_store(
-                    "self_share_received",
-                    record_submission_event,
-                    task_store,
-                    row,
-                    TaskStage.RECEIVED,
-                    TaskStatus.RUNNING,
-                    "已接收 115 分享到待整理",
-                    received_title=received.get("title") or "",
-                    received_file_ids=received.get("file_ids") or [],
-                    received_items=received.get("received_items") or [],
-                    received_items_complete=bool(received.get("received_items_complete", True)),
-                    received_expected_item_count=int(received.get("received_expected_item_count") or 0),
-                    received_existing_file_ids=received.get("received_existing_file_ids") or [],
-                    received_snapshot_complete=bool(received.get("received_snapshot_complete", False)),
-                    tmdb_hint_normalized=False,
-                )
-                add_display_row(index, source, "已接收：" + format_task_label(row))
-                LOG.info("Received 115 share without CMS plain submit: share_code=%s cid=%s", key.share_code, self_share_receive_cid)
-                if poll_status:
-                    start_status_poll(
-                        cms,
-                        telegram,
-                        chat_id,
-                        store,
-                        row,
-                        status_poll_seconds,
-                        status_poll_interval,
-                        emby=emby,
-                        move_config=move_config,
-                        openai_classifier=openai_classifier,
-                        tmdb_resolver=tmdb_resolver,
-                        self_share_workflow=self_share_workflow,
-                        cleanup_client=cleanup_client,
-                        task_store=task_store,
-                    )
-                continue
-            resp = cms.add_share_down(link)
-            task_id, title = extract_task_info(resp)
-            row = store.upsert_submission(key, link, "submitted", cms_task_id=task_id, title=title)
-            _sync_task_store(
-                "cms_submitted",
-                record_submission_event,
-                task_store,
-                row,
-                TaskStage.CMS_SUBMITTED,
-                TaskStatus.RUNNING,
-                "已提交 CMS",
-            )
-            add_display_row(index, source, "已提交：" + format_task_label(row))
-            LOG.info("Submitted share link to CMS: share_code=%s task_id=%s", key.share_code, task_id)
-            if poll_status:
-                start_status_poll(
-                    cms,
-                    telegram,
-                    chat_id,
+            if task_store is None:
+                raise RuntimeError("TaskStore is required")
+            if explicit_series_update:
+                existing_task = task_store.find_task_by_share_key(key.share_code, key.receive_code)
+                updated_task, update_result = start_series_update_task(
+                    existing_task,
                     store,
-                    row,
-                    status_poll_seconds,
-                    status_poll_interval,
-                    emby=emby,
-                    move_config=move_config,
-                    openai_classifier=openai_classifier,
-                    tmdb_resolver=tmdb_resolver,
-                    self_share_workflow=self_share_workflow,
-                    cleanup_client=cleanup_client,
-                    task_store=task_store,
+                    task_store,
+                    source="文本追更",
                 )
+                if update_result == "started":
+                    add_display_row(index, source, f"已开始追更：{format_task_snapshot(updated_task)}")
+                    continue
+                if update_result == "failed":
+                    add_display_row(index, source, f"追更失败：{format_task_snapshot(updated_task)}")
+                    continue
+                add_display_row(index, source, "新分享链接追更需指定历史任务号，例如：追更 #328 <115链接>")
+                continue
+            task = task_store.upsert_task(key.share_code, key.receive_code, link, chat_id=str(chat_id or ""))
+            submission = None
+            submission_id = task.submission_id or task.metadata.get("submission_id")
+            if submission_id not in (None, ""):
+                try:
+                    submission = store.find_by_id(int(submission_id))
+                except (TypeError, ValueError):
+                    submission = None
+            drift_stage = completion_drift_retry_stage(task, submission)
+            if drift_stage:
+                task = task_store.record_event(
+                    task.id,
+                    drift_stage,
+                    TaskStatus.RUNNING,
+                    "已完成任务状态漂移，准备重新检查",
+                    metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": drift_stage.value},
+                )
+                task = task_store.enqueue_task(task.id, drift_stage, message="重新检查入库状态")
+            elif task.status in {TaskStatus.FAILED, TaskStatus.NEEDS_ACTION} or task.current_stage in {TaskStage.FAILED, TaskStage.NEEDS_ACTION}:
+                retry_stage = retry_stage_for_intake(task)
+                task = task_store.record_event(
+                    task.id,
+                    retry_stage,
+                    task.status,
+                    "准备重新入队",
+                    metadata_patch={"retry_from_stage": task.current_stage.value, "retry_stage": retry_stage.value},
+                )
+                task = task_store.enqueue_task(task.id, retry_stage, message="重新入队")
+            elif task.current_stage == TaskStage.RECEIVED and task.status == TaskStatus.PENDING and not task_store.list_events(task.id):
+                task = task_store.enqueue_task(task.id, TaskStage.RECEIVED, message="等待执行")
+            add_display_row(index, source, format_task_intake_reply(task))
+            LOG.info("Enqueued self-share link in TaskStore: share_code=%s task_id=%s stage=%s status=%s", key.share_code, task.id, task.current_stage.value, task.status.value)
+            continue
         except Exception as exc:  # keep bot alive and report the failed link
             LOG.exception("Failed to submit link")
             category = classify_error(exc)
@@ -3973,6 +3594,10 @@ def run_forever(
         else tmdb_web_resolver
     )
     task_store = create_task_store(config)
+    write_gate = Database(task_store.db_path).write_gate()
+    start_runner = write_gate in {"runner_open", "open"}
+    start_intake = write_gate == "open"
+    start_observers = write_gate == "open"
     store = WorkflowRowAdapter(task_store)
     background_jobs = BackgroundJobCoordinator(state_store=task_store)
     hdhive_workflow = create_hdhive_workflow(config, cms)
@@ -4013,7 +3638,7 @@ def run_forever(
     probe_threads: list[threading.Thread] = []
     probe_holder: dict[str, Any] = {"stop_event": None, "thread": None}
     probe_holder_lock = threading.Lock()
-    if config.task_engine_enabled:
+    if start_runner:
         direct_workflow = DirectTaskWorkflow(
             cms=cms,
             store=store,
@@ -4073,7 +3698,7 @@ def run_forever(
             config.backup_timezone,
             config.backup_retention_days,
         )
-    if config.task_engine_enabled and self_share_config.enabled and p115:
+    if start_observers and self_share_config.enabled and p115:
         def set_invalid_probe_enabled(quality_enabled: bool) -> None:
             if not config.self_share_invalid_cleanup_enabled:
                 return
@@ -4132,7 +3757,7 @@ def run_forever(
             stop_event,
         )
     offset = None
-    LOG.info("cms-tg-ingest started db_path=%s", config.db_path)
+    LOG.info("cms-tg-ingest started database_path=%s write_gate=%s", config.database_path, write_gate)
     try:
         repaired = normalize_emby_parents(store, emby)
         if repaired:
@@ -4140,17 +3765,6 @@ def run_forever(
         write_metrics_snapshot(store, metrics_path_for_store(store))
     except Exception:
         LOG.debug("Failed to write startup metrics snapshot", exc_info=True)
-    if config.status_repair_enabled and not config.task_engine_enabled:
-        start_status_repair_loop(
-            store,
-            emby,
-            move_config=move_config,
-            cms=cms,
-            self_share_config=self_share_config,
-            cleanup_client=p115 if self_share_config.cleanup_after_emby else None,
-            interval_seconds=max(1, int(config.status_repair_interval_seconds)),
-            limit=max(1, int(config.status_repair_limit)),
-        )
     if config.media_strm_repair_enabled and Path(config.cms_state_db_path).is_file():
         cms_index = CmsCloudDataIndex(config.cms_state_db_path)
         strm_source_root = Path(config.strm_source_roots.split(",")[0].strip())
@@ -4191,7 +3805,7 @@ def run_forever(
             cleanup_client=p115 if self_share_config.enabled else None,
             self_share_receive_cid=config.self_share_receive_cid,
             task_store=task_store,
-            task_engine_enabled=config.task_engine_enabled,
+            task_engine_enabled=start_intake,
             hdhive_workflow=hdhive_workflow,
             enqueue_unlocked_links=enqueue_hdhive_links,
             hdhive_subscription_service=hdhive_subscription_service,
@@ -4207,7 +3821,7 @@ def run_forever(
                 return None
         return None
 
-    tmdb_card_cache = TmdbDetailCache(Path(config.task_db_path))
+    tmdb_card_cache = TmdbDetailCache(Path(config.database_path))
 
     def notify_hdhive_item(subscription: Any, item: Any) -> None:
         details = {}
@@ -4268,7 +3882,7 @@ def run_forever(
         tmdb_resolver=tmdb_resolver,
         emby=emby,
     )
-    if hdhive_subscription_service is not None and Path(
+    if start_observers and hdhive_subscription_service is not None and Path(
         getattr(config, "hdhive_token_config_path", "")
     ).is_file():
         hdhive_subscription_scheduler = HdhiveSubscriptionScheduler(
@@ -4323,6 +3937,9 @@ def run_forever(
 
     try:
         while not stop_event.is_set():
+            if not start_intake:
+                stop_event.wait(max(1, int(config.poll_timeout)))
+                continue
             try:
                 updates = telegram.get_updates(offset=offset, timeout=config.poll_timeout)
                 for update in updates:
@@ -4343,7 +3960,7 @@ def run_forever(
                         cleanup_client=p115 if self_share_config.enabled else None,
                         self_share_receive_cid=config.self_share_receive_cid,
                         task_store=task_store,
-                        task_engine_enabled=config.task_engine_enabled,
+                        task_engine_enabled=start_intake,
                         hdhive_workflow=hdhive_workflow,
                         enqueue_unlocked_links=enqueue_hdhive_links if hdhive_workflow is not None else None,
                         quality_automation=quality_automation,
