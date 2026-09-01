@@ -251,8 +251,10 @@ _HDHIVE_FILTER_PROMPT = "请发送集数过滤，例如 S01E01-S01E10,S02；发�
 ED2K_HELP_EXAMPLE = "ed2k://|file|Example.mkv|10|" + "0123456789ABCDEF" * 2 + "|/"
 HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 分享、磁力或 ED2K 链接\n- 磁力/ED2K 会进入 115 云下载，再复用 CMS 整理和分享 STRM 流程\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- 新链接追更：追更 #任务号 <新115链接>\n- /搜索：通过 TMDB 匹配 HDHive 影片/剧集，筛选网盘并解锁资源（/hdhive_search 仍兼容）\n- /订阅 <HDHive剧集链接>：创建 HDHive 剧集订阅\n- 发送 HDHive 剧集页面也可直接订阅，例如 https://hdhive.com/tv/xxxxxxxx\n- /status 查看最近任务\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd\n""" + ED2K_HELP_EXAMPLE
 MENU_BUTTONS = {
-    "📊 统计": "/metrics",
+    "🔍 搜索": "/搜索",
     "📋 最近任务": "/status",
+    "📺 订阅": "/hdhive_subscriptions",
+    "📊 统计": "/metrics",
     "🕘 历史": "/history",
     "🧯 巡检": "/quality",
     "🧹 清理历史": "/clear_history",
@@ -3262,10 +3264,10 @@ def handle_update(
         return
     if command in {"/搜索", "/hdhive_search"}:
         if hdhive_workflow is None:
-            telegram.send_message(chat_id, "HDHive 搜索未启用，或 CMS 尚未完成影巢账号授权。")
+            send_menu_message(telegram, chat_id, "HDHive 搜索未启用，或 CMS 尚未完成影巢账号授权。")
             return
         session_id = hdhive_workflow.sessions.begin(str(chat_id), "")
-        telegram.send_message(chat_id, f"请输入片名或 TMDB ID。\n本次搜索编号：{session_id}")
+        send_menu_message(telegram, chat_id, f"请输入片名或 TMDB ID。\n本次搜索编号：{session_id}")
         return
     if command == "/订阅":
         if hdhive_subscription_service is None:

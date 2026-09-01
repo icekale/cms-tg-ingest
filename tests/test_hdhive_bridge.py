@@ -16,6 +16,7 @@ from app.telegram_ui import (
     format_hdhive_subscriptions,
     hdhive_candidate_keyboard,
     hdhive_resource_keyboard,
+    menu_keyboard,
     truncate_end,
 )
 
@@ -435,6 +436,7 @@ class HdhiveBridgeTests(unittest.TestCase):
 
         self.assertIn("请输入片名或 TMDB ID", telegram.messages[-1][1])
         self.assertTrue(telegram.messages[-1][1].split("本次搜索编号：", 1)[1])
+        self.assertEqual(telegram.messages[-1][2], menu_keyboard())
 
     def test_chinese_subscription_command_requires_a_hdhive_url(self):
         telegram = FakeTelegram()

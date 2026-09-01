@@ -789,11 +789,8 @@ def clear_history_keyboard() -> dict[str, Any]:
 def menu_keyboard() -> dict[str, Any]:
     return {
         "keyboard": [
-            [{"text": "📊 统计"}, {"text": "📋 最近任务"}],
-            [{"text": "🕘 历史"}, {"text": "🧹 清理历史"}],
-            [{"text": "HDHive 搜索"}],
-            [{"text": "HDHive 订阅"}],
-            [{"text": "🩺 健康检查"}, {"text": "❓ 帮助"}],
+            [{"text": "🔍 搜索"}],
+            [{"text": "📋 最近任务"}, {"text": "📺 订阅"}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
