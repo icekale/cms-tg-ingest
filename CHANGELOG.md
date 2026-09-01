@@ -1,3 +1,7 @@
+## 0.5.3 - 2026-09-01
+
+- **Telegram 底部菜单**：常驻键盘改为搜索、最近任务、订阅；旧按钮文字仍可用。
+
 ## 0.5.2 - 2026-08-31
 
 - **接收后不再因 title 崩溃**：adapter `upsert_submission` 不再把 `title` 传给 `upsert_task`，真实 115 入库可以过 `received`。
