@@ -62,6 +62,10 @@ class FakeP115:
         self.folder_paths = {}
         self.file_infos = {}
         self.file_info_calls = []
+        self.share_listings = {}
+        self.share_prepare_items = None
+        self.share_prepare_title = "received title"
+        self.received_intents = []
 
     def receive_share_to_cid(self, share_code, receive_code, receive_cid):
         intent = self.prepare_share_receive(share_code, receive_code, receive_cid)
@@ -69,6 +73,18 @@ class FakeP115:
 
     def prepare_share_receive(self, share_code, receive_code, receive_cid):
         self.receive_preparations.append((share_code, receive_code, receive_cid))
+        if self.share_prepare_items is not None:
+            items = list(self.share_prepare_items)
+            return {
+                "share_code": share_code,
+                "receive_code": receive_code,
+                "target_cid": receive_cid,
+                "source_file_ids": [str(item["fid"]) for item in items],
+                "source_file_names": [str(item["n"]) for item in items],
+                "title": self.share_prepare_title,
+                "target_pre_call_file_ids": ["old-file"],
+                "target_snapshot_complete": True,
+            }
         return {
             "share_code": share_code,
             "receive_code": receive_code,
@@ -79,6 +95,10 @@ class FakeP115:
             "target_pre_call_file_ids": ["old-file"],
             "target_snapshot_complete": True,
         }
+
+    def share_root_items(self, share_code, receive_code, cid="0", limit=100, offset=0, use_cache=True):
+        items = list(self.share_listings.get(str(cid), []))
+        return items, {"data": {"list": items}}
 
     def _receive_result(self, intent):
         return {
@@ -109,7 +129,35 @@ class FakeP115:
 
     def execute_prepared_share_receive(self, intent):
         self.received.append((intent["share_code"], intent["receive_code"], intent["target_cid"]))
+        self.received_intents.append(dict(intent))
         self.received_target_visible = True
+        source_ids = [str(value).strip() for value in intent.get("source_file_ids") or [] if str(value).strip()]
+        source_names = [str(value) for value in intent.get("source_file_names") or []]
+        if source_ids != ["file-a", "file-b"]:
+            received_items = [
+                {
+                    "file_id": f"local-{file_id}",
+                    "file_name": source_names[index] if index < len(source_names) else file_id,
+                    "parent_id": intent["target_cid"],
+                    "is_folder": False,
+                    "received_item_verified": True,
+                }
+                for index, file_id in enumerate(source_ids)
+            ]
+            return {
+                "title": intent.get("title") or "received title",
+                "file_ids": source_ids,
+                "received_items": received_items,
+                "received_items_complete": True,
+                "received_expected_item_count": len(received_items),
+                "received_existing_file_ids": [
+                    str(value).strip()
+                    for value in intent.get("target_pre_call_file_ids") or []
+                    if str(value).strip()
+                ],
+                "received_snapshot_complete": True,
+                "response": {"state": True},
+            }
         return self._receive_result(intent)
 
     def reconcile_prepared_share_receive(self, intent):
@@ -931,6 +979,90 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertFalse(result.metadata["tmdb_hint_normalized"])
             self.assertEqual(self.tasks.find_task(task.id).metadata["receive_target_cid"], "pending-cid")
 
+    def test_received_stage_skips_files_already_in_dest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            dest = {
+                "cid": "dest-y",
+                "pid": "movie-parent",
+                "n": "Y-异形：夺命舰-2024-[tmdb=945961]",
+                "fc": 1,
+            }
+            self.p115.search_hits = {
+                "945961": [dest],
+            }
+            self.p115.files_by_parent = {
+                "dest-y": [{"fid": "hive", "n": "HiveWeb.mkv", "cid": "dest-y"}],
+            }
+            self.p115.share_prepare_title = "异形：夺命舰 (2024) {tmdbid=945961}"
+            self.p115.share_prepare_items = [
+                {"fid": "hive-share", "n": "HiveWeb.mkv"},
+                {"fid": "ourbits-share", "n": "OurBits.mkv"},
+            ]
+            task = self._claim_task("abc", "1234", TaskStage.RECEIVED)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(self.p115.received_intents[0]["source_file_ids"], ["ourbits-share"])
+            self.assertEqual(result.metadata["received_items"][0]["file_name"], "OurBits.mkv")
+
+    def test_received_stage_expands_share_folder_and_skips_excluded_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            prior = self.tasks.upsert_task("old", "0000", "https://115cdn.com/s/old?password=0000")
+            self.tasks.record_event(
+                prior.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "cleaned",
+                tmdb_id="945961",
+                metadata_patch={
+                    "intake_skip_names": ["ADE.mkv"],
+                    "intake_identity": {"intake_skip_names": ["ADE.mkv"]},
+                },
+            )
+            self.p115.share_prepare_title = "异形：夺命舰 (2024) {tmdbid=945961}"
+            self.p115.share_prepare_items = [
+                {"fid": "folder-1", "n": "异形：夺命舰 (2024) {tmdbid=945961}"},
+            ]
+            self.p115.share_listings = {
+                "folder-1": [
+                    {"fid": "ade-share", "n": "ADE.mkv"},
+                    {"fid": "ourbits-share", "n": "OurBits.mkv"},
+                ]
+            }
+            task = self._claim_task("abc", "1234", TaskStage.RECEIVED)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(self.p115.received_intents[0]["source_file_ids"], ["ourbits-share"])
+            self.assertEqual(result.metadata["received_items"][0]["file_name"], "OurBits.mkv")
+
+    def test_received_stage_skips_receive_when_all_share_files_excluded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp, receive_cid="pending-cid")
+            dest = {
+                "cid": "dest-y",
+                "pid": "movie-parent",
+                "n": "Y-异形：夺命舰-2024-[tmdb=945961]",
+                "fc": 1,
+            }
+            self.p115.search_hits = {"945961": [dest]}
+            self.p115.files_by_parent = {
+                "dest-y": [{"fid": "ourbits", "n": "OurBits.mkv", "cid": "dest-y"}],
+            }
+            self.p115.share_prepare_title = "异形：夺命舰 (2024) {tmdbid=945961}"
+            self.p115.share_prepare_items = [{"fid": "ourbits-share", "n": "OurBits.mkv"}]
+            task = self._claim_task("abc", "1234", TaskStage.RECEIVED)
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(self.p115.received, [])
+            self.assertIn("跳过接收", result.message)
+
     def test_receive_cid_is_pinned_after_receive(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp, receive_cid="111")
@@ -1714,6 +1846,92 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             status, targets, identity = workflow._resolve_intake_dest_folders(
                 task_metadata,
                 {},
+                receive_cid="pending-cid",
+            )
+
+            self.assertEqual(status, "incomplete")
+            self.assertEqual(targets, [])
+            self.assertIsNone(identity)
+
+    def test_resolve_intake_dest_folders_drops_vanished_file_and_binds_remaining(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            dest = {
+                "cid": "dest-y",
+                "pid": "movie-parent",
+                "n": "Y-异形：夺命舰-2024-[tmdb=945961]",
+                "fc": 1,
+            }
+            remaining = {"fid": "ourbits", "cid": "dest-y", "n": "OurBits.mkv"}
+            workflow.p115.search_hits = {
+                "945961": [dest],
+                "OurBits.mkv": [remaining],
+                "ADE.mkv": [],
+                "dest-y": [dest],
+            }
+            workflow.p115.files_by_parent = {"dest-y": [remaining]}
+            workflow.p115.folder_paths = {
+                "dest-y": [dest, {"cid": "movie-parent", "pid": "0", "n": "欧美电影"}],
+            }
+            task_metadata = {
+                "tmdb_hint_id": "945961",
+                "intake_identity": {
+                    "root_ids": ["received-root"],
+                    "files": [
+                        {"id": "ade", "name": "ADE.mkv"},
+                        {"id": "ourbits", "name": "OurBits.mkv"},
+                    ],
+                },
+            }
+
+            status, targets, identity = workflow._resolve_intake_dest_folders(
+                task_metadata,
+                {"tmdb_id": "945961"},
+                receive_cid="pending-cid",
+            )
+
+            self.assertEqual(status, "dest-y")
+            self.assertEqual(targets[0]["file_ids"], ["ourbits"])
+            self.assertEqual(identity["files"], [{"id": "ourbits", "name": "OurBits.mkv"}])
+            self.assertEqual(identity["dest_id"], "dest-y")
+            self.assertEqual(identity["intake_skip_names"], ["ADE.mkv"])
+
+    def test_resolve_intake_dest_folders_keeps_waiting_for_unmoved_live_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            dest = {
+                "cid": "dest-y",
+                "pid": "movie-parent",
+                "n": "Y-异形：夺命舰-2024-[tmdb=945961]",
+                "fc": 1,
+            }
+            remaining = {"fid": "ourbits", "cid": "dest-y", "n": "OurBits.mkv"}
+            unmoved = {"fid": "ade", "cid": "pending-cid", "n": "ADE.mkv"}
+            workflow.p115.search_hits = {
+                "945961": [dest],
+                "OurBits.mkv": [remaining],
+                "ADE.mkv": [unmoved],
+                "dest-y": [dest],
+            }
+            workflow.p115.files_by_parent = {"dest-y": [remaining], "pending-cid": [unmoved]}
+            workflow.p115.file_infos = {"ade": unmoved}
+            workflow.p115.folder_paths = {
+                "dest-y": [dest, {"cid": "movie-parent", "pid": "0", "n": "欧美电影"}],
+            }
+            task_metadata = {
+                "tmdb_hint_id": "945961",
+                "intake_identity": {
+                    "root_ids": ["received-root"],
+                    "files": [
+                        {"id": "ade", "name": "ADE.mkv"},
+                        {"id": "ourbits", "name": "OurBits.mkv"},
+                    ],
+                },
+            }
+
+            status, targets, identity = workflow._resolve_intake_dest_folders(
+                task_metadata,
+                {"tmdb_id": "945961"},
                 receive_cid="pending-cid",
             )
 

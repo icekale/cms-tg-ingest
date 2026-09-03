@@ -26,6 +26,7 @@ from app.clients.p115 import (
     p115_is_folder,
     p115_item_id,
     p115_item_parent_id,
+    p115_share_item_id,
     select_named_cloud_outputs,
 )
 from app.config import DEFAULT_OWN_SHARE_RECEIVE_CODE, MovePlan, SelfShareConfig, default_library_roots, is_relative_to, is_under_any_root, safe_resolve
@@ -52,6 +53,7 @@ from app.media.intake_identity import (
     collect_file_ids_under_dest,
     dest_file_ids_from_hits,
     is_season_folder_name,
+    is_video_name,
     snapshot_files,
 )
 from app.media.strm import (
@@ -1302,6 +1304,166 @@ class BridgeSelfShareTaskWorkflow:
             )
         return raw, None, True, 0
 
+    def _receive_tmdb_id(self, task, intent: dict[str, Any]) -> str:
+        for value in (
+            getattr(task, "tmdb_id", ""),
+            (getattr(task, "metadata", None) or {}).get("tmdb_hint_id"),
+            extract_tmdb_id_from_name(str(intent.get("title") or "")),
+            *(
+                extract_tmdb_id_from_name(str(name or ""))
+                for name in (intent.get("source_file_names") or [])
+            ),
+        ):
+            tmdb_id = str(value or "").strip()
+            if tmdb_id:
+                return tmdb_id
+        return ""
+
+    def _dest_video_names_for_tmdb(self, tmdb_id: str) -> set[str]:
+        names: set[str] = set()
+        tmdb_id = str(tmdb_id or "").strip()
+        if not tmdb_id or not hasattr(self.p115, "search_files"):
+            return names
+        try:
+            hits = self.p115.search_files(tmdb_id) or []
+        except Exception:
+            LOG.debug("Failed to search dest videos tmdb=%s", tmdb_id, exc_info=True)
+            return names
+        for item in hits:
+            if not isinstance(item, dict) or not p115_is_folder(item):
+                continue
+            folder_name = p115_file_name(item)
+            if extract_tmdb_id_from_name(folder_name) != tmdb_id:
+                continue
+            folder_id = p115_item_id(item)
+            if not folder_id or not hasattr(self.p115, "list_files"):
+                continue
+            try:
+                children = self._p115_list_files(folder_id)
+            except Exception:
+                LOG.debug("Failed to list dest videos dest=%s", folder_id, exc_info=True)
+                continue
+            for child in children or []:
+                if not isinstance(child, dict):
+                    continue
+                child_name = p115_file_name(child)
+                if is_video_name(child_name):
+                    names.add(child_name)
+                    continue
+                if not (p115_is_folder(child) and is_season_folder_name(child_name)):
+                    continue
+                season_id = p115_item_id(child)
+                if not season_id:
+                    continue
+                try:
+                    episodes = self._p115_list_files(season_id)
+                except Exception:
+                    LOG.debug("Failed to list dest season dest=%s", season_id, exc_info=True)
+                    continue
+                names.update(
+                    p115_file_name(episode)
+                    for episode in episodes or []
+                    if isinstance(episode, dict) and is_video_name(p115_file_name(episode))
+                )
+        return names
+
+    def _prior_intake_skip_names(self, tmdb_id: str, task_id: int) -> set[str]:
+        names: set[str] = set()
+        tmdb_id = str(tmdb_id or "").strip()
+        if not tmdb_id or not hasattr(self.task_store, "list_recent_tasks"):
+            return names
+        try:
+            others = self.task_store.list_recent_tasks(100)
+        except Exception:
+            LOG.debug("Failed to list prior skip names tmdb=%s", tmdb_id, exc_info=True)
+            return names
+        for other in others:
+            if int(getattr(other, "id", 0) or 0) == int(task_id):
+                continue
+            other_tmdb = str(
+                getattr(other, "tmdb_id", "")
+                or (getattr(other, "metadata", None) or {}).get("tmdb_hint_id")
+                or ""
+            ).strip()
+            if other_tmdb != tmdb_id:
+                continue
+            metadata = getattr(other, "metadata", None) or {}
+            identity = metadata.get("intake_identity") if isinstance(metadata, dict) else None
+            raw_names = []
+            if isinstance(metadata, dict):
+                raw_names.extend(metadata.get("intake_skip_names") or [])
+            if isinstance(identity, dict):
+                raw_names.extend(identity.get("intake_skip_names") or [])
+            names.update(str(name).strip() for name in raw_names if str(name).strip())
+        return names
+
+    def _receive_skip_names(self, task, intent: dict[str, Any]) -> set[str]:
+        metadata = getattr(task, "metadata", None) or {}
+        identity = metadata.get("intake_identity") if isinstance(metadata, dict) else None
+        names = {
+            str(name).strip()
+            for name in list(metadata.get("intake_skip_names") or [])
+            + list((identity or {}).get("intake_skip_names") or [])
+            if str(name).strip()
+        }
+        tmdb_id = self._receive_tmdb_id(task, intent)
+        if tmdb_id:
+            names.update(self._dest_video_names_for_tmdb(tmdb_id))
+            names.update(self._prior_intake_skip_names(tmdb_id, int(task.id)))
+        return names
+
+    def _expand_share_receive_items(self, intent: dict[str, Any], items: list[dict[str, str]]) -> list[dict[str, str]]:
+        if not hasattr(self.p115, "share_root_items"):
+            return items
+        expanded: list[dict[str, str]] = []
+        for item in items:
+            name = str(item.get("n") or "").strip()
+            file_id = str(item.get("fid") or "").strip()
+            if not file_id:
+                continue
+            if is_video_name(name):
+                expanded.append({"fid": file_id, "n": name})
+                continue
+            try:
+                children, _snap = self.p115.share_root_items(
+                    str(intent.get("share_code") or ""),
+                    str(intent.get("receive_code") or ""),
+                    cid=file_id,
+                    limit=100,
+                    use_cache=False,
+                )
+            except Exception:
+                LOG.debug("Failed to expand share folder id=%s", file_id, exc_info=True)
+                expanded.append({"fid": file_id, "n": name})
+                continue
+            child_items = []
+            for child in children or []:
+                if not isinstance(child, dict):
+                    continue
+                child_id = p115_share_item_id(child)
+                child_name = p115_file_name(child)
+                if child_id:
+                    child_items.append({"fid": child_id, "n": child_name})
+            expanded.extend(child_items or [{"fid": file_id, "n": name}])
+        return expanded
+
+    def _apply_receive_skip_filter(self, intent: dict[str, Any], task) -> dict[str, Any]:
+        skip_names = self._receive_skip_names(task, intent)
+        if not skip_names:
+            return intent
+        items = [
+            {"fid": str(file_id).strip(), "n": str(name).strip()}
+            for file_id, name in zip(intent.get("source_file_ids") or [], intent.get("source_file_names") or [])
+            if str(file_id).strip()
+        ]
+        items = self._expand_share_receive_items(intent, items)
+        kept = [item for item in items if item["n"] not in skip_names]
+        filtered = dict(intent)
+        filtered["source_file_ids"] = [item["fid"] for item in kept]
+        filtered["source_file_names"] = [item["n"] for item in kept]
+        filtered["receive_skip_names"] = sorted(skip_names)
+        return filtered
+
     def _stage_received(self, task):
         if not self.self_share_config.enabled:
             return StageResult.failed("自分享工作流未启用", error_type="self_share_disabled")
@@ -1390,6 +1552,15 @@ class BridgeSelfShareTaskWorkflow:
 
         if operation is None:
             intent = self.p115.prepare_share_receive(task.share_code, task.receive_code, receive_cid)
+            intent = self._apply_receive_skip_filter(intent, task)
+            if not [file_id for file_id in (intent.get("source_file_ids") or []) if str(file_id).strip()]:
+                return StageResult.needs_action(
+                    "分享文件均已在片库或已排除，已跳过接收",
+                    {
+                        "receive_target_cid": receive_cid,
+                        "receive_skip_names": list(intent.get("receive_skip_names") or []),
+                    },
+                )
             operation = self.task_store.prepare_operation(
                 int(task.id),
                 operation_key,
@@ -1903,6 +2074,28 @@ class BridgeSelfShareTaskWorkflow:
                     folder_hits.append(folder)
                     folders.add(folder_id)
 
+    def _remaining_intake_file_ids(
+        self,
+        expected_ids: list[str],
+        file_hits: list[dict[str, Any]],
+    ) -> list[str]:
+        found = {p115_item_id(item) for item in file_hits if p115_item_id(item)}
+        remaining: list[str] = []
+        for file_id in expected_ids:
+            if file_id in found:
+                remaining.append(file_id)
+                continue
+            info = None
+            if hasattr(self.p115, "file_info"):
+                try:
+                    info = self.p115.file_info(file_id)
+                except Exception:
+                    LOG.debug("Failed to read intake file info id=%s", file_id, exc_info=True)
+                    info = None
+            if isinstance(info, dict):
+                remaining.append(file_id)
+        return remaining
+
     def _intake_expected_files_located(
         self,
         dest: str,
@@ -2178,6 +2371,39 @@ class BridgeSelfShareTaskWorkflow:
         grouped = expand_candidate_destinations(grouped)
         if grouped is None:
             return CONFLICT, [], None
+        if not grouped:
+            remaining_ids = self._remaining_intake_file_ids(expected_ids, file_hits)
+            if remaining_ids != expected_ids:
+                remaining_set = set(remaining_ids)
+                dropped_names = [
+                    str(item.get("name") or "").strip()
+                    for item in files
+                    if str(item.get("id") or "").strip() not in remaining_set
+                    and str(item.get("name") or "").strip()
+                ]
+                files = [
+                    item
+                    for item in files
+                    if str(item.get("id") or "").strip() in remaining_set
+                ]
+                expected_ids = remaining_ids
+                skip_names = sorted(
+                    {
+                        str(name).strip()
+                        for name in list(identity.get("intake_skip_names") or []) + dropped_names
+                        if str(name).strip()
+                    }
+                )
+                identity = {**identity, "files": files, "intake_skip_names": skip_names}
+                if expected_ids:
+                    grouped = dest_file_ids_from_hits(
+                        file_hits=file_hits,
+                        folder_hits=folder_hits,
+                        expected_ids=expected_ids,
+                    )
+                    grouped = expand_candidate_destinations(grouped)
+                    if grouped is None:
+                        return CONFLICT, [], None
         if tmdb_search_failed and grouped:
             return INCOMPLETE, [], None
         if grouped:

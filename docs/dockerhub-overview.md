@@ -6,7 +6,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 链接 -> 115 接收/云下载 -> CMS 整理 -> shared/direct STRM -> 媒体库 -> Emby
 ```
 
-**0.5.2** 使用一份 SQLite 任务库和唯一 TaskRunner 写入者；观察者只入队命令。当前镜像 `icekale/cms-tg-ingest:0.5.3`。
+**0.5.2** 使用一份 SQLite 任务库和唯一 TaskRunner 写入者；观察者只入队命令。当前镜像 `icekale/cms-tg-ingest:0.5.4`。
 
 ## 核心能力
 
@@ -32,7 +32,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂。把 115 分享、磁�
 固定版本镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.5.3
+docker pull icekale/cms-tg-ingest:0.5.4
 ```
 
 ### 完整 Docker Compose
@@ -42,7 +42,7 @@ docker pull icekale/cms-tg-ingest:0.5.3
 ```yaml
 services:
   cms-tg-ingest:
-    image: icekale/cms-tg-ingest:0.5.3
+    image: icekale/cms-tg-ingest:0.5.4
     container_name: cms-tg-ingest
     restart: unless-stopped
     env_file:

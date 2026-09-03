@@ -6,7 +6,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 115 分享/磁力/ED2K -> 115 接收或云下载 -> CMS 整理分类 -> 自有永久分享 -> 分享 STRM -> Emby 入库 -> 清理转存源
 ```
 
-**0.5.2** 起运行时只有一份 SQLite 任务库（`DATABASE_PATH=/data/cms-tg-ingest.db`）和唯一的 TaskRunner 写入者：观察者只入队命令，接收/建分享/同步/删除带不可变 journal，失败后接着跑而不是重做上游。当前镜像 `icekale/cms-tg-ingest:0.5.3`。
+**0.5.2** 起运行时只有一份 SQLite 任务库（`DATABASE_PATH=/data/cms-tg-ingest.db`）和唯一的 TaskRunner 写入者：观察者只入队命令，接收/建分享/同步/删除带不可变 journal，失败后接着跑而不是重做上游。当前镜像 `icekale/cms-tg-ingest:0.5.4`。
 
 它只编排你已经拥有权限的 CMS、115、HDHive 和 Emby 工作流，不提供媒体资源，也不绕过任何服务的权限或风控机制。
 
@@ -40,7 +40,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.5.3`。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.5.4`。
 4. 拉取固定版本并启动：
 
 ```sh
@@ -506,7 +506,7 @@ git push origin v0.2.90
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.5.3
+docker pull icekale/cms-tg-ingest:0.5.4
 docker pull icekale/cms-tg-ingest:latest
 ```
 
