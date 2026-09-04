@@ -77,6 +77,7 @@ from app.media.strm import (
     validate_self_share_strm_source,
 )
 from app.models import TaskStage, TaskStatus
+from app.release_quality import remove_superseded_strms
 from app.self_share_settings import resolve_own_share_receive_code, resolve_self_share_review_policy
 from app.task_bridge import reset_self_share_submission_for_reprocess
 from app.task_store import operation_scope
@@ -5392,7 +5393,17 @@ class BridgeSelfShareTaskWorkflow:
         metadata = self._multi_target_metadata(row, targets, cleanup_status="deleted", share_review_status="passed")
         if residue_count:
             metadata["residue_deleted_count"] = residue_count
+        superseded = self._supersede_cleanup_duplicates(task)
+        if superseded:
+            metadata["superseded_strm_removed"] = superseded
         return StageResult.complete("全部目标审核、移动和 Emby 确认完成，115 接收源已统一清理", metadata)
+
+    def _supersede_cleanup_duplicates(self, task) -> int:
+        """洗版收尾：删除媒体库中同一集旧分辨率/旧片源的 strm（每组保留最新）。"""
+        dest_path = str(task.metadata.get("dest_path") or "").strip()
+        if not dest_path:
+            return 0
+        return remove_superseded_strms(dest_path, float(task.created_at or 0))
 
     def _stage_cleaned(self, task):
         row = self._submission_row(task)
@@ -5473,6 +5484,9 @@ class BridgeSelfShareTaskWorkflow:
         metadata.update(review_metadata)
         if residue_count:
             metadata["residue_deleted_count"] = residue_count
+        superseded = self._supersede_cleanup_duplicates(task)
+        if superseded:
+            metadata["superseded_strm_removed"] = superseded
         return StageResult.complete("115 转存源已删除，自有分享保留", metadata)
 
     def _cleanup_parent_ids(self, task) -> set[str]:

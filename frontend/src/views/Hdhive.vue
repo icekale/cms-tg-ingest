@@ -69,6 +69,15 @@ async function saveFilter(subscription) {
   } catch (err) { message.error(err.message) }
 }
 
+async function toggleUpgradeMode(subscription) {
+  const next = !subscription.upgrade_mode
+  try {
+    await api.hdhiveSubscriptionUpgradeMode(subscription.id, next)
+    message.success(next ? '洗版模式已开启：发现更高质量资源会自动替换' : '洗版模式已关闭')
+    await load()
+  } catch (err) { message.error(err.message) }
+}
+
 async function confirmItem(id) {
   try {
     await api.hdhiveItemConfirm(id)
@@ -212,6 +221,14 @@ onMounted(load)
         <div class="action-row">
           <n-input v-model:value="filterDraft[subscription.id]" class="subscription-filter-input" aria-label="集数过滤" placeholder="S01E01-S01E10,S02" />
           <n-button secondary @click="saveFilter(subscription)">设置集数过滤</n-button>
+          <n-popconfirm @positive-click="toggleUpgradeMode(subscription)">
+            <template #trigger>
+              <n-button :type="subscription.upgrade_mode ? 'success' : 'default'" secondary>
+                {{ subscription.upgrade_mode ? '洗版模式：开' : '洗版模式：关' }}
+              </n-button>
+            </template>
+            {{ subscription.upgrade_mode ? '关闭后，已入库的集不再自动替换更高质量版本。' : '开启后，订阅检查发现严格更高质量的资源（如 1080p→2160p、WEB-DL→REMUX）会自动解锁入库并清理旧版本。' }}
+          </n-popconfirm>
         </div>
       </div>
     </div>

@@ -336,6 +336,16 @@ def serialize_task(
         # A single task with an invalid persisted strm_mode must not 500 the
         # whole task list / detail / health API surface.
         strm_mode = "shared"
+    from .release_quality import quality_from_names
+
+    organized_folder = task.metadata.get("organized_folder")
+    quality = quality_from_names(
+        task.metadata.get("own_share_file_name"),
+        task.metadata.get("received_title"),
+        task.metadata.get("direct_file_share_file_name"),
+        organized_folder.get("direct_file_name") if isinstance(organized_folder, dict) else "",
+        task.title,
+    )
     return _safe_api_value({
         "id": task.id,
         "title": task.title or task.share_code,
@@ -344,6 +354,7 @@ def serialize_task(
         "stage": _enum_value(task.current_stage),
         "status": _enum_value(task.status),
         "strm_mode": strm_mode,
+        "quality": quality.as_dict() if quality else None,
         "category": task.category or task.metadata.get("category") or "",
         "tmdb_id": task.tmdb_id or task.metadata.get("tmdb_id") or "",
         "safe_url": _safe_url(task.url),

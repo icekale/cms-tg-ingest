@@ -57,6 +57,7 @@ from .self_share_settings import (
     resolve_self_share_review_policy,
 )
 from .integration_credentials import resolve_emby_credentials, resolve_tmdb_credentials
+from .release_quality import quality_from_names
 from .strm_mode import STRM_MODE_LABELS
 from .clients.hdhive import HdhiveProxyError
 from .hdhive_subscriptions import HdhiveUrlError, parse_hdhive_tv_url
@@ -1545,6 +1546,32 @@ class WebApp:
         resolved = resolve_tmdb_credentials(self.store, self.tmdb_resolver)
         return resolved.masked_payload()
 
+    def _wash_context(self, task: Any) -> tuple[Any, str, str, Any]:
+        """洗版上下文：HDHive 服务、TMDB ID、媒体类型与当前库内版本质量。"""
+        service = self.hdhive_service
+        if service is None:
+            raise ValueError("HDHive 未启用，无法使用洗版功能")
+        if getattr(task.status, "value", task.status) != "succeeded":
+            raise ValueError("只有已成功入库的任务才能洗版")
+        tmdb_id = str(task.tmdb_id or task.metadata.get("tmdb_id") or "").strip()
+        if not tmdb_id.isdigit():
+            raise ValueError("任务缺少 TMDB ID，无法搜索洗版资源")
+        recognition = task.metadata.get("recognition")
+        recognition = recognition if isinstance(recognition, dict) else {}
+        media_type = str(recognition.get("type") or task.metadata.get("type") or "").strip().lower()
+        if media_type not in {"tv", "movie"}:
+            category = str(task.category or task.metadata.get("category") or "")
+            media_type = "movie" if "电影" in category else "tv"
+        organized_folder = task.metadata.get("organized_folder")
+        current = quality_from_names(
+            task.metadata.get("own_share_file_name"),
+            task.metadata.get("received_title"),
+            task.metadata.get("direct_file_share_file_name"),
+            organized_folder.get("direct_file_name") if isinstance(organized_folder, dict) else "",
+            task.title,
+        )
+        return service, tmdb_id, media_type, current
+
     def _session_token(self, now: float) -> str:
         """Signed session value: <expires>:<username>:<hmac-sha256>."""
         payload = f"{int(now + _SESSION_TTL_SECONDS)}:{self.web_username}"
@@ -2215,6 +2242,62 @@ class WebApp:
                     )
                 )
                 return status, {**response_headers, **auth_headers}, response_body
+        if path.startswith("/api/v1/tasks/") and path.endswith("/wash") and len(path.split("/")) == 6:
+            raw_id = path.split("/")[4]
+            if not raw_id.isdigit():
+                status, response_headers, response_body = api_response({"error": "task_not_found", "message": TASK_NOT_FOUND_MESSAGE}, status=404)
+                return status, {**response_headers, **auth_headers}, response_body
+            task = self.store.find_task(int(raw_id))
+            if task is None:
+                status, response_headers, response_body = api_response({"error": "task_not_found", "message": TASK_NOT_FOUND_MESSAGE}, status=404)
+                return status, {**response_headers, **auth_headers}, response_body
+            try:
+                context = self._wash_context(task)
+            except ValueError as exc:
+                status, response_headers, response_body = api_response({"error": "wash_unavailable", "message": str(exc)}, status=400)
+                return status, {**response_headers, **auth_headers}, response_body
+            service, tmdb_id, media_type, current = context
+            if method == "GET":
+                try:
+                    candidates = service.wash_candidates(current, media_type, tmdb_id)
+                except Exception as exc:  # noqa: BLE001 - 洗版搜索失败不炸任务页
+                    status, response_headers, response_body = api_response({"error": "wash_search_failed", "message": str(exc)}, status=502)
+                    return status, {**response_headers, **auth_headers}, response_body
+                status, response_headers, response_body = api_response(
+                    {
+                        "task_id": task.id,
+                        "current": current.as_dict() if current else None,
+                        "candidates": candidates,
+                    }
+                )
+                return status, {**response_headers, **auth_headers}, response_body
+            # POST: 解锁洗版资源并入队
+            try:
+                values = self._api_body(body, headers)
+            except (UnicodeDecodeError, ValueError):
+                values = {}
+            slug = str(values.get("slug") or "").strip()
+            confirmed = values.get("confirmed") is True or str(values.get("confirmed") or "").lower() in {"1", "true", "yes"}
+            if not slug:
+                status, response_headers, response_body = api_response({"error": "wash_slug_required", "message": "缺少资源 slug"}, status=400)
+                return status, {**response_headers, **auth_headers}, response_body
+            try:
+                result = service.wash_unlock(
+                    slug=slug,
+                    media_type=media_type,
+                    tmdb_id=tmdb_id,
+                    current_quality=current,
+                    chat_id=str(task.chat_id or ""),
+                    confirmed=confirmed,
+                )
+            except ValueError as exc:
+                status, response_headers, response_body = api_response({"error": "wash_rejected", "message": str(exc)}, status=400)
+                return status, {**response_headers, **auth_headers}, response_body
+            except Exception as exc:  # noqa: BLE001
+                status, response_headers, response_body = api_response({"error": "wash_unlock_failed", "message": str(exc)}, status=502)
+                return status, {**response_headers, **auth_headers}, response_body
+            status, response_headers, response_body = api_response({"wash": result})
+            return status, {**response_headers, **auth_headers}, response_body
         if method == "DELETE" and path.startswith("/api/v1/tasks/"):
             raw_id = path.removeprefix("/api/v1/tasks/")
             if raw_id.isdigit():
@@ -2388,6 +2471,20 @@ class WebApp:
                 try:
                     values = self._api_body(body, headers)
                     service.set_episode_filter(subscription_id, str(values.get("episode_filter") or ""))
+                    serialized = serialize_hdhive_subscription(service, subscription_id)
+                except (UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+                    status, response_headers, response_body = api_response({"error": str(exc)}, status=400)
+                    return status, {**response_headers, **auth_headers}, response_body
+                if serialized is None:
+                    status, response_headers, response_body = api_response({"error": "subscription_not_found"}, status=404)
+                    return status, {**response_headers, **auth_headers}, response_body
+                status, response_headers, response_body = api_response({"subscription": serialized})
+                return status, {**response_headers, **auth_headers}, response_body
+            if action == "upgrade-mode":
+                try:
+                    values = self._api_body(body, headers)
+                    enabled = values.get("enabled") is True or str(values.get("enabled") or "").lower() in {"1", "true", "yes"}
+                    service.set_upgrade_mode(subscription_id, enabled)
                     serialized = serialize_hdhive_subscription(service, subscription_id)
                 except (UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
                     status, response_headers, response_body = api_response({"error": str(exc)}, status=400)

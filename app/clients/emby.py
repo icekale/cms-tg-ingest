@@ -261,6 +261,41 @@ class EmbyClient:
                 keys.add(key.normalized)
         return keys
 
+    def episode_paths_for_series(self, series_id: str) -> dict[str, str]:
+        """映射 episode key（SxxExx normalized）→ Emby 条目 Path（strm 路径）。
+
+        洗版判定用：从 strm 文件名解析现有版本质量。取不到 Path 的集不出现在
+        结果里（调用方对缺失 key 按已存在处理，不参与洗版比较）。
+        """
+        series_id = str(series_id or "").strip()
+        if not series_id:
+            return {}
+        user_id = self.get_user_id()
+        quoted_series_id = urllib.parse.quote(series_id, safe="")
+        resp = self._get(
+            f"/Shows/{quoted_series_id}/Episodes",
+            {
+                "UserId": user_id,
+                "Fields": "ParentIndexNumber,IndexNumber,Path",
+            },
+        )
+        episodes = _response_items(resp)
+        paths: dict[str, str] = {}
+        for episode in episodes or []:
+            if not isinstance(episode, dict):
+                continue
+            season = _positive_episode_index(episode.get("ParentIndexNumber"))
+            number = _positive_episode_index(episode.get("IndexNumber"))
+            if season is None or number is None:
+                continue
+            key = parse_episode_key(f"S{season}E{number}")
+            if key is None:
+                continue
+            path = str(episode.get("Path") or "").strip()
+            if path:
+                paths.setdefault(key.normalized, path)
+        return paths
+
     def existing_episode_keys_by_tmdb(self, tmdb_id: str) -> set[str]:
         series = self.find_series_by_tmdb(tmdb_id)
         if not series:
@@ -269,6 +304,16 @@ class EmbyClient:
         if not series_id:
             return set()
         return self.episode_keys_for_series(series_id)
+
+    def existing_episode_paths_by_tmdb(self, tmdb_id: str) -> dict[str, str]:
+        """洗版用：episode key → 现有 strm 路径（找不到剧集返回空）。"""
+        series = self.find_series_by_tmdb(tmdb_id)
+        if not series:
+            return {}
+        series_id = str(series.get("Id") or series.get("ItemId") or "").strip()
+        if not series_id:
+            return {}
+        return self.episode_paths_for_series(series_id)
 
     def library_roots(self) -> list[tuple[Path, str]]:
         if self._library_roots is not None:

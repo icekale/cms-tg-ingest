@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { NAlert, NButton, NCard, NDescriptions, NDescriptionsItem, NPopconfirm, NSelect, NTag, useMessage } from 'naive-ui'
+import { NAlert, NButton, NCard, NDescriptions, NDescriptionsItem, NModal, NPopconfirm, NSelect, NTag, NText, useMessage } from 'naive-ui'
 import { useRoute } from 'vue-router'
 import { api } from '../api'
 import { displayTaskTitle, taskActionLabel } from '../taskView'
@@ -31,6 +31,7 @@ const canRetry = computed(() => actionSet().has('retry'))
 const canEmby = computed(() => actionSet().has('emby'))
 const canRestore = computed(() => actionSet().has('restore'))
 const canReprocess = computed(() => actionSet().has('reprocess'))
+const canWash = computed(() => task.value?.status === 'succeeded' && !!task.value?.tmdb_id)
 
 async function runAction(action) {
   busyAction.value = action
@@ -40,12 +41,59 @@ async function runAction(action) {
   } catch (err) { message.error(err.message); await load() } finally { busyAction.value = '' }
 }
 
+// ---------- 洗版 ----------
+const washOpen = ref(false)
+const washLoading = ref(false)
+const washUnlocking = ref('')
+const washConfirming = ref(new Set())
+const wash = ref(null) // { current, candidates }
+
+async function openWash() {
+  washOpen.value = true
+  washLoading.value = true
+  wash.value = null
+  try {
+    wash.value = await api.taskWash(route.params.id)
+  } catch (err) {
+    message.error(err.message)
+    washOpen.value = false
+  } finally { washLoading.value = false }
+}
+
+async function washUnlock(candidate) {
+  // 两段式确认：积分消耗超过阈值时，后端返回 requires_confirmation；
+  // 前端先把按钮切换为“确认消耗 N 积分”，再点一次才带 confirmed=true。
+  if (!washConfirming.value.has(candidate.slug) && (candidate.unlock_points ?? 0) > 0) {
+    washConfirming.value = new Set(washConfirming.value).add(candidate.slug)
+    return
+  }
+  washConfirming.value = new Set([...washConfirming.value].filter(s => s !== candidate.slug))
+  washUnlocking.value = candidate.slug
+  try {
+    const result = (await api.taskWashUnlock(route.params.id, candidate.slug, true)).wash
+    if (result.enqueued) {
+      message.success(`洗版任务已入队：#${result.task_id}，完成入库后将自动清理旧版本`)
+      washOpen.value = false
+    } else if (result.requires_confirmation) {
+      washConfirming.value = new Set(washConfirming.value).add(candidate.slug)
+      message.info(`该资源需要 ${result.unlock_points} 积分，请再次点击确认`)
+    } else {
+      message.warning('解锁成功但入队未确认，请稍后在任务列表查看')
+    }
+  } catch (err) { message.error(err.message) } finally { washUnlocking.value = '' }
+}
+
 function eventTime(value) { return value ? new Date(value * 1000).toLocaleString() : '-' }
 onMounted(load)
 </script>
 
 <template>
-  <div v-if="task" class="page-title"><div><h1>{{ displayTaskTitle(task) }}</h1><p>#{{ task.id }} · {{ task.stage }}</p></div><n-tag>{{ task.status }}</n-tag></div>
+  <div v-if="task" class="page-title"><div><h1>{{ displayTaskTitle(task) }}</h1><p>#{{ task.id }} · {{ task.stage }}</p></div>
+    <div style="display: flex; gap: 8px; align-items: center">
+      <n-tag v-if="task.quality" type="info">{{ task.quality.label }}</n-tag>
+      <n-tag>{{ task.status }}</n-tag>
+    </div>
+  </div>
   <n-card v-if="task" title="任务详情">
     <n-alert v-if="task.completion_drift" type="warning" title="入库状态需要复核" style="margin-bottom: 18px">
       <div>{{ task.completion_drift.message }}</div>
@@ -74,6 +122,7 @@ onMounted(load)
         </template>
         将从头重跑该任务，已完成阶段会再走一遍，确定继续？
       </n-popconfirm>
+      <n-button v-if="canWash" secondary type="info" :loading="washLoading && washOpen" @click="openWash">尝试洗版</n-button>
       <n-button secondary @click="load">刷新</n-button>
     </div>
     <n-card title="处理时间线" embedded style="margin-top: 18px">
@@ -86,4 +135,30 @@ onMounted(load)
     </n-card>
   </n-card>
   <n-card v-else>正在加载任务…</n-card>
+
+  <n-modal v-model:show="washOpen" preset="card" title="尝试洗版" style="max-width: 760px">
+    <n-text depth="3">当前版本：{{ wash?.current?.label || '未知质量' }}。只列出严格优于当前版本的资源；解锁后自动入队，入库成功会清理旧版本 STRM。</n-text>
+    <div v-if="washLoading" class="muted" style="margin-top: 14px">正在搜索 HDHive 资源…</div>
+    <template v-else-if="wash">
+      <div v-if="!(wash.candidates || []).length" class="muted" style="margin-top: 14px">暂无更优质量的资源。</div>
+      <div v-for="candidate in wash.candidates || []" :key="candidate.slug" style="display: flex; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border)">
+        <div style="flex: 1; min-width: 0">
+          <div style="overflow-wrap: anywhere">{{ candidate.title }}</div>
+          <div class="muted">
+            <n-tag size="small" :type="candidate.is_upgrade ? 'success' : 'default'">{{ candidate.quality?.label || '未知质量' }}</n-tag>
+            {{ candidate.pan_type.toUpperCase() }} · {{ candidate.size || '大小未知' }}
+            <template v-if="candidate.unlock_points != null"> · {{ candidate.unlock_points }} 积分</template>
+            <template v-if="candidate.is_unlocked"> · 已拥有</template>
+          </div>
+        </div>
+        <n-button
+          size="small"
+          :type="washConfirming.has(candidate.slug) ? 'warning' : 'primary'"
+          :disabled="!candidate.upgrade_eligible"
+          :loading="washUnlocking === candidate.slug"
+          @click="washUnlock(candidate)"
+        >{{ washConfirming.has(candidate.slug) ? `确认消耗 ${candidate.unlock_points ?? 0} 积分` : '解锁入库' }}</n-button>
+      </div>
+    </template>
+  </n-modal>
 </template>

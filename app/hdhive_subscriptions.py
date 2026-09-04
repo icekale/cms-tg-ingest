@@ -400,6 +400,16 @@ def resolution_score(resource: HdhiveResource) -> int:
     return max((scores.get(match.group(1).lower(), 0) for value in values for match in [_RESOLUTION_RE.search(value or "")] if match), default=0)
 
 
+def resource_release_quality(resource: HdhiveResource):
+    """资源的 ReleaseQuality：优先 video_resolution 字段，回退标题解析。"""
+    from .release_quality import parse_release_quality
+
+    quality = parse_release_quality(resource.title)
+    if quality is None and resource.video_resolution:
+        quality = parse_release_quality(str(resource.video_resolution[0]))
+    return quality
+
+
 def _is_valid_status(status: str) -> bool:
     return str(status or "").strip().lower() in _VALID_STATUSES
 
@@ -484,6 +494,36 @@ class HdhiveSubscriptionService:
         parse_episode_filter(normalized)
         return self.store.update_episode_filter(subscription_id, normalized)
 
+    def set_upgrade_mode(self, subscription_id: int, enabled: bool) -> HdhiveSubscription:
+        return self.store.update_upgrade_mode(subscription_id, bool(enabled))
+
+    @staticmethod
+    def _group_beats_existing_quality(candidates: list[HdhiveResource], parsed_keys: tuple[Any, ...], emby_paths: dict[str, str]) -> bool:
+        """洗版判定：组内任一候选严格优于该集现有 strm 版本即算可洗。"""
+        from pathlib import Path as _Path
+
+        from .release_quality import is_upgrade, parse_release_quality
+
+        best = None
+        for resource in candidates:
+            if str(resource.validate_status or "").strip().lower() in _INVALID_STATUSES:
+                continue
+            quality = resource_release_quality(resource)
+            if quality is None:
+                continue
+            if best is None or (quality.resolution_score, quality.source_rank) > (best.resolution_score, best.source_rank):
+                best = quality
+        if best is None:
+            return False
+        for parsed in parsed_keys:
+            existing_path = emby_paths.get(parsed.normalized)
+            if not existing_path:
+                continue
+            existing = parse_release_quality(_Path(existing_path).name)
+            if existing is None or is_upgrade(existing, best):
+                return True
+        return False
+
     def pause(self, subscription_id: int) -> HdhiveSubscription:
         return self.store.set_status(subscription_id, "paused")
 
@@ -498,6 +538,122 @@ class HdhiveSubscriptionService:
         if item is None:
             raise KeyError(f"HDHive subscription item {item_id} does not exist")
         return self.check(item.subscription_id, confirmed_item_id=item.id)
+
+    def wash_candidates(
+        self,
+        current_quality: Any,
+        media_type: str,
+        tmdb_id: str,
+        *,
+        pan_type: str = "115",
+    ) -> list[dict[str, Any]]:
+        """列出严格优于 current_quality 的 HDHive 资源（洗版候选）。
+
+        直接按 TMDB 拉资源列表，解析每个资源的质量并与当前版本比较；
+        无效资源与非目标网盘被排除。current_quality 为 None 时不判定，
+        由调用方决定（手动确认未知质量）。
+        """
+        from .release_quality import is_upgrade
+
+        tmdb_id = str(tmdb_id or "").strip()
+        if not tmdb_id.isdigit():
+            raise ValueError("任务缺少有效的 TMDB ID，无法搜索洗版资源")
+        resources = self.proxy.resources(media_type, tmdb_id)
+        candidates: list[dict[str, Any]] = []
+        for resource in resources:
+            if str(resource.validate_status or "").strip().lower() in _INVALID_STATUSES:
+                continue
+            if pan_type != "all" and resource.pan_type.lower() != pan_type:
+                continue
+            quality = resource_release_quality(resource)
+            upgrade = is_upgrade(current_quality, quality)
+            candidates.append(
+                {
+                    "slug": resource.slug,
+                    "title": resource.title,
+                    "pan_type": resource.pan_type,
+                    "size": resource.share_size,
+                    "unlock_points": resource.unlock_points,
+                    "is_unlocked": bool(resource.is_unlocked),
+                    "quality": quality.as_dict() if quality else None,
+                    "is_upgrade": upgrade,
+                    "upgrade_eligible": upgrade or current_quality is None,
+                }
+            )
+        candidates.sort(
+            key=lambda item: (
+                not item["upgrade_eligible"],
+                -(item["quality"] or {}).get("resolution_score", 0),
+                (item["quality"] or {}).get("source_rank", -1) * -1,
+                item["unlock_points"] if item["unlock_points"] is not None else 10**9,
+            )
+        )
+        return candidates
+
+    def wash_unlock(
+        self,
+        *,
+        slug: str,
+        media_type: str,
+        tmdb_id: str,
+        current_quality: Any,
+        chat_id: str,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """解锁洗版资源并把分享链接入队为新任务（打 upgrade 标记）。
+
+        再次校验 is_upgrade，不信任客户端传递；积分消耗超过
+        auto_unlock_max_points 且未确认时拒绝。
+        """
+        from .release_quality import is_upgrade
+
+        slug = str(slug or "").strip()
+        if not slug:
+            raise ValueError("缺少资源 slug")
+        resources = self.proxy.resources(media_type, str(tmdb_id or "").strip())
+        resource = next((item for item in resources if item.slug == slug), None)
+        if resource is None:
+            raise ValueError("资源不存在或已下架，请刷新候选列表")
+        if str(resource.validate_status or "").strip().lower() in _INVALID_STATUSES:
+            raise ValueError("该资源已被判定无效，不能解锁")
+        quality = resource_release_quality(resource)
+        if current_quality is not None and not is_upgrade(current_quality, quality):
+            raise ValueError("该资源不优于当前库内版本，已阻止重复洗版")
+        if not resource.is_unlocked:
+            account = self.proxy.account()
+            points = resource.unlock_points or 0
+            if points > self.auto_unlock_max_points and not confirmed:
+                return {
+                    "requires_confirmation": True,
+                    "unlock_points": points,
+                    "account_points": account.points,
+                    "quality": quality.as_dict() if quality else None,
+                }
+            results = self.proxy.unlock([slug])
+            unlocked = next((item for item in results if item.slug == slug), None)
+            if unlocked is None or not unlocked.success:
+                message = str(getattr(unlocked, "message", "") or "解锁失败")
+                raise ValueError(f"HDHive 解锁失败：{message}")
+            url = str(unlocked.full_url or "").strip()
+        else:
+            # 已拥有的资源：重新拉取详情拿分享链接需要解锁接口；proxy.unlock
+            # 对已拥有资源通常直接返回链接（already_owned）。
+            results = self.proxy.unlock([slug])
+            unlocked = next((item for item in results if item.slug == slug), None)
+            if unlocked is None or not unlocked.success:
+                raise ValueError("获取已拥有资源的分享链接失败")
+            url = str(unlocked.full_url or "").strip()
+        if not _is_115_share_url(url):
+            raise ValueError("解锁结果不是 115 分享链接，无法入库")
+        task_id = _task_id_from_intake_result(self.enqueue_links([url], str(chat_id or "").strip() or self.default_chat_id))
+        if task_id is None:
+            return {"enqueued": False, "quality": quality.as_dict() if quality else None}
+        return {
+            "enqueued": True,
+            "task_id": task_id,
+            "quality": quality.as_dict() if quality else None,
+            "already_owned": bool(unlocked.already_owned),
+        }
 
     def check(self, subscription_id: int, confirmed_item_id: int | None = None) -> SubscriptionCheckResult:
         subscription = self.store.get_subscription(subscription_id)
@@ -647,26 +803,41 @@ class HdhiveSubscriptionService:
                     self.store.reset_item_for_check(item.id, "filtered")
 
         emby_keys: set[str] = set()
+        emby_paths: dict[str, str] = {}
         emby_skip_unavailable = not self._dependency_enabled(self.emby)
         emby_lookup_failed = False
+        upgrade_mode = bool(getattr(subscription, "upgrade_mode", False))
         if not emby_skip_unavailable:
             try:
-                raw_emby_keys = self.emby.existing_episode_keys_by_tmdb(subscription.tmdb_id)
-                for value in raw_emby_keys or ():
-                    parsed = parse_episode_key(str(value))
-                    if parsed is not None:
-                        emby_keys.add(parsed.normalized)
+                if upgrade_mode:
+                    # 洗版模式：取每集 strm 路径以解析现有版本质量。
+                    emby_paths = dict(self.emby.existing_episode_paths_by_tmdb(subscription.tmdb_id) or {})
+                    emby_keys = set(emby_paths)
+                else:
+                    raw_emby_keys = self.emby.existing_episode_keys_by_tmdb(subscription.tmdb_id)
+                    for value in raw_emby_keys or ():
+                        parsed = parse_episode_key(str(value))
+                        if parsed is not None:
+                            emby_keys.add(parsed.normalized)
             except Exception:
                 emby_skip_unavailable = True
                 emby_lookup_failed = True
                 LOG.warning("HDHive Emby episode lookup unavailable subscription_id=%s", subscription.id, exc_info=True)
 
+        upgraded_groups: set[str] = set()
         for key, candidates in grouped.items():
             parsed_keys = parsed_by_resource.get(id(candidates[0]), ())
             if not parsed_keys or not any(episode_filter.matches(parsed) for parsed in parsed_keys):
                 continue
             items = group_items(key)
             if all(parsed.normalized in emby_keys for parsed in parsed_keys):
+                if upgrade_mode and self._group_beats_existing_quality(candidates, parsed_keys, emby_paths):
+                    # 洗版：候选严格优于 Emby 现有版本，不跳过，按正常入队走。
+                    upgraded_groups.add(key)
+                    for item in items:
+                        if item.status == "emby_exists":
+                            self.store.reset_item_for_check(item.id, "emby_exists")
+                    continue
                 emby_groups.add(key)
                 for item in items:
                     if item.status not in {"enqueued", "emby_exists"} and not protects_unlock_outcome(item):
@@ -701,7 +872,9 @@ class HdhiveSubscriptionService:
             if not parsed_keys or not any(episode_filter.matches(parsed) for parsed in parsed_keys):
                 skipped += 1
                 continue
-            if all(parsed.normalized in emby_keys for parsed in parsed_keys):
+            if all(parsed.normalized in emby_keys for parsed in parsed_keys) and not (
+                upgrade_mode and self._group_beats_existing_quality(candidates, parsed_keys, emby_paths)
+            ):
                 skipped += 1
                 continue
             if any(item.status == "enqueued" for item in persisted_items):

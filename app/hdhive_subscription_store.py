@@ -55,6 +55,7 @@ class HdhiveSubscription:
     updated_at: float
     episode_filter: str = ""
     last_summary_json: str = "{}"
+    upgrade_mode: bool = False
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "HdhiveSubscription":
@@ -75,6 +76,7 @@ class HdhiveSubscription:
             updated_at=float(row["updated_at"] or 0),
             episode_filter=str(row["episode_filter"] or ""),
             last_summary_json=str(row["last_summary_json"] or "{}"),
+            upgrade_mode=bool(row["upgrade_mode"]),
         )
 
 
@@ -253,6 +255,7 @@ class HdhiveSubscriptionStore:
                 {
                     "episode_filter": "TEXT NOT NULL DEFAULT ''",
                     "last_summary_json": "TEXT NOT NULL DEFAULT '{}'",
+                    "upgrade_mode": "INTEGER NOT NULL DEFAULT 0",
                 },
             )
             self._ensure_columns(
@@ -374,6 +377,24 @@ class HdhiveSubscriptionStore:
                 WHERE id = ?
                 """,
                 (str(value or "").strip(), time.time(), int(subscription_id)),
+            )
+            row = connection.execute(
+                "SELECT * FROM hdhive_subscriptions WHERE id = ?",
+                (int(subscription_id),),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"HDHive subscription {subscription_id} does not exist")
+        return HdhiveSubscription.from_row(row)
+
+    def update_upgrade_mode(self, subscription_id: int, enabled: bool) -> HdhiveSubscription:
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE hdhive_subscriptions
+                SET upgrade_mode = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (1 if enabled else 0, time.time(), int(subscription_id)),
             )
             row = connection.execute(
                 "SELECT * FROM hdhive_subscriptions WHERE id = ?",

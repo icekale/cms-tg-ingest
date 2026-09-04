@@ -87,9 +87,10 @@ class FakeTmdbResolver:
 class FakeEmby:
     enabled = True
 
-    def __init__(self, existing=None, error=None, *, enabled=True):
+    def __init__(self, existing=None, error=None, *, enabled=True, paths=None):
         self.enabled = enabled
         self.existing = set(existing or ())
+        self.paths = dict(paths or {})
         self.error = error
         self.calls = []
 
@@ -98,6 +99,12 @@ class FakeEmby:
         if self.error is not None:
             raise self.error
         return set(self.existing)
+
+    def existing_episode_paths_by_tmdb(self, tmdb_id):
+        self.calls.append(str(tmdb_id))
+        if self.error is not None:
+            raise self.error
+        return dict(self.paths)
 
 
 class HdhiveSubscriptionUrlTests(unittest.TestCase):
@@ -201,6 +208,62 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(item.unlock_points_spent, 20)
         self.assertEqual(item.unlock_points_source, "estimated")
         self.assertGreater(item.unlocked_at or 0, 0)
+
+    def test_upgrade_mode_enqueues_strictly_better_resource_despite_emby_exists(self):
+        # Emby 已有 S01E01（1080p WEB-DL），洗版模式下 2160p 候选应解锁入队。
+        unlock_items = [HdhiveUnlockItem("up-2160", True, "https://115cdn.com/s/up?password=abcd", "", "", False)]
+        directory, store, subscription, proxy, service, intake_calls = self.make_service(
+            [resource("up-2160", resolution="2160P", points=5, season_number=1, episode_number=1)],
+            unlock_items,
+            emby=FakeEmby(paths={"S01E01": "/mnt/x/Show - S01E01 - 1080p.strm"}),
+        )
+        try:
+            store.update_upgrade_mode(subscription.id, True)
+            result = service.check(subscription.id)
+            items = store.list_items(subscription.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.enqueued, 1)
+        self.assertEqual(result.summary.get("emby_exists", 0), 0)
+        self.assertEqual(proxy.unlock_calls, [["up-2160"]])
+        self.assertEqual(items[0].status, "enqueued")
+
+    def test_upgrade_mode_still_skips_when_resource_not_better(self):
+        # Emby 已有 2160p，候选只有 1080p → 不洗版，仍按 emby_exists 跳过。
+        directory, store, subscription, _proxy, service, intake_calls = self.make_service(
+            [resource("not-better", resolution="1080P", points=1, season_number=1, episode_number=1)],
+            emby=FakeEmby(paths={"S01E01": "/mnt/x/Show - S01E01 - 2160p.strm"}),
+        )
+        try:
+            store.update_upgrade_mode(subscription.id, True)
+            result = service.check(subscription.id)
+            items = store.list_items(subscription.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.enqueued, 0)
+        self.assertEqual(result.summary.get("emby_exists", 0), 1)
+        self.assertEqual(intake_calls, [])
+        self.assertEqual(items[0].status, "emby_exists")
+
+    def test_without_upgrade_mode_emby_exists_skips_even_if_better_exists(self):
+        # 关闭洗版模式：即使存在更高质量候选也不自动替换（保持默认行为）。
+        unlock_items = [HdhiveUnlockItem("up-2160", True, "https://115cdn.com/s/up?password=abcd", "", "", False)]
+        directory, store, subscription, proxy, service, intake_calls = self.make_service(
+            [resource("up-2160", resolution="2160P", points=5, season_number=1, episode_number=1)],
+            unlock_items,
+            emby=FakeEmby(existing={"S01E01"}, paths={"S01E01": "/mnt/x/Show - S01E01 - 1080p.strm"}),
+        )
+        try:
+            result = service.check(subscription.id)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.enqueued, 0)
+        self.assertEqual(result.summary.get("emby_exists", 0), 1)
+        self.assertEqual(proxy.unlock_calls, [])
+        self.assertEqual(intake_calls, [])
 
     def test_orphan_enqueued_without_task_is_unlocked_again(self):
         unlock_items = [HdhiveUnlockItem("ghost", True, "https://115cdn.com/s/ghost?password=abcd", "", "", False)]

@@ -1095,6 +1095,128 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(current.episode_filter, "")
         self.assertIn("episode", json.loads(body)["error"])
+
+    def test_hdhive_upgrade_mode_api_toggles_and_persists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore(Path(tmp) / "tasks.db")
+            subscription_store = HdhiveSubscriptionStore(Path(tmp) / "hdhive.db")
+            subscription = subscription_store.create_subscription("464100862", "tmdb_tv", "1416", "剧集", "1416")
+
+            class Service:
+                store = subscription_store
+
+                def list(self):
+                    return self.store.list_subscriptions()
+
+                def set_upgrade_mode(self, subscription_id, enabled):
+                    return self.store.update_upgrade_mode(subscription_id, enabled)
+
+            app = WebApp(task_store, hdhive_service=Service())
+            on_status, _h, on_body = app.handle_request(
+                "POST",
+                f"/api/v1/hdhive/subscriptions/{subscription.id}/upgrade-mode",
+                {"Content-Type": "application/json"},
+                b'{"enabled":true}',
+            )
+            row = json.loads(on_body)["subscription"]
+            self.assertEqual(on_status, 200)
+            self.assertTrue(row["upgrade_mode"])
+            off_status, _h, off_body = app.handle_request(
+                "POST",
+                f"/api/v1/hdhive/subscriptions/{subscription.id}/upgrade-mode",
+                {"Content-Type": "application/json"},
+                b'{"enabled":false}',
+            )
+            self.assertEqual(off_status, 200)
+            self.assertFalse(json.loads(off_body)["subscription"]["upgrade_mode"])
+
+    def test_task_wash_api_lists_upgrade_candidates_and_unlocks(self):
+        from types import SimpleNamespace as _NS
+
+        class Service:
+            def wash_candidates(self, current_quality, media_type, tmdb_id, pan_type="115"):
+                assert media_type == "tv" and tmdb_id == "94997"
+                return [
+                    {
+                        "slug": "better",
+                        "title": "Show.2160p.REMUX.mkv",
+                        "pan_type": "115",
+                        "size": "10GB",
+                        "unlock_points": 5,
+                        "is_unlocked": False,
+                        "quality": {"resolution": "2160p", "resolution_score": 2160, "source": "remux", "source_rank": 5, "label": "2160P · REMUX"},
+                        "is_upgrade": True,
+                        "upgrade_eligible": True,
+                    }
+                ]
+
+            def wash_unlock(self, *, slug, media_type, tmdb_id, current_quality, chat_id, confirmed=False):
+                assert slug == "better" and confirmed is True
+                return {"enqueued": True, "task_id": 999, "quality": {"label": "2160P · REMUX"}, "already_owned": False}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("washme", "", "https://115cdn.com/s/washme")
+            store.patch_metadata(task.id, {"tmdb_id": "94997", "recognition": {"type": "tv"}, "own_share_file_name": "Show.S03E03.1080p.WEB-DL.mkv"})
+            store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            app = WebApp(store, hdhive_service=Service())
+
+            list_status, _h, list_body = app.handle_request("GET", f"/api/v1/tasks/{task.id}/wash", {}, b"")
+            payload = json.loads(list_body)
+            self.assertEqual(list_status, 200)
+            self.assertEqual(payload["current"]["resolution"], "1080p")
+            self.assertEqual(payload["candidates"][0]["slug"], "better")
+
+            post_status, _h, post_body = app.handle_request(
+                "POST",
+                f"/api/v1/tasks/{task.id}/wash",
+                {"Content-Type": "application/json"},
+                b'{"slug":"better","confirmed":true}',
+            )
+            result = json.loads(post_body)["wash"]
+            self.assertEqual(post_status, 200)
+            self.assertTrue(result["enqueued"])
+            self.assertEqual(result["task_id"], 999)
+
+    def test_task_wash_api_rejects_non_succeeded_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("running", "94997", "https://115cdn.com/s/running")
+            app = WebApp(store, hdhive_service=object())
+
+            status, _h, body = app.handle_request("GET", f"/api/v1/tasks/{task.id}/wash", {}, b"")
+            payload = json.loads(body)
+            self.assertEqual(status, 400)
+            self.assertEqual(payload["error"], "wash_unavailable")
+
+    def test_task_wash_api_unavailable_without_hdhive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("wash", "94997", "https://115cdn.com/s/wash")
+            store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            app = WebApp(store, hdhive_service=None)
+
+            status, _h, body = app.handle_request("GET", f"/api/v1/tasks/{task.id}/wash", {}, b"")
+            payload = json.loads(body)
+            self.assertEqual(status, 400)
+            self.assertIn("HDHive", payload["message"])
+
+    def test_task_quality_badge_in_api_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("badge", "", "https://115cdn.com/s/badge")
+            store.patch_metadata(task.id, {"own_share_file_name": "Show.S01E01.2160p.WEB-DL.mkv"})
+            app = WebApp(store)
+
+            status, _h, body = app.handle_request("GET", f"/api/v1/tasks/{task.id}", {}, b"")
+
+        self.assertEqual(status, 200)
+        detail = json.loads(body)
+        task_row = detail.get("task") or detail
+        quality = task_row.get("quality")
+        self.assertIsNotNone(quality)
+        self.assertEqual(quality["resolution"], "2160p")
+        self.assertEqual(quality["source"], "web-dl")
     def test_task_api_redacts_share_password_and_returns_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
