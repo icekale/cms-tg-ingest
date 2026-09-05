@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import threading
 import time
@@ -450,7 +451,83 @@ def resolve_category_with_fallbacks(
     resolved, should_prompt = apply_tmdb_search_resolution(resolved, share_name, tmdb_resolver)
     if not should_prompt:
         return resolved, False
+    resolved, should_prompt = apply_openai_identity_resolution(
+        resolved,
+        share_name,
+        openai_classifier,
+        tmdb_resolver,
+    )
+    if not should_prompt:
+        return resolved, False
     return apply_openai_category_fallback(resolved, share_name, openai_classifier)
+
+
+_OPENAI_IDENTITY_MIN_CONFIDENCE = 0.6
+
+
+def apply_openai_identity_resolution(
+    recognition: dict[str, Any],
+    share_name: str,
+    openai_classifier: Any | None,
+    tmdb_resolver: Any | None,
+) -> tuple[dict[str, Any], bool]:
+    """AI 辅助识别：LLM 清洗混淆资源名，再用清洗结果重搜 TMDB 确认。
+
+    只在 TMDB marker 与原生搜索都失败后调用。TMDB 仍是唯一事实源——
+    LLM 只负责"把名字洗干净"：给出 tmdb_id 就走 marker 校验路径（TMDB
+    lookup 确认），只给标题就重搜。低置信度、LLM 失败或清洗后仍搜不到
+    一律静默放行到下一个兜底，绝不因 AI 幻觉污染识别结果。结果在
+    classifier 内部缓存，任务重试不会重复打 LLM。
+    """
+    if not is_recognition_uncertain(recognition):
+        return recognition, False
+    if not openai_classifier or not getattr(openai_classifier, "enabled", False):
+        return recognition, True
+    if not hasattr(openai_classifier, "identify_media"):
+        return recognition, True
+    if not tmdb_resolver or not getattr(tmdb_resolver, "enabled", False):
+        return recognition, True
+    try:
+        identity = openai_classifier.identify_media(share_name, recognition)
+    except Exception:
+        LOG.debug("OpenAI identity resolution failed", exc_info=True)
+        return recognition, True
+    if not isinstance(identity, dict) or not identity.get("ok"):
+        return recognition, True
+    if as_float(identity.get("confidence"), 0.0) < _OPENAI_IDENTITY_MIN_CONFIDENCE:
+        return recognition, True
+    title = str(identity.get("title") or "").strip()
+    tmdb_id = str(identity.get("tmdb_id") or "").strip()
+    year = str(identity.get("year") or "").strip()
+    media_type = str(identity.get("media_type") or "").strip().lower()
+    reason = str(identity.get("reason") or "").strip()
+
+    def _confirmed(resolved: dict[str, Any]) -> dict[str, Any]:
+        confirmed = dict(resolved)
+        confirmed["openai_source"] = "openai_identity"
+        confirmed["openai_reason"] = reason or str(confirmed.get("openai_reason") or "")
+        return confirmed
+
+    # 1) LLM 给出 TMDB ID：走 marker 校验路径，TMDB lookup 确认后采信。
+    if tmdb_id and tmdb_id != str(recognition.get("tmdb_id") or ""):
+        resolved, should_prompt = apply_tmdb_hint_resolution(
+            {**recognition, "tmdb_id": tmdb_id},
+            f"{share_name} {{tmdb-{tmdb_id}}}",
+            tmdb_resolver,
+        )
+        if not should_prompt:
+            return _confirmed(resolved), False
+    # 2) 只有清洗标题：合成干净名重搜。tv 用 .S01 后缀让类型探测命中，
+    #    movie 用空格年份（括号形式不满足搜索查询的年份 marker 提取）。
+    if title and title.strip().lower() != share_name.strip().lower():
+        if media_type == "tv":
+            synthetic = f"{title}.S01"
+        else:
+            synthetic = f"{title} {year}" if year and year != title else title
+        resolved, should_prompt = apply_tmdb_search_resolution(recognition, synthetic, tmdb_resolver)
+        if not should_prompt:
+            return _confirmed(resolved), False
+    return recognition, True
 
 
 def category_keyboard(row_id: int) -> dict[str, Any]:

@@ -20,6 +20,11 @@ const tmdbApiKey = ref('')
 const tmdbBearerToken = ref('')
 const savingEmby = ref(false)
 const savingTmdb = ref(false)
+const aiEnabled = ref(false)
+const aiBaseUrl = ref('')
+const aiModel = ref('')
+const aiApiKey = ref('')
+const savingAi = ref(false)
 const reviewOffPrompt = ref(false)
 
 async function load() {
@@ -154,6 +159,30 @@ async function clearTmdbCredentials() {
     const result = await api.clearTmdbCredentials()
     settings.value.tmdb_credentials = result.tmdb_credentials
     message.success('已恢复环境配置中的 TMDB 凭据')
+  } catch (err) { message.error(err.message) }
+}
+
+async function saveAiCredentials() {
+  const payload = { enabled: !!aiEnabled.value }
+  if (aiBaseUrl.value.trim()) payload.base_url = aiBaseUrl.value.trim()
+  if (aiModel.value.trim()) payload.model = aiModel.value.trim()
+  if (aiApiKey.value.trim()) payload.api_key = aiApiKey.value.trim()
+  savingAi.value = true
+  try {
+    const result = await api.setAiCredentials(payload)
+    settings.value.ai_credentials = result.ai_credentials
+    aiBaseUrl.value = ''
+    aiModel.value = ''
+    aiApiKey.value = ''
+    message.success('AI 识别设置已保存并立即生效')
+  } catch (err) { message.error(err.message) } finally { savingAi.value = false }
+}
+
+async function clearAiCredentials() {
+  try {
+    const result = await api.clearAiCredentials()
+    settings.value.ai_credentials = result.ai_credentials
+    message.success('已恢复环境配置中的 AI 识别设置')
   } catch (err) { message.error(err.message) }
 }
 
@@ -335,6 +364,33 @@ onMounted(load)
         <n-button secondary @click="clearTmdbCredentials">恢复环境配置</n-button>
       </div>
       <n-text depth="3">用于媒体元数据刮削（海报、评分、简介）。保存后立即生效；留空保存不会覆盖已有值。</n-text>
+    </n-form>
+  </n-card>
+  <n-card v-if="settings" title="AI 辅助识别" class="section-card">
+    <n-form class="settings-form" label-placement="top">
+      <n-text depth="3">
+        当前：{{ settings.ai_credentials?.enabled ? '已启用' : '已停用' }} · {{ settings.ai_credentials?.model || '未配置模型' }} · {{ settings.ai_credentials?.base_url || '未配置地址' }} · Key {{ settings.ai_credentials?.api_key || '未配置' }}
+        （来源：{{ settings.ai_credentials?.source || 'unset' }}）
+      </n-text>
+      <n-form-item label="启用 AI 辅助识别">
+        <n-switch v-model:value="aiEnabled" />
+      </n-form-item>
+      <n-form-item label="API Base URL">
+        <n-input v-model:value="aiBaseUrl" placeholder="https://api.openai.com/v1" />
+      </n-form-item>
+      <n-form-item label="模型">
+        <n-input v-model:value="aiModel" placeholder="gpt-4.1-mini" />
+      </n-form-item>
+      <n-form-item label="API Key">
+        <n-input v-model:value="aiApiKey" type="password" show-password-on="click" placeholder="留空则保留现有 Key" />
+      </n-form-item>
+      <div class="form-actions">
+        <n-button type="primary" :loading="savingAi" @click="saveAiCredentials">保存</n-button>
+        <n-button secondary @click="clearAiCredentials">恢复环境配置</n-button>
+      </div>
+      <n-text depth="3">
+        仅在 TMDB 识别失败后调用：AI 清洗混淆资源名（提取真实标题/年份/TMDB ID），再用清洗结果重搜 TMDB 确认，TMDB 仍是事实源。同名识别结果缓存 6 小时，任务重试不会重复消耗配额。保存后立即生效；留空保存不会覆盖已有值。
+      </n-text>
     </n-form>
   </n-card>
   <n-card v-if="cms" title="CMS 版本更新" class="section-card">

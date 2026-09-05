@@ -652,3 +652,165 @@ class CmsFirstFallbackTests(unittest.TestCase):
         self.assertEqual(store.emby_update[1], "confirmed")
         self.assertEqual(store.emby_update[5], "Strm外国电视")
         self.assertEqual(telegram.messages, [])
+
+
+class OpenAIIdentityResolutionTests(unittest.TestCase):
+    """AI 辅助识别：LLM 清洗混淆名 → TMDB 重搜确认（TMDB 是事实源）。"""
+
+    @staticmethod
+    def _classifier(identity=None, calls=None):
+        class FakeAI:
+            enabled = True
+            high_confidence = 0.75
+            suggest_confidence = 0.45
+
+            def identify_media(self, share_name, recognition=None):
+                if calls is not None:
+                    calls.append(share_name)
+                return dict(identity or {'ok': False})
+
+        return FakeAI()
+
+    @staticmethod
+    def _resolver(search_by_type=None):
+        class FakeTmdb:
+            enabled = True
+
+            def __init__(self):
+                self.searches = []
+
+            def search(self, query, media_type):
+                self.searches.append((query, media_type))
+                result = (search_by_type or {}).get((query, media_type))
+                return dict(result) if result else {'ok': False}
+
+            def lookup(self, tmdb_id, media_type, share_name):
+                return {
+                    'ok': True,
+                    'title': '小黄人与大怪兽',
+                    'type': media_type,
+                    'category': '动漫电影',
+                    'tmdb_id': tmdb_id,
+                }
+
+        return FakeTmdb()
+
+    def test_identity_via_tmdb_id_marker_confirms_through_lookup(self):
+        from app.workflows.self_share import apply_openai_identity_resolution
+
+        ai = self._classifier({
+            'ok': True, 'title': '小黄人与大怪兽', 'year': '2026',
+            'media_type': 'movie', 'tmdb_id': '1315772', 'confidence': 0.92,
+            'reason': 'Remux.Thor@HDSky 是小黄人与格鲁的衍生电影',
+        })
+        resolver = self._resolver()
+        base = {'ok': False, 'title': '', 'type': '', 'category': '', 'tmdb_id': ''}
+
+        resolved, should_prompt = apply_openai_identity_resolution(base, 'X.2160p.BluRay.REMUX.Thor@HDSky.mkv', ai, resolver)
+
+        self.assertFalse(should_prompt)
+        self.assertEqual(resolved['tmdb_id'], '1315772')
+        self.assertEqual(resolved['type'], 'movie')
+        self.assertEqual(resolved['openai_source'], 'openai_identity')
+
+    def test_identity_via_cleaned_title_researches_tmdb(self):
+        from app.workflows.self_share import apply_openai_identity_resolution
+
+        ai = self._classifier({
+            'ok': True, 'title': 'Minions and Monsters', 'year': '2026',
+            'media_type': 'tv', 'tmdb_id': '', 'confidence': 0.85, 'reason': '',
+        })
+        resolver = self._resolver({('Minions and Monsters', 'tv'): {
+            'ok': True, 'title': 'Minions and Monsters', 'type': 'tv',
+            'category': '外国电视', 'tmdb_id': '2461080', 'release_date': '2026-01-01',
+        }})
+        base = {'ok': False, 'title': '', 'type': '', 'category': '', 'tmdb_id': ''}
+
+        resolved, should_prompt = apply_openai_identity_resolution(base, 'Obfuscated.Junk.Name.2160p.mkv', ai, resolver)
+
+        self.assertFalse(should_prompt)
+        self.assertEqual(resolved['category'], '外国电视')
+        self.assertEqual(resolver.searches[0], ('Minions and Monsters', 'tv'))
+
+    def test_low_confidence_identity_is_ignored(self):
+        from app.workflows.self_share import apply_openai_identity_resolution
+
+        ai = self._classifier({
+            'ok': True, 'title': '猜不出的电影', 'year': '', 'media_type': 'unknown',
+            'tmdb_id': '', 'confidence': 0.3, 'reason': '猜的',
+        })
+        base = {'ok': False, 'title': '', 'type': '', 'category': '', 'tmdb_id': ''}
+
+        resolved, should_prompt = apply_openai_identity_resolution(base, 'junk.mkv', ai, self._resolver())
+
+        self.assertTrue(should_prompt)
+        self.assertFalse(resolved.get('ok'))
+
+    def test_disabled_classifier_passes_through(self):
+        from app.workflows.self_share import apply_openai_identity_resolution
+
+        class Disabled:
+            enabled = False
+
+        base = {'ok': False, 'title': '', 'type': '', 'category': '', 'tmdb_id': ''}
+        resolved, should_prompt = apply_openai_identity_resolution(base, 'junk.mkv', Disabled(), self._resolver())
+
+        self.assertTrue(should_prompt)
+
+    def test_identity_result_is_cached_per_share_name(self):
+        """同名资源重复走到 AI 兜底（任务重试）不得重复消耗 LLM 配额。"""
+        from types import SimpleNamespace
+
+        import bridge
+
+        class FakeHttp:
+            def __init__(self):
+                self.calls = 0
+
+            def request(self, url, method="GET", data=None, headers=None, params=None, payload=None):
+                self.calls += 1
+                body = '{"ok": true, "title": "X", "year": "2026", "media_type": "movie", "tmdb_id": "1315772", "confidence": 0.9, "reason": ""}'
+                return {"output_text": body}
+
+        config = SimpleNamespace(
+            openai_classify_enabled=True,
+            openai_api_key="sk-test-12345678",
+            openai_base_url="https://api.openai.com/v1",
+            openai_model="gpt-test",
+            http_timeout=60,
+            openai_high_confidence=0.75,
+            openai_suggest_confidence=0.45,
+        )
+        classifier = bridge.OpenAIClassifier(config, http=FakeHttp())
+        self.assertTrue(classifier.identify_media("Same.Name.mkv")["ok"])
+        second = classifier.identify_media("Same.Name.mkv")
+        self.assertTrue(second["ok"])
+        self.assertEqual(classifier.http.calls, 1)
+        self.assertEqual(second["tmdb_id"], "1315772")
+
+    def test_chain_calls_identity_only_after_tmdb_paths_fail(self):
+        from app.workflows.self_share import resolve_category_with_fallbacks
+
+        class ExplodingAI:
+            enabled = True
+            def identify_media(self, share_name, recognition=None):
+                raise AssertionError('AI should not run when TMDB marker resolves')
+
+        class FakeTmdb:
+            enabled = True
+
+            def lookup(self, tmdb_id, media_type, share_name):
+                return {
+                    'ok': True, 'title': '军中乐园', 'type': media_type,
+                    'category': '华语电影', 'tmdb_id': tmdb_id, 'language': '汉语',
+                }
+
+        resolved, should_prompt = resolve_category_with_fallbacks(
+            uncertain_recognition(),
+            'Paradise.in.Service.2014.CH.DVDRip.x264 {tmdb-287888}',
+            ExplodingAI(),
+            FakeTmdb(),
+        )
+
+        self.assertFalse(should_prompt)
+        self.assertEqual(resolved['tmdb_id'], '287888')

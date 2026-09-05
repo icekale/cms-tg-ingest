@@ -106,3 +106,66 @@ def resolve_tmdb_credentials(store: Any, resolver: Any) -> TmdbCredentials:
     else:
         source = "unset"
     return TmdbCredentials(api_key, bearer, source)
+
+
+@dataclass(frozen=True)
+class AiCredentials:
+    enabled: bool
+    base_url: str
+    model: str
+    api_key: str
+    source: str
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.enabled and self.api_key and self.base_url)
+
+    def masked_payload(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "base_url": self.base_url or "",
+            "model": self.model or "",
+            "api_key": _mask_secret(self.api_key),
+            "source": self.source,
+            "configured": self.configured,
+        }
+
+
+def resolve_ai_credentials(store: Any, classifier: Any) -> AiCredentials:
+    """当前生效的 AI 凭据：Web override 优先，否则读 classifier 实例（.env）。
+
+    classifier 可能缺失（旧流程未接线）——此时仅反映 Web override。
+    """
+    overrides = _web_overrides_ai(store)
+    enabled_override = None
+    getter = getattr(store, "get_openai_enabled_override", None)
+    if callable(getter):
+        enabled_override = getter()
+    base_url = overrides.get("openai_base_url") or str(getattr(classifier, "base_url", "") or "")
+    model = overrides.get("openai_model") or str(getattr(classifier, "model", "") or "")
+    api_key = overrides.get("openai_api_key") or str(getattr(classifier, "api_key", "") or "")
+    if overrides or enabled_override is not None:
+        source = "web"
+    elif bool(api_key):
+        source = "env"
+    else:
+        source = "unset"
+    if enabled_override is not None:
+        enabled = enabled_override
+    else:
+        enabled = bool(getattr(classifier, "enabled_flag", getattr(classifier, "enabled", False)))
+    return AiCredentials(enabled, base_url, model, api_key, source)
+
+
+def _web_overrides_ai(store: Any) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for key, getter in (
+        ("openai_base_url", getattr(store, "get_openai_base_url_override", None)),
+        ("openai_model", getattr(store, "get_openai_model_override", None)),
+        ("openai_api_key", getattr(store, "get_openai_api_key_override", None)),
+    ):
+        if callable(getter):
+            value = str(getter() or "").strip()
+            if value:
+                values[key] = value
+    return values

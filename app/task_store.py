@@ -151,6 +151,10 @@ EMBY_BASE_URL_OVERRIDE_KEY = "emby_base_url_override"
 EMBY_API_KEY_OVERRIDE_KEY = "emby_api_key_override"
 TMDB_API_KEY_OVERRIDE_KEY = "tmdb_api_key_override"
 TMDB_BEARER_TOKEN_OVERRIDE_KEY = "tmdb_bearer_token_override"
+OPENAI_ENABLED_OVERRIDE_KEY = "openai_enabled_override"
+OPENAI_BASE_URL_OVERRIDE_KEY = "openai_base_url_override"
+OPENAI_MODEL_OVERRIDE_KEY = "openai_model_override"
+OPENAI_API_KEY_OVERRIDE_KEY = "openai_api_key_override"
 TERMINATION_REQUESTED_AT_KEY = "termination_requested_at"
 TERMINATION_REQUESTED_BY_KEY = "termination_requested_by"
 _TERMINATION_METADATA_DELETE_KEYS = (
@@ -1047,6 +1051,71 @@ class TaskStore:
 
     def clear_tmdb_bearer_token_override(self) -> None:
         self.delete_runtime_state(TMDB_BEARER_TOKEN_OVERRIDE_KEY)
+
+    def get_openai_enabled_override(self) -> bool | None:
+        state = self.get_runtime_state(OPENAI_ENABLED_OVERRIDE_KEY)
+        if state is None:
+            return None
+        return str(state["value"] or "").strip() in {"1", "true", "yes"}
+
+    def set_openai_enabled_override(self, enabled: bool) -> bool:
+        value = bool(enabled)
+        self.set_runtime_state(OPENAI_ENABLED_OVERRIDE_KEY, "1" if value else "0")
+        return value
+
+    def clear_openai_enabled_override(self) -> None:
+        self.delete_runtime_state(OPENAI_ENABLED_OVERRIDE_KEY)
+
+    def get_openai_base_url_override(self) -> str | None:
+        state = self.get_runtime_state(OPENAI_BASE_URL_OVERRIDE_KEY)
+        if state is None:
+            return None
+        value = str(state["value"] or "").strip()
+        return value or None
+
+    def set_openai_base_url_override(self, base_url: str) -> str:
+        value = str(base_url or "").strip().rstrip("/")
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("AI Base URL 必须以 http:// 或 https:// 开头")
+        self.set_runtime_state(OPENAI_BASE_URL_OVERRIDE_KEY, value)
+        return value
+
+    def clear_openai_base_url_override(self) -> None:
+        self.delete_runtime_state(OPENAI_BASE_URL_OVERRIDE_KEY)
+
+    def get_openai_model_override(self) -> str | None:
+        state = self.get_runtime_state(OPENAI_MODEL_OVERRIDE_KEY)
+        if state is None:
+            return None
+        value = str(state["value"] or "").strip()
+        return value or None
+
+    def set_openai_model_override(self, model: str) -> str:
+        value = str(model or "").strip()
+        if not value:
+            raise ValueError("AI 模型名不能为空")
+        self.set_runtime_state(OPENAI_MODEL_OVERRIDE_KEY, value)
+        return value
+
+    def clear_openai_model_override(self) -> None:
+        self.delete_runtime_state(OPENAI_MODEL_OVERRIDE_KEY)
+
+    def get_openai_api_key_override(self) -> str | None:
+        state = self.get_runtime_state(OPENAI_API_KEY_OVERRIDE_KEY)
+        if state is None:
+            return None
+        value = str(state["value"] or "").strip()
+        return value or None
+
+    def set_openai_api_key_override(self, api_key: str) -> str:
+        value = str(api_key or "").strip()
+        if len(value) < 8:
+            raise ValueError("AI API Key 长度不足（至少 8 位）")
+        self.set_runtime_state(OPENAI_API_KEY_OVERRIDE_KEY, value)
+        return value
+
+    def clear_openai_api_key_override(self) -> None:
+        self.delete_runtime_state(OPENAI_API_KEY_OVERRIDE_KEY)
 
     def get_cms_version_overrides(self) -> dict[str, Any]:
         state = self.get_runtime_state("cms_version_overrides")

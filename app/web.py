@@ -56,7 +56,7 @@ from .self_share_settings import (
     resolve_self_share_receive_cid,
     resolve_self_share_review_policy,
 )
-from .integration_credentials import resolve_emby_credentials, resolve_tmdb_credentials
+from .integration_credentials import resolve_ai_credentials, resolve_emby_credentials, resolve_tmdb_credentials
 from .release_quality import quality_from_names
 from .strm_mode import STRM_MODE_LABELS
 from .clients.hdhive import HdhiveProxyError
@@ -1427,6 +1427,7 @@ class WebApp:
         media_enricher: Any | None = None,
         emby_client: Any | None = None,
         tmdb_resolver: Any | None = None,
+        ai_classifier: Any | None = None,
     ):
         self.store = store
         self.web_token = web_token
@@ -1451,12 +1452,17 @@ class WebApp:
         self.media_enricher = media_enricher
         self.emby_client = emby_client
         self.tmdb_resolver = tmdb_resolver
+        self.ai_classifier = ai_classifier
         # 环境快照：凭据「恢复环境配置」时把客户端实例还原成 .env 原始值。
         # 保存凭据会热更新实例，不清除时会覆盖 env 值，故在此先记录。
         self._env_emby_base_url = str(getattr(emby_client, "base_url", "") or "")
         self._env_emby_api_key = str(getattr(emby_client, "api_key", "") or "")
         self._env_tmdb_api_key = str(getattr(tmdb_resolver, "api_key", "") or "")
         self._env_tmdb_bearer_token = str(getattr(tmdb_resolver, "bearer_token", "") or "")
+        self._env_ai_enabled = bool(getattr(ai_classifier, "enabled_flag", False))
+        self._env_ai_base_url = str(getattr(ai_classifier, "base_url", "") or "")
+        self._env_ai_model = str(getattr(ai_classifier, "model", "") or "")
+        self._env_ai_api_key = str(getattr(ai_classifier, "api_key", "") or "")
         self.cms_guard_container = str(cms_guard_container or "cloud-media-sync").strip()
         self.cms_guard_docker_socket = str(cms_guard_docker_socket or "").strip()
         self.cms_guard_marker = str(cms_guard_marker or "").strip()
@@ -1544,6 +1550,10 @@ class WebApp:
 
     def _tmdb_credentials_payload(self) -> dict[str, Any]:
         resolved = resolve_tmdb_credentials(self.store, self.tmdb_resolver)
+        return resolved.masked_payload()
+
+    def _ai_credentials_payload(self) -> dict[str, Any]:
+        resolved = resolve_ai_credentials(self.store, self.ai_classifier)
         return resolved.masked_payload()
 
     def _wash_context(self, task: Any) -> tuple[Any, str, str, Any]:
@@ -2583,6 +2593,7 @@ class WebApp:
                 ],
                 "emby_credentials": self._emby_credentials_payload(),
                 "tmdb_credentials": self._tmdb_credentials_payload(),
+                "ai_credentials": self._ai_credentials_payload(),
             }
             status, response_headers, response_body = api_response(payload)
             return status, {**response_headers, **auth_headers}, response_body
@@ -2855,6 +2866,52 @@ class WebApp:
                 {"tmdb_credentials": self._tmdb_credentials_payload()}
             )
             return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path == "/api/v1/settings/ai-credentials":
+            try:
+                values = self._api_body(body, headers)
+                clear = values.get("clear") is True or str(values.get("clear") or "").lower() in {"1", "true", "yes"}
+                if clear:
+                    self.store.clear_openai_enabled_override()
+                    self.store.clear_openai_base_url_override()
+                    self.store.clear_openai_model_override()
+                    self.store.clear_openai_api_key_override()
+                    if self.ai_classifier is not None:
+                        self.ai_classifier.enabled_flag = self._env_ai_enabled
+                        self.ai_classifier.base_url = self._env_ai_base_url
+                        self.ai_classifier.model = self._env_ai_model
+                        self.ai_classifier.api_key = self._env_ai_api_key
+                else:
+                    has_any = any(
+                        key in values
+                        for key in ("enabled", "base_url", "model", "api_key")
+                    )
+                    if not has_any:
+                        raise ValueError("请至少提供一项 AI 识别设置")
+                    if "enabled" in values:
+                        enabled = values.get("enabled") is True or str(values.get("enabled") or "").lower() in {"1", "true", "yes"}
+                        self.store.set_openai_enabled_override(enabled)
+                    if str(values.get("base_url") or "").strip():
+                        self.store.set_openai_base_url_override(str(values.get("base_url")).strip())
+                    if str(values.get("model") or "").strip():
+                        self.store.set_openai_model_override(str(values.get("model")).strip())
+                    if str(values.get("api_key") or "").strip():
+                        self.store.set_openai_api_key_override(str(values.get("api_key")).strip())
+                    if self.ai_classifier is not None:
+                        resolved = resolve_ai_credentials(self.store, self.ai_classifier)
+                        self.ai_classifier.enabled_flag = resolved.enabled
+                        if resolved.base_url:
+                            self.ai_classifier.base_url = resolved.base_url
+                        if resolved.model:
+                            self.ai_classifier.model = resolved.model
+                        if resolved.api_key:
+                            self.ai_classifier.api_key = resolved.api_key
+            except (UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+                status, response_headers, response_body = api_response({"error": str(exc)}, status=400)
+                return status, {**response_headers, **auth_headers}, response_body
+            status, response_headers, response_body = api_response(
+                {"ai_credentials": self._ai_credentials_payload()}
+            )
+            return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path.startswith("/api/v1/tasks/") and path.endswith("/strm-mode"):
             raw_id = path.removeprefix("/api/v1/tasks/").removesuffix("/strm-mode")
             try:
@@ -2906,6 +2963,7 @@ def start_web_server(
     cms_guard_workflow_mode: str = "",
     tmdb_resolver: Any | None = None,
     emby_client: Any | None = None,
+    ai_classifier: Any | None = None,
 ) -> ThreadingHTTPServer:
     app = WebApp(
         store,
@@ -2935,6 +2993,7 @@ def start_web_server(
         ),
         emby_client=emby_client,
         tmdb_resolver=tmdb_resolver,
+        ai_classifier=ai_classifier,
     )
     sse_capacity = BoundedSemaphore(max(1, int(SSE_MAX_CLIENTS)))
 

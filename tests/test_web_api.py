@@ -1459,6 +1459,74 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(resolver.api_key, "env-tmdb-key-0000000000")
         self.assertEqual(resolver.bearer_token, "")
 
+    def test_ai_credentials_api_save_clear_and_hot_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            classifier = SimpleNamespace(
+                enabled_flag=True,
+                api_key="env-ai-key-000000",
+                base_url="https://env.example/v1",
+                model="gpt-env",
+            )
+            app = WebApp(store, ai_classifier=classifier)
+
+            initial_status, _h, initial_body = app.handle_request("GET", "/api/v1/settings", {}, b"")
+            save_status, _h, save_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/ai-credentials",
+                {"Content-Type": "application/json"},
+                b'{"enabled":false,"base_url":"https://web.example/v1","model":"gpt-web","api_key":"web-ai-key-0000000"}',
+            )
+            saved = json.loads(save_body)["ai_credentials"]
+            self.assertFalse(classifier.enabled_flag)
+            self.assertEqual(classifier.base_url, "https://web.example/v1")
+            self.assertEqual(classifier.model, "gpt-web")
+            self.assertEqual(classifier.api_key, "web-ai-key-0000000")
+
+            clear_status, _h, clear_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/ai-credentials",
+                {"Content-Type": "application/json"},
+                b'{"clear":true}',
+            )
+
+        initial = json.loads(initial_body)["ai_credentials"]
+        cleared = json.loads(clear_body)["ai_credentials"]
+        self.assertEqual(initial_status, 200)
+        self.assertEqual(initial["source"], "env")
+        self.assertTrue(initial["enabled"])
+        self.assertEqual(initial["api_key"], "env-****0000")
+        self.assertEqual(save_status, 200)
+        self.assertEqual(saved["source"], "web")
+        self.assertFalse(saved["enabled"])
+        self.assertEqual(clear_status, 200)
+        self.assertEqual(cleared["source"], "env")
+        self.assertTrue(classifier.enabled_flag)
+        self.assertEqual(classifier.base_url, "https://env.example/v1")
+        self.assertEqual(classifier.model, "gpt-env")
+        self.assertEqual(classifier.api_key, "env-ai-key-000000")
+
+    def test_ai_credentials_api_rejects_invalid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = WebApp(TaskStore(Path(tmp) / "tasks.db"))
+
+            empty_status, _h, empty_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/ai-credentials",
+                {"Content-Type": "application/json"},
+                b"{}",
+            )
+            url_status, _h, url_body = app.handle_request(
+                "POST",
+                "/api/v1/settings/ai-credentials",
+                {"Content-Type": "application/json"},
+                b'{"base_url":"not-a-url"}',
+            )
+
+        self.assertEqual(empty_status, 400)
+        self.assertEqual(url_status, 400)
+        self.assertIn("http", json.loads(url_body)["error"])
+
     def test_tmdb_credentials_api_rejects_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = WebApp(TaskStore(Path(tmp) / "tasks.db"))

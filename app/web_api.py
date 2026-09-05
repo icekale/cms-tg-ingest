@@ -262,7 +262,7 @@ def _safe_api_value(value: Any) -> Any:
                     "source": source if source in _OWN_SHARE_RECEIVE_CODE_SOURCES else "",
                 }
                 continue
-            if normalized_key in {"emby_credentials", "tmdb_credentials"} and isinstance(item, dict):
+            if normalized_key in {"emby_credentials", "tmdb_credentials", "ai_credentials"} and isinstance(item, dict):
                 # 凭据 payload 里的 key 已是脱敏值（integration_credentials 的
                 # masked_payload），不能再被下方敏感 key 规则整值替换成 ***。
                 result[key] = _safe_api_value({k: v for k, v in item.items() if k != "api_key" and k != "bearer_token"})

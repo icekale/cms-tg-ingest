@@ -513,6 +513,7 @@ def maybe_start_web_server(
     cms_version_checker: Any | None = None,
     tmdb_resolver: Any | None = None,
     emby: EmbyClient | None = None,
+    openai_classifier: Any | None = None,
 ):
     if not config.web_enabled:
         return None
@@ -562,6 +563,8 @@ def maybe_start_web_server(
         kwargs["tmdb_resolver"] = tmdb_resolver
     if emby is not None:
         kwargs["emby_client"] = emby
+    if openai_classifier is not None:
+        kwargs["ai_classifier"] = openai_classifier
     try:
         starter_parameters = inspect.signature(starter).parameters
         supports_username_auth = (
@@ -662,6 +665,7 @@ def call_maybe_start_web_server(
     cms_version_checker: Any | None = None,
     tmdb_resolver: Any | None = None,
     emby: EmbyClient | None = None,
+    openai_classifier: Any | None = None,
 ):
     try:
         parameters = inspect.signature(maybe_start_web_server).parameters
@@ -712,6 +716,8 @@ def call_maybe_start_web_server(
             kwargs["tmdb_resolver"] = tmdb_resolver
         if supports_keyword("emby"):
             kwargs["emby"] = emby
+        if supports_keyword("openai_classifier"):
+            kwargs["openai_classifier"] = openai_classifier
         return maybe_start_web_server(config, task_store, **kwargs)
     return maybe_start_web_server(config, task_store)
 
@@ -905,15 +911,28 @@ def format_health(
 
 
 class OpenAIClassifier:
+    # 识别辅助（identify_media）的短期缓存：同名混淆资源在重试循环里会反复
+    # 走到 AI 兜底，缓存命中直接复用，避免重试打爆 LLM 配额。失败结果同样
+    # 缓存（ok=False），否则每次重试都会重新调用。TTL 过后重新请求。
+    _IDENTITY_CACHE_TTL_SECONDS = 6 * 3600
+    _IDENTITY_CACHE_MAX_ENTRIES = 256
+
     def __init__(self, config: Config, http: HttpJson | None = None):
         self.config = config
-        self.http = http or HttpJson(config.http_timeout)
+        # 实例属性（可被 Web 设置热更新覆盖；config 只作初始值）。
+        self.enabled_flag = bool(getattr(config, "openai_classify_enabled", False))
+        self.api_key = str(getattr(config, "openai_api_key", "") or "")
+        self.base_url = str(getattr(config, "openai_base_url", "") or "https://api.openai.com/v1").rstrip("/")
+        self.model = str(getattr(config, "openai_model", "") or "gpt-4.1-mini")
+        self.http = http or HttpJson(min(int(getattr(config, "http_timeout", 60) or 60), 20))
         self.high_confidence = config.openai_high_confidence
         self.suggest_confidence = config.openai_suggest_confidence
+        self._identity_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._identity_cache_lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
-        return bool(self.config.openai_classify_enabled and self.config.openai_api_key)
+        return bool(self.enabled_flag and self.api_key)
 
     def healthcheck(self) -> bool:
         return self.enabled
@@ -943,7 +962,7 @@ class OpenAIClassifier:
             "allowed_categories": OPENAI_CATEGORY_LABELS,
         }
         payload = {
-            "model": self.config.openai_model,
+            "model": self.model,
             "input": [
                 {
                     "role": "system",
@@ -962,11 +981,11 @@ class OpenAIClassifier:
             },
         }
         resp = self.http.request(
-            f"{self.config.openai_base_url}/responses",
+            f"{self.base_url}/responses",
             method="POST",
             payload=payload,
             headers={
-                "Authorization": f"Bearer {self.config.openai_api_key}",
+                "Authorization": f"Bearer {self.api_key}",
                 "Accept": "application/json",
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
             },
@@ -977,6 +996,98 @@ class OpenAIClassifier:
             raise RuntimeError(f"OpenAI returned unsupported category: {category}")
         parsed["confidence"] = max(0.0, min(1.0, as_float(parsed.get("confidence"), 0.0)))
         return parsed
+
+    def identify_media(self, share_name: str, recognition: dict[str, Any] | None = None) -> dict[str, Any]:
+        """AI 辅助识别：从资源站混淆名提取真实标题/年份/类型/TMDB ID。
+
+        只做"名字清洗"，不做最终判断——调用方必须用返回的 tmdb_id 或清洗
+        标题重搜 TMDB 确认（TMDB 是事实源，LLM 可能产生幻觉）。结果带
+        ok 标记并缓存：成功与失败都缓存，重试循环不再重复打 LLM。
+        """
+        if not self.enabled:
+            raise RuntimeError("OpenAI classifier is disabled")
+        key = re.sub(r"\s+", " ", str(share_name or "")).strip()
+        now = time.time()
+        with self._identity_cache_lock:
+            cached = self._identity_cache.get(key)
+            if cached and now - cached[0] < self._IDENTITY_CACHE_TTL_SECONDS:
+                return dict(cached[1])
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "ok": {"type": "boolean"},
+                "title": {"type": "string"},
+                "year": {"type": "string"},
+                "media_type": {"type": "string", "enum": ["movie", "tv", "unknown"]},
+                "tmdb_id": {"type": "string"},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "reason": {"type": "string"},
+            },
+            "required": ["ok", "title", "year", "media_type", "tmdb_id", "confidence", "reason"],
+        }
+        user_payload = {
+            "share_name": share_name,
+            "cms_recognition": {
+                key: recognition.get(key)
+                for key in ("ok", "title", "type", "category", "tmdb_id", "raw_msg")
+            } if isinstance(recognition, dict) else {},
+        }
+        payload = {
+            "model": self.model,
+            "input": [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是媒体资源名清洗器。资源站常把片名混淆成乱码式英文名，"
+                        "你要识别出真实的影视作品：给出真实标题（保持原名语言，中文资源给中文名）、"
+                        "发行年份、类型，以及你确定的 TMDB ID。不确定 TMDB ID 就留空字符串，"
+                        "宁缺勿错；ok=false 表示你无法辨认。不要编造。"
+                    ),
+                },
+                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+            ],
+            "max_output_tokens": 300,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "media_identity",
+                    "strict": True,
+                    "schema": schema,
+                }
+            },
+        }
+        try:
+            resp = self.http.request(
+                f"{self.base_url}/responses",
+                method="POST",
+                payload=payload,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+                },
+            )
+            parsed = self._extract_json(resp)
+        except Exception as exc:
+            LOG.debug("OpenAI identify_media failed share=%s", share_name, exc_info=True)
+            parsed = {"ok": False, "confidence": 0.0, "reason": str(exc)}
+        result = {
+            "ok": bool(parsed.get("ok")) and as_float(parsed.get("confidence"), 0.0) > 0,
+            "title": str(parsed.get("title") or "").strip(),
+            "year": str(parsed.get("year") or "").strip(),
+            "media_type": str(parsed.get("media_type") or "unknown").strip().lower(),
+            "tmdb_id": str(parsed.get("tmdb_id") or "").strip(),
+            "confidence": max(0.0, min(1.0, as_float(parsed.get("confidence"), 0.0))),
+            "reason": str(parsed.get("reason") or "").strip(),
+        }
+        with self._identity_cache_lock:
+            if len(self._identity_cache) >= self._IDENTITY_CACHE_MAX_ENTRIES:
+                oldest = min(self._identity_cache, key=lambda item: self._identity_cache[item][0])
+                self._identity_cache.pop(oldest, None)
+            self._identity_cache[key] = (now, dict(result))
+        return dict(result)
+
 
     @staticmethod
     def _extract_json(resp: dict[str, Any]) -> dict[str, Any]:
@@ -3921,6 +4032,7 @@ def run_forever(
         cms_version_checker=cms_version_checker,
         tmdb_resolver=tmdb_resolver,
         emby=emby,
+        openai_classifier=openai_classifier,
         frontend_dist_path=getattr(config, "frontend_dist_path", "/app/frontend/dist"),
         background_jobs=background_jobs,
         log_hub=log_hub,
