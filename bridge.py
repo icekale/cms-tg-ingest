@@ -1047,7 +1047,7 @@ class OpenAIClassifier:
                 },
                 {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
             ],
-            "max_output_tokens": 300,
+            "max_output_tokens": 700,
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -1072,13 +1072,22 @@ class OpenAIClassifier:
         except Exception as exc:
             LOG.debug("OpenAI identify_media failed share=%s", share_name, exc_info=True)
             parsed = {"ok": False, "confidence": 0.0, "reason": str(exc)}
+        confidence = max(0.0, min(1.0, as_float(parsed.get("confidence"), 0.85 if parsed.get("confidence") is None else 0.0)))
+        title = str(parsed.get("title") or "").strip()
+        # 非 OpenAI 官方端点可能忽略 json_schema（缺 ok/confidence 字段、年份为
+        # 数字、media_type 叫 type 等）：字段缺失按宽容语义推断。
+        raw_ok = parsed.get("ok")
+        if isinstance(raw_ok, bool):
+            ok = raw_ok and bool(title)
+        else:
+            ok = bool(title)
         result = {
-            "ok": bool(parsed.get("ok")) and as_float(parsed.get("confidence"), 0.0) > 0,
-            "title": str(parsed.get("title") or "").strip(),
+            "ok": ok,
+            "title": title,
             "year": str(parsed.get("year") or "").strip(),
-            "media_type": str(parsed.get("media_type") or "unknown").strip().lower(),
+            "media_type": str(parsed.get("media_type") or parsed.get("type") or "unknown").strip().lower(),
             "tmdb_id": str(parsed.get("tmdb_id") or "").strip(),
-            "confidence": max(0.0, min(1.0, as_float(parsed.get("confidence"), 0.0))),
+            "confidence": confidence,
             "reason": str(parsed.get("reason") or "").strip(),
         }
         with self._identity_cache_lock:
@@ -1106,7 +1115,20 @@ class OpenAIClassifier:
             text = str(message.get("content") or "").strip()
         if not text:
             raise RuntimeError("OpenAI returned empty classification")
-        return json.loads(text)
+        # 非 OpenAI 官方端点（Gemini 代理等）不支持 json_schema 强约束，会返回
+        # markdown 代码块或混杂文本：剥 fence 后再截取首个 { 到末个 } 解析。
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            stripped = "\n".join(
+                line for line in stripped.splitlines() if not line.strip().startswith("```")
+            ).strip()
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            start, end = stripped.find("{"), stripped.rfind("}")
+            if 0 <= start < end:
+                return json.loads(stripped[start : end + 1])
+            raise
 
 
 def _redact_telegram_error(exc: Exception) -> str:

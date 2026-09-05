@@ -1,3 +1,8 @@
+## 0.5.10 - 2026-09-05
+
+- **AI 端点兼容性修复（Gemini 等非官方端点）**：`_extract_json` 增加 markdown 代码块剥离与首尾大括号截取容错（Gemini 代理忽略 json_schema 且输出被 ``` 包裹）；`identify_media` 字段宽容转换（缺 ok/confidence 字段、media_type 叫 type、年份为数字）；max_output_tokens 300→700（reasoning token 计入上限易截断）。
+- 线上实测（gemini-3.8-flash-high + 真实历史中断任务批量验证）：8 个样本端到端 3 个正确识别（蜘蛛侠：纵横宇宙、头号玩家、末日地堡），其余正确拒绝（GTA VI 预告未上映、Cold War 双年份重名、Phoenix 幻觉 id 被词元校验拦截）。
+
 ## 0.5.9 - 2026-09-05
 
 - **AI 辅助识别防幻觉加固 + 模型建议**：线上实测发现 LLM 会幻觉出不存在的 tmdb 对应关系（把演唱会视频匹配成同名电影且被 lookup 存在性确认放行）。修正：**清洗标题重搜升为首选路径**（TMDB search 返回的 id 是 TMDB 自己给的）；LLM 的 tmdb_id 降为兜底，且 lookup 标题必须与 LLM 标题有词元交集才采信，任一侧纯中文无法交叉验证时宁缺勿滥。
