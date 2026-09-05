@@ -57,6 +57,9 @@ def snapshot_files(roots: list[dict[str, Any]], list_files: ListFiles) -> list[d
 
 INCOMPLETE = "incomplete"
 CONFLICT = "conflict"
+# 接入文件被 CMS 整理进了排除目录（冗余/已存在等）：需立即升级人工处理，
+# 不能按"未整理完"继续空转等待（2026-09-05 任务 595 教训）。
+EXCLUDED_DEST = "excluded_dest"
 
 
 def dest_file_ids_from_hits(

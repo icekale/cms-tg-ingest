@@ -1325,3 +1325,159 @@ class PostAutoOrganizeGuardTests(unittest.TestCase):
 
         self.assertEqual(result.outcome.value, "defer")
         self.assertEqual(row.get("own_share_file_id"), None)
+
+    def test_stage_organizing_escalates_when_intake_file_lands_in_excluded_dest(self):
+        """接入文件被 CMS 移进排除目录（冗余/已存在）时必须立即 needs_action，
+        给出可操作提示，而不是按"未整理完"空等到 organizing 超时（任务 595）。"""
+        from types import SimpleNamespace
+
+        class ExcludedDestP115(FakeCloudP115):
+            def search_files(self, search_value, limit=20):
+                if search_value == "redundant-folder":
+                    return [
+                        {
+                            "cid": "redundant-folder",
+                            "pid": "library-parent",
+                            "n": "X-Example-2026-[tmdb=1315772]",
+                            "fc": "0",
+                        }
+                    ]
+                if search_value == "Example.mkv":
+                    return [
+                        {
+                            "cid": "intake-file-1",
+                            "pid": "redundant-folder",
+                            "n": "Example.mkv",
+                            "fc": "1",
+                        }
+                    ]
+                return []
+
+            def list_files(self, parent_id, **kwargs):
+                if parent_id == "redundant-folder":
+                    return [
+                        {
+                            "cid": "intake-file-1",
+                            "pid": "redundant-folder",
+                            "n": "Example.mkv",
+                            "fc": "1",
+                        }
+                    ]
+                return []
+
+        submissions = FakeSubmissionStore()
+        row = submissions.upsert_submission(
+            bridge.ShareKey("swhou1y3nr6", "u148"),
+            "https://115cdn.com/s/swhou1y3nr6?password=u148",
+            "organized_found",
+            title="Example.mkv",
+        )
+        task = SimpleNamespace(
+            id=1,
+            share_code="swhou1y3nr6",
+            receive_code="u148",
+            url="https://115cdn.com/s/swhou1y3nr6?password=u148",
+            title="Example.mkv",
+            metadata={
+                "submission_id": row["id"],
+                "operation_generation": 0,
+                "update_requested_run": 0,
+                "intake_identity": {
+                    "root_ids": ["intake-file-1"],
+                    "files": [{"id": "intake-file-1", "name": "Example.mkv"}],
+                    "dest_id": "",
+                },
+            },
+        )
+        workflow = make_workflow(ExcludedDestP115([]), submissions)
+        workflow.self_share_config.excluded_parent_ids = {"redundant-folder"}
+
+        result = workflow._stage_organizing(task)
+
+        self.assertEqual(result.outcome.value, "needs_action")
+        self.assertIn("排除目录", result.message)
+        self.assertIn("X-Example-2026-[tmdb=1315772]", result.message)
+        self.assertIn("继续整理", result.message)
+        self.assertEqual(result.metadata.get("excluded_dest_folder"), "redundant-folder")
+
+    def test_stage_organizing_prefers_library_dest_over_excluded_hit(self):
+        """同一文件同时命中媒体库目录与排除目录时（如先后两次整理），
+        仍应绑定媒体库目录继续流程，不误伤。"""
+        from types import SimpleNamespace
+
+        class MixedDestP115(FakeCloudP115):
+            def search_files(self, search_value, limit=20):
+                if search_value == "Example.mkv":
+                    return [
+                        {
+                            "cid": "intake-file-1",
+                            "pid": "redundant-folder",
+                            "n": "Example.mkv",
+                            "fc": "1",
+                        }
+                    ]
+                return []
+
+            def folder_path(self, parent_id):
+                if parent_id == "redundant-folder":
+                    return [{"cid": "redundant-folder", "pid": "0", "n": "X-Example-2026-[tmdb=1315772]"}]
+                return []
+
+            def list_files(self, parent_id, **kwargs):
+                if parent_id == "library-folder":
+                    return [
+                        {
+                            "cid": "intake-file-1",
+                            "pid": "library-folder",
+                            "n": "Example.mkv",
+                            "fc": "1",
+                        }
+                    ]
+                return []
+
+        submissions = FakeSubmissionStore()
+        row = submissions.upsert_submission(
+            bridge.ShareKey("swhou1y3nr6", "u148"),
+            "https://115cdn.com/s/swhou1y3nr6?password=u148",
+            "organized_found",
+            title="Example.mkv",
+        )
+        task = SimpleNamespace(
+            id=1,
+            share_code="swhou1y3nr6",
+            receive_code="u148",
+            url="https://115cdn.com/s/swhou1y3nr6?password=u148",
+            title="Example.mkv",
+            metadata={
+                "submission_id": row["id"],
+                "operation_generation": 0,
+                "update_requested_run": 0,
+                "tmdb_hint_id": "1315772",
+                "intake_identity": {
+                    "root_ids": ["intake-file-1"],
+                    "files": [{"id": "intake-file-1", "name": "Example.mkv"}],
+                    "dest_id": "",
+                },
+            },
+        )
+        workflow = make_workflow(MixedDestP115([]), submissions)
+        workflow.self_share_config.excluded_parent_ids = {"redundant-folder"}
+        # tmdb 搜索会命中媒体库目录
+        def _search_with_library(self, value, limit=20):
+            if value == "1315772":
+                return [
+                    {
+                        "cid": "library-folder",
+                        "pid": "movie-parent",
+                        "n": "X-Example-2026-[tmdb=1315772]",
+                        "fc": "0",
+                    }
+                ]
+            return MixedDestP115.search_files(self, value, limit=limit)
+
+        with patch.object(type(workflow.p115), "search_files", _search_with_library):
+            with patch.object(workflow, "_conflicting_folder_owner", return_value=None):
+                result = workflow._stage_organizing(task)
+
+        # 媒体库目录命中 → 走正常绑定（complete），而不是 excluded 升级
+        self.assertEqual(result.outcome.value, "complete")

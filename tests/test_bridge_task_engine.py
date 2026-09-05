@@ -1761,9 +1761,16 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 receive_cid="pending-cid",
             )
 
-            self.assertEqual(status, "incomplete")
+            # 2026-09-05 任务 595 后语义升级：实时核验文件确实位于排除目录时
+            # 返回 excluded_dest（由 organizing 升级 needs_action），不再按
+            # incomplete 空等。核心保护不变：targets 恒为空（绝不绑定排除目录）。
+            self.assertEqual(status, "excluded_dest")
             self.assertEqual(targets, [])
-            self.assertIsNone(identity)
+            self.assertIsNotNone(identity)
+            self.assertEqual(
+                (identity or {}).get("_excluded_dest", {}).get("folder_id"),
+                "redundant-cid",
+            )
 
     def test_resolve_intake_dest_folders_rejects_persisted_leftover_dest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1996,7 +2003,11 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             )
             result = workflow.run_stage(task)
             stored = self.submissions.find_by_id(int(row["id"]))
-            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            # 2026-09-05 任务 595 后语义升级：文件确实落在排除目录时立即
+            # needs_action（实时核验通过），不再按"未整理完"空等到超时。
+            # 但核心保护不变：绝不把排除目录绑定为整理目标。
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("排除目录", result.message)
             self.assertNotEqual(stored["own_share_file_id"], "redundant-cid")
             identity = result.metadata.get("intake_identity") or {}
             self.assertNotEqual(identity.get("dest_id"), "redundant-cid")

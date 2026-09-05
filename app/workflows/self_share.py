@@ -48,6 +48,7 @@ from app.media.classify import (
 )
 from app.media.intake_identity import (
     CONFLICT,
+    EXCLUDED_DEST,
     INCOMPLETE,
     cleanup_root_action,
     collect_file_ids_under_dest,
@@ -2118,6 +2119,21 @@ class BridgeSelfShareTaskWorkflow:
             return False
         return expected <= found
 
+    def _excluded_dest_confirmed(self, dest: str, expected_ids: list[str]) -> bool:
+        """实时核验接入文件确实位于排除目录（115 搜索索引可能滞后）。
+
+        返回 False 表示搜索命中是陈旧数据，按未整理继续等待。
+        """
+        expected = {str(value) for value in expected_ids if str(value)}
+        if not expected or not dest or not hasattr(self.p115, "list_files"):
+            return False
+        try:
+            found = collect_file_ids_under_dest(dest, self._p115_list_files)
+        except Exception:
+            LOG.debug("Failed to verify excluded dest children dest=%s", dest, exc_info=True)
+            return False
+        return bool(expected & found)
+
     def _organized_target_for_dest(
         self,
         dest: str,
@@ -2409,6 +2425,7 @@ class BridgeSelfShareTaskWorkflow:
             return INCOMPLETE, [], None
         if grouped:
             targets: list[dict[str, Any]] = []
+            excluded_hits: list[dict[str, str]] = []
             require_real_folder = len(grouped) > 1
             for dest, file_ids in grouped.items():
                 folder = self._folder_record_for_dest(
@@ -2425,17 +2442,29 @@ class BridgeSelfShareTaskWorkflow:
                     return INCOMPLETE, [], None
                 if not self._intake_expected_files_located(dest, file_ids, file_hits):
                     return INCOMPLETE, [], None
-                if (
-                    dest == receive_cid
-                    or dest in root_ids
-                    or dest in excluded_dest_ids
-                    or self._dest_is_receive_child(dest, receive_cid) is not False
-                    or self._dest_is_excluded_source(dest, folder, receive_cid)
-                ):
+                if dest == receive_cid or dest in root_ids:
+                    return INCOMPLETE, [], None
+                if dest in excluded_dest_ids:
+                    # CMS 把文件整理进了排除目录（冗余/已存在等）：立即升级人工
+                    # 处理，不再按"未整理完"空转等待到超时（2026-09-05 任务 595）。
+                    # 搜索索引可能滞后：升级前用实时列目录核验文件确实还在这里。
+                    if self._excluded_dest_confirmed(dest, file_ids):
+                        excluded_hits.append({"folder_id": dest, "folder_name": dest_name})
+                        continue
+                    return INCOMPLETE, [], None
+                if self._dest_is_receive_child(dest, receive_cid) is not False:
+                    return INCOMPLETE, [], None
+                if self._dest_is_excluded_source(dest, folder, receive_cid):
                     return INCOMPLETE, [], None
                 if receive_cid and str(folder.get("parent_id") or "").strip() == receive_cid:
                     return INCOMPLETE, [], None
                 targets.append(self._organized_target_for_dest(dest, file_ids, folder, {}))
+            if not targets and excluded_hits:
+                return EXCLUDED_DEST, [], {**identity, "_excluded_dest": excluded_hits[0]}
+            if excluded_hits:
+                # 部分文件在排除目录、其余已绑定媒体库：记录待人工处理的那部分，
+                # 但不阻塞已可绑定的目标。
+                identity = {**identity, "_excluded_dest": excluded_hits[0]}
             targets.sort(key=lambda item: str(item.get("target_id") or ""))
             first_dest = str(targets[0].get("target_id") or "") if targets else ""
             return (
@@ -2729,6 +2758,17 @@ class BridgeSelfShareTaskWorkflow:
             return StageResult.needs_action(
                 "接收文件归属存在歧义，已停止自动绑定",
                 {"submission_id": int(row["id"])},
+            )
+        if dest_status == EXCLUDED_DEST:
+            marker = (dest_identity or {}).get("_excluded_dest") if isinstance(dest_identity, dict) else None
+            folder_name = str((marker or {}).get("folder_name") or "").strip() or "排除目录"
+            return StageResult.needs_action(
+                f"CMS 把接收文件整理到了排除目录「{folder_name}」——通常是库内已存在同版本，被判定冗余或已存在。"
+                "若是想要的新版本：手动把文件移入媒体库对应目录后点「继续整理」；若不需要：直接删除本任务即可。",
+                {
+                    "submission_id": int(row["id"]),
+                    "excluded_dest_folder": str((marker or {}).get("folder_id") or ""),
+                },
             )
         if dest_targets:
             if dest_identity:
