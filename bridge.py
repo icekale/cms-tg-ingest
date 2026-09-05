@@ -924,7 +924,7 @@ class OpenAIClassifier:
         self.api_key = str(getattr(config, "openai_api_key", "") or "")
         self.base_url = str(getattr(config, "openai_base_url", "") or "https://api.openai.com/v1").rstrip("/")
         self.model = str(getattr(config, "openai_model", "") or "gpt-4.1-mini")
-        self.http = http or HttpJson(min(int(getattr(config, "http_timeout", 60) or 60), 20))
+        self.http = http or HttpJson(min(int(getattr(config, "http_timeout", 60) or 60), 45))
         self.high_confidence = config.openai_high_confidence
         self.suggest_confidence = config.openai_suggest_confidence
         self._identity_cache: dict[str, tuple[float, dict[str, Any]]] = {}
