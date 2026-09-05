@@ -508,17 +508,28 @@ def apply_openai_identity_resolution(
         confirmed["openai_reason"] = reason or str(confirmed.get("openai_reason") or "")
         return confirmed
 
-    # 1) LLM 给出 TMDB ID：走 marker 校验路径，TMDB lookup 确认后采信。
+    # 1) 清洗标题重搜（首选）：TMDB search 返回的 id 是 TMDB 自己给的，
+    #    不依赖 LLM 的 id（LLM 会幻觉出不存在的对应关系）。
+    # 2) LLM 的 tmdb_id 降为兜底：lookup 确认存在后，还要求结果标题与
+    #    LLM 标题有词元交集（LLM 曾把演唱会视频幻觉成同名电影）；任一侧
+    #    无拉丁词元（纯中文）无法交叉验证时也拒绝——宁缺勿滥。
+    title_tokens = _title_tokens(share_name)
+    looked_up: dict[str, Any] | None = None
     if tmdb_id and tmdb_id != str(recognition.get("tmdb_id") or ""):
-        resolved, should_prompt = apply_tmdb_hint_resolution(
-            {**recognition, "tmdb_id": tmdb_id},
-            f"{share_name} {{tmdb-{tmdb_id}}}",
-            tmdb_resolver,
-        )
-        if not should_prompt:
-            return _confirmed(resolved), False
-    # 2) 只有清洗标题：合成干净名重搜。tv 用 .S01 后缀让类型探测命中，
-    #    movie 用空格年份（括号形式不满足搜索查询的年份 marker 提取）。
+        try:
+            candidate = tmdb_resolver.lookup(tmdb_id, "movie", share_name)
+        except Exception:
+            candidate = None
+        if not isinstance(candidate, dict) or not candidate.get("ok"):
+            try:
+                candidate = tmdb_resolver.lookup(tmdb_id, "tv", share_name)
+            except Exception:
+                candidate = None
+        if isinstance(candidate, dict) and candidate.get("ok") and (
+            not title_tokens
+            or (_title_tokens(str(candidate.get("title") or "")) & title_tokens)
+        ):
+            looked_up = candidate
     if title and title.strip().lower() != share_name.strip().lower():
         if media_type == "tv":
             synthetic = f"{title}.S01"
@@ -527,7 +538,20 @@ def apply_openai_identity_resolution(
         resolved, should_prompt = apply_tmdb_search_resolution(recognition, synthetic, tmdb_resolver)
         if not should_prompt:
             return _confirmed(resolved), False
+    if looked_up is not None:
+        resolved = apply_tmdb_hint_resolution(
+            {**recognition, "tmdb_id": tmdb_id},
+            f"{share_name} {{tmdb-{tmdb_id}}}",
+            tmdb_resolver,
+        )[0]
+        if not is_recognition_uncertain(resolved):
+            return _confirmed(resolved), False
     return recognition, True
+
+
+def _title_tokens(value: str) -> set[str]:
+    """资源名/标题的词元集合（>=3 位字母数字），用于交叉验证 LLM 结果。"""
+    return set(re.findall(r"[a-z0-9]{3,}", str(value or "").lower()))
 
 
 def category_keyboard(row_id: int) -> dict[str, Any]:

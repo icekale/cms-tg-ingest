@@ -672,7 +672,7 @@ class OpenAIIdentityResolutionTests(unittest.TestCase):
         return FakeAI()
 
     @staticmethod
-    def _resolver(search_by_type=None):
+    def _resolver(search_by_type=None, lookup_title='小黄人与大怪兽'):
         class FakeTmdb:
             enabled = True
 
@@ -687,7 +687,7 @@ class OpenAIIdentityResolutionTests(unittest.TestCase):
             def lookup(self, tmdb_id, media_type, share_name):
                 return {
                     'ok': True,
-                    'title': '小黄人与大怪兽',
+                    'title': lookup_title,
                     'type': media_type,
                     'category': '动漫电影',
                     'tmdb_id': tmdb_id,
@@ -695,7 +695,8 @@ class OpenAIIdentityResolutionTests(unittest.TestCase):
 
         return FakeTmdb()
 
-    def test_identity_via_tmdb_id_marker_confirms_through_lookup(self):
+    def test_identity_via_cleaned_chinese_title_search_resolves(self):
+        """LLM 给出中文标题时优先走 TMDB 标题重搜（search 返回的 id 可信）。"""
         from app.workflows.self_share import apply_openai_identity_resolution
 
         ai = self._classifier({
@@ -703,14 +704,62 @@ class OpenAIIdentityResolutionTests(unittest.TestCase):
             'media_type': 'movie', 'tmdb_id': '1315772', 'confidence': 0.92,
             'reason': 'Remux.Thor@HDSky 是小黄人与格鲁的衍生电影',
         })
-        resolver = self._resolver()
+        resolver = self._resolver(search_by_type={
+            ('小黄人与大怪兽', 'movie'): {
+                'ok': True, 'title': '小黄人与大怪兽', 'type': 'movie',
+                'category': '动漫电影', 'tmdb_id': '1315772',
+            }
+        })
         base = {'ok': False, 'title': '', 'type': '', 'category': '', 'tmdb_id': ''}
 
-        resolved, should_prompt = apply_openai_identity_resolution(base, 'X.2160p.BluRay.REMUX.Thor@HDSky.mkv', ai, resolver)
+        resolved, should_prompt = apply_openai_identity_resolution(
+            base, 'X.2160p.BluRay.REMUX.Thor@HDSky.mkv', ai, resolver,
+        )
 
         self.assertFalse(should_prompt)
         self.assertEqual(resolved['tmdb_id'], '1315772')
         self.assertEqual(resolved['type'], 'movie')
+        self.assertEqual(resolved['openai_source'], 'openai_identity')
+        self.assertEqual(resolver.searches, [('小黄人与大怪兽', 'movie')])
+
+    def test_llm_tmdb_id_with_mismatched_lookup_title_is_rejected(self):
+        """LLM 幻觉的 tmdb_id（lookup 标题与 LLM 标题无词元交集）必须被丢弃。"""
+        from app.workflows.self_share import apply_openai_identity_resolution
+
+        ai = self._classifier({
+            'ok': True, 'title': 'Minions and Monsters', 'year': '2026',
+            'media_type': 'movie', 'tmdb_id': '435486', 'confidence': 0.99,
+            'reason': '',
+        })
+        resolver = self._resolver(lookup_title='Abbath: Live at Hellfest 2016')
+        base = {'ok': False, 'title': '', 'type': '', 'category': '', 'tmdb_id': ''}
+
+        resolved, should_prompt = apply_openai_identity_resolution(
+            base, 'X.2160p.BluRay.REMUX.mkv', ai, resolver,
+        )
+
+        self.assertTrue(should_prompt)
+        self.assertFalse(resolved.get('ok'))
+        self.assertNotEqual(resolved.get('tmdb_id'), '435486')
+
+    def test_llm_tmdb_id_accepted_when_lookup_title_matches(self):
+        """lookup 标题与 LLM 标题有词元交集时才采信 LLM 的 tmdb_id。"""
+        from app.workflows.self_share import apply_openai_identity_resolution
+
+        ai = self._classifier({
+            'ok': True, 'title': 'Minions and Monsters', 'year': '2026',
+            'media_type': 'movie', 'tmdb_id': '1315772', 'confidence': 0.95,
+            'reason': '',
+        })
+        resolver = self._resolver(lookup_title='Minions and Monsters 2026')
+        base = {'ok': False, 'title': '', 'type': '', 'category': '', 'tmdb_id': ''}
+
+        resolved, should_prompt = apply_openai_identity_resolution(
+            base, 'X.2160p.BluRay.REMUX.Minions.and.Monsters.mkv', ai, resolver,
+        )
+
+        self.assertFalse(should_prompt)
+        self.assertEqual(resolved['tmdb_id'], '1315772')
         self.assertEqual(resolved['openai_source'], 'openai_identity')
 
     def test_identity_via_cleaned_title_researches_tmdb(self):
