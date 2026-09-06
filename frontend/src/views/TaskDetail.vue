@@ -129,6 +129,12 @@ onMounted(load)
       <div v-for="event in task.events || []" :key="event.id" class="event-row"><n-tag size="small">{{ event.stage }}</n-tag><span>{{ event.message }}</span><span class="muted">{{ eventTime(event.created_at) }}</span></div>
       <div v-if="!(task.events || []).length" class="muted">暂无事件</div>
     </n-card>
+    <n-card v-if="task.metadata?.assistant_diagnosis" title="AI 诊断" embedded style="margin-top: 18px">
+      <div class="detail-text" style="white-space: pre-wrap">{{ task.metadata.assistant_diagnosis.reply || task.metadata.assistant_diagnosis.error || '' }}</div>
+      <div class="muted" style="margin-top: 8px">
+        由 pi 智能助手在任务进入 needs_action 时自动生成（{{ eventTime(task.metadata.assistant_diagnosis.diagnosed_at) }}），仅供参考；实际操作以页面按钮为准。
+      </div>
+    </n-card>
     <n-card title="错误与技术详情" embedded style="margin-top: 18px">
       <div v-if="task.error?.summary" class="error-text">{{ task.error.summary }}</div>
       <pre class="detail-text">{{ JSON.stringify(task.metadata || {}, null, 2) }}</pre>

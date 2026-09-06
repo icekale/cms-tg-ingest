@@ -1,3 +1,13 @@
+## 0.5.11 - 2026-09-06
+
+- **新增内置 AI 运维助手（以 pi 为基座，Web + Telegram 双端）**：基座为 [pi coding agent](https://github.com/earendil-works/pi-coding-agent)（`pi -p --mode json` 非交互模式），pi 负责模型接入、凭据与会话记忆（`--session-id` 跨请求延续对话），本应用负责采集系统快照（健康状态、开放任务 + 最近 3 条事件、可选任务详情）附在提问里。
+- **Telegram 接入**：`/助手 [任务号] <问题>` 对话式诊断（后台线程执行不阻塞轮询、回复按 4096 上限分段发送、同一 TG 会话复用同一 pi 会话支持追问）、`/诊断` 一键体检；/help 与菜单按钮同步更新。
+- **needs_action 自动诊断（兜底）**：巡检循环（默认 120s）发现进入 needs_action 且原因未诊断过的任务时，自动跑 AI 诊断——结果写任务 metadata（Web 任务详情新增「AI 诊断」卡片）并推送到 Telegram；同一事件只诊断一次，失败 6 小时后才重试，`PI_ASSISTANT_AUTO_DIAGNOSIS=0` 可关闭。
+- **安全边界**：助手以 `--no-tools --no-extensions --no-skills --no-context-files` 运行，不接触容器 shell、不受本机编码配置影响；只基于快照做诊断与建议，不执行任何操作（动作建议指向 Web/Telegram 已有能力）。
+- **配置**：镜像内置 pi 0.83.0（复用前端构建阶段的 Node 运行时 + libstdc++）；凭据放数据卷 `/data/pi/agent/auth.json`（`PI_CODING_AGENT_DIR` 即 agent 目录本身，镜像已设为 `/data/pi/agent`）。可选环境变量：`PI_ASSISTANT_BIN`（默认 PATH 中的 pi）、`PI_ASSISTANT_MODEL`（默认 pi 配置的默认模型）、`PI_ASSISTANT_TIMEOUT`（默认 120s）、`PI_ASSISTANT_SESSION_DIR`（默认 `<数据库目录>/assistant-sessions`）。pi 未安装/未配置时接口返回 503 并给出安装提示。
+- **API**：`POST /api/v1/assistant/chat`（question、session_id、task_id 聚焦任务），会话 ID 由后端生成/校验；Web 助手与 TG 命令共用同一快照构建（`assistant.build_snapshot`）。
+- 实测：真实服务器 + 真 pi + 真模型端到端通过——Web 端助手准确指出 needs_action 任务及事件原文原因、给出 reprocess/delete 建议、发现 pending 任务 `next_run_at=-1` 不会被调度；TG 端 `/助手 1 <问题>` 与自动诊断 sweep 均正确产出带依据的诊断并写入 metadata，同一事件不重复诊断；同会话追问记忆正确。单测新增 19 项，后端 1914 项全部通过；前端构建通过。
+
 ## 0.5.10 - 2026-09-05
 
 - **AI 端点兼容性修复（Gemini 等非官方端点）**：`_extract_json` 增加 markdown 代码块剥离与首尾大括号截取容错（Gemini 代理忽略 json_schema 且输出被 ``` 包裹）；`identify_media` 字段宽容转换（缺 ok/confidence 字段、media_type 叫 type、年份为数字）；max_output_tokens 300→700（reasoning token 计入上限易截断）。

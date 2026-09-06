@@ -52,6 +52,7 @@ export const api = {
   qualityRun: () => request('quality/run', { method: 'POST' }),
   qualitySettings: (settings) => request('quality/settings', { method: 'POST', body: JSON.stringify(settings) }),
   qualityReset: () => request('quality/settings/reset', { method: 'POST' }),
+  assistantChat: (payload) => request('assistant/chat', { method: 'POST', body: JSON.stringify(payload) }),
   hdhiveSubscriptionAction: (id, action) => request(`hdhive/subscriptions/${id}/${action}`, { method: 'POST' }),
   hdhiveCreateSubscription: (payload) => request('hdhive/subscriptions', { method: 'POST', body: JSON.stringify(payload) }),
   hdhiveSubscriptionFilter: (id, episode_filter) => request(`hdhive/subscriptions/${id}/episode-filter`, { method: 'POST', body: JSON.stringify({ episode_filter }) }),

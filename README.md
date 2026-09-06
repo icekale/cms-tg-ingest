@@ -6,7 +6,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 115 分享/磁力/ED2K -> 115 接收或云下载 -> CMS 整理分类 -> 自有永久分享 -> 分享 STRM -> Emby 入库 -> 清理转存源
 ```
 
-**0.5.2** 起运行时只有一份 SQLite 任务库（`DATABASE_PATH=/data/cms-tg-ingest.db`）和唯一的 TaskRunner 写入者：观察者只入队命令，接收/建分享/同步/删除带不可变 journal，失败后接着跑而不是重做上游。当前镜像 `icekale/cms-tg-ingest:0.5.8`。
+**0.5.2** 起运行时只有一份 SQLite 任务库（`DATABASE_PATH=/data/cms-tg-ingest.db`）和唯一的 TaskRunner 写入者：观察者只入队命令，接收/建分享/同步/删除带不可变 journal，失败后接着跑而不是重做上游。当前镜像 `icekale/cms-tg-ingest:0.5.11`。
 
 它只编排你已经拥有权限的 CMS、115、HDHive 和 Emby 工作流，不提供媒体资源，也不绕过任何服务的权限或风控机制。
 
@@ -26,6 +26,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 - **HDHive 搜索与解锁**：复用 CMS 已授权的单个 HDHive 账号，按 TMDB 匹配影片/剧集、筛选网盘、单条或批量解锁。
 - **HDHive 剧集订阅**：可在 Web `/app/hdhive` 或用 `/订阅 <HDHive剧集链接>` 创建订阅，按计划检查新集，费用未知或较高时等待确认。
 - **Web 运维台**：查看队列、阶段耗时、健康状态、质量巡检和 HDHive 订阅。
+- **AI 运维助手**：以 [pi coding agent](https://github.com/earendil-works/pi-coding-agent) 为基座，覆盖 Web 与 Telegram 两端。Web 管理台「AI 助手」页对话诊断；Telegram `/助手 [任务号] <问题>` 随时提问、`/诊断` 一键体检。提问自动附上健康状态、任务队列和任务事件的系统快照；任务进入 needs_action 时自动跑 AI 诊断并推送到 TG，结果存任务详情「AI 诊断」卡片。助手只建议不执行，建议落到 Web/Telegram 已有动作上。需要在容器内配置 pi 凭据（见「AI 助手配置」）。
 - **Emby 看板**：独立媒体仪表盘——数据概览（电影/剧集/集数/媒体库数）、我的媒体库（各库代表海报 + 数量）、最近入库海报流，点击直达 Emby 详情/播放。Emby API Key 只在服务端使用，不外泄到浏览器。
 - **暗色模式**：Web 管理台跟随系统深浅色，顶栏可手动切换并记住选择；登录页同步适配。
 - **CMS 版本检测与一键升级**：Web 设置页「立即检查」对比本地 CMS 版本与 Docker Hub 最新 tag；发现新版可直接「升级」，在容器内完成拉取、重建和 STRM 守卫校验，失败自动回滚。
@@ -40,7 +41,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.5.8`。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.5.11`。
 4. 拉取固定版本并启动：
 
 ```sh
@@ -147,6 +148,16 @@ CMS_UPDATE_IMAGE=imaliang/cloud-media-sync:latest
 ```
 
 待整理目录也可以在新版 Web UI 的“设置”中查看和修改。Web 保存值写入 TaskStore，优先于 `SELF_SHARE_RECEIVE_CID`，重启后仍保留；点击“使用环境配置”可清除 Web 覆盖并恢复 `.env` 值。该设置同时用于 115 转存和云下载目标目录。
+
+### AI 助手配置
+
+「AI 助手」页面以 [pi coding agent](https://github.com/earendil-works/pi-coding-agent) 为基座（镜像已内置 pi，无需额外安装）。pi 负责模型接入与会话记忆，只需把 pi 的凭据放到数据卷：
+
+1. 在宿主机准备 `pi/agent/auth.json`（可在装了 pi 的机器上用 `pi auth` 导出，或手工按 pi 文档编写）。
+2. 挂载到容器：`-v /path/to/pi/agent:/data/pi/agent`（镜像内 `PI_CODING_AGENT_DIR=/data/pi/agent`）。
+3. 重启后打开 Web 管理台「AI 助手」页面即可提问；pi 未配置时接口返回 503 并提示。
+
+可选环境变量：`PI_ASSISTANT_BIN`（pi 路径，默认 PATH）、`PI_ASSISTANT_MODEL`（默认用 pi 配置的默认模型）、`PI_ASSISTANT_TIMEOUT`（单次调用超时秒数，默认 120）、`PI_ASSISTANT_SESSION_DIR`（会话存储目录，默认 `<数据库目录>/assistant-sessions`）、`PI_ASSISTANT_AUTO_DIAGNOSIS`（设 `0` 关闭 needs_action 自动诊断，默认开启）。助手以 `--no-tools` 等隔离参数运行，只读快照做诊断建议，不执行操作；会话文件保存在数据卷中，可用「新对话」开启新会话。
 
 ### 首次启动检查
 
@@ -506,7 +517,7 @@ git push origin v0.2.90
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.5.8
+docker pull icekale/cms-tg-ingest:0.5.11
 docker pull icekale/cms-tg-ingest:latest
 ```
 

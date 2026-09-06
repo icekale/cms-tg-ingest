@@ -199,8 +199,18 @@ from app.telegram_ui import (
 )
 from app.task_runner import StageResult, TaskRunner, new_worker_id
 from app.task_store import TaskStore, WorkflowRowAdapter, reprocess_delete_keys_for
+from app import assistant
+from app.assistant import AUTO_DIAGNOSIS_QUESTION, DIAGNOSIS_META_KEY
 from app.web import start_web_server
-from app.web_api import quality_items
+from app.web_api import (
+    CMS_DIRECT_STRM_GUARD_MARKER,
+    CMS_OS_STRM_GUARD_MARKER,
+    CMS_STRM_GUARD_MARKER,
+    check_cms_direct_strm_guard,
+    check_cms_os_strm_guard,
+    check_cms_strm_guard,
+    quality_items,
+)
 from app.workflows.direct import DirectTaskWorkflow, ModeRoutingWorkflow, SourceShareTaskWorkflow
 from app.workflows.self_share import (
     BridgeSelfShareTaskWorkflow,
@@ -249,7 +259,7 @@ _HDHIVE_PENDING_FILTERS_LOCK = threading.Lock()
 _HDHIVE_PENDING_FILTERS: dict[str, int] = {}
 _HDHIVE_FILTER_PROMPT = "请发送集数过滤，例如 S01E01-S01E10,S02；发送“清除”恢复全部正常集。"
 ED2K_HELP_EXAMPLE = "ed2k://|file|Example.mkv|10|" + "0123456789ABCDEF" * 2 + "|/"
-HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 分享、磁力或 ED2K 链接\n- 磁力/ED2K 会进入 115 云下载，再复用 CMS 整理和分享 STRM 流程\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- 新链接追更：追更 #任务号 <新115链接>\n- /搜索：通过 TMDB 匹配 HDHive 影片/剧集，筛选网盘并解锁资源（/hdhive_search 仍兼容）\n- /订阅 <HDHive剧集链接>：创建 HDHive 剧集订阅\n- 发送 HDHive 剧集页面也可直接订阅，例如 https://hdhive.com/tv/xxxxxxxx\n- /status 查看最近任务\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd\n""" + ED2K_HELP_EXAMPLE
+HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 分享、磁力或 ED2K 链接\n- 磁力/ED2K 会进入 115 云下载，再复用 CMS 整理和分享 STRM 流程\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- 新链接追更：追更 #任务号 <新115链接>\n- /搜索：通过 TMDB 匹配 HDHive 影片/剧集，筛选网盘并解锁资源（/hdhive_search 仍兼容）\n- /订阅 <HDHive剧集链接>：创建 HDHive 剧集订阅\n- 发送 HDHive 剧集页面也可直接订阅，例如 https://hdhive.com/tv/xxxxxxxx\n- /status 查看最近任务\n- /助手 [任务号] <问题>：AI 运维助手诊断故障（基于 pi），例如「/助手 12 为什么一直 needs_action」\n- /诊断：AI 一键体检，总结当前健康状态和需要处理的问题\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd\n""" + ED2K_HELP_EXAMPLE
 MENU_BUTTONS = {
     "🔍 搜索": "/搜索",
     "📋 最近任务": "/status",
@@ -261,6 +271,7 @@ MENU_BUTTONS = {
     "HDHive 搜索": "/搜索",
     "HDHive 订阅": "/hdhive_subscriptions",
     "🩺 健康检查": "/health",
+    "🤖 AI 助手": "/诊断",
     "❓ 帮助": "/help",
 }
 
@@ -2400,6 +2411,272 @@ def start_self_share_maintenance_loop(
     return thread
 
 
+# ---- AI 运维助手（pi 基座）：Telegram /助手 命令 + needs_action 自动诊断 ----
+
+_ASSISTANT_DIAGNOSIS_INFLIGHT: set[int] = set()
+_ASSISTANT_DIAGNOSIS_LOCK = threading.Lock()
+_TG_ASSISTANT_SESSIONS: dict[str, str] = {}
+_TG_ASSISTANT_SESSION_LOCK = threading.Lock()
+_ASSISTANT_ERROR_RETRY_SECONDS = 6 * 3600
+
+
+def _chunk_assistant_text(text: str, limit: int = 3800) -> list[str]:
+    """Telegram 单条消息上限 4096 字符：按行装箱分段，超长行硬切。"""
+    text = str(text or "").strip()
+    if not text:
+        return [""]
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    current = ""
+    for line in text.splitlines():
+        while len(line) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        if len(current) + len(line) + 1 > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current.strip():
+        chunks.append(current)
+    return chunks or [""]
+
+
+def _assistant_session_id(chat_id: int | str) -> str:
+    """同一 TG 会话的 /助手 复用同一个 pi 会话（多轮追问记得上文）。"""
+    key = str(chat_id)
+    with _TG_ASSISTANT_SESSION_LOCK:
+        session_id = _TG_ASSISTANT_SESSIONS.get(key)
+        if not session_id:
+            session_id = assistant.new_session_id()
+            _TG_ASSISTANT_SESSIONS[key] = session_id
+        return session_id
+
+
+def build_assistant_guards(config: Any, self_share_config: Any) -> dict[str, Any]:
+    """CMS STRM 守卫状态（从不抛错、进程内缓存 60s），供助手快照诊断 STRM 误删类故障。"""
+    workflow_mode = str(getattr(config, "workflow_mode", "direct") or "")
+    container = "cloud-media-sync"
+    docker_socket = str(getattr(config, "cms_update_docker_socket", "") or "/var/run/docker.sock")
+    return {
+        "cms_strm_guard": check_cms_strm_guard(
+            workflow_mode=workflow_mode, container=container, docker_socket=docker_socket, marker=CMS_STRM_GUARD_MARKER
+        ),
+        "cms_direct_strm_guard": check_cms_direct_strm_guard(
+            workflow_mode=workflow_mode, container=container, docker_socket=docker_socket, marker=CMS_DIRECT_STRM_GUARD_MARKER
+        ),
+        "cms_os_strm_guard": check_cms_os_strm_guard(
+            workflow_mode=workflow_mode, container=container, docker_socket=docker_socket, marker=CMS_OS_STRM_GUARD_MARKER
+        ),
+    }
+
+
+def handle_assistant_command(
+    text: str,
+    command: str,
+    chat_id: int | str,
+    telegram: TelegramClient,
+    task_store: Any,
+    *,
+    engine_enabled: bool = True,
+    guards: dict[str, Any] | None = None,
+) -> None:
+    """/助手 [任务号] <问题>：后台线程调用 pi，回复分段发送，不阻塞轮询循环。"""
+    if task_store is None:
+        telegram.send_message(chat_id, "AI 助手不可用：任务库未初始化。")
+        return
+    first_token = text.split()[0] if text.split() else command
+    rest = text[len(first_token):].strip() if first_token else ""
+    task_id = 0
+    question = rest
+    match = re.match(r"^#?(\d+)\s*(.*)$", rest, re.S)
+    if match:
+        task_id = int(match.group(1))
+        question = match.group(2).strip()
+    if not question:
+        question = (
+            f"任务 #{task_id} 目前是什么状态？原因是什么？请给出处理建议。"
+            if task_id
+            else "当前系统整体健康状况如何？有哪些任务需要人工处理？请给出结论和处理建议。"
+        )
+    question = question[:8000]
+    if not assistant.resolve_pi_binary():
+        telegram.send_message(
+            chat_id,
+            "AI 助手未启用：未找到 pi（@earendil-works/pi-coding-agent）。\n"
+            "请在容器内安装 pi 并挂载凭据到 /data/pi/agent，或通过 PI_ASSISTANT_BIN 指定路径。",
+        )
+        return
+    telegram.send_message(chat_id, "🤖 正在分析系统快照，请稍候（约 10-40 秒）…")
+
+    def work() -> None:
+        try:
+            snapshot = assistant.build_snapshot(
+                task_store,
+                engine_enabled=engine_enabled,
+                task_id=task_id,
+                guards=guards,
+            )
+            result = assistant.run_pi(
+                assistant.build_user_message(question, snapshot),
+                session_id=_assistant_session_id(chat_id),
+                session_dir=assistant.assistant_session_dir(task_store),
+                model=assistant.assistant_model(),
+                timeout=assistant.assistant_timeout(),
+            )
+            header = f"🤖 关于任务 #{task_id}：\n" if task_id else ""
+            for chunk in _chunk_assistant_text(f"{header}{result['reply']}"):
+                telegram.send_message(chat_id, chunk)
+        except assistant.AssistantError as exc:
+            telegram.send_message(chat_id, f"AI 助手调用失败：{safe_telegram_text(str(exc), 360)}")
+        except Exception as exc:
+            LOG.debug("Assistant command failed", exc_info=True)
+            telegram.send_message(chat_id, f"AI 助手调用失败：{safe_telegram_text(str(exc), 360)}")
+
+    threading.Thread(target=work, name="tg-assistant", daemon=True).start()
+
+
+def run_assistant_diagnosis_sweep(
+    task_store: Any,
+    telegram: TelegramClient,
+    allowed_chat_id: str,
+    config: Any,
+    self_share_config: Any,
+    *,
+    engine_enabled: bool = True,
+    max_retries: int = 3,
+    max_per_sweep: int = 2,
+    guards: dict[str, Any] | None = None,
+) -> int:
+    """扫一轮 needs_action 任务，为原因未诊断过的任务跑 AI 诊断（同步、串行）。
+
+    返回本轮启动诊断的任务数。诊断结果写任务 metadata 并推送到 TG；同一
+    事件只诊断一次，失败 6 小时后才重试，避免打爆 LLM 配额。
+    """
+    if task_store is None:
+        return 0
+    if guards is None:
+        guards = build_assistant_guards(config, self_share_config)
+    diagnosed = 0
+    for task in task_store.list_open_tasks():
+        if diagnosed >= max_per_sweep:
+            break
+        status_value = getattr(getattr(task, "status", ""), "value", getattr(task, "status", ""))
+        if str(status_value) != str(TaskStatus.NEEDS_ACTION.value):
+            continue
+        task_id = int(task.id)
+        with _ASSISTANT_DIAGNOSIS_LOCK:
+            if task_id in _ASSISTANT_DIAGNOSIS_INFLIGHT:
+                continue
+        metadata = getattr(task, "metadata", {}) or {}
+        existing = metadata.get(DIAGNOSIS_META_KEY) if isinstance(metadata, dict) else None
+        latest_event = assistant.diagnosis_event_id(task_store, task_id)
+        if isinstance(existing, dict) and existing.get("error"):
+            if time.time() < float(existing.get("diagnosed_at") or 0) + _ASSISTANT_ERROR_RETRY_SECONDS:
+                continue
+        elif isinstance(existing, dict) and int(existing.get("event_id") or 0) == latest_event:
+            continue
+        with _ASSISTANT_DIAGNOSIS_LOCK:
+            _ASSISTANT_DIAGNOSIS_INFLIGHT.add(task_id)
+        diagnosed += 1
+        try:
+            snapshot = assistant.build_snapshot(
+                task_store,
+                engine_enabled=engine_enabled,
+                max_retries=max_retries,
+                task_id=task_id,
+                guards=guards,
+            )
+            result = assistant.run_pi(
+                assistant.build_user_message(f"任务 #{task_id} {AUTO_DIAGNOSIS_QUESTION}", snapshot),
+                session_id=assistant.new_session_id(),
+                session_dir=assistant.assistant_session_dir(task_store),
+                model=assistant.assistant_model(),
+                timeout=assistant.assistant_timeout(),
+            )
+            task_store.patch_metadata(
+                task_id,
+                {
+                    DIAGNOSIS_META_KEY: {
+                        "event_id": latest_event,
+                        "reply": result["reply"],
+                        "diagnosed_at": time.time(),
+                    }
+                },
+            )
+            LOG.info("Assistant auto-diagnosis stored for task %s", task_id)
+            for chunk in _chunk_assistant_text(f"🤖 AI 诊断 · 任务 #{task_id}\n{result['reply']}"):
+                telegram.send_message(allowed_chat_id, chunk)
+        except assistant.AssistantError as exc:
+            LOG.warning("Assistant auto-diagnosis failed for task %s: %s", task_id, exc)
+            try:
+                task_store.patch_metadata(
+                    task_id,
+                    {
+                        DIAGNOSIS_META_KEY: {
+                            "event_id": latest_event,
+                            "reply": "",
+                            "error": str(exc)[:300],
+                            "diagnosed_at": time.time(),
+                        }
+                    },
+                )
+            except Exception:
+                LOG.debug("Assistant diagnosis error marker not stored", exc_info=True)
+        except Exception:
+            LOG.debug("Assistant auto-diagnosis crashed for task %s", task_id, exc_info=True)
+        finally:
+            with _ASSISTANT_DIAGNOSIS_LOCK:
+                _ASSISTANT_DIAGNOSIS_INFLIGHT.discard(task_id)
+    return diagnosed
+
+
+def start_assistant_watch_loop(
+    task_store: Any,
+    telegram: TelegramClient,
+    allowed_chat_id: str,
+    config: Any,
+    self_share_config: Any,
+    *,
+    engine_enabled: bool = True,
+    max_retries: int = 3,
+    interval_seconds: int = 120,
+    stop_event: threading.Event | None = None,
+) -> threading.Thread | None:
+    """兜底巡检循环：定期扫描 needs_action 任务并自动跑 AI 诊断。
+
+    PI_ASSISTANT_AUTO_DIAGNOSIS=0 可整体关闭。
+    """
+    if task_store is None or interval_seconds <= 0 or not assistant.auto_diagnosis_enabled():
+        return None
+    loop_stop_event = stop_event or threading.Event()
+
+    def loop() -> None:
+        while not loop_stop_event.is_set():
+            try:
+                run_assistant_diagnosis_sweep(
+                    task_store,
+                    telegram,
+                    allowed_chat_id,
+                    config,
+                    self_share_config,
+                    engine_enabled=engine_enabled,
+                    max_retries=max_retries,
+                )
+            except Exception:
+                LOG.debug("Assistant watch sweep failed", exc_info=True)
+            if loop_stop_event.wait(interval_seconds):
+                break
+
+    thread = threading.Thread(target=loop, name="assistant-watch", daemon=True)
+    thread.start()
+    return thread
+
+
 def send_emby_timeout(telegram: TelegramClient, chat_id: int | str, store: Any, row: dict[str, Any]) -> None:
     updated = store.update_emby(int(row["id"]), "timeout") or row
     telegram.send_message(
@@ -3355,6 +3632,7 @@ def handle_update(
     hdhive_subscription_scheduler: HdhiveSubscriptionScheduler | None = None,
     max_retries: int = 3,
     background_jobs: BackgroundJobCoordinator | None = None,
+    assistant_guards: Any = None,
 ) -> None:
     if update.get("callback_query"):
         handle_callback_query(
@@ -3504,6 +3782,24 @@ def handle_update(
                     enabled=True,
                 ) if task_store is not None else None,
             ),
+        )
+        return
+
+    if command in {"/助手", "/ai", "/诊断"}:
+        guard_snapshot = None
+        if callable(assistant_guards):
+            try:
+                guard_snapshot = assistant_guards()
+            except Exception:
+                guard_snapshot = None
+        handle_assistant_command(
+            text,
+            command,
+            chat_id,
+            telegram,
+            task_store,
+            engine_enabled=task_engine_enabled,
+            guards=guard_snapshot,
         )
         return
 
@@ -3893,6 +4189,16 @@ def run_forever(
             stop_event=stop_event,
             emby=emby,
         )
+        start_assistant_watch_loop(
+            task_store,
+            telegram,
+            config.tg_allowed_chat_id,
+            config,
+            self_share_config,
+            engine_enabled=True,
+            max_retries=config.task_max_retries,
+            stop_event=stop_event,
+        )
     offset = None
     LOG.info("cms-tg-ingest started database_path=%s write_gate=%s", config.database_path, write_gate)
     try:
@@ -4093,6 +4399,7 @@ def run_forever(
                         hdhive_subscription_scheduler=hdhive_subscription_scheduler,
                         max_retries=config.task_max_retries,
                         background_jobs=background_jobs,
+                        assistant_guards=lambda: build_assistant_guards(config, self_share_config),
                     )
             except Exception as exc:
                 if stop_event.is_set():

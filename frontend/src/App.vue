@@ -43,6 +43,7 @@ const menuOptions = [
   { label: 'Emby 看板', key: '/emby-board', icon: navIcons.emby },
   { label: '当前任务', key: '/tasks', icon: navIcons.tasks },
   { label: '质量巡检', key: '/quality', icon: navIcons.quality },
+  { label: 'AI 助手', key: '/assistant', icon: navIcons.assistant },
   { label: '本地健康', key: '/health', icon: navIcons.health },
   { label: 'HDHive 订阅', key: '/hdhive', icon: navIcons.hdhive },
   { label: '实时日志', key: '/logs', icon: navIcons.logs },

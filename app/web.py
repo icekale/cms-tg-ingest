@@ -30,6 +30,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from . import __version__
+from . import assistant
 from .background_jobs import BackgroundJobCoordinator, JobSubmission, redact_background_text
 from .config import SelfShareConfig
 from .logging_system import LogFilter, LogHub, parse_log_filter
@@ -77,6 +78,7 @@ from .web_api import (
     CMS_DIRECT_STRM_GUARD_MARKER,
     CMS_OS_STRM_GUARD_MARKER,
     quality_items,
+    serialize_event,
     serialize_health,
     serialize_hdhive,
     serialize_hdhive_subscription,
@@ -2178,6 +2180,67 @@ class WebApp:
     ) -> tuple[int, dict[str, str], bytes]:
         if method == "POST" and not self.task_engine_enabled:
             return self._write_gate_rejection(auth_headers, api=True)
+        if method == "POST" and path == "/api/v1/assistant/chat":
+            try:
+                values = self._api_body(body, headers)
+            except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError):
+                values = {}
+            question = str(values.get("question") or "").strip()[: assistant.MAX_QUESTION_CHARS]
+            if not question:
+                status, response_headers, response_body = api_response(
+                    {"error": "请输入问题"},
+                    status=400,
+                )
+                return status, {**response_headers, **auth_headers}, response_body
+            # 会话 ID 由后端生成/校验：不认识的一律开新会话，避免把任意
+            # 字符串塞进 --session-id。
+            raw_session = str(values.get("session_id") or "").strip().lower()
+            if len(raw_session) >= 8 and set(raw_session) <= set("0123456789abcdef-") and len(raw_session) <= 64:
+                session_id = raw_session
+            else:
+                session_id = assistant.new_session_id()
+            try:
+                task_id = int(values.get("task_id") or 0)
+            except (TypeError, ValueError):
+                task_id = 0
+            if not assistant.resolve_pi_binary():
+                status, response_headers, response_body = api_response(
+                    {
+                        "error": "助手不可用：未找到 pi（@earendil-works/pi-coding-agent）。"
+                        "请安装 pi 并配置模型凭据，或通过 PI_ASSISTANT_BIN 指定路径。"
+                    },
+                    status=503,
+                )
+                return status, {**response_headers, **auth_headers}, response_body
+            context = assistant.build_snapshot(
+                self.store,
+                engine_enabled=self.task_engine_enabled,
+                max_retries=self.max_retries,
+                task_id=task_id,
+                guards={
+                    "cms_strm_guard": self._cms_strm_guard(),
+                    "cms_direct_strm_guard": self._cms_direct_strm_guard(),
+                    "cms_os_strm_guard": self._cms_os_strm_guard(),
+                },
+            )
+            try:
+                result = assistant.run_pi(
+                    assistant.build_user_message(question, context),
+                    session_id=session_id,
+                    session_dir=assistant.assistant_session_dir(self.store),
+                    model=assistant.assistant_model(),
+                    timeout=assistant.assistant_timeout(),
+                )
+            except assistant.AssistantTimeout as exc:
+                status, response_headers, response_body = api_response({"error": str(exc)}, status=504)
+                return status, {**response_headers, **auth_headers}, response_body
+            except assistant.AssistantError as exc:
+                status, response_headers, response_body = api_response({"error": str(exc)}, status=502)
+                return status, {**response_headers, **auth_headers}, response_body
+            status, response_headers, response_body = api_response(
+                {"reply": result["reply"], "session_id": result["session_id"]}
+            )
+            return status, {**response_headers, **auth_headers}, response_body
         if method == "POST" and path == "/api/v1/tasks/purge":
             try:
                 values = self._api_body(body, headers)

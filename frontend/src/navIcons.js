@@ -53,6 +53,11 @@ export const navIcons = {
   health: strokeIcon([
     p('M22 12h-4l-3 7-6-14-3 7H2'),
   ]),
+  assistant: strokeIcon([
+    p('M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z'),
+    p('M12 7v6'),
+    p('M9 10h6'),
+  ]),
   hdhive: strokeIcon([
     c(6, 18, 2),
     p('M4 11a9 9 0 0 1 9 9'),
