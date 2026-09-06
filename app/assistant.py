@@ -50,6 +50,48 @@ MEMORY_EXTRACT_SYSTEM_PROMPT = (
 
 _SECRET_LINE_RE = re.compile(r"sk-[A-Za-z0-9]{10,}|(?:api[_-]?key|token|password|passwd|cookie|密码|密钥)\s*[:=]", re.I)
 
+# ---- 工具（只读）：助手可实时查任务库，而不是只看静态快照 ----
+# 内置只读文件工具 + 自定义只读查询工具（见 pi-extensions/cms-tools.ts）。
+# 不给 bash/edit/write：助手不能改代码、改库、执行任意命令。
+ASSISTANT_TOOL_NAMES = "read,grep,find,ls,task_detail,query_tasks,task_events,system_stats"
+TOOL_ENV_PATTERN = re.compile(
+    r"^(TG_|CMS_|EMBY_|P115_|OPENAI_|WEB_|HDHIVE_|SELF_SHARE|BACKUP_|DATABASE_PATH|STRM_|HF_|GH_|GITHUB)"
+)
+
+
+def tools_enabled() -> bool:
+    return str(os.environ.get("PI_ASSISTANT_TOOLS") or "").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def resolve_extensions_path() -> str:
+    override = str(os.environ.get("PI_ASSISTANT_EXTENSIONS") or "").strip()
+    if override:
+        return override
+    candidates = [
+        Path("/app/pi-extensions/cms-tools.ts"),
+        Path(__file__).resolve().parent.parent / "pi-extensions" / "cms-tools.ts",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return ""
+
+
+def sanitized_env() -> dict[str, str]:
+    """子进程环境：剥掉业务密钥（TG/CMS/Emby/115/AI key 等），助手工具与
+    pi 自身用不到它们；即使模型被诱导读环境也拿不到敏感值。"""
+    keep = {}
+    for key, value in os.environ.items():
+        if TOOL_ENV_PATTERN.match(key):
+            continue
+        keep[key] = value
+    return keep
+
 
 def memory_enabled() -> bool:
     return str(os.environ.get("PI_ASSISTANT_MEMORY") or "").strip().lower() not in {
@@ -154,6 +196,7 @@ def extract_memory_async(question: str, reply: str, session_dir: Path | None = N
                 model=assistant_model(),
                 timeout=45.0,
                 system_prompt=MEMORY_EXTRACT_SYSTEM_PROMPT,
+                tools=False,
             )
             added = append_memory_entries(result.get("reply", ""), session_dir)
             if added:
@@ -192,20 +235,22 @@ _TASK_FIELDS = (
 )
 
 ASSISTANT_SYSTEM_PROMPT = (
-    "你是 cms-tg-ingest 的内置运维助手。cms-tg-ingest 是 Cloud Media Sync（CMS）的 Telegram "
-    "自动入库外挂：把 115 分享/磁力/ED2K/HDHive 资源交给 Bot，经 CMS 整理分类 → 生成 STRM → "
-    "Emby 入库确认 → 清理转存源。任务状态机大致为 pending → receiving → organizing → sharing "
-    "→ syncing → moving → checking → succeeded；失败会自动重试，超过重试次数或需要人工判断时"
-    "进入 needs_action。\n"
+    "你是 cms-tg-ingest 的内置智能助手，也是用户长期共事的运维搭档。cms-tg-ingest 是 Cloud Media Sync（CMS）"
+    "的 Telegram 自动入库外挂：把 115 分享/磁力/ED2K/HDHive 资源交给 Bot，经 CMS 整理分类 → 生成 STRM → "
+    "Emby 入库确认 → 清理转存源。任务状态机大致为 pending → receiving → organizing → sharing → syncing → "
+    "moving → checking → succeeded；失败会自动重试，超过重试次数或需要人工判断时进入 needs_action。\n"
     "用户消息末尾可能附有「系统快照」JSON（健康状态、任务列表、指定任务详情）。回答规则：\n"
-    "1. 优先基于快照回答；不要编造快照里没有的状态、ID 或数值。\n"
-    "2. 诊断问题时给出：结论 → 依据 → 具体处理建议（可结合任务的 available_actions，"
-    "说明在 Web 管理台或 Telegram 里如何操作）。\n"
-    "3. 你不能直接执行操作；只做诊断和给出步骤。\n"
-    "4. 用简体中文回答，简洁分点，先结论后依据。\n"
-    "5. 信息不足时直接说明还缺什么（如任务 ID、日志关键字）。\n"
-    "6. 你在一次对话中会收到多份快照，以最新一份为准。\n"
-    "7. 你与用户是长期共事的同事：回答直接、简洁、口语一点，可以引用记忆里的偏好和历史；"
+    "1. 优先基于快照和工具查证回答；涉及具体任务/数值时先用工具核实，不要编造快照里没有的状态、ID 或数值。\n"
+    "2. 你有只读查询工具（task_detail / query_tasks / task_events / system_stats）和文件读取工具，"
+    "可以实时查任务库与文件——主动用它们核实后再下结论，查不到就如实说。\n"
+    "3. 诊断问题时给出：结论 → 依据 → 具体处理建议（可结合任务的 available_actions，说明在 Web 管理台或 "
+    "Telegram 里如何操作）。\n"
+    "4. 你不能执行修改类操作（不能改库、改配置、动文件内容）；只做诊断、查证和给出步骤。\n"
+    "5. 绝不读取或输出密钥、密码、token、cookie（包括环境变量和 .env）。\n"
+    "6. 你既能处理运维诊断，也可以正常陪聊、回答通用问题；不确定是不是系统问题时，按普通问题自然回答。\n"
+    "7. 用简体中文回答，简洁分点，先结论后依据；信息不足时直接说明还缺什么。\n"
+    "8. 你在一次对话中会收到多份快照，以最新一份为准。\n"
+    "9. 你与用户是长期共事的同事：直接、简洁、口语一点，可以引用记忆里的偏好和历史；"
     "用户纠正你的地方要接受并调整，不要重复犯错。"
 )
 
@@ -375,6 +420,58 @@ def new_session_id() -> str:
     return str(uuid.uuid4())
 
 
+def _build_pi_argv(
+    question: str,
+    *,
+    session_id: str | None,
+    session_dir: Path,
+    binary: str,
+    system_prompt: str | None,
+    inject_memory: bool,
+    model: str,
+    tools: bool | None = None,
+) -> tuple[list[str], dict[str, str]]:
+    use_tools = tools_enabled() if tools is None else tools
+    argv = [
+        binary,
+        "--print",
+        "--mode",
+        "json",
+        "--system-prompt",
+        system_prompt or ASSISTANT_SYSTEM_PROMPT,
+        # 禁用发现类来源（用户编码配置/技能/上下文文件），扩展只加载我们
+        # 随镜像分发的只读工具（-e 显式路径不受 --no-extensions 影响）。
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--no-context-files",
+        "--no-approve",
+        "--session-dir",
+        str(session_dir),
+    ]
+    extension_path = resolve_extensions_path() if use_tools else ""
+    if extension_path:
+        argv += ["-e", extension_path, "--tools", ASSISTANT_TOOL_NAMES]
+    else:
+        argv.append("--no-tools")
+    if session_id:
+        argv += ["--session-id", session_id]
+    else:
+        argv.append("--no-session")
+    if inject_memory:
+        memory = read_memory_context(session_dir)
+        if memory:
+            argv[argv.index("--system-prompt") + 1] += MEMORY_INJECTION_HEADER + memory
+    if str(model or "").strip():
+        argv += ["--model", str(model).strip()]
+    env = sanitized_env()
+    config_dir = str(os.environ.get("PI_ASSISTANT_CONFIG_DIR") or "").strip()
+    if config_dir:
+        env["PI_CODING_AGENT_DIR"] = config_dir
+    return argv, env
+
+
 def run_pi(
     question: str,
     *,
@@ -385,6 +482,7 @@ def run_pi(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     system_prompt: str | None = None,
     inject_memory: bool = False,
+    tools: bool | None = None,
 ) -> dict[str, str]:
     """非交互调用 pi，返回 {reply, session_id}。失败抛 AssistantError/TimeoutExpired。
 
@@ -402,39 +500,16 @@ def run_pi(
         session_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise AssistantError(f"无法创建会话目录 {session_dir}: {exc}") from exc
-    argv = [
-        binary,
-        "--print",
-        "--mode",
-        "json",
-        "--system-prompt",
-        system_prompt or ASSISTANT_SYSTEM_PROMPT,
-        # 助手只做诊断：禁用扩展/技能/上下文文件/工具，避免用户编码配置和
-        # 项目本地文件影响线上助手，也显著加快启动。
-        "--no-extensions",
-        "--no-skills",
-        "--no-prompt-templates",
-        "--no-themes",
-        "--no-context-files",
-        "--no-tools",
-        "--no-approve",
-        "--session-dir",
-        str(session_dir),
-    ]
-    if session_id:
-        argv += ["--session-id", session_id]
-    else:
-        argv.append("--no-session")
-    if inject_memory:
-        memory = read_memory_context(session_dir)
-        if memory:
-            argv[argv.index("--system-prompt") + 1] += MEMORY_INJECTION_HEADER + memory
-    if str(model or "").strip():
-        argv += ["--model", str(model).strip()]
-    env = dict(os.environ)
-    config_dir = str(os.environ.get("PI_ASSISTANT_CONFIG_DIR") or "").strip()
-    if config_dir:
-        env["PI_CODING_AGENT_DIR"] = config_dir
+    argv, env = _build_pi_argv(
+        question,
+        session_id=session_id,
+        session_dir=session_dir,
+        binary=binary,
+        system_prompt=system_prompt,
+        inject_memory=inject_memory,
+        model=model,
+        tools=tools,
+    )
     # 容器冷启动后的首次调用可能撞上 pi 自身 bootstrap 的瞬态失败：
     # 进程级失败重试一次再放弃，避免任务背上数小时的诊断退避。
     proc = None
@@ -458,3 +533,107 @@ def run_pi(
         if attempt == 1:
             LOG.warning("pi run failed (attempt 1/2), retrying: %s", stderr_tail[:200])
     raise AssistantError(f"pi 退出码 {proc.returncode}: {stderr_tail or '无输出'}")
+
+
+def run_pi_stream(
+    question: str,
+    *,
+    session_id: str | None,
+    session_dir: Path,
+    binary: str = "",
+    model: str = "",
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    system_prompt: str | None = None,
+    inject_memory: bool = False,
+    tools: bool | None = None,
+    on_update=None,
+) -> dict[str, str]:
+    """流式版 run_pi：解析 stdout 的 NDJSON 事件流，把助手的阶段性文本通过
+    ``on_update(latest_text)`` 回调出去（调用方自行节流）。返回值与 run_pi 一致。"""
+    binary = binary or resolve_pi_binary()
+    if not binary:
+        raise AssistantError(
+            "未找到 pi（@earendil-works/pi-coding-agent）。请安装 pi 并确保其在 PATH 中，"
+            "或通过 PI_ASSISTANT_BIN 指定路径。"
+        )
+    session_dir = Path(session_dir)
+    try:
+        session_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise AssistantError(f"无法创建会话目录 {session_dir}: {exc}") from exc
+    argv, env = _build_pi_argv(
+        question,
+        session_id=session_id,
+        session_dir=session_dir,
+        binary=binary,
+        system_prompt=system_prompt,
+        inject_memory=inject_memory,
+        model=model,
+        tools=tools,
+    )
+    proc = subprocess.Popen(  # noqa: S603 - 固定 argv，无 shell
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        cwd=str(session_dir),
+    )
+    latest = ""
+    deadline = time.time() + timeout
+    returncode = -1
+    try:
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(question)
+        proc.stdin.close()
+        for line in proc.stdout:
+            if time.time() > deadline:
+                raise AssistantTimeout(f"助手响应超时（超过 {timeout:.0f} 秒），可稍后重试或调大 PI_ASSISTANT_TIMEOUT")
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict) or event.get("type") not in {"message_update", "message_end"}:
+                continue
+            message = event.get("message") or {}
+            if message.get("role") != "assistant":
+                continue
+            text = "".join(
+                str(part.get("text") or "")
+                for part in message.get("content") or []
+                if isinstance(part, dict) and part.get("type") == "text"
+            ).strip()
+            if text:
+                latest = text
+                if on_update is not None and event.get("type") == "message_update":
+                    try:
+                        on_update(text)
+                    except Exception:
+                        LOG.debug("assistant on_update callback failed", exc_info=True)
+        returncode = proc.wait(timeout=max(5.0, deadline - time.time()))
+    except AssistantTimeout:
+        proc.kill()
+        raise
+    finally:
+        if returncode == -1 and proc.poll() is None:
+            proc.kill()
+        for stream in (proc.stdout, proc.stderr, proc.stdin):
+            try:
+                if stream:
+                    stream.close()
+            except Exception:
+                pass
+    if returncode != 0:
+        stderr_tail = ""
+        try:
+            stderr_tail = (proc.stderr.read() if proc.stderr else "")[-600:].strip()
+        except Exception:
+            pass
+        raise AssistantError(f"pi 退出码 {returncode}: {stderr_tail or '无输出'}")
+    if not latest:
+        raise AssistantError("pi 未返回可解析的回复")
+    return {"reply": latest, "session_id": session_id}

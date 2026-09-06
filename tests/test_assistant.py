@@ -60,13 +60,58 @@ class RunPiTests(unittest.TestCase):
         self.assertEqual(result, {"reply": "结论：任务 #1 处于 needs_action。", "session_id": "11111111-2222-3333-4444-555555555555"})
         argv = recorded["argv"]
         self.assertEqual(argv[0], "/usr/local/bin/pi")
-        for flag in ("--print", "--mode", "--no-extensions", "--no-skills", "--no-tools", "--no-approve"):
+        for flag in ("--print", "--mode", "--no-extensions", "--no-skills", "--no-approve"):
             self.assertIn(flag, argv)
+        # 默认开启只读工具：加载随镜像分发的扩展并放行内置只读工具
+        self.assertNotIn("--no-tools", argv)
+        self.assertIn("-e", argv)
+        self.assertEqual(argv[argv.index("--tools") + 1], assistant.ASSISTANT_TOOL_NAMES)
         self.assertEqual(argv[argv.index("--session-id") + 1], "11111111-2222-3333-4444-555555555555")
         self.assertEqual(argv[argv.index("--model") + 1], "glm/*")
         self.assertEqual(argv[argv.index("--system-prompt") + 1], assistant.ASSISTANT_SYSTEM_PROMPT)
         # 问题正文通过 stdin 传递，不占 argv。
         self.assertEqual(recorded["kwargs"]["input"], "为什么任务失败？")
+
+    def test_run_pi_tools_disabled_falls_back_to_no_tools(self):
+        recorded = {}
+
+        def fake_run(argv, **kwargs):
+            recorded["argv"] = argv
+            return _completed_process(stdout=_pi_stdout_events("好的"))
+
+        with patch.dict(os.environ, {"PI_ASSISTANT_TOOLS": "0"}), patch.object(
+            assistant, "resolve_pi_binary", return_value="pi"
+        ), patch.object(assistant.subprocess, "run", side_effect=fake_run):
+            assistant.run_pi("问题", session_id="a" * 32, session_dir=Path("/tmp/assistant-test"))
+        self.assertIn("--no-tools", recorded["argv"])
+        self.assertNotIn("-e", recorded["argv"])
+
+    def test_subprocess_env_strips_business_secrets(self):
+        recorded = {}
+
+        def fake_run(argv, **kwargs):
+            recorded["env"] = kwargs.get("env") or {}
+            return _completed_process(stdout=_pi_stdout_events("好的"))
+
+        base_env = {
+            "PATH": "/usr/bin",
+            "TG_BOT_TOKEN": "secret-tg",
+            "CMS_PASSWORD": "secret-cms",
+            "OPENAI_API_KEY": "secret-ai",
+            "WEB_PASSWORD": "secret-web",
+            "P115_COOKIE_PATH": "/tmp/cookie",
+            "EMBY_API_KEY": "secret-emby",
+        }
+        with patch.dict(os.environ, base_env), patch.object(
+            assistant, "resolve_pi_binary", return_value="pi"
+        ), patch.object(assistant.subprocess, "run", side_effect=fake_run):
+            assistant.run_pi("问题", session_id="a" * 32, session_dir=Path("/tmp/assistant-test"))
+        env = recorded["env"]
+        for key in base_env:
+            if key == "PATH":
+                continue
+            self.assertNotIn(key, env, f"{key} 不应传入助手子进程")
+        self.assertIn("PATH", env)
 
     def test_timeout_wrapped_as_assistant_timeout(self):
         def fake_run(argv, **kwargs):
@@ -271,14 +316,27 @@ class _FakeTelegram:
     def __init__(self):
         self._lock = threading.Lock()
         self.sent: list[str] = []
+        self._next_id = 0
 
     def send_message(self, chat_id, text, reply_markup=None):
         with self._lock:
             self.sent.append(str(text))
+            self._next_id += 1
+        return {"result": {"message_id": self._next_id}}
 
     def send_rich_message(self, chat_id, document, reply_markup=None):
         with self._lock:
             self.sent.append("rich-message")
+
+    def send_chat_action(self, chat_id, action="typing"):
+        with self._lock:
+            self.sent.append("typing")
+        return {"ok": True}
+
+    def edit_message_text(self, chat_id, message_id, text):
+        with self._lock:
+            self.sent.append(str(text))
+        return {"ok": True}
 
     def answer_callback_query(self, callback_id, text=None, show_alert=False):
         return {"ok": True}
@@ -353,7 +411,7 @@ class TelegramAssistantTests(unittest.TestCase):
                 return {"reply": "结论：整理超时，建议 reprocess。", "session_id": session_id}
 
             with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
-                assistant, "run_pi", side_effect=fake_run_pi
+                assistant, "run_pi_stream", side_effect=fake_run_pi
             ):
                 bridge.handle_assistant_command("/助手 系统现在有什么问题？", "/助手", 42, telegram, store)
                 self.assertTrue(telegram.wait_for(lambda sent: any("结论" in m for m in sent)))
@@ -377,7 +435,7 @@ class TelegramAssistantTests(unittest.TestCase):
                 return {"reply": "结论：整理超时。", "session_id": session_id}
 
             with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
-                assistant, "run_pi", side_effect=fake_run_pi
+                assistant, "run_pi_stream", side_effect=fake_run_pi
             ):
                 bridge.handle_assistant_command("/助手 系统现在有什么问题？", "/助手", 42, telegram, store)
                 self.assertTrue(telegram.wait_for(lambda sent: any("结论" in m for m in sent)))
@@ -395,7 +453,7 @@ class TelegramAssistantTests(unittest.TestCase):
                 return {"reply": "诊断内容", "session_id": kwargs["session_id"]}
 
             with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
-                assistant, "run_pi", side_effect=fake_run_pi
+                assistant, "run_pi_stream", side_effect=fake_run_pi
             ):
                 bridge.handle_assistant_command(f"/助手 {task.id} 为什么失败", "/助手", 42, telegram, store)
                 self.assertTrue(telegram.wait_for(lambda sent: any("诊断内容" in m for m in sent)))
@@ -479,16 +537,16 @@ class PlainTextAssistantRoutingTests(unittest.TestCase):
             }
         }
 
-    def _run_handle_update(self, text, telegram, task_store, submission_store, run_pi_side_effect):
+    def _run_handle_update(self, text, telegram, task_store, submission_store, run_pi_side_effect, reply_marker):
         captured = {}
 
-        def fake_run_pi(question, *, session_id, **kwargs):
+        def fake_run_pi_stream(question, *, session_id, on_update=None, **kwargs):
             captured["question"] = question
             captured["session_id"] = session_id
             return run_pi_side_effect(question, session_id=session_id, **kwargs)
 
         with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
-            assistant, "run_pi", side_effect=fake_run_pi
+            assistant, "run_pi_stream", side_effect=fake_run_pi_stream
         ):
             bridge.handle_update(
                 self._update(text),
@@ -499,10 +557,11 @@ class PlainTextAssistantRoutingTests(unittest.TestCase):
                 poll_status=False,
                 task_store=task_store,
             )
-            # 助手回复跑在后台线程里，必须在 patch 仍生效时等待它完成
+            # 助手回复跑在后台线程里，必须在 patch 仍生效时等到最终回复出现
+            # （typing/占位提示都会进 sent，不能作为完成信号）。
             telegram.wait_for(
-                lambda sent: any("失败" in m for m in sent) or len([m for m in sent if m != "rich-message"]) >= 2,
-                timeout=8.0,
+                lambda sent: any(reply_marker in m for m in sent) or any("调用失败" in m for m in sent),
+                timeout=10.0,
             )
         return captured
 
@@ -516,8 +575,9 @@ class PlainTextAssistantRoutingTests(unittest.TestCase):
                 store,
                 SubmissionStore(Path(tmp) / "submissions.db"),
                 lambda question, session_id, **kw: {"reply": "整体健康。", "session_id": session_id},
+                reply_marker="整体健康",
             )
-            self.assertTrue(telegram.wait_for(lambda sent: any("整体健康" in m for m in sent)))
+            self.assertTrue(any("整体健康" in m for m in telegram.sent))
             # 整条消息必须是问题本身，而不是 /助手 的默认健康问句
             self.assertIn("系统现在有什么问题？", captured["question"])
             self.assertIn("系统快照", captured["question"])
@@ -533,8 +593,9 @@ class PlainTextAssistantRoutingTests(unittest.TestCase):
                 store,
                 SubmissionStore(Path(tmp) / "submissions.db"),
                 lambda question, session_id, **kw: {"reply": "整理超时。", "session_id": session_id},
+                reply_marker="整理超时",
             )
-            self.assertTrue(telegram.wait_for(lambda sent: any("整理超时" in m for m in sent)))
+            self.assertTrue(any("整理超时" in m for m in telegram.sent))
             self.assertIn('"focus_task"', captured["question"])
             self.assertIn("这个任务怎么了", captured["question"])
 
@@ -543,7 +604,7 @@ class PlainTextAssistantRoutingTests(unittest.TestCase):
             store = TaskStore(Path(tmp) / "tasks.db")
             telegram = _FakeTelegram()
             with patch.object(assistant, "resolve_pi_binary", return_value=""), patch.object(
-                assistant, "run_pi", side_effect=AssertionError("should not be called")
+                assistant, "run_pi_stream", side_effect=AssertionError("should not be called")
             ):
                 bridge.handle_update(
                     self._update("随便聊聊"),
@@ -566,7 +627,7 @@ class PlainTextAssistantRoutingTests(unittest.TestCase):
                 raise AssertionError("115 链接不应进助手")
 
             with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
-                assistant, "run_pi", side_effect=boom
+                assistant, "run_pi_stream", side_effect=boom
             ):
                 bridge.handle_update(
                     self._update("https://115cdn.com/s/abc?password=1234"),
@@ -587,7 +648,7 @@ class PlainTextAssistantRoutingTests(unittest.TestCase):
             store = TaskStore(Path(tmp) / "tasks.db")
             telegram = _FakeTelegram()
             with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
-                assistant, "run_pi", side_effect=AssertionError("追更文本不应进助手")
+                assistant, "run_pi_stream", side_effect=AssertionError("追更文本不应进助手")
             ):
                 bridge.handle_update(
                     self._update("追更 你好"),
@@ -687,6 +748,47 @@ class MemoryTests(unittest.TestCase):
                 time.sleep(0.1)
         memory = (assistant.assistant_memory_dir(self.sessions) / "MEMORY.md").read_text(encoding="utf-8")
         self.assertIn("Unraid", memory)
+
+
+    def test_run_pi_stream_emits_updates_and_final(self):
+        import io
+
+        lines = [
+            json.dumps({"type": "message_update", "message": {"role": "assistant", "content": [{"type": "text", "text": "第一段"}]}}),
+            json.dumps({"type": "tool_call", "tool_name": "task_detail"}),
+            json.dumps({"type": "message_update", "message": {"role": "assistant", "content": [{"type": "text", "text": "第一段，第二段"}]}}),
+            json.dumps({"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "第一段，第二段"}]}}),
+            json.dumps({"type": "agent_settled"}),
+        ]
+        fake_proc = SimpleNamespace(stdout=iter(lines), stderr=io.StringIO(), stdin=io.StringIO())
+        fake_proc.wait = lambda timeout=None: 0
+        updates = []
+        with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
+            assistant.subprocess, "Popen", return_value=fake_proc
+        ) as fake_popen:
+            result = assistant.run_pi_stream(
+                "问题",
+                session_id="a" * 32,
+                session_dir=Path("/tmp/assistant-test"),
+                on_update=updates.append,
+            )
+        self.assertEqual(updates, ["第一段", "第一段，第二段"])
+        self.assertEqual(result["reply"], "第一段，第二段")
+        argv = fake_popen.call_args.args[0]
+        self.assertIn("--tools", argv)
+        self.assertNotIn("--no-tools", argv)
+        self.assertEqual(fake_popen.call_args.kwargs["input"] if "input" in fake_popen.call_args.kwargs else None, None)
+
+    def test_run_pi_stream_raises_on_failure(self):
+        import io
+
+        fake_proc = SimpleNamespace(stdout=iter([]), stderr=io.StringIO("boom"), stdin=io.StringIO())
+        fake_proc.wait = lambda timeout=None: 1
+        with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
+            assistant.subprocess, "Popen", return_value=fake_proc
+        ):
+            with self.assertRaises(assistant.AssistantError):
+                assistant.run_pi_stream("问题", session_id="a" * 32, session_dir=Path("/tmp/assistant-test"))
 
 
 if __name__ == "__main__":

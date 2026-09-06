@@ -28,6 +28,7 @@ WORKDIR /app
 COPY bridge.py doctor.py /app/
 COPY app/ /app/app/
 COPY scripts/ /app/scripts/
+COPY pi-extensions/ /app/pi-extensions/
 COPY --from=frontend-build /frontend/dist /app/frontend/dist
 
 VOLUME ["/data"]

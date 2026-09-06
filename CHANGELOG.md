@@ -1,3 +1,13 @@
+## 0.5.16 - 2026-09-06
+
+- **助手进化：从"看快照的报告生成器"到能自己动手查证的智能体（pi 原生能力放开）**：
+  - **只读工具**：随镜像内置 pi 扩展（`pi-extensions/cms-tools.ts`）+ 只读查询 CLI（`scripts/assistant_read.py`），助手可实时调用 `task_detail` / `query_tasks` / `task_events` / `system_stats` 查任务库，配合内置 `read/grep/find/ls` 核实文件——回答前先查证，不再依赖提问瞬间的静态快照。不给 bash/edit/write：不能改代码、改库、执行任意命令。
+  - **流式回复（TG）**：`pi --mode json` 的 `text_delta` 事件流接入 Telegram——占位消息随生成进度渐进编辑（≥2.5s 节流），首 token 前保持"正在输入"指示，完成后原位落稿；超长回复自动分段。Web 端保持同步返回。
+  - **环境脱敏**：助手子进程环境剥掉 TG/CMS/Emby/115/AI key 等业务密钥（`sanitized_env`），工具与 pi 用不到它们。
+  - 人格升级：系统提示明确"能查证、不臆测；既能运维诊断也能正常陪聊"。
+- 开关：`PI_ASSISTANT_TOOLS=0` 关闭工具（回退纯快照模式）。
+- 单测新增 4 项（工具 argv/关闭回退/环境脱敏/流式解析），助手 37 项、后端全量通过。
+
 ## 0.5.15 - 2026-09-06
 
 - **智能助手获得 hermes 式长期记忆**：借鉴 pi-hermes-memory 的设计，助手现在跨会话认识你——每轮对话（TG 与 Web）结束后在后台用 flash 模型提取值得长期记住的信息（用户偏好、纠正、系统事实、失败教训），写入数据卷 `<数据库目录>/assistant-memory/MEMORY.md`（一行一条带日期，与 hermes 文件格式兼容）；下次提问时注入系统提示，助手能引用历史偏好、接受纠正不再重复犯错。
