@@ -18,12 +18,13 @@ COPY --from=frontend-build /usr/local/bin/node /usr/local/bin/node
 COPY --from=frontend-build /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 ENV PI_CODING_AGENT_DIR=/data/pi/agent
 # git：pi 启动/会话路径会 spawn git，alpine 运行时必须提供。
-# 构建期只验 node——CI 的 qemu 仿真跑 pi（V8 JIT）会随机 SIGILL，真机运行没问题。
+# NODE_OPTIONS=--jitless：CI 的 qemu 仿真下 V8 JIT 随机 SIGILL（连 node --version 都会崩），
+# 纯解释器模式稳定；运行时（真机）不受影响。
 RUN apk add --no-cache libstdc++ libgcc git \
     && ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-    && npm install -g --silent @earendil-works/pi-coding-agent@0.83.0 \
+    && NODE_OPTIONS=--jitless npm install -g --silent @earendil-works/pi-coding-agent@0.83.0 \
     && npm cache clean --force \
-    && node --version && echo pi-installed
+    && NODE_OPTIONS=--jitless node --version && echo pi-installed
 
 WORKDIR /app
 COPY bridge.py doctor.py /app/
