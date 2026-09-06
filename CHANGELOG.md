@@ -1,3 +1,7 @@
+## 0.5.18 - 2026-09-06
+
+- **修复 task_action 工具路由**：0.5.17 中扩展把动作执行错误地指向了只读脚本（`assistant_read.py: invalid choice: 'act'`），现拆分 READ_SCRIPT/OPS_SCRIPT 两个路由——查询走 assistant_read.py，动作走 assistant_ops.py。线上实测：needs_action 任务 #601 由助手执行 resume_organizing 成功重新入队。
+
 ## 0.5.17 - 2026-09-06
 
 - **助手从"只读"升级为"可执行"（修复只读不合理的缺口）**：新增 `task_action` 工具，助手可以对任务执行修复动作——retry（失败点重试）/ reprocess（从头重跑）/ resume_organizing（继续整理）/ emby（重新确认入库）/ restore（恢复 STRM）/ terminate（终止任务）。与 Web 管理台按钮**同一入口**（`app.task_actions.apply_task_action`，自带资格校验与幂等），`actor="AI助手"` 可审计。

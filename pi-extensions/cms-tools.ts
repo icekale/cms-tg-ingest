@@ -5,13 +5,14 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { execFile } from "node:child_process";
 
-const SCRIPT = process.env.CMS_TOOLS_SCRIPT || "/app/scripts/assistant_read.py";
+const READ_SCRIPT = process.env.CMS_TOOLS_SCRIPT || "/app/scripts/assistant_read.py";
+const OPS_SCRIPT = process.env.CMS_TOOLS_OPS_SCRIPT || "/app/scripts/assistant_ops.py";
 
-function run(args: string[]): Promise<string> {
+function run(script: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       "python3",
-      [SCRIPT, ...args],
+      [script, ...args],
       { timeout: 25_000, maxBuffer: 4 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err) {
@@ -23,6 +24,8 @@ function run(args: string[]): Promise<string> {
     );
   });
 }
+
+const read = (args: string[]) => run(READ_SCRIPT, args);
 
 function textToolResult(text: string) {
   return { content: [{ type: "text", text: text.slice(0, 16_000) }], details: {} };
@@ -39,7 +42,7 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params) {
       try {
-        return textToolResult(await run(["task", String(params.task_id)]));
+        return textToolResult(await read(["task", String(params.task_id)]));
       } catch (err) {
         return textToolResult(`task_detail failed: ${String(err)}`);
       }
@@ -60,7 +63,7 @@ export default function (pi: ExtensionAPI) {
       if (params.status) args.push("--status", String(params.status));
       args.push("--limit", String(params.limit ?? 15));
       try {
-        return textToolResult(await run(args));
+        return textToolResult(await read(args));
       } catch (err) {
         return textToolResult(`query_tasks failed: ${String(err)}`);
       }
@@ -78,7 +81,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params) {
       const args = ["events", String(params.task_id), "--limit", String(params.limit ?? 20)];
       try {
-        return textToolResult(await run(args));
+        return textToolResult(await read(args));
       } catch (err) {
         return textToolResult(`task_events failed: ${String(err)}`);
       }
@@ -93,7 +96,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({}),
     async execute() {
       try {
-        return textToolResult(await run(["stats"]));
+        return textToolResult(await read(["stats"]));
       } catch (err) {
         return textToolResult(`system_stats failed: ${String(err)}`);
       }
@@ -123,7 +126,7 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params) {
       try {
-        return textToolResult(await run(["act", String(params.task_id), String(params.action)]));
+        return textToolResult(await run(OPS_SCRIPT, ["act", String(params.task_id), String(params.action)]));
       } catch (err) {
         const message = String(err).slice(0, 400);
         return textToolResult(`task_action failed: ${message}`);
