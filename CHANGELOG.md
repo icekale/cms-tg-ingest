@@ -1,3 +1,10 @@
+## 0.5.17 - 2026-09-06
+
+- **助手从"只读"升级为"可执行"（修复只读不合理的缺口）**：新增 `task_action` 工具，助手可以对任务执行修复动作——retry（失败点重试）/ reprocess（从头重跑）/ resume_organizing（继续整理）/ emby（重新确认入库）/ restore（恢复 STRM）/ terminate（终止任务）。与 Web 管理台按钮**同一入口**（`app.task_actions.apply_task_action`，自带资格校验与幂等），`actor="AI助手"` 可审计。
+- **护栏**：动作白名单硬编码（删除任务记录等破坏性操作不在其中）；系统提示与工具描述强制"先说明、获用户明确同意（最新消息出现确认字样）才可执行，terminate 尤其要确认，执行后如实报告"；动作经 `scripts/assistant_ops.py` 执行（`DATABASE_PATH` 隔离，只开这一条写通道）。
+- 部署形态不变：`pi-extensions/cms-tools.ts` + `scripts/` 随镜像分发，`PI_ASSISTANT_TOOLS=0` 仍可整体回退纯快照模式。
+- 实测：needs_action 任务由助手执行 retry 后重新入队；生产容器验证通过。单测新增 3 项（终止/幂等/白名单拒绝），后端 1935 项全部通过。
+
 ## 0.5.16 - 2026-09-06
 
 - **助手进化：从"看快照的报告生成器"到能自己动手查证的智能体（pi 原生能力放开）**：

@@ -53,7 +53,7 @@ _SECRET_LINE_RE = re.compile(r"sk-[A-Za-z0-9]{10,}|(?:api[_-]?key|token|password
 # ---- 工具（只读）：助手可实时查任务库，而不是只看静态快照 ----
 # 内置只读文件工具 + 自定义只读查询工具（见 pi-extensions/cms-tools.ts）。
 # 不给 bash/edit/write：助手不能改代码、改库、执行任意命令。
-ASSISTANT_TOOL_NAMES = "read,grep,find,ls,task_detail,query_tasks,task_events,system_stats"
+ASSISTANT_TOOL_NAMES = "read,grep,find,ls,task_detail,query_tasks,task_events,system_stats,task_action"
 TOOL_ENV_PATTERN = re.compile(
     r"^(TG_|CMS_|EMBY_|P115_|OPENAI_|WEB_|HDHIVE_|SELF_SHARE|BACKUP_|DATABASE_PATH|STRM_|HF_|GH_|GITHUB)"
 )
@@ -245,7 +245,9 @@ ASSISTANT_SYSTEM_PROMPT = (
     "可以实时查任务库与文件——主动用它们核实后再下结论，查不到就如实说。\n"
     "3. 诊断问题时给出：结论 → 依据 → 具体处理建议（可结合任务的 available_actions，说明在 Web 管理台或 "
     "Telegram 里如何操作）。\n"
-    "4. 你不能执行修改类操作（不能改库、改配置、动文件内容）；只做诊断、查证和给出步骤。\n"
+    "4. 你可以执行任务操作工具（task_action：retry/reprocess/resume_organizing/emby/restore/terminate），"
+    "它与 Web 管理台按钮同源、自带资格校验；但必须先向用户说明并获得明确同意（最新消息出现「确认/好的/执行」）才能调用，"
+    "terminate 这类中止任务的动作尤其要确认；执行后如实报告结果。除该工具外不能改库、改配置、改文件内容。\n"
     "5. 绝不读取或输出密钥、密码、token、cookie（包括环境变量和 .env）。\n"
     "6. 你既能处理运维诊断，也可以正常陪聊、回答通用问题；不确定是不是系统问题时，按普通问题自然回答。\n"
     "7. 用简体中文回答，简洁分点，先结论后依据；信息不足时直接说明还缺什么。\n"

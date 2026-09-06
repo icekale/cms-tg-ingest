@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -789,6 +790,56 @@ class MemoryTests(unittest.TestCase):
         ):
             with self.assertRaises(assistant.AssistantError):
                 assistant.run_pi_stream("问题", session_id="a" * 32, session_dir=Path("/tmp/assistant-test"))
+
+
+class AssistantOpsScriptTests(unittest.TestCase):
+    """assistant_ops.py：白名单动作走 Web 同源入口，delete 被拒。"""
+
+    def _run(self, *args):
+        env = dict(os.environ, DATABASE_PATH=str(self.db_path))
+        return subprocess.run(
+            [sys.executable, str(self.script), *args],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+
+    def setUp(self):
+        import io as _io  # noqa: F401
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.db_path = Path(self._tmp.name) / "tasks.db"
+        self.script = Path(__file__).resolve().parent.parent / "scripts" / "assistant_ops.py"
+        store = TaskStore(self.db_path)
+        task = store.upsert_task("待终止任务", "", "https://115cdn.com/s/ops")
+        store.record_event(task.id, TaskStage.RECEIVED, TaskStatus.PENDING, "等待执行")
+        self.task_id = task.id
+
+    def test_terminate_pending_task_applies_and_is_idempotent(self):
+        out = self._run("act", str(self.task_id), "terminate")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        payload = json.loads(out.stdout)
+        self.assertTrue(payload["applied"])
+        self.assertEqual(payload["task"]["status"], "cancelled")
+        # 再次终止：幂等（任务已终止）
+        out2 = self._run("act", str(self.task_id), "terminate")
+        self.assertEqual(out2.returncode, 0)
+        self.assertTrue(json.loads(out2.stdout)["applied"])
+
+    def test_delete_action_rejected_by_whitelist(self):
+        out = self._run("act", str(self.task_id), "delete")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("invalid choice", out.stderr)
+
+    def test_unsupported_action_for_state_reports_reason(self):
+        # running 之外的任务不能 resume_organizing：应给出原因而不是崩溃
+        out = self._run("act", str(self.task_id), "resume_organizing")
+        self.assertEqual(out.returncode, 2)
+        payload = json.loads(out.stdout)
+        self.assertFalse(payload["applied"])
+        self.assertTrue(payload["reason"])
 
 
 if __name__ == "__main__":

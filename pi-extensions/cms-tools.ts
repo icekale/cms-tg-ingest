@@ -99,4 +99,35 @@ export default function (pi: ExtensionAPI) {
       }
     },
   });
+
+  pi.registerTool({
+    name: "task_action",
+    label: "执行任务操作",
+    description:
+      "对任务执行修复操作，与 Web 管理台按钮同一入口（带资格校验）。动作含义：" +
+      "retry=从失败点重试；reprocess=从头重跑；resume_organizing=继续整理（卡在整理阶段的任务）；" +
+      "emby=重新确认 Emby 入库；restore=恢复 STRM；terminate=终止任务（破坏性：中止进行中的任务）。" +
+      "重要：执行任何动作前必须先向用户说明你要做什么并得到其明确同意（最新消息里出现“确认/好的/执行”等字样）" +
+      "才可调用；用户只是问“该怎么办”时不要调用，先给建议。terminate 尤其需要明确确认。" +
+      "执行后必须如实报告 applied 与 reason。",
+    parameters: Type.Object({
+      task_id: Type.Number({ description: "任务 ID" }),
+      action: Type.Union([
+        Type.Literal("retry"),
+        Type.Literal("emby"),
+        Type.Literal("restore"),
+        Type.Literal("reprocess"),
+        Type.Literal("resume_organizing"),
+        Type.Literal("terminate"),
+      ]),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        return textToolResult(await run(["act", String(params.task_id), String(params.action)]));
+      } catch (err) {
+        const message = String(err).slice(0, 400);
+        return textToolResult(`task_action failed: ${message}`);
+      }
+    },
+  });
 }
