@@ -13,6 +13,8 @@ from app import assistant
 from app.models import TaskStage, TaskStatus
 from app.task_store import TaskStore
 from app.web import WebApp
+from tests.legacy_submission_store import SubmissionStore
+from tests.test_bridge_v02_integration import FakeCmsSubmit
 
 
 def _completed_process(stdout: str = "", stderr: str = "", returncode: int = 0):
@@ -266,6 +268,13 @@ class _FakeTelegram:
         with self._lock:
             self.sent.append(str(text))
 
+    def send_rich_message(self, chat_id, document, reply_markup=None):
+        with self._lock:
+            self.sent.append("rich-message")
+
+    def answer_callback_query(self, callback_id, text=None, show_alert=False):
+        return {"ok": True}
+
     def wait_for(self, predicate, timeout=5.0):
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -434,6 +443,142 @@ class TelegramAssistantTests(unittest.TestCase):
                 # 失败后 6 小时内不重试
                 bridge.run_assistant_diagnosis_sweep(store, telegram, "42", config, self_share_config)
                 self.assertEqual(calls["count"], 1)
+
+
+class PlainTextAssistantRoutingTests(unittest.TestCase):
+    """免前缀：普通文本直接进 AI 助手，且不劫持链接/追更等既有语义。"""
+
+    def _update(self, text):
+        return {
+            "message": {
+                "chat": {"id": 464100862},
+                "from": {"id": 464100862},
+                "text": text,
+            }
+        }
+
+    def _run_handle_update(self, text, telegram, task_store, submission_store, run_pi_side_effect):
+        captured = {}
+
+        def fake_run_pi(question, *, session_id, **kwargs):
+            captured["question"] = question
+            captured["session_id"] = session_id
+            return run_pi_side_effect(question, session_id=session_id, **kwargs)
+
+        with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
+            assistant, "run_pi", side_effect=fake_run_pi
+        ):
+            bridge.handle_update(
+                self._update(text),
+                FakeCmsSubmit(),
+                telegram,
+                "464100862",
+                submission_store,
+                poll_status=False,
+                task_store=task_store,
+            )
+            # 助手回复跑在后台线程里，必须在 patch 仍生效时等待它完成
+            telegram.wait_for(
+                lambda sent: any("失败" in m for m in sent) or len([m for m in sent if m != "rich-message"]) >= 2,
+                timeout=8.0,
+            )
+        return captured
+
+    def test_plain_question_routes_to_assistant_without_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            telegram = _FakeTelegram()
+            captured = self._run_handle_update(
+                "系统现在有什么问题？",
+                telegram,
+                store,
+                SubmissionStore(Path(tmp) / "submissions.db"),
+                lambda question, session_id, **kw: {"reply": "整体健康。", "session_id": session_id},
+            )
+            self.assertTrue(telegram.wait_for(lambda sent: any("整体健康" in m for m in sent)))
+            # 整条消息必须是问题本身，而不是 /助手 的默认健康问句
+            self.assertIn("系统现在有什么问题？", captured["question"])
+            self.assertIn("系统快照", captured["question"])
+
+    def test_hash_prefixed_plain_text_focuses_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = _needs_action_task(store, "哑舍 第一季")
+            telegram = _FakeTelegram()
+            captured = self._run_handle_update(
+                f"#{task.id} 这个任务怎么了",
+                telegram,
+                store,
+                SubmissionStore(Path(tmp) / "submissions.db"),
+                lambda question, session_id, **kw: {"reply": "整理超时。", "session_id": session_id},
+            )
+            self.assertTrue(telegram.wait_for(lambda sent: any("整理超时" in m for m in sent)))
+            self.assertIn('"focus_task"', captured["question"])
+            self.assertIn("这个任务怎么了", captured["question"])
+
+    def test_plain_text_silent_when_pi_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            telegram = _FakeTelegram()
+            with patch.object(assistant, "resolve_pi_binary", return_value=""), patch.object(
+                assistant, "run_pi", side_effect=AssertionError("should not be called")
+            ):
+                bridge.handle_update(
+                    self._update("随便聊聊"),
+                    FakeCmsSubmit(),
+                    telegram,
+                    "464100862",
+                    SubmissionStore(Path(tmp) / "submissions.db"),
+                    poll_status=False,
+                    task_store=store,
+                )
+            self.assertEqual(telegram.sent, [], "pi 未配置时应保持原静默行为")
+
+    def test_link_intake_not_hijacked_by_assistant(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submission_store = SubmissionStore(Path(tmp) / "submissions.db")
+            store = TaskStore(Path(tmp) / "tasks.db")
+            telegram = _FakeTelegram()
+
+            def boom(*args, **kwargs):
+                raise AssertionError("115 链接不应进助手")
+
+            with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
+                assistant, "run_pi", side_effect=boom
+            ):
+                bridge.handle_update(
+                    self._update("https://115cdn.com/s/abc?password=1234"),
+                    FakeCmsSubmit(),
+                    telegram,
+                    "464100862",
+                    submission_store,
+                    poll_status=False,
+                    task_store=store,
+                )
+            tasks = store.list_recent_tasks(limit=5)
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0].share_code, "abc")
+            self.assertFalse(any("正在分析" in m for m in telegram.sent), "链接入库不应触发助手占位提示")
+
+    def test_series_update_with_non_link_payload_stays_silent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            telegram = _FakeTelegram()
+            with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
+                assistant, "run_pi", side_effect=AssertionError("追更文本不应进助手")
+            ):
+                bridge.handle_update(
+                    self._update("追更 你好"),
+                    FakeCmsSubmit(),
+                    telegram,
+                    "464100862",
+                    SubmissionStore(Path(tmp) / "submissions.db"),
+                    poll_status=False,
+                    task_store=store,
+                )
+            # 走追更分支（未启用自分享工作流的提示），绝不进助手
+            self.assertTrue(any("追更" in m for m in telegram.sent), telegram.sent)
+            self.assertFalse(any("正在分析" in m for m in telegram.sent), telegram.sent)
 
 
 if __name__ == "__main__":

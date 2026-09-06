@@ -259,7 +259,7 @@ _HDHIVE_PENDING_FILTERS_LOCK = threading.Lock()
 _HDHIVE_PENDING_FILTERS: dict[str, int] = {}
 _HDHIVE_FILTER_PROMPT = "请发送集数过滤，例如 S01E01-S01E10,S02；发送“清除”恢复全部正常集。"
 ED2K_HELP_EXAMPLE = "ed2k://|file|Example.mkv|10|" + "0123456789ABCDEF" * 2 + "|/"
-HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 分享、磁力或 ED2K 链接\n- 磁力/ED2K 会进入 115 云下载，再复用 CMS 整理和分享 STRM 流程\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- 新链接追更：追更 #任务号 <新115链接>\n- /搜索：通过 TMDB 匹配 HDHive 影片/剧集，筛选网盘并解锁资源（/hdhive_search 仍兼容）\n- /订阅 <HDHive剧集链接>：创建 HDHive 剧集订阅\n- 发送 HDHive 剧集页面也可直接订阅，例如 https://hdhive.com/tv/xxxxxxxx\n- /status 查看最近任务\n- /助手 [任务号] <问题>：AI 运维助手诊断故障（基于 pi），例如「/助手 12 为什么一直 needs_action」\n- /诊断：AI 一键体检，总结当前健康状态和需要处理的问题\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd\n""" + ED2K_HELP_EXAMPLE
+HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 分享、磁力或 ED2K 链接\n- 磁力/ED2K 会进入 115 云下载，再复用 CMS 整理和分享 STRM 流程\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- 新链接追更：追更 #任务号 <新115链接>\n- /搜索：通过 TMDB 匹配 HDHive 影片/剧集，筛选网盘并解锁资源（/hdhive_search 仍兼容）\n- /订阅 <HDHive剧集链接>：创建 HDHive 剧集订阅\n- 发送 HDHive 剧集页面也可直接订阅，例如 https://hdhive.com/tv/xxxxxxxx\n- /status 查看最近任务\n- 直接发送文字提问即可使用 AI 助手（基于 pi），无需任何指令；也可用 /助手 [任务号] <问题>，或 /诊断 一键体检\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd\n""" + ED2K_HELP_EXAMPLE
 MENU_BUTTONS = {
     "🔍 搜索": "/搜索",
     "📋 最近任务": "/status",
@@ -2484,16 +2484,25 @@ def handle_assistant_command(
     *,
     engine_enabled: bool = True,
     guards: dict[str, Any] | None = None,
+    is_command: bool = True,
 ) -> None:
-    """/助手 [任务号] <问题>：后台线程调用 pi，回复分段发送，不阻塞轮询循环。"""
+    """/助手 [任务号] <问题>：后台线程调用 pi，回复分段发送，不阻塞轮询循环。
+
+    is_command=False 时为免前缀模式（普通文本直接提问）：整条消息即问题，
+    仅当以 #数字 开头时解析聚焦任务号。
+    """
     if task_store is None:
         telegram.send_message(chat_id, "AI 助手不可用：任务库未初始化。")
         return
-    first_token = text.split()[0] if text.split() else command
-    rest = text[len(first_token):].strip() if first_token else ""
+    if is_command:
+        first_token = text.split()[0] if text.split() else command
+        rest = text[len(first_token):].strip() if first_token else ""
+        question = rest
+    else:
+        rest = str(text or "").strip()
+        question = rest
     task_id = 0
-    question = rest
-    match = re.match(r"^#?(\d+)\s*(.*)$", rest, re.S)
+    match = re.match(r"^#(\d+)\s*(.*)$" if not is_command else r"^#?(\d+)\s*(.*)$", rest, re.S)
     if match:
         task_id = int(match.group(1))
         question = match.group(2).strip()
@@ -3887,6 +3896,26 @@ def handle_update(
             telegram.send_message(chat_id, f"追更失败{detail}")
         return
     if not sources:
+        # 兜底：既不是链接、指令、追更，也不是搜索/筛选会话输入的普通文本
+        # → 直接交给 AI 助手（免前缀）。pi 未配置时保持原静默行为，避免
+        # 每条无关文本都被"未启用"提示打扰。
+        if text and not explicit_series_update and task_store is not None and assistant.resolve_pi_binary():
+            guard_snapshot = None
+            if callable(assistant_guards):
+                try:
+                    guard_snapshot = assistant_guards()
+                except Exception:
+                    guard_snapshot = None
+            handle_assistant_command(
+                text,
+                command,
+                chat_id,
+                telegram,
+                task_store,
+                engine_enabled=task_engine_enabled,
+                guards=guard_snapshot,
+                is_command=False,
+            )
         return
 
     display_rows = []
