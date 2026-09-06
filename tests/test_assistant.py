@@ -85,6 +85,29 @@ class RunPiTests(unittest.TestCase):
                 assistant.run_pi("问题", session_id="a" * 32, session_dir=Path("/tmp/assistant-test"))
         self.assertIn("no auth configured", str(ctx.exception))
 
+    def test_transient_failure_retries_once_then_succeeds(self):
+        responses = [
+            _completed_process(stderr="bootstrap noise", returncode=1),
+            _completed_process(stdout=_pi_stdout_events("重试后的回复")),
+        ]
+        with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
+            assistant.subprocess, "run", side_effect=responses
+        ) as fake_run:
+            result = assistant.run_pi("问题", session_id="a" * 32, session_dir=Path("/tmp/assistant-test"))
+        self.assertEqual(fake_run.call_count, 2)
+        self.assertEqual(result["reply"], "重试后的回复")
+
+    def test_persistent_failure_raises_after_two_attempts(self):
+        with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
+            assistant.subprocess,
+            "run",
+            return_value=_completed_process(stderr="still broken", returncode=1),
+        ) as fake_run:
+            with self.assertRaises(assistant.AssistantError) as ctx:
+                assistant.run_pi("问题", session_id="a" * 32, session_dir=Path("/tmp/assistant-test"))
+        self.assertEqual(fake_run.call_count, 2)
+        self.assertIn("still broken", str(ctx.exception))
+
     def test_empty_stdout_raises(self):
         with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
             assistant.subprocess, "run", return_value=_completed_process()

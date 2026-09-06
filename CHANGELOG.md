@@ -1,3 +1,8 @@
+## 0.5.13 - 2026-09-06
+
+- **助手进程级失败自动重试一次**：容器冷启动后的首次 pi 调用可能撞上 pi 自身 bootstrap 的瞬态失败（线上实测 `spawn git ENOENT` 式崩溃），`run_pi` 现在对非零退出重试一次再放弃——避免首跑失败让任务背上 6 小时诊断退避。超时仍直接抛出不重试。
+- 线上已切 `PI_ASSISTANT_MODEL=k4le/gemini-3.8-flash-high`（自建代理，pi models.json 自定义 provider），needs_action 重新诊断验证通过（TG 推送 + metadata 落库均走 Gemini）。
+
 ## 0.5.12 - 2026-09-06
 
 - **助手模型切换到 Gemini 3.8 Flash + 运行时修复（线上实测）**：pi 助手改走自建代理（`PI_ASSISTANT_MODEL=k4le/gemini-3.8-flash-high`，供应商在 pi `models.json` 里以自定义 provider 配置）。部署中发现两个运行时问题并修复：① 镜像缺 `git`——pi 某些启动/会话路径会 `spawn git`，alpine 运行时崩溃（spawn git ENOENT），运行时镜像补装 git；② pi 配置目录必须可写（settings.json.lock），compose 挂载从 `:ro` 改为可写。

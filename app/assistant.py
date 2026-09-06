@@ -12,6 +12,7 @@ pi 负责模型接入、凭据与会话记忆；本模块只做三件事：
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -25,6 +26,7 @@ from .web_api import api_task_detail, api_tasks, serialize_event, serialize_heal
 
 DEFAULT_TIMEOUT_SECONDS = 120.0
 MAX_QUESTION_CHARS = 8000
+LOG = logging.getLogger(__name__)
 
 # needs_action 自动诊断：结果写进任务 metadata（Web 任务详情可见），
 # event_id 记录诊断时最新事件——只有原因变化（新事件）才重新诊断。
@@ -284,19 +286,26 @@ def run_pi(
     config_dir = str(os.environ.get("PI_ASSISTANT_CONFIG_DIR") or "").strip()
     if config_dir:
         env["PI_CODING_AGENT_DIR"] = config_dir
-    try:
-        proc = subprocess.run(  # noqa: S603 - 固定 argv，无 shell
-            argv,
-            input=question,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-            cwd=str(session_dir),
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise AssistantTimeout(f"助手响应超时（超过 {timeout:.0f} 秒），可稍后重试或调大 PI_ASSISTANT_TIMEOUT") from exc
-    if proc.returncode != 0:
+    # 容器冷启动后的首次调用可能撞上 pi 自身 bootstrap 的瞬态失败：
+    # 进程级失败重试一次再放弃，避免任务背上数小时的诊断退避。
+    proc = None
+    stderr_tail = ""
+    for attempt in (1, 2):
+        try:
+            proc = subprocess.run(  # noqa: S603 - 固定 argv，无 shell
+                argv,
+                input=question,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+                cwd=str(session_dir),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise AssistantTimeout(f"助手响应超时（超过 {timeout:.0f} 秒），可稍后重试或调大 PI_ASSISTANT_TIMEOUT") from exc
+        if proc.returncode == 0:
+            return {"reply": _parse_reply(proc.stdout or ""), "session_id": session_id}
         stderr_tail = (proc.stderr or proc.stdout or "")[-600:].strip()
-        raise AssistantError(f"pi 退出码 {proc.returncode}: {stderr_tail or '无输出'}")
-    return {"reply": _parse_reply(proc.stdout or ""), "session_id": session_id}
+        if attempt == 1:
+            LOG.warning("pi run failed (attempt 1/2), retrying: %s", stderr_tail[:200])
+    raise AssistantError(f"pi 退出码 {proc.returncode}: {stderr_tail or '无输出'}")
