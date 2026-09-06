@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import tempfile
 import threading
@@ -156,6 +157,13 @@ class ContextTests(unittest.TestCase):
 
 
 class AssistantChatEndpointTests(unittest.TestCase):
+
+    def setUp(self):
+        # 记忆提取是后台线程，单测里统一关掉，避免二次调用测试桩
+        p = patch.object(assistant, "extract_memory_async", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+
     def _make_app(self, tmp: str, task_title: str = "哑舍 S01"):
         store = TaskStore(Path(tmp) / "tasks.db")
         task = store.upsert_task(task_title, "", "https://115cdn.com/s/assistant")
@@ -167,7 +175,7 @@ class AssistantChatEndpointTests(unittest.TestCase):
             app, task = self._make_app(tmp)
             captured = {}
 
-            def fake_run_pi(question, *, session_id, session_dir, model="", timeout=0):
+            def fake_run_pi(question, *, session_id, session_dir, model="", timeout=0, **_kwargs):
                 captured["question"] = question
                 captured["session_id"] = session_id
                 captured["session_dir"] = session_dir
@@ -305,6 +313,13 @@ def _needs_action_task(store: TaskStore, title: str = "哑舍 第一季"):
 
 
 class TelegramAssistantTests(unittest.TestCase):
+
+    def setUp(self):
+        # 记忆提取是后台线程，单测里统一关掉，避免二次调用测试桩
+        p = patch.object(assistant, "extract_memory_async", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_chunk_assistant_text(self):
         self.assertEqual(bridge._chunk_assistant_text(""), [""])
         self.assertEqual(bridge._chunk_assistant_text("短回复"), ["短回复"])
@@ -446,6 +461,13 @@ class TelegramAssistantTests(unittest.TestCase):
 
 
 class PlainTextAssistantRoutingTests(unittest.TestCase):
+    def setUp(self):
+        # 记忆提取是后台线程，单测里统一关掉，避免二次调用测试桩
+        p = patch.object(assistant, "extract_memory_async", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+
+
     """免前缀：普通文本直接进 AI 助手，且不劫持链接/追更等既有语义。"""
 
     def _update(self, text):
@@ -579,6 +601,92 @@ class PlainTextAssistantRoutingTests(unittest.TestCase):
             # 走追更分支（未启用自分享工作流的提示），绝不进助手
             self.assertTrue(any("追更" in m for m in telegram.sent), telegram.sent)
             self.assertFalse(any("正在分析" in m for m in telegram.sent), telegram.sent)
+
+
+class MemoryTests(unittest.TestCase):
+    """hermes 式长期记忆：注入、提取写回、密钥拦截、容量裁剪。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.sessions = Path(self._tmp.name) / "assistant-sessions"
+        p = patch.dict(os.environ, {"PI_ASSISTANT_MEMORY_DIR": str(self.sessions.parent / "assistant-memory")})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_memory_disabled_by_env(self):
+        with patch.dict(os.environ, {"PI_ASSISTANT_MEMORY": "0"}):
+            self.assertEqual(assistant.read_memory_context(self.sessions), "")
+            self.assertEqual(assistant.append_memory_entries("- 2026-01-01 测试"), [])
+
+    def test_injection_adds_memory_to_system_prompt(self):
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            captured["sp"] = argv[argv.index("--system-prompt") + 1]
+            return _completed_process(stdout=_pi_stdout_events("好的"))
+
+        with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
+            assistant.subprocess, "run", side_effect=fake_run
+        ):
+            assistant.append_memory_entries("- 2026-09-06 用户偏好简体中文回复")
+            assistant.run_pi("问题", session_id="a" * 32, session_dir=self.sessions, inject_memory=True)
+        self.assertIn("长期记忆", captured["sp"])
+        self.assertIn("偏好简体中文", captured["sp"])
+
+    def test_no_injection_without_memory(self):
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            captured["sp"] = argv[argv.index("--system-prompt") + 1]
+            return _completed_process(stdout=_pi_stdout_events("好的"))
+
+        with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
+            assistant.subprocess, "run", side_effect=fake_run
+        ):
+            assistant.run_pi("问题", session_id="a" * 32, session_dir=self.sessions, inject_memory=True)
+        self.assertNotIn("长期记忆", captured["sp"])
+
+    def test_extract_appends_new_entries_and_dedupes(self):
+        added = assistant.append_memory_entries("- 2026-09-06 Emby 端口是 9096\n- 2026-09-06 Emby 端口是 9096")
+        self.assertEqual(len(added), 1)
+        memory = (assistant.assistant_memory_dir(self.sessions) / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertIn("Emby 端口是 9096", memory)
+        # 完全相同的条目不再重复
+        self.assertEqual(assistant.append_memory_entries("- 2026-09-06 Emby 端口是 9096"), [])
+
+    def test_extract_skips_secrets_and_noise(self):
+        added = assistant.append_memory_entries(
+            "NOTHING\n- 2026-09-06 我的 key 是 sk-abcdefghij123456\n普通文本不是条目"
+        )
+        self.assertEqual(added, [])
+        self.assertFalse((assistant.assistant_memory_dir(self.sessions) / "MEMORY.md").exists())
+
+    def test_memory_trim_keeps_recent_entries(self):
+        for i in range(200):
+            assistant.append_memory_entries(f"- 2026-01-01 第{i}条测试记忆内容，内容足够长以便撑大文件体积，这里再补充一段文字确保超过阈值")
+        content = (assistant.assistant_memory_dir(self.sessions) / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertLessEqual(len(content), assistant.MEMORY_MAX_CHARS + 200)
+        self.assertIn("第199条", content, "裁剪后应保留较新的条目")
+        self.assertNotIn("第0条测试", content)
+
+    def test_extract_memory_async_learns_from_conversation(self):
+        with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
+            assistant.subprocess,
+            "run",
+            return_value=_completed_process(stdout=_pi_stdout_events("- 2026-09-06 用户在 Unraid 上运行本系统")),
+        ):
+            assistant.extract_memory_async(
+                "我在哪里跑的这个系统？", "你在 Unraid 上运行它。", self.sessions
+            )
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                memory_path = assistant.assistant_memory_dir(self.sessions) / "MEMORY.md"
+                if memory_path.exists() and "Unraid" in memory_path.read_text(encoding="utf-8"):
+                    break
+                time.sleep(0.1)
+        memory = (assistant.assistant_memory_dir(self.sessions) / "MEMORY.md").read_text(encoding="utf-8")
+        self.assertIn("Unraid", memory)
 
 
 if __name__ == "__main__":

@@ -2530,16 +2530,20 @@ def handle_assistant_command(
                 task_id=task_id,
                 guards=guards,
             )
+            session_dir = assistant.assistant_session_dir(task_store)
             result = assistant.run_pi(
                 assistant.build_user_message(question, snapshot),
                 session_id=_assistant_session_id(chat_id),
-                session_dir=assistant.assistant_session_dir(task_store),
+                session_dir=session_dir,
                 model=assistant.assistant_model(),
                 timeout=assistant.assistant_timeout(),
+                inject_memory=True,
             )
             header = f"🤖 关于任务 #{task_id}：\n" if task_id else ""
-            for chunk in _chunk_assistant_text(f"{header}{result['reply']}"):
+            reply = result["reply"]
+            for chunk in _chunk_assistant_text(f"{header}{reply}"):
                 telegram.send_message(chat_id, chunk)
+            assistant.extract_memory_async(question, reply, session_dir)
         except assistant.AssistantError as exc:
             telegram.send_message(chat_id, f"AI 助手调用失败：{safe_telegram_text(str(exc), 360)}")
         except Exception as exc:

@@ -14,8 +14,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -27,6 +29,139 @@ from .web_api import api_task_detail, api_tasks, serialize_event, serialize_heal
 DEFAULT_TIMEOUT_SECONDS = 120.0
 MAX_QUESTION_CHARS = 8000
 LOG = logging.getLogger(__name__)
+
+# ---- hermes 式长期记忆：跨会话记住用户偏好/纠正/事实/教训 ----
+# 文件格式与 pi-hermes-memory 兼容（MEMORY.md，一行一条带日期前缀），
+# 存在数据卷上，注入系统提示 + 每轮对话后异步提取新条目。
+MEMORY_MAX_CHARS = 6000
+MEMORY_TRIM_CHARS = 4000
+
+MEMORY_INJECTION_HEADER = (
+    "\n\n---- 长期记忆（你与这位用户长期共事积累的认识，供参考；以最新对话为准）----\n"
+)
+
+MEMORY_EXTRACT_SYSTEM_PROMPT = (
+    "你是记忆管理器。从对话中提取值得长期记住的信息：用户的身份与偏好、对助手回答的纠正、"
+    "关于这套系统的重要事实、踩过的坑和失败教训。已有记忆不要重复收录；一次性的任务状态"
+    "（如某任务当前卡在哪个阶段）不属于长期记忆。只输出新增条目，每行一条，"
+    "格式为「- YYYY-MM-DD 内容」；没有任何新增就只输出 NOTHING。"
+    "绝不输出 API key、token、密码、cookie 等敏感信息。"
+)
+
+_SECRET_LINE_RE = re.compile(r"sk-[A-Za-z0-9]{10,}|(?:api[_-]?key|token|password|passwd|cookie|密码|密钥)\s*[:=]", re.I)
+
+
+def memory_enabled() -> bool:
+    return str(os.environ.get("PI_ASSISTANT_MEMORY") or "").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def assistant_memory_dir(session_dir: Path | None = None) -> Path:
+    override = str(os.environ.get("PI_ASSISTANT_MEMORY_DIR") or "").strip()
+    if override:
+        return Path(override)
+    base = Path(session_dir).parent if session_dir else assistant_session_dir(None).parent
+    return base / "assistant-memory"
+
+
+def read_memory_context(session_dir: Path | None = None, *, max_chars: int = 4000) -> str:
+    """读取长期记忆文本（MEMORY.md 尾部优先，超长从头裁剪）。"""
+    if not memory_enabled():
+        return ""
+    path = assistant_memory_dir(session_dir) / "MEMORY.md"
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if not text:
+        return ""
+    if len(text) > max_chars:
+        # 保留较新的条目（文件按时间追加，新的在尾部）。
+        text = text[-max_chars:]
+        newline = text.find("\n")
+        if newline != -1:
+            text = text[newline + 1 :]
+    return text.strip()
+
+
+def append_memory_entries(output: str, session_dir: Path | None = None) -> list[str]:
+    """把记忆提取的输出写进 MEMORY.md；返回实际新增的条目。"""
+    if not memory_enabled():
+        return []
+    entries: list[str] = []
+    for raw_line in str(output or "").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("-"):
+            continue
+        line = line.lstrip("-").strip()
+        # 模型可能自带日期前缀，剥掉后统一补当前日期。
+        line = re.sub(r"^\d{4}-\d{2}-\d{2}\s+", "", line)
+        if not line or line.upper() == "NOTHING":
+            continue
+        if _SECRET_LINE_RE.search(line):
+            LOG.info("Assistant memory entry dropped by secret filter")
+            continue
+        if line not in entries:
+            entries.append(line)
+    if not entries:
+        return []
+    memory_dir = assistant_memory_dir(session_dir)
+    try:
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        path = memory_dir / "MEMORY.md"
+        existing = ""
+        try:
+            existing = path.read_text(encoding="utf-8")
+        except OSError:
+            pass
+        today = time.strftime("%Y-%m-%d")
+        lines = [f"- {today} {entry}" for entry in entries if entry not in existing]
+        if not lines:
+            return []
+        content = existing.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
+        if len(content) > MEMORY_MAX_CHARS:
+            content = content[-MEMORY_TRIM_CHARS:]
+            newline = content.find("\n")
+            if newline != -1:
+                content = content[newline + 1 :]
+        path.write_text(content.lstrip("\n"), encoding="utf-8")
+        return lines
+    except OSError as exc:
+        LOG.warning("Assistant memory write failed: %s", exc)
+        return []
+
+
+def extract_memory_async(question: str, reply: str, session_dir: Path | None = None) -> None:
+    """对话结束后在后台提取长期记忆（fire-and-forget，失败静默）。"""
+    if not memory_enabled():
+        return
+
+    def work() -> None:
+        try:
+            existing = read_memory_context(session_dir, max_chars=MEMORY_MAX_CHARS)
+            conversation = (
+                f"已有记忆：\n{existing or '（空）'}\n\n"
+                f"对话：\n用户：{str(question)[:2000]}\n助手：{str(reply)[:1500]}"
+            )
+            result = run_pi(
+                conversation,
+                session_id=None,
+                session_dir=session_dir or assistant_session_dir(None),
+                model=assistant_model(),
+                timeout=45.0,
+                system_prompt=MEMORY_EXTRACT_SYSTEM_PROMPT,
+            )
+            added = append_memory_entries(result.get("reply", ""), session_dir)
+            if added:
+                LOG.info("Assistant memory learned %d new entries", len(added))
+        except Exception:
+            LOG.debug("Assistant memory extraction failed", exc_info=True)
+
+    threading.Thread(target=work, name="assistant-memory", daemon=True).start()
 
 # needs_action 自动诊断：结果写进任务 metadata（Web 任务详情可见），
 # event_id 记录诊断时最新事件——只有原因变化（新事件）才重新诊断。
@@ -69,7 +204,9 @@ ASSISTANT_SYSTEM_PROMPT = (
     "3. 你不能直接执行操作；只做诊断和给出步骤。\n"
     "4. 用简体中文回答，简洁分点，先结论后依据。\n"
     "5. 信息不足时直接说明还缺什么（如任务 ID、日志关键字）。\n"
-    "6. 你在一次对话中会收到多份快照，以最新一份为准。"
+    "6. 你在一次对话中会收到多份快照，以最新一份为准。\n"
+    "7. 你与用户是长期共事的同事：回答直接、简洁、口语一点，可以引用记忆里的偏好和历史；"
+    "用户纠正你的地方要接受并调整，不要重复犯错。"
 )
 
 
@@ -241,13 +378,19 @@ def new_session_id() -> str:
 def run_pi(
     question: str,
     *,
-    session_id: str,
+    session_id: str | None,
     session_dir: Path,
     binary: str = "",
     model: str = "",
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    system_prompt: str | None = None,
+    inject_memory: bool = False,
 ) -> dict[str, str]:
-    """非交互调用 pi，返回 {reply, session_id}。失败抛 AssistantError/TimeoutExpired。"""
+    """非交互调用 pi，返回 {reply, session_id}。失败抛 AssistantError/TimeoutExpired。
+
+    session_id=None 时用 --no-session（一次性调用，如记忆提取）；
+    inject_memory=True 时把长期记忆注入系统提示。
+    """
     binary = binary or resolve_pi_binary()
     if not binary:
         raise AssistantError(
@@ -265,7 +408,7 @@ def run_pi(
         "--mode",
         "json",
         "--system-prompt",
-        ASSISTANT_SYSTEM_PROMPT,
+        system_prompt or ASSISTANT_SYSTEM_PROMPT,
         # 助手只做诊断：禁用扩展/技能/上下文文件/工具，避免用户编码配置和
         # 项目本地文件影响线上助手，也显著加快启动。
         "--no-extensions",
@@ -277,9 +420,15 @@ def run_pi(
         "--no-approve",
         "--session-dir",
         str(session_dir),
-        "--session-id",
-        session_id,
     ]
+    if session_id:
+        argv += ["--session-id", session_id]
+    else:
+        argv.append("--no-session")
+    if inject_memory:
+        memory = read_memory_context(session_dir)
+        if memory:
+            argv[argv.index("--system-prompt") + 1] += MEMORY_INJECTION_HEADER + memory
     if str(model or "").strip():
         argv += ["--model", str(model).strip()]
     env = dict(os.environ)

@@ -2230,6 +2230,7 @@ class WebApp:
                     session_dir=assistant.assistant_session_dir(self.store),
                     model=assistant.assistant_model(),
                     timeout=assistant.assistant_timeout(),
+                    inject_memory=True,
                 )
             except assistant.AssistantTimeout as exc:
                 status, response_headers, response_body = api_response({"error": str(exc)}, status=504)
@@ -2237,6 +2238,12 @@ class WebApp:
             except assistant.AssistantError as exc:
                 status, response_headers, response_body = api_response({"error": str(exc)}, status=502)
                 return status, {**response_headers, **auth_headers}, response_body
+            # hermes 式长期记忆：对话后异步提取值得记住的信息（不阻塞响应）。
+            assistant.extract_memory_async(
+                question,
+                result["reply"],
+                assistant.assistant_session_dir(self.store),
+            )
             status, response_headers, response_body = api_response(
                 {"reply": result["reply"], "session_id": result["session_id"]}
             )
