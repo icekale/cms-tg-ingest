@@ -17,7 +17,8 @@ ENV PYTHONUNBUFFERED=1 \
 COPY --from=frontend-build /usr/local/bin/node /usr/local/bin/node
 COPY --from=frontend-build /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 ENV PI_CODING_AGENT_DIR=/data/pi/agent
-RUN apk add --no-cache libstdc++ libgcc \
+# git：pi 启动/会话路径会 spawn git，alpine 运行时必须提供。
+RUN apk add --no-cache libstdc++ libgcc git \
     && ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && npm install -g --silent @earendil-works/pi-coding-agent@0.83.0 \
     && npm cache clean --force \

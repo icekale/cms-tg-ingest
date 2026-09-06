@@ -1,3 +1,8 @@
+## 0.5.12 - 2026-09-06
+
+- **助手模型切换到 Gemini 3.8 Flash + 运行时修复（线上实测）**：pi 助手改走自建代理（`PI_ASSISTANT_MODEL=k4le/gemini-3.8-flash-high`，供应商在 pi `models.json` 里以自定义 provider 配置）。部署中发现两个运行时问题并修复：① 镜像缺 `git`——pi 某些启动/会话路径会 `spawn git`，alpine 运行时崩溃（spawn git ENOENT），运行时镜像补装 git；② pi 配置目录必须可写（settings.json.lock），compose 挂载从 `:ro` 改为可写。
+- 线上验证：容器内 k4le/gemini-3.8-flash-high 真实调用通过；needs_action 任务重新诊断成功写入 metadata。切换模型只需改 `PI_ASSISTANT_MODEL`（格式 `<provider>/<model>`），无需改代码。
+
 ## 0.5.11 - 2026-09-06
 
 - **新增内置 AI 运维助手（以 pi 为基座，Web + Telegram 双端）**：基座为 [pi coding agent](https://github.com/earendil-works/pi-coding-agent)（`pi -p --mode json` 非交互模式），pi 负责模型接入、凭据与会话记忆（`--session-id` 跨请求延续对话），本应用负责采集系统快照（健康状态、开放任务 + 最近 3 条事件、可选任务详情）附在提问里。
