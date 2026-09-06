@@ -220,6 +220,10 @@ AUTO_REPAIR_ONCE_ACTIONS = ("reprocess",)
 _SHARE_RISK_MARKERS = (
     "have_vio_file",
     "分享不可用",
+    "变为不可用",
+    "风险标记",
+    "不可用状态",
+    "源文件已保留",
     "违规",
     "vio_file",
     "分享失效",
@@ -346,6 +350,8 @@ def choose_auto_repair_action(task: Any, store: Any, *, max_retries: int = 3) ->
     """
     from .task_actions import available_task_actions
 
+    if _task_looks_share_risk(task, store):
+        return ""
     actions = available_task_actions(task, max_retries, store=store)
     for action in AUTO_REPAIR_SAFE_ACTIONS:
         if action in actions:
@@ -353,11 +359,7 @@ def choose_auto_repair_action(task: Any, store: Any, *, max_retries: int = 3) ->
     metadata = getattr(task, "metadata", {}) or {}
     diagnosis = metadata.get(DIAGNOSIS_META_KEY) if isinstance(metadata, dict) else None
     already = isinstance(diagnosis, dict) and bool(diagnosis.get("auto_repair_action"))
-    if (
-        "reprocess" in actions
-        and not already
-        and not _task_looks_share_risk(task, store)
-    ):
+    if "reprocess" in actions and not already:
         return "reprocess"
     return ""
 

@@ -555,6 +555,51 @@ class TelegramAssistantTests(unittest.TestCase):
             self.assertFalse(applied)
             self.assertEqual(telegram.sent, [])
 
+    def test_auto_repair_skips_emby_when_share_became_unavailable(self):
+        task = SimpleNamespace(
+            status=TaskStatus.NEEDS_ACTION,
+            current_stage=TaskStage.CLEANED,
+            claimed_by="",
+            metadata={},
+            retry_count=0,
+            error_summary="",
+            id=430,
+        )
+        store = SimpleNamespace(
+            list_events=lambda _tid: [
+                {"message": "自有分享在异步审核中已变为不可用，源文件已保留，停止自动改名和重建"}
+            ]
+        )
+        with patch("app.task_actions.available_task_actions", return_value=frozenset({"emby", "reprocess", "restore"})):
+            self.assertEqual(assistant.choose_auto_repair_action(task, store), "")
+
+    def test_diagnosis_failure_keeps_previous_auto_repair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = _needs_action_task(store)
+            store.patch_metadata(
+                task.id,
+                {
+                    assistant.DIAGNOSIS_META_KEY: {
+                        "event_id": 0,
+                        "reply": "旧诊断",
+                        "auto_repair_action": "reprocess",
+                        "auto_repair_applied": True,
+                    }
+                },
+            )
+            store.record_event(task.id, TaskStage.ORGANIZING, TaskStatus.NEEDS_ACTION, "再次整理超时")
+            telegram = _FakeTelegram()
+            config, self_share_config = _guards_config()
+            with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
+                assistant, "run_pi", side_effect=assistant.AssistantError("timeout")
+            ):
+                bridge.run_assistant_diagnosis_sweep(store, telegram, "42", config, self_share_config)
+            diagnosis = store.find_task(task.id).metadata[assistant.DIAGNOSIS_META_KEY]
+            self.assertEqual(diagnosis["auto_repair_action"], "reprocess")
+            self.assertTrue(diagnosis["auto_repair_applied"])
+            self.assertIn("timeout", diagnosis["error"])
+
     def test_choose_auto_repair_prefers_retry_over_reprocess(self):
         task = SimpleNamespace(
             status=TaskStatus.FAILED,

@@ -2691,33 +2691,31 @@ def run_assistant_diagnosis_sweep(
                     model=assistant.assistant_model(),
                     timeout=assistant.assistant_timeout(),
                 )
-                task_store.patch_metadata(
-                    task_id,
+                merged = dict(existing) if isinstance(existing, dict) else {}
+                merged.update(
                     {
-                        DIAGNOSIS_META_KEY: {
-                            "event_id": latest_event,
-                            "reply": result["reply"],
-                            "diagnosed_at": time.time(),
-                        }
-                    },
+                        "event_id": latest_event,
+                        "reply": result["reply"],
+                        "diagnosed_at": time.time(),
+                    }
                 )
+                merged.pop("error", None)
+                task_store.patch_metadata(task_id, {DIAGNOSIS_META_KEY: merged})
                 LOG.info("Assistant auto-diagnosis stored for task %s", task_id)
                 for chunk in _chunk_assistant_text(f"🤖 AI 诊断 · 任务 #{task_id}\n{result['reply']}"):
                     telegram.send_message(allowed_chat_id, chunk)
             except assistant.AssistantError as ex:
                 LOG.warning("Assistant auto-diagnosis failed for task %s: %s", task_id, ex)
                 try:
-                    task_store.patch_metadata(
-                        task_id,
+                    merged = dict(existing) if isinstance(existing, dict) else {}
+                    merged.update(
                         {
-                            DIAGNOSIS_META_KEY: {
-                                "event_id": latest_event,
-                                "reply": "",
-                                "error": str(ex)[:300],
-                                "diagnosed_at": time.time(),
-                            }
-                        },
+                            "event_id": latest_event,
+                            "error": str(ex)[:300],
+                            "diagnosed_at": time.time(),
+                        }
                     )
+                    task_store.patch_metadata(task_id, {DIAGNOSIS_META_KEY: merged})
                 except Exception:
                     LOG.debug("Assistant diagnosis error marker not stored", exc_info=True)
             except Exception:
