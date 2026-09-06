@@ -26,7 +26,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 - **HDHive 搜索与解锁**：复用 CMS 已授权的单个 HDHive 账号，按 TMDB 匹配影片/剧集、筛选网盘、单条或批量解锁。
 - **HDHive 剧集订阅**：可在 Web `/app/hdhive` 或用 `/订阅 <HDHive剧集链接>` 创建订阅，按计划检查新集，费用未知或较高时等待确认。
 - **Web 运维台**：查看队列、阶段耗时、健康状态、质量巡检和 HDHive 订阅。
-- **AI 运维助手**：以 [pi coding agent](https://github.com/earendil-works/pi-coding-agent) 为基座，覆盖 Web 与 Telegram 两端。Web 管理台「AI 助手」页对话诊断；Telegram `/助手 [任务号] <问题>` 随时提问、`/诊断` 一键体检。提问自动附上健康状态、任务队列和任务事件的系统快照；任务进入 needs_action 时自动跑 AI 诊断并推送到 TG，结果存任务详情「AI 诊断」卡片。助手只建议不执行，建议落到 Web/Telegram 已有动作上。需要在容器内配置 pi 凭据（见「AI 助手配置」）。
+- **AI 运维助手**：以 [pi coding agent](https://github.com/earendil-works/pi-coding-agent) 为基座，覆盖 Web 与 Telegram 两端。Web 管理台「AI 助手」页对话诊断；Telegram 里直接发文字提问即可（免指令，`#任务号 问题` 可聚焦单个任务），也保留 `/助手 [任务号] <问题>` 与 `/诊断` 一键体检。提问自动附上健康状态、任务队列和任务事件的系统快照；任务进入 needs_action 时自动跑 AI 诊断并推送到 TG，结果存任务详情「AI 诊断」卡片。助手只建议不执行，建议落到 Web/Telegram 已有动作上。需要在容器内配置 pi 凭据（见「AI 助手配置」）。
 - **Emby 看板**：独立媒体仪表盘——数据概览（电影/剧集/集数/媒体库数）、我的媒体库（各库代表海报 + 数量）、最近入库海报流，点击直达 Emby 详情/播放。Emby API Key 只在服务端使用，不外泄到浏览器。
 - **暗色模式**：Web 管理台跟随系统深浅色，顶栏可手动切换并记住选择；登录页同步适配。
 - **CMS 版本检测与一键升级**：Web 设置页「立即检查」对比本地 CMS 版本与 Docker Hub 最新 tag；发现新版可直接「升级」，在容器内完成拉取、重建和 STRM 守卫校验，失败自动回滚。
