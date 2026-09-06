@@ -518,6 +518,55 @@ class TelegramAssistantTests(unittest.TestCase):
                 bridge.run_assistant_diagnosis_sweep(store, telegram, "42", config, self_share_config)
                 self.assertEqual(calls["count"], 1)
 
+    def test_auto_repair_reprocess_once_for_needs_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = _needs_action_task(store)
+            telegram = _FakeTelegram()
+            config, self_share_config = _guards_config()
+            with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
+                assistant, "run_pi", return_value={"reply": "整理超时，建议 reprocess", "session_id": "x"}
+            ):
+                diagnosed = bridge.run_assistant_diagnosis_sweep(store, telegram, "42", config, self_share_config)
+            self.assertEqual(diagnosed, 1)
+            diagnosis = store.find_task(task.id).metadata[assistant.DIAGNOSIS_META_KEY]
+            self.assertEqual(diagnosis["auto_repair_action"], "reprocess")
+            self.assertTrue(diagnosis["auto_repair_applied"])
+            self.assertTrue(any("自动执行 reprocess" in m for m in telegram.sent))
+            # 同一事件不再二次 reprocess
+            telegram.sent.clear()
+            with patch.object(assistant, "run_pi", side_effect=AssertionError("should not diagnose again")):
+                bridge.run_assistant_diagnosis_sweep(store, telegram, "42", config, self_share_config)
+            self.assertFalse(any("自动执行" in m for m in telegram.sent))
+
+    def test_auto_repair_skips_share_risk_reprocess(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("违规分享", "", "https://115cdn.com/s/vio")
+            store.record_event(
+                task.id,
+                TaskStage.NEEDS_ACTION,
+                TaskStatus.NEEDS_ACTION,
+                "115 标记 have_vio_file，分享不可用",
+            )
+            telegram = _FakeTelegram()
+            with patch.object(assistant, "auto_repair_enabled", return_value=True):
+                applied = bridge.maybe_auto_repair_task(store, task.id, telegram, "42")
+            self.assertFalse(applied)
+            self.assertEqual(telegram.sent, [])
+
+    def test_choose_auto_repair_prefers_retry_over_reprocess(self):
+        task = SimpleNamespace(
+            status=TaskStatus.FAILED,
+            current_stage=TaskStage.ORGANIZING,
+            claimed_by="",
+            metadata={},
+            retry_count=0,
+            error_summary="超时",
+        )
+        with patch("app.task_actions.available_task_actions", return_value=frozenset({"retry", "reprocess"})):
+            self.assertEqual(assistant.choose_auto_repair_action(task, store=None), "retry")
+
 
 class PlainTextAssistantRoutingTests(unittest.TestCase):
     def setUp(self):

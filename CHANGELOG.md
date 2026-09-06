@@ -1,3 +1,12 @@
+## 0.5.19 - 2026-09-06
+
+- **needs_action 自动修复**：巡检诊断完成后，对安全动作直接入队，减少人工点按钮。
+  - 自动执行：`retry`、`resume_organizing`、`emby`、`restore`。
+  - `reprocess` 仅执行一次，且事件/诊断含 `have_vio_file`、分享不可用、违规等风险标记时跳过。
+  - `terminate` / 删除任务永不自动。
+  - 存量已诊断任务也会补修一轮；成功会推送「🛠️ AI 已自动执行 …」到 Telegram，结果写入 `assistant_diagnosis.auto_repair_*`。
+- 关闭开关：`PI_ASSISTANT_AUTO_REPAIR=0`（诊断仍可开）。单测覆盖一次性 reprocess、违规跳过、retry 优先。
+
 ## 0.5.18 - 2026-09-06
 
 - **修复 task_action 工具路由**：0.5.17 中扩展把动作执行错误地指向了只读脚本（`assistant_read.py: invalid choice: 'act'`），现拆分 READ_SCRIPT/OPS_SCRIPT 两个路由——查询走 assistant_read.py，动作走 assistant_ops.py。线上实测：needs_action 任务 #601 由助手执行 resume_organizing 成功重新入队。

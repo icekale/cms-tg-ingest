@@ -5,9 +5,8 @@ pi 负责模型接入、凭据与会话记忆；本模块只做三件事：
 2. 以非交互模式（``pi -p --mode json``）调用 pi 子进程并解析回复；
 3. 通过 ``--session-id`` 让同一对话跨请求延续（多轮记忆由 pi 会话文件承载）。
 
-助手不启用任何工具（``--no-tools``），只基于快照做诊断与建议——快照来自
-任务库，把模型输出重新交回给人决定是否执行。 ponytail: 若未来要让它直接
-执行修复动作，应通过扩展注册只读/白名单工具，而不是放开 bash。
+助手默认带只读查证工具，以及白名单任务动作（``task_action``，与 Web 按钮同源）。
+自动巡检诊断后会对安全动作直接入队；terminate/delete 永不自动。
 """
 from __future__ import annotations
 
@@ -210,8 +209,20 @@ def extract_memory_async(question: str, reply: str, session_dir: Path | None = N
 # event_id 记录诊断时最新事件——只有原因变化（新事件）才重新诊断。
 DIAGNOSIS_META_KEY = "assistant_diagnosis"
 AUTO_DIAGNOSIS_QUESTION = (
-    "该任务已进入 needs_action（需要人工处理）。请诊断根本原因，评估影响，"
-    "并给出具体的处理建议（结合 available_actions 说明在 Web 管理台或 Telegram 里怎么操作）。"
+    "该任务已进入 needs_action。请诊断根本原因，并在建议里明确写出最合适的 available_actions。"
+    "系统会在诊断后对安全动作自动执行（retry / resume_organizing / emby / restore；"
+    "reprocess 仅非违规且本事件未自动重跑过时执行一次）。terminate 不会自动执行。"
+)
+
+# 自动修复：永不自动 terminate/delete；reprocess 有额外风险门槛。
+AUTO_REPAIR_SAFE_ACTIONS = ("retry", "resume_organizing", "emby", "restore")
+AUTO_REPAIR_ONCE_ACTIONS = ("reprocess",)
+_SHARE_RISK_MARKERS = (
+    "have_vio_file",
+    "分享不可用",
+    "违规",
+    "vio_file",
+    "分享失效",
 )
 
 # 传给模型的任务字段白名单：serialize_task 的完整 dict 含 metadata/URL 等
@@ -296,6 +307,59 @@ def auto_diagnosis_enabled() -> bool:
         "no",
         "off",
     }
+
+
+def auto_repair_enabled() -> bool:
+    return str(os.environ.get("PI_ASSISTANT_AUTO_REPAIR") or "").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _task_looks_share_risk(task: Any, store: Any | None = None) -> bool:
+    texts: list[str] = [str(getattr(task, "error_summary", "") or "")]
+    metadata = getattr(task, "metadata", {}) or {}
+    if isinstance(metadata, dict):
+        texts.append(json.dumps(metadata, ensure_ascii=False, default=str)[:4000])
+        diagnosis = metadata.get(DIAGNOSIS_META_KEY)
+        if isinstance(diagnosis, dict):
+            texts.append(str(diagnosis.get("reply") or ""))
+    if store is not None:
+        try:
+            task_id = int(getattr(task, "id", 0) or 0)
+            if task_id:
+                for event in store.list_events(task_id)[-8:]:
+                    texts.append(str((event or {}).get("message") or ""))
+        except Exception:
+            pass
+    blob = " ".join(texts).lower()
+    return any(marker.lower() in blob for marker in _SHARE_RISK_MARKERS)
+
+
+def choose_auto_repair_action(task: Any, store: Any, *, max_retries: int = 3) -> str:
+    """选出本轮可自动执行的动作。空字符串表示仍需人工。
+
+    优先级：retry > resume_organizing > emby > restore > reprocess（一次性、非违规）。
+    terminate / delete 永不自动。
+    """
+    from .task_actions import available_task_actions
+
+    actions = available_task_actions(task, max_retries, store=store)
+    for action in AUTO_REPAIR_SAFE_ACTIONS:
+        if action in actions:
+            return action
+    metadata = getattr(task, "metadata", {}) or {}
+    diagnosis = metadata.get(DIAGNOSIS_META_KEY) if isinstance(metadata, dict) else None
+    already = isinstance(diagnosis, dict) and bool(diagnosis.get("auto_repair_action"))
+    if (
+        "reprocess" in actions
+        and not already
+        and not _task_looks_share_risk(task, store)
+    ):
+        return "reprocess"
+    return ""
 
 
 def build_task_brief(task: dict[str, Any] | None) -> dict[str, Any] | None:

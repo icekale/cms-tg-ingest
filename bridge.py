@@ -2654,9 +2654,8 @@ def run_assistant_diagnosis_sweep(
     if guards is None:
         guards = build_assistant_guards(config, self_share_config)
     diagnosed = 0
+    repaired = 0
     for task in task_store.list_open_tasks():
-        if diagnosed >= max_per_sweep:
-            break
         status_value = getattr(getattr(task, "status", ""), "value", getattr(task, "status", ""))
         if str(status_value) != str(TaskStatus.NEEDS_ACTION.value):
             continue
@@ -2667,64 +2666,130 @@ def run_assistant_diagnosis_sweep(
         metadata = getattr(task, "metadata", {}) or {}
         existing = metadata.get(DIAGNOSIS_META_KEY) if isinstance(metadata, dict) else None
         latest_event = assistant.diagnosis_event_id(task_store, task_id)
+        needs_diagnosis = True
         if isinstance(existing, dict) and existing.get("error"):
             if time.time() < float(existing.get("diagnosed_at") or 0) + _ASSISTANT_ERROR_RETRY_SECONDS:
-                continue
+                needs_diagnosis = False
         elif isinstance(existing, dict) and int(existing.get("event_id") or 0) == latest_event:
-            continue
-        with _ASSISTANT_DIAGNOSIS_LOCK:
-            _ASSISTANT_DIAGNOSIS_INFLIGHT.add(task_id)
-        diagnosed += 1
-        try:
-            snapshot = assistant.build_snapshot(
-                task_store,
-                engine_enabled=engine_enabled,
-                max_retries=max_retries,
-                task_id=task_id,
-                guards=guards,
-            )
-            result = assistant.run_pi(
-                assistant.build_user_message(f"任务 #{task_id} {AUTO_DIAGNOSIS_QUESTION}", snapshot),
-                session_id=assistant.new_session_id(),
-                session_dir=assistant.assistant_session_dir(task_store),
-                model=assistant.assistant_model(),
-                timeout=assistant.assistant_timeout(),
-            )
-            task_store.patch_metadata(
-                task_id,
-                {
-                    DIAGNOSIS_META_KEY: {
-                        "event_id": latest_event,
-                        "reply": result["reply"],
-                        "diagnosed_at": time.time(),
-                    }
-                },
-            )
-            LOG.info("Assistant auto-diagnosis stored for task %s", task_id)
-            for chunk in _chunk_assistant_text(f"🤖 AI 诊断 · 任务 #{task_id}\n{result['reply']}"):
-                telegram.send_message(allowed_chat_id, chunk)
-        except assistant.AssistantError as exc:
-            LOG.warning("Assistant auto-diagnosis failed for task %s: %s", task_id, exc)
+            needs_diagnosis = False
+        if needs_diagnosis and diagnosed < max_per_sweep:
+            with _ASSISTANT_DIAGNOSIS_LOCK:
+                _ASSISTANT_DIAGNOSIS_INFLIGHT.add(task_id)
+            diagnosed += 1
             try:
+                snapshot = assistant.build_snapshot(
+                    task_store,
+                    engine_enabled=engine_enabled,
+                    max_retries=max_retries,
+                    task_id=task_id,
+                    guards=guards,
+                )
+                result = assistant.run_pi(
+                    assistant.build_user_message(f"任务 #{task_id} {AUTO_DIAGNOSIS_QUESTION}", snapshot),
+                    session_id=assistant.new_session_id(),
+                    session_dir=assistant.assistant_session_dir(task_store),
+                    model=assistant.assistant_model(),
+                    timeout=assistant.assistant_timeout(),
+                )
                 task_store.patch_metadata(
                     task_id,
                     {
                         DIAGNOSIS_META_KEY: {
                             "event_id": latest_event,
-                            "reply": "",
-                            "error": str(exc)[:300],
+                            "reply": result["reply"],
                             "diagnosed_at": time.time(),
                         }
                     },
                 )
+                LOG.info("Assistant auto-diagnosis stored for task %s", task_id)
+                for chunk in _chunk_assistant_text(f"🤖 AI 诊断 · 任务 #{task_id}\n{result['reply']}"):
+                    telegram.send_message(allowed_chat_id, chunk)
+            except assistant.AssistantError as ex:
+                LOG.warning("Assistant auto-diagnosis failed for task %s: %s", task_id, ex)
+                try:
+                    task_store.patch_metadata(
+                        task_id,
+                        {
+                            DIAGNOSIS_META_KEY: {
+                                "event_id": latest_event,
+                                "reply": "",
+                                "error": str(ex)[:300],
+                                "diagnosed_at": time.time(),
+                            }
+                        },
+                    )
+                except Exception:
+                    LOG.debug("Assistant diagnosis error marker not stored", exc_info=True)
             except Exception:
-                LOG.debug("Assistant diagnosis error marker not stored", exc_info=True)
-        except Exception:
-            LOG.debug("Assistant auto-diagnosis crashed for task %s", task_id, exc_info=True)
-        finally:
-            with _ASSISTANT_DIAGNOSIS_LOCK:
-                _ASSISTANT_DIAGNOSIS_INFLIGHT.discard(task_id)
+                LOG.debug("Assistant auto-diagnosis crashed for task %s", task_id, exc_info=True)
+            finally:
+                with _ASSISTANT_DIAGNOSIS_LOCK:
+                    _ASSISTANT_DIAGNOSIS_INFLIGHT.discard(task_id)
+        if maybe_auto_repair_task(
+            task_store,
+            task_id,
+            telegram,
+            allowed_chat_id,
+            max_retries=max_retries,
+        ):
+            repaired += 1
+    if repaired:
+        LOG.info("Assistant auto-repair applied to %s tasks", repaired)
     return diagnosed
+
+
+def maybe_auto_repair_task(
+    task_store: Any,
+    task_id: int,
+    telegram: TelegramClient,
+    allowed_chat_id: str,
+    *,
+    max_retries: int = 3,
+) -> bool:
+    """诊断完成后，对安全动作自动入队。失败静默，返回是否成功执行。"""
+    if not assistant.auto_repair_enabled():
+        return False
+    task = task_store.find_task(task_id)
+    if task is None:
+        return False
+    status_value = getattr(getattr(task, "status", ""), "value", getattr(task, "status", ""))
+    if str(status_value) != str(TaskStatus.NEEDS_ACTION.value):
+        return False
+    action = assistant.choose_auto_repair_action(task, task_store, max_retries=max_retries)
+    if not action:
+        return False
+    result = apply_task_action(
+        task_store,
+        task_id,
+        action,
+        max_retries=max_retries,
+        actor="AI助手自动修复",
+    )
+    diagnosis = dict(((task.metadata or {}).get(DIAGNOSIS_META_KEY) or {}) if isinstance(task.metadata, dict) else {})
+    diagnosis.update(
+        {
+            "auto_repair_action": action,
+            "auto_repair_applied": bool(result.applied),
+            "auto_repair_reason": str(result.reason or "")[:300],
+            "auto_repair_at": time.time(),
+        }
+    )
+    try:
+        task_store.patch_metadata(task_id, {DIAGNOSIS_META_KEY: diagnosis})
+    except Exception:
+        LOG.debug("Assistant auto-repair metadata not stored", exc_info=True)
+    if result.applied:
+        LOG.info("Assistant auto-repair %s on task %s: %s", action, task_id, result.reason)
+        try:
+            telegram.send_message(
+                allowed_chat_id,
+                f"🛠️ AI 已自动执行 {action} · 任务 #{task_id}\n{result.reason}",
+            )
+        except Exception:
+            LOG.debug("Assistant auto-repair telegram notify failed", exc_info=True)
+        return True
+    LOG.info("Assistant auto-repair skipped task %s action=%s: %s", task_id, action, result.reason)
+    return False
 
 
 def start_assistant_watch_loop(
@@ -2741,7 +2806,7 @@ def start_assistant_watch_loop(
 ) -> threading.Thread | None:
     """兜底巡检循环：定期扫描 needs_action 任务并自动跑 AI 诊断。
 
-    PI_ASSISTANT_AUTO_DIAGNOSIS=0 可整体关闭。
+    PI_ASSISTANT_AUTO_DIAGNOSIS=0 关闭诊断；PI_ASSISTANT_AUTO_REPAIR=0 关闭自动修复。
     """
     if task_store is None or interval_seconds <= 0 or not assistant.auto_diagnosis_enabled():
         return None
