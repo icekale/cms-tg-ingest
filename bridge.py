@@ -2667,10 +2667,16 @@ def run_assistant_diagnosis_sweep(
         existing = metadata.get(DIAGNOSIS_META_KEY) if isinstance(metadata, dict) else None
         latest_event = assistant.diagnosis_event_id(task_store, task_id)
         needs_diagnosis = True
-        if isinstance(existing, dict) and existing.get("error"):
-            if time.time() < float(existing.get("diagnosed_at") or 0) + _ASSISTANT_ERROR_RETRY_SECONDS:
+        last_diagnosed = float((existing or {}).get("diagnosed_at") or 0) if isinstance(existing, dict) else 0.0
+        cooldown = assistant.diagnosis_cooldown_seconds()
+        if assistant._task_looks_share_risk(task, task_store) and isinstance(existing, dict) and existing.get("reply"):
+            needs_diagnosis = False
+        elif isinstance(existing, dict) and existing.get("error"):
+            if time.time() < last_diagnosed + _ASSISTANT_ERROR_RETRY_SECONDS:
                 needs_diagnosis = False
         elif isinstance(existing, dict) and int(existing.get("event_id") or 0) == latest_event:
+            needs_diagnosis = False
+        elif cooldown > 0 and last_diagnosed and time.time() < last_diagnosed + cooldown:
             needs_diagnosis = False
         if needs_diagnosis and diagnosed < max_per_sweep:
             with _ASSISTANT_DIAGNOSIS_LOCK:
@@ -2799,14 +2805,15 @@ def start_assistant_watch_loop(
     *,
     engine_enabled: bool = True,
     max_retries: int = 3,
-    interval_seconds: int = 120,
+    interval_seconds: int | float | None = None,
     stop_event: threading.Event | None = None,
 ) -> threading.Thread | None:
     """兜底巡检循环：定期扫描 needs_action 任务并自动跑 AI 诊断。
 
     PI_ASSISTANT_AUTO_DIAGNOSIS=0 关闭诊断；PI_ASSISTANT_AUTO_REPAIR=0 关闭自动修复。
     """
-    if task_store is None or interval_seconds <= 0 or not assistant.auto_diagnosis_enabled():
+    interval = float(interval_seconds) if interval_seconds is not None else assistant.watch_interval_seconds()
+    if task_store is None or interval <= 0 or not assistant.auto_diagnosis_enabled():
         return None
     loop_stop_event = stop_event or threading.Event()
 
@@ -2824,7 +2831,7 @@ def start_assistant_watch_loop(
                 )
             except Exception:
                 LOG.debug("Assistant watch sweep failed", exc_info=True)
-            if loop_stop_event.wait(interval_seconds):
+            if loop_stop_event.wait(interval):
                 break
 
     thread = threading.Thread(target=loop, name="assistant-watch", daemon=True)

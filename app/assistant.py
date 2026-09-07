@@ -322,6 +322,28 @@ def auto_repair_enabled() -> bool:
     }
 
 
+def _env_seconds(name: str, default: float) -> float:
+    try:
+        return max(0.0, float(os.environ.get(name) or default))
+    except (TypeError, ValueError):
+        return default
+
+
+def watch_interval_seconds(default: float = 900.0) -> float:
+    """巡检间隔，默认 15 分钟。PI_ASSISTANT_WATCH_INTERVAL 可覆盖。"""
+    return max(60.0, _env_seconds("PI_ASSISTANT_WATCH_INTERVAL", default))
+
+
+def auto_repair_cooldown_seconds() -> float:
+    """同一任务两次自动修复的最小间隔，默认 6 小时。"""
+    return _env_seconds("PI_ASSISTANT_AUTO_REPAIR_COOLDOWN", 6 * 3600)
+
+
+def diagnosis_cooldown_seconds() -> float:
+    """同一任务两次自动诊断的最小间隔，默认 6 小时（即使事件变了）。"""
+    return _env_seconds("PI_ASSISTANT_DIAGNOSIS_COOLDOWN", 6 * 3600)
+
+
 def _task_looks_share_risk(task: Any, store: Any | None = None) -> bool:
     texts: list[str] = [str(getattr(task, "error_summary", "") or "")]
     metadata = getattr(task, "metadata", {}) or {}
@@ -352,12 +374,17 @@ def choose_auto_repair_action(task: Any, store: Any, *, max_retries: int = 3) ->
 
     if _task_looks_share_risk(task, store):
         return ""
+    metadata = getattr(task, "metadata", {}) or {}
+    diagnosis = metadata.get(DIAGNOSIS_META_KEY) if isinstance(metadata, dict) else None
+    if isinstance(diagnosis, dict) and diagnosis.get("auto_repair_applied"):
+        cooldown = auto_repair_cooldown_seconds()
+        last = float(diagnosis.get("auto_repair_at") or 0)
+        if cooldown > 0 and last and time.time() < last + cooldown:
+            return ""
     actions = available_task_actions(task, max_retries, store=store)
     for action in AUTO_REPAIR_SAFE_ACTIONS:
         if action in actions:
             return action
-    metadata = getattr(task, "metadata", {}) or {}
-    diagnosis = metadata.get(DIAGNOSIS_META_KEY) if isinstance(metadata, dict) else None
     already = isinstance(diagnosis, dict) and bool(diagnosis.get("auto_repair_action"))
     if "reprocess" in actions and not already:
         return "reprocess"
