@@ -61,7 +61,7 @@ def cmd_act(args) -> None:
             ensure_ascii=False,
         )
     )
-    raise SystemExit(0 if result.applied else 2)
+    raise SystemExit(0)
 
 
 def main() -> None:

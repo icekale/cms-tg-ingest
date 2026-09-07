@@ -1,3 +1,13 @@
+## 0.5.22 - 2026-09-07
+
+- **助手工具失败走 isError**：`cms-tools.ts` 不再把 python 失败吞成普通文本，pi 能看见工具失败。
+- **terminate 由 tool_call 拦截**：本轮用户消息（不含系统快照）没有确认字样时直接 block，不再只靠模型自觉。
+- **task_id 收成整数**：`Type.Integer` + `prepareArguments`，模型传 `"445"` 不再 schema 失败。
+- **动作拒绝不再当崩溃**：`assistant_ops.py` 资格不符 `applied:false` 仍 exit 0；库不存在才 exit 1。
+- **工具能打到真库**：`sanitized_env` 放行 `DATABASE_PATH` 与 `CMS_TOOLS_*`。
+- **快照变瘦**：开放任务只留 `last_event`，不再每轮塞 15×3 事件；过期工具结果和旧快照在 `context` 里丢掉。
+- **输出截断走 pi 内置**：`truncateHead` / `truncateTail` + `AbortSignal`。
+
 ## 0.5.21 - 2026-09-07
 
 - **巡检降敏**：默认间隔 2 分钟 → 15 分钟（`PI_ASSISTANT_WATCH_INTERVAL`，秒）。

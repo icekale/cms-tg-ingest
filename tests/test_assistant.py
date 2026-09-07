@@ -114,6 +114,20 @@ class RunPiTests(unittest.TestCase):
             self.assertNotIn(key, env, f"{key} 不应传入助手子进程")
         self.assertIn("PATH", env)
 
+    def test_sanitized_env_keeps_tool_runtime_vars(self):
+        extra = {
+            "DATABASE_PATH": "/data/cms-tg-ingest.db",
+            "CMS_TOOLS_SCRIPT": "/app/scripts/assistant_read.py",
+            "CMS_TOOLS_OPS_SCRIPT": "/app/scripts/assistant_ops.py",
+            "CMS_PASSWORD": "secret-cms",
+        }
+        with patch.dict(os.environ, extra, clear=False):
+            env = assistant.sanitized_env()
+        self.assertEqual(env["DATABASE_PATH"], extra["DATABASE_PATH"])
+        self.assertEqual(env["CMS_TOOLS_SCRIPT"], extra["CMS_TOOLS_SCRIPT"])
+        self.assertEqual(env["CMS_TOOLS_OPS_SCRIPT"], extra["CMS_TOOLS_OPS_SCRIPT"])
+        self.assertNotIn("CMS_PASSWORD", env)
+
     def test_timeout_wrapped_as_assistant_timeout(self):
         def fake_run(argv, **kwargs):
             raise subprocess.TimeoutExpired(cmd=argv, timeout=1)
@@ -200,6 +214,45 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(payload["version"], "0.0.0-test")
         self.assertEqual(payload["open_tasks"][0]["display_title"], "哑舍 S01")
         self.assertEqual(payload["focus_task"]["id"], 1)
+
+    def test_snapshot_open_tasks_omit_event_stream(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("哑舍 S01", "", "https://115cdn.com/s/snapshot")
+            store.record_event(task.id, TaskStage.ORGANIZING, TaskStatus.RUNNING, "整理中")
+            store.record_event(task.id, TaskStage.NEEDS_ACTION, TaskStatus.NEEDS_ACTION, "整理超时")
+            snap = assistant.build_snapshot(store, task_id=task.id)
+        open_task = next(item for item in snap["open_tasks"] if item["id"] == task.id)
+        self.assertNotIn("recent_events", open_task)
+        self.assertEqual(open_task["last_event"], "整理超时")
+        self.assertIn("recent_events", snap["focus_task"])
+        problem = snap["health"].get("latest_problem")
+        if isinstance(problem, dict):
+            self.assertNotIn("metadata", problem)
+            self.assertNotIn("safe_url", problem)
+
+
+class CmsToolsExtensionTests(unittest.TestCase):
+    def setUp(self):
+        self.src = (Path(__file__).resolve().parent.parent / "pi-extensions" / "cms-tools.ts").read_text()
+
+    def test_failures_throw_instead_of_text_result(self):
+        self.assertNotIn("task_detail failed:", self.src)
+        self.assertNotIn("catch (err)", self.src)
+        self.assertIn("reject(", self.src)
+
+    def test_terminate_is_gated_on_tool_call(self):
+        self.assertIn('pi.on("tool_call"', self.src)
+        self.assertIn("block: true", self.src)
+        self.assertIn("terminate", self.src)
+
+    def test_uses_pi_truncation_signal_and_enums(self):
+        self.assertIn("truncateHead", self.src)
+        self.assertIn("StringEnum", self.src)
+        self.assertIn("Type.Integer", self.src)
+        self.assertIn("signal", self.src)
+        self.assertIn("promptGuidelines", self.src)
+        self.assertIn('pi.on("context"', self.src)
 
 
 class AssistantChatEndpointTests(unittest.TestCase):
@@ -972,7 +1025,7 @@ class AssistantOpsScriptTests(unittest.TestCase):
     def test_unsupported_action_for_state_reports_reason(self):
         # running 之外的任务不能 resume_organizing：应给出原因而不是崩溃
         out = self._run("act", str(self.task_id), "resume_organizing")
-        self.assertEqual(out.returncode, 2)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         payload = json.loads(out.stdout)
         self.assertFalse(payload["applied"])
         self.assertTrue(payload["reason"])

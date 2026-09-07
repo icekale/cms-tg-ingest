@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .web_api import api_task_detail, api_tasks, serialize_event, serialize_health
+from .web_api import api_task_detail, api_tasks, serialize_health
 
 DEFAULT_TIMEOUT_SECONDS = 120.0
 MAX_QUESTION_CHARS = 8000
@@ -56,6 +56,7 @@ ASSISTANT_TOOL_NAMES = "read,grep,find,ls,task_detail,query_tasks,task_events,sy
 TOOL_ENV_PATTERN = re.compile(
     r"^(TG_|CMS_|EMBY_|P115_|OPENAI_|WEB_|HDHIVE_|SELF_SHARE|BACKUP_|DATABASE_PATH|STRM_|HF_|GH_|GITHUB)"
 )
+TOOL_ENV_KEEP = frozenset({"DATABASE_PATH", "CMS_TOOLS_SCRIPT", "CMS_TOOLS_OPS_SCRIPT"})
 
 
 def tools_enabled() -> bool:
@@ -86,7 +87,7 @@ def sanitized_env() -> dict[str, str]:
     pi 自身用不到它们；即使模型被诱导读环境也拿不到敏感值。"""
     keep = {}
     for key, value in os.environ.items():
-        if TOOL_ENV_PATTERN.match(key):
+        if TOOL_ENV_PATTERN.match(key) and key not in TOOL_ENV_KEEP:
             continue
         keep[key] = value
     return keep
@@ -247,6 +248,7 @@ _TASK_FIELDS = (
     "why_slow",
     "stage_elapsed",
     "updated_at",
+    "last_event",
 )
 
 ASSISTANT_SYSTEM_PROMPT = (
@@ -260,13 +262,13 @@ ASSISTANT_SYSTEM_PROMPT = (
     "可以实时查任务库与文件——主动用它们核实后再下结论，查不到就如实说。\n"
     "3. 诊断问题时给出：结论 → 依据 → 具体处理建议（可结合任务的 available_actions，说明在 Web 管理台或 "
     "Telegram 里如何操作）。\n"
-    "4. 你可以执行任务操作工具（task_action：retry/reprocess/resume_organizing/emby/restore/terminate），"
-    "它与 Web 管理台按钮同源、自带资格校验；但必须先向用户说明并获得明确同意（最新消息出现「确认/好的/执行」）才能调用，"
-    "terminate 这类中止任务的动作尤其要确认；执行后如实报告结果。除该工具外不能改库、改配置、改文件内容。\n"
+    "4. 你可以调用 task_action（retry/reprocess/resume_organizing/emby/restore/terminate），"
+    "与 Web 按钮同源、自带资格校验。terminate 必须用户本轮确认，由工具拦截；其他动作也要先说明再执行。"
+    "执行后如实报告 applied 与 reason。除该工具外不能改库、改配置、改文件内容。\n"
     "5. 绝不读取或输出密钥、密码、token、cookie（包括环境变量和 .env）。\n"
     "6. 你既能处理运维诊断，也可以正常陪聊、回答通用问题；不确定是不是系统问题时，按普通问题自然回答。\n"
     "7. 用简体中文回答，简洁分点，先结论后依据；信息不足时直接说明还缺什么。\n"
-    "8. 你在一次对话中会收到多份快照，以最新一份为准。\n"
+    "8. 旧快照和过期工具结果可能被省略，以最新快照和最新工具结果为准。\n"
     "9. 你与用户是长期共事的同事：直接、简洁、口语一点，可以引用记忆里的偏好和历史；"
     "用户纠正你的地方要接受并调整，不要重复犯错。"
 )
@@ -412,10 +414,14 @@ def build_context_payload(
     open_tasks: list[dict[str, Any]],
     task_detail: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    compact_health = dict(health or {})
+    for key in ("latest_problem", "latest_lock_wait"):
+        if isinstance(compact_health.get(key), dict):
+            compact_health[key] = build_task_brief(compact_health[key])
     payload: dict[str, Any] = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "version": version,
-        "health": health or {},
+        "health": compact_health,
         "open_tasks": [build_task_brief(task) for task in open_tasks[:15]],
     }
     if task_detail is not None:
@@ -431,7 +437,7 @@ def build_snapshot(
     task_id: int = 0,
     guards: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """采集诊断快照：健康状态 + 开放任务（含最近事件）+ 可选聚焦任务。
+    """采集诊断快照：健康状态 + 开放任务摘要 + 可选聚焦任务（含最近事件）。
 
     Web 助手与 Telegram /助手 共用，保证两边看到同样的上下文。guards 是
     可选的 CMS 守卫状态 dict（cms_strm_guard / cms_direct_strm_guard /
@@ -452,10 +458,11 @@ def build_snapshot(
         lifecycle_actions_enabled=engine_enabled,
         max_retries=max_retries,
     )["items"]
-    # 列表序列化不带事件，而失败原因往往只在事件流里（task.error_summary
-    # 可能为空）：给每个开放任务附最近 3 条事件，助手才有诊断依据。
+    # 列表不附事件流（默认有 task_detail/task_events），只留最后一条说明。
     for item in open_items:
-        item["events"] = [serialize_event(event) for event in store.list_events(int(item["id"]))[-3:]]
+        events = store.list_events(int(item["id"]))
+        if events:
+            item["last_event"] = str((events[-1] or {}).get("message") or "")[:240]
     detail = None
     if int(task_id) > 0:
         detail = api_task_detail(
