@@ -886,10 +886,14 @@ class HdhiveSubscriptionService:
             elif is_orphan_enqueued(item):
                 self.store.reset_orphan_enqueued(item.id)
         group_parsed_sets: dict[str, set[EpisodeKey]] = {}
+        group_covering_sets: dict[str, set[EpisodeKey]] = {}
         for group_key, group_candidates in grouped.items():
             parsed_keys = parsed_by_resource.get(id(group_candidates[0]), ())
-            if parsed_keys and not _group_is_llm_pending(group_candidates):
-                group_parsed_sets[group_key] = set(parsed_keys)
+            if not parsed_keys:
+                continue
+            group_parsed_sets[group_key] = set(parsed_keys)
+            if not _group_is_llm_pending(group_candidates):
+                group_covering_sets[group_key] = set(parsed_keys)
 
         def _covered_by_broader_group(group_key: str) -> bool:
             own_keys = group_parsed_sets.get(group_key)
@@ -900,7 +904,7 @@ class HdhiveSubscriptionService:
                 and other_keys
                 and own_keys <= other_keys
                 and own_keys != other_keys
-                for other_key, other_keys in group_parsed_sets.items()
+                for other_key, other_keys in group_covering_sets.items()
             )
 
 
