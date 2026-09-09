@@ -250,6 +250,7 @@ class HttpJson:
         payload: dict | None = None,
         headers: dict | None = None,
         safe_get_attempts: int | None = None,
+        timeout: int | None = None,
     ) -> dict:
         data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req_headers = {"Accept": "application/json"}
@@ -260,7 +261,7 @@ class HttpJson:
         req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
         try:
             attempts = self.safe_get_attempts if safe_get_attempts is None else max(1, int(safe_get_attempts))
-            raw = _read_response(req, self.timeout, attempts)
+            raw = _read_response(req, int(timeout) if timeout is not None else self.timeout, attempts)
         except urllib.error.HTTPError as exc:
             try:
                 body = _redact_text(exc.read().decode("utf-8", "replace"))[:300]

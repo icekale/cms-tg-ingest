@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -927,6 +928,10 @@ class OpenAIClassifier:
     # 缓存（ok=False），否则每次重试都会重新调用。TTL 过后重新请求。
     _IDENTITY_CACHE_TTL_SECONDS = 6 * 3600
     _IDENTITY_CACHE_MAX_ENTRIES = 256
+    _EPISODE_CACHE_OK_TTL_SECONDS = 6 * 3600
+    _EPISODE_CACHE_FAIL_TTL_SECONDS = 30 * 60
+    _EPISODE_CACHE_MAX_ENTRIES = 256
+    _EPISODE_HTTP_TIMEOUT_SECONDS = 20
 
     def __init__(self, config: Config, http: HttpJson | None = None):
         self.config = config
@@ -940,6 +945,8 @@ class OpenAIClassifier:
         self.suggest_confidence = config.openai_suggest_confidence
         self._identity_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._identity_cache_lock = threading.Lock()
+        self._episode_cache: dict[str, tuple[float, float, dict[str, Any]]] = {}
+        self._episode_cache_lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
@@ -1108,6 +1115,153 @@ class OpenAIClassifier:
             self._identity_cache[key] = (now, dict(result))
         return dict(result)
 
+    def parse_hdhive_episode(
+        self,
+        tmdb_id: str = "",
+        resource_slug: str = "",
+        title: str = "",
+        remark: str = "",
+        episode_key: str = "",
+        episode_code: str = "",
+        show_title: str = "",
+        tmdb_seasons: list | None = None,
+    ) -> dict[str, Any]:
+        if not self.enabled:
+            return self._episode_error_result("disabled")
+        cache_key = self._episode_cache_key(
+            tmdb_id, resource_slug, title, remark, episode_key, episode_code
+        )
+        now = time.time()
+        with self._episode_cache_lock:
+            cached = self._episode_cache.get(cache_key)
+            if cached and now - cached[0] < cached[1]:
+                return dict(cached[2])
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "season": {"type": "integer"},
+                "episode_start": {"type": "integer"},
+                "episode_end": {"type": "integer"},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "reason": {"type": "string"},
+                "evidence": {"type": "string"},
+            },
+            "required": ["season", "episode_start", "episode_end", "confidence", "reason", "evidence"],
+        }
+        user_payload = {
+            "show_title": show_title,
+            "tmdb_id": tmdb_id,
+            "tmdb_seasons": tmdb_seasons if isinstance(tmdb_seasons, list) else [],
+            "title": title,
+            "remark": remark,
+            "episode_key": episode_key,
+            "episode_code": episode_code,
+        }
+        payload = {
+            "model": self.model,
+            "input": [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是剧集季集抽取器。集数必须来自资源标题/备注原文；"
+                        "备注「更新至07集」则 episode_end=7，不得改成 TMDB 总集数或当前正播集。"
+                        "文本缺季号时可用剧名和 TMDB 季列表推断 season。"
+                        "给不出合法季和集时仍填字段，由调用方校验。"
+                        "evidence 必须是原文片段。"
+                    ),
+                },
+                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+            ],
+            "max_output_tokens": 300,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "hdhive_episode",
+                    "strict": True,
+                    "schema": schema,
+                }
+            },
+        }
+        try:
+            resp = self.http.request(
+                f"{self.base_url}/responses",
+                method="POST",
+                payload=payload,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+                },
+                timeout=self._EPISODE_HTTP_TIMEOUT_SECONDS,
+            )
+            result = self._episode_success_result(self._extract_json(resp))
+            ttl = self._EPISODE_CACHE_OK_TTL_SECONDS
+        except Exception as exc:
+            LOG.debug(
+                "OpenAI parse_hdhive_episode failed tmdb_id=%s slug=%s",
+                tmdb_id,
+                resource_slug,
+                exc_info=True,
+            )
+            result = self._episode_error_result(type(exc).__name__)
+            ttl = self._EPISODE_CACHE_FAIL_TTL_SECONDS
+        with self._episode_cache_lock:
+            if cache_key not in self._episode_cache and len(self._episode_cache) >= self._EPISODE_CACHE_MAX_ENTRIES:
+                oldest = min(self._episode_cache, key=lambda item: self._episode_cache[item][0])
+                self._episode_cache.pop(oldest, None)
+            self._episode_cache[cache_key] = (now, ttl, dict(result))
+        return dict(result)
+
+    @staticmethod
+    def _episode_cache_key(
+        tmdb_id: str,
+        resource_slug: str,
+        title: str,
+        remark: str,
+        episode_key: str,
+        episode_code: str,
+    ) -> str:
+        raw = "|".join(
+            (
+                str(tmdb_id or ""),
+                str(resource_slug or ""),
+                str(title or ""),
+                str(remark or ""),
+                str(episode_key or ""),
+                str(episode_code or ""),
+            )
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _episode_error_result(reason: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "season": 0,
+            "episode_start": 0,
+            "episode_end": 0,
+            "confidence": 0.0,
+            "reason": str(reason or ""),
+            "evidence": "",
+        }
+
+    @staticmethod
+    def _episode_success_result(parsed: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(parsed, dict):
+            raise TypeError("schema")
+        required = ("season", "episode_start", "episode_end", "confidence", "reason", "evidence")
+        if any(field not in parsed for field in required):
+            raise KeyError("schema")
+        return {
+            "ok": True,
+            "season": int(parsed["season"]),
+            "episode_start": int(parsed["episode_start"]),
+            "episode_end": int(parsed["episode_end"]),
+            "confidence": max(0.0, min(1.0, float(parsed["confidence"]))),
+            "reason": str(parsed.get("reason") or ""),
+            "evidence": str(parsed.get("evidence") or ""),
+        }
 
     @staticmethod
     def _extract_json(resp: dict[str, Any]) -> dict[str, Any]:

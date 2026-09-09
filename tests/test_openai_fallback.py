@@ -863,3 +863,96 @@ class OpenAIIdentityResolutionTests(unittest.TestCase):
 
         self.assertFalse(should_prompt)
         self.assertEqual(resolved['tmdb_id'], '287888')
+
+
+class HdhiveEpisodeParseTests(unittest.TestCase):
+    def _classifier(self, http):
+        class FakeConfig:
+            http_timeout = 60
+            openai_high_confidence = 0.75
+            openai_suggest_confidence = 0.45
+            openai_classify_enabled = True
+            openai_api_key = "test-key"
+            openai_base_url = "https://open.sub2api.top/v1"
+            openai_model = "gpt-test"
+
+        return bridge.OpenAIClassifier(FakeConfig(), http=http)
+
+    def test_parse_hdhive_episode_sends_schema_without_secrets(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, method="GET", payload=None, headers=None, timeout=None):
+                self.calls.append({"url": url, "payload": payload, "headers": headers, "timeout": timeout})
+                return {
+                    "output_text": (
+                        '{"season":2,"episode_start":1,"episode_end":7,'
+                        '"confidence":0.9,"reason":"title","evidence":"更新至07集"}'
+                    )
+                }
+
+        http = FakeHttp()
+        result = self._classifier(http).parse_hdhive_episode(
+            tmdb_id="100088",
+            resource_slug="pack",
+            title="最后生还者 第二季",
+            remark="更新至07集",
+            show_title="最后生还者",
+            tmdb_seasons=[{"season_number": 1, "name": "Season 1"}, {"season_number": 2, "name": "Season 2"}],
+        )
+        self.assertEqual(result["season"], 2)
+        self.assertEqual(result["episode_end"], 7)
+        self.assertEqual(http.calls[0]["timeout"], 20)
+        dumped = str(http.calls[0]["payload"])
+        self.assertNotIn("test-key", dumped)
+        self.assertNotIn("115cdn.com", dumped)
+        self.assertIn("更新至07集", dumped)
+        self.assertIn("json_schema", dumped)
+
+    def test_parse_hdhive_episode_caches_success_and_failure(self):
+        class FakeHttp:
+            def __init__(self):
+                self.calls = 0
+
+            def request(self, url, method="GET", payload=None, headers=None, timeout=None):
+                self.calls += 1
+                if self.calls == 1:
+                    raise TimeoutError("slow")
+                return {
+                    "output_text": (
+                        '{"season":1,"episode_start":1,"episode_end":1,'
+                        '"confidence":0.9,"reason":"ok","evidence":"第1集"}'
+                    )
+                }
+
+        http = FakeHttp()
+        classifier = self._classifier(http)
+        first = classifier.parse_hdhive_episode(
+            tmdb_id="1", resource_slug="a", title="剧", remark="第1集", show_title="剧"
+        )
+        second = classifier.parse_hdhive_episode(
+            tmdb_id="1", resource_slug="a", title="剧", remark="第1集", show_title="剧"
+        )
+        self.assertFalse(first.get("ok"))
+        self.assertEqual(first, second)
+        self.assertEqual(http.calls, 1)
+
+    def test_disabled_classifier_does_not_call_http(self):
+        class FakeHttp:
+            def request(self, *args, **kwargs):
+                raise AssertionError("http should not run")
+
+        class FakeConfig:
+            http_timeout = 60
+            openai_high_confidence = 0.75
+            openai_suggest_confidence = 0.45
+            openai_classify_enabled = False
+            openai_api_key = ""
+            openai_base_url = "https://open.sub2api.top/v1"
+            openai_model = "gpt-test"
+
+        result = bridge.OpenAIClassifier(FakeConfig(), http=FakeHttp()).parse_hdhive_episode(
+            tmdb_id="1", resource_slug="a", title="剧", remark="第1集", show_title="剧"
+        )
+        self.assertFalse(result.get("ok"))
