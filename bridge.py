@@ -494,6 +494,7 @@ def create_hdhive_subscription_service(
     on_subscription_completed: Any | None = None,
     tmdb_resolver: Any | None = None,
     emby: EmbyClient | None = None,
+    openai_classifier: Any | None = None,
 ) -> HdhiveSubscriptionService | None:
     if not bool(getattr(config, "hdhive_enabled", False)) or hdhive_workflow is None:
         return None
@@ -506,6 +507,7 @@ def create_hdhive_subscription_service(
         on_subscription_completed=on_subscription_completed,
         tmdb_resolver=tmdb_resolver,
         emby=emby,
+        episode_parser=openai_classifier,
         default_chat_id=str(getattr(config, "tg_allowed_chat_id", "") or ""),
     )
 
@@ -4647,6 +4649,7 @@ def run_forever(
         on_subscription_completed=notify_hdhive_subscription_completed,
         tmdb_resolver=tmdb_resolver,
         emby=emby,
+        openai_classifier=openai_classifier,
     )
     if start_observers and hdhive_subscription_service is not None and Path(
         getattr(config, "hdhive_token_config_path", "")

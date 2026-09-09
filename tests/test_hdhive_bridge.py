@@ -532,6 +532,22 @@ class HdhiveBridgeTests(unittest.TestCase):
             self.assertIs(service.tmdb_resolver, tmdb)
             self.assertIs(service.emby, emby)
 
+    def test_subscription_service_factory_passes_openai_classifier(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = SimpleNamespace(
+                hdhive_enabled=True,
+                database_path=str(Path(directory) / "tasks.db"),
+                hdhive_auto_unlock_max_points=20,
+            )
+            classifier = object()
+            service = bridge.create_hdhive_subscription_service(
+                config,
+                SimpleNamespace(proxy=object()),
+                lambda _urls, _chat: None,
+                openai_classifier=classifier,
+            )
+            self.assertIs(service.episode_parser, classifier)
+
     def test_subscription_service_factory_passes_completion_callback(self):
         with tempfile.TemporaryDirectory() as directory:
             completed = lambda *_args: None
