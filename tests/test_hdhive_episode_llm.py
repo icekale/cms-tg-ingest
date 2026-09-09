@@ -97,6 +97,33 @@ class KeysFromLlmPayloadTests(unittest.TestCase):
         }
         self.assertFalse(keys_from_llm_payload(payload, source).ok)
 
+    def test_updated_through_allows_start_one_when_end_is_in_evidence(self):
+        parsed = keys_from_llm_payload(
+            {
+                "season": 2,
+                "episode_start": 1,
+                "episode_end": 7,
+                "confidence": 0.9,
+                "evidence": "更新至07集",
+            },
+            "更新至07集",
+        )
+        self.assertTrue(parsed.ok)
+        self.assertEqual(parsed.keys[-1].episode, 7)
+
+    def test_updated_through_rejects_end_missing_from_evidence_and_source(self):
+        parsed = keys_from_llm_payload(
+            {
+                "season": 2,
+                "episode_start": 1,
+                "episode_end": 10,
+                "confidence": 0.9,
+                "evidence": "更新至07集",
+            },
+            "更新至07集",
+        )
+        self.assertFalse(parsed.ok)
+
 
 class DecideLlmEpisodeTests(unittest.TestCase):
     def test_high_confidence_in_tmdb_is_auto(self):

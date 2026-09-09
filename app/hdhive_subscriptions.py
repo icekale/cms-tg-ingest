@@ -776,6 +776,7 @@ class HdhiveSubscriptionService:
         suggest_confidence = float(getattr(parser, "suggest_confidence", 0.45) or 0.45)
         llm_calls = 0
         llm_decision_by_resource: dict[int, str] = {}
+        existing_by_slug = {item.resource_slug: item for item in self.store.list_items(subscription.id)}
 
         episode_filter = parse_episode_filter(subscription.episode_filter)
         grouped: dict[str, list[HdhiveResource]] = {}
@@ -793,7 +794,6 @@ class HdhiveSubscriptionService:
             ):
                 clue_text = resource_clue_text(resource)
                 if has_episode_clue(clue_text):
-                    llm_calls += 1
                     try:
                         raw = parser.parse_hdhive_episode(
                             tmdb_id=str(subscription.tmdb_id or ""),
@@ -817,6 +817,10 @@ class HdhiveSubscriptionService:
                             exc_info=True,
                         )
                         raw = {}
+                    if not isinstance(raw, dict):
+                        raw = {}
+                    if not raw.get("cached"):
+                        llm_calls += 1
                     parsed = keys_from_llm_payload(raw, clue_text)
                     decision = decide_llm_episode(parsed, season_numbers, high_confidence, suggest_confidence)
                     llm_decision_by_resource[id(resource)] = decision
@@ -830,6 +834,12 @@ class HdhiveSubscriptionService:
                             _format_episode_keys(parsed_keys),
                             parsed.confidence,
                         )
+            if not parsed_keys and confirmed_item_id is not None:
+                existing = existing_by_slug.get(str(resource.slug or ""))
+                if existing is not None and existing.id == int(confirmed_item_id):
+                    stored = self._stored_episode_keys(existing)
+                    if stored:
+                        parsed_keys = stored
             key = _format_episode_keys(parsed_keys) if parsed_keys else episode_key(resource, default_season=default_season)
             grouped.setdefault(key, []).append(resource)
             parsed_by_resource[id(resource)] = parsed_keys

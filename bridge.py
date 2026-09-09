@@ -1129,7 +1129,9 @@ class OpenAIClassifier:
         tmdb_seasons: list | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
-            return self._episode_error_result("disabled")
+            result = self._episode_error_result("disabled")
+            result["cached"] = False
+            return result
         cache_key = self._episode_cache_key(
             tmdb_id, resource_slug, title, remark, episode_key, episode_code
         )
@@ -1137,7 +1139,9 @@ class OpenAIClassifier:
         with self._episode_cache_lock:
             cached = self._episode_cache.get(cache_key)
             if cached and now - cached[0] < cached[1]:
-                return dict(cached[2])
+                result = dict(cached[2])
+                result["cached"] = True
+                return result
         schema = {
             "type": "object",
             "additionalProperties": False,
@@ -1212,8 +1216,12 @@ class OpenAIClassifier:
             if cache_key not in self._episode_cache and len(self._episode_cache) >= self._EPISODE_CACHE_MAX_ENTRIES:
                 oldest = min(self._episode_cache, key=lambda item: self._episode_cache[item][0])
                 self._episode_cache.pop(oldest, None)
-            self._episode_cache[cache_key] = (now, ttl, dict(result))
-        return dict(result)
+            stored = dict(result)
+            stored.pop("cached", None)
+            self._episode_cache[cache_key] = (now, ttl, stored)
+        fresh = dict(result)
+        fresh["cached"] = False
+        return fresh
 
     @staticmethod
     def _episode_cache_key(

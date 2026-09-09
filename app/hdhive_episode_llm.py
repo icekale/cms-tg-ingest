@@ -22,6 +22,19 @@ _CLUE_RE = re.compile(
     r"(?<![A-Za-z])Season\s*\d+",
     re.IGNORECASE,
 )
+_INT_RE = re.compile(r"\d+")
+
+
+def _number_appears_in_text(number: int, *texts: str) -> bool:
+    target = int(number)
+    for text in texts:
+        for match in _INT_RE.finditer(str(text or "")):
+            try:
+                if int(match.group(0)) == target:
+                    return True
+            except ValueError:
+                continue
+    return False
 
 
 @dataclass(frozen=True)
@@ -83,6 +96,12 @@ def keys_from_llm_payload(payload: dict | None, source_text: str) -> LlmEpisodeP
     if evidence == "" or evidence not in source:
         return LlmEpisodeParse(ok=False, confidence=confidence, reason=reason, evidence=evidence)
     if season < 0 or start <= 0 or start > end or end - start > 200:
+        return LlmEpisodeParse(ok=False, confidence=confidence, reason=reason, evidence=evidence)
+    if not _number_appears_in_text(end, evidence, source):
+        return LlmEpisodeParse(ok=False, confidence=confidence, reason=reason, evidence=evidence)
+    start_in_text = _number_appears_in_text(start, evidence, source)
+    updated_through = "更新至" in evidence or "更新至" in source
+    if not start_in_text and not (updated_through and start == 1):
         return LlmEpisodeParse(ok=False, confidence=confidence, reason=reason, evidence=evidence)
     keys = tuple(EpisodeKey(season, number) for number in range(start, end + 1))
     return LlmEpisodeParse(

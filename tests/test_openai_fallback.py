@@ -935,7 +935,12 @@ class HdhiveEpisodeParseTests(unittest.TestCase):
             tmdb_id="1", resource_slug="a", title="剧", remark="第1集", show_title="剧"
         )
         self.assertFalse(first.get("ok"))
-        self.assertEqual(first, second)
+        self.assertFalse(first.get("cached"))
+        self.assertTrue(second.get("cached"))
+        self.assertEqual(
+            {key: value for key, value in first.items() if key != "cached"},
+            {key: value for key, value in second.items() if key != "cached"},
+        )
         self.assertEqual(http.calls, 1)
 
     def test_disabled_classifier_does_not_call_http(self):
