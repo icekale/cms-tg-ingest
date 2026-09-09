@@ -888,7 +888,7 @@ class HdhiveSubscriptionService:
         group_parsed_sets: dict[str, set[EpisodeKey]] = {}
         for group_key, group_candidates in grouped.items():
             parsed_keys = parsed_by_resource.get(id(group_candidates[0]), ())
-            if parsed_keys:
+            if parsed_keys and not _group_is_llm_pending(group_candidates):
                 group_parsed_sets[group_key] = set(parsed_keys)
 
         def _covered_by_broader_group(group_key: str) -> bool:
