@@ -12,6 +12,17 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.clients.hdhive import HdhiveResource, HdhiveUnlockItem
+from app.hdhive_episode_llm import (
+    DECISION_AUTO,
+    DECISION_PENDING,
+    MAX_LLM_CALLS_PER_CHECK,
+    decide_llm_episode,
+    format_llm_pending_reason,
+    has_episode_clue,
+    keys_from_llm_payload,
+    resource_clue_text,
+    tmdb_season_numbers,
+)
 from app.hdhive_subscription_store import HdhiveSubscription, HdhiveSubscriptionItem, HdhiveSubscriptionStore
 from app.series_rules import EpisodeKey, completion_state, is_special_episode, parse_episode_filter, parse_episode_key
 
@@ -531,6 +542,7 @@ class HdhiveSubscriptionService:
         tmdb_resolver: Any | None = None,
         emby: Any | None = None,
         default_chat_id: str = "",
+        episode_parser: Any | None = None,
     ):
         self.proxy = proxy
         self.store = store
@@ -541,6 +553,7 @@ class HdhiveSubscriptionService:
         self.tmdb_resolver = tmdb_resolver
         self.emby = emby
         self.default_chat_id = str(default_chat_id or "")
+        self.episode_parser = episode_parser
 
     def create_from_url(self, chat_id: str, url: str) -> HdhiveSubscription:
         page = self.proxy.resolve_tv_page(url)
@@ -752,6 +765,17 @@ class HdhiveSubscriptionService:
                 tmdb_lookup_failed = True
                 LOG.warning("HDHive TMDB lookup unavailable subscription_id=%s", subscription.id, exc_info=True)
         default_season = _default_season_from_tmdb(tmdb_details)
+        season_numbers = tmdb_season_numbers(tmdb_details)
+        parser = self.episode_parser
+        parser_enabled = bool(
+            parser is not None
+            and getattr(parser, "enabled", False)
+            and hasattr(parser, "parse_hdhive_episode")
+        )
+        high_confidence = float(getattr(parser, "high_confidence", 0.75) or 0.75)
+        suggest_confidence = float(getattr(parser, "suggest_confidence", 0.45) or 0.45)
+        llm_calls = 0
+        llm_decision_by_resource: dict[int, str] = {}
 
         episode_filter = parse_episode_filter(subscription.episode_filter)
         grouped: dict[str, list[HdhiveResource]] = {}
@@ -762,7 +786,51 @@ class HdhiveSubscriptionService:
             if str(resource.pan_type or "").strip().lower() != "115":
                 continue
             parsed_keys = episode_keys(resource, default_season=default_season)
-            key = episode_key(resource, default_season=default_season)
+            if (
+                not parsed_keys
+                and parser_enabled
+                and llm_calls < MAX_LLM_CALLS_PER_CHECK
+            ):
+                clue_text = resource_clue_text(resource)
+                if has_episode_clue(clue_text):
+                    llm_calls += 1
+                    try:
+                        raw = parser.parse_hdhive_episode(
+                            tmdb_id=str(subscription.tmdb_id or ""),
+                            resource_slug=str(resource.slug or ""),
+                            title=str(resource.title or ""),
+                            remark=str(resource.remark or ""),
+                            episode_key=str(getattr(resource, "episode_key", "") or ""),
+                            episode_code=str(getattr(resource, "episode_code", "") or ""),
+                            show_title=str(subscription.title or ""),
+                            tmdb_seasons=[
+                                season
+                                for season in (tmdb_details.get("seasons") or [])
+                                if isinstance(season, dict)
+                            ],
+                        )
+                    except Exception:
+                        LOG.warning(
+                            "HDHive LLM episode parse failed subscription_id=%s resource_slug=%s",
+                            subscription.id,
+                            resource.slug,
+                            exc_info=True,
+                        )
+                        raw = {}
+                    parsed = keys_from_llm_payload(raw, clue_text)
+                    decision = decide_llm_episode(parsed, season_numbers, high_confidence, suggest_confidence)
+                    llm_decision_by_resource[id(resource)] = decision
+                    if decision in {DECISION_AUTO, DECISION_PENDING} and parsed.keys:
+                        parsed_keys = parsed.keys
+                        LOG.info(
+                            "HDHive LLM episode parsed subscription_id=%s resource_slug=%s decision=%s key=%s confidence=%s",
+                            subscription.id,
+                            resource.slug,
+                            decision,
+                            _format_episode_keys(parsed_keys),
+                            parsed.confidence,
+                        )
+            key = _format_episode_keys(parsed_keys) if parsed_keys else episode_key(resource, default_season=default_season)
             grouped.setdefault(key, []).append(resource)
             parsed_by_resource[id(resource)] = parsed_keys
             item = self.store.upsert_item(
@@ -874,6 +942,11 @@ class HdhiveSubscriptionService:
             for item in items:
                 if item.status == "filtered":
                     self.store.reset_item_for_check(item.id, "filtered")
+            if llm_decision_by_resource.get(id(candidates[0])) == DECISION_PENDING:
+                for item in items:
+                    if item.status != "enqueued" and not protects_unlock_outcome(item):
+                        self.store.mark_item_pending(item.id, format_llm_pending_reason(parsed_keys))
+                continue
 
         emby_keys: set[str] = set()
         emby_paths: dict[str, str] = {}

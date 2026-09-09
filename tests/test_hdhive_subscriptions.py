@@ -109,6 +109,22 @@ class FakeEmby:
         return dict(self.paths)
 
 
+class FakeEpisodeParser:
+    def __init__(self, result=None, error=None, *, enabled=True):
+        self.enabled = enabled
+        self.result = result or {}
+        self.error = error
+        self.calls = []
+        self.high_confidence = 0.75
+        self.suggest_confidence = 0.45
+
+    def parse_hdhive_episode(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return dict(self.result)
+
+
 class HdhiveSubscriptionUrlTests(unittest.TestCase):
     def test_parse_hdhive_tv_url_accepts_current_and_legacy_hosts(self):
         slug = "542a1c1fe6ac4a5aab152369079596b5"
@@ -178,6 +194,7 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         tmdb_resolver=None,
         emby=None,
         on_subscription_completed=None,
+        episode_parser=None,
     ):
         directory = tempfile.TemporaryDirectory()
         store = HdhiveSubscriptionStore(Path(directory.name) / "tasks.db")
@@ -192,6 +209,7 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
             tmdb_resolver=tmdb_resolver,
             emby=emby,
             on_subscription_completed=on_subscription_completed,
+            episode_parser=episode_parser,
         )
         return directory, store, subscription, proxy, service, intake_calls
 
@@ -872,6 +890,182 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(result.enqueued, 0)
         self.assertEqual(result.summary["unparsed"], 1)
         self.assertEqual(item.status, "unparsed")
+        self.assertEqual(proxy.unlock_calls, [])
+
+    def test_llm_high_confidence_enqueues_seasonless_updated_through(self):
+        tmdb = FakeTmdbResolver(
+            {
+                "ok": True,
+                "status": "Returning Series",
+                "seasons": [
+                    {"season_number": 1, "episode_count": 10},
+                    {"season_number": 2, "episode_count": 8},
+                ],
+            }
+        )
+        parser = FakeEpisodeParser(
+            {
+                "ok": True,
+                "season": 2,
+                "episode_start": 1,
+                "episode_end": 7,
+                "confidence": 0.91,
+                "reason": "current season",
+                "evidence": "更新至07集",
+            }
+        )
+        unlock_items = [HdhiveUnlockItem("pack", True, "https://115cdn.com/s/pack?password=abcd", "", "", False)]
+        directory, store, subscription, proxy, service, intake_calls = self.make_service(
+            [resource("pack", episode_key="", title="最后生还者", remark="更新至07集")],
+            unlock_items,
+            tmdb_resolver=tmdb,
+            episode_parser=parser,
+        )
+        try:
+            result = service.check(subscription.id)
+            item = store.list_items(subscription.id)[0]
+        finally:
+            directory.cleanup()
+        self.assertEqual(len(parser.calls), 1)
+        self.assertNotIn("password", str(parser.calls[0]))
+        self.assertEqual(result.enqueued, 1)
+        self.assertEqual(result.summary["unparsed"], 0)
+        self.assertEqual(item.status, "enqueued")
+        self.assertEqual(item.normalized_episode_key, "S02E01-S02E07")
+        self.assertEqual(proxy.unlock_calls, [["pack"]])
+        self.assertEqual(intake_calls, [(["https://115cdn.com/s/pack?password=abcd"], "464100862")])
+
+    def test_llm_medium_confidence_is_pending_without_unlock(self):
+        # Multi-season TMDB so regex cannot apply default_season to "更新至07集".
+        tmdb = FakeTmdbResolver(
+            {
+                "ok": True,
+                "seasons": [
+                    {"season_number": 1, "episode_count": 10},
+                    {"season_number": 2, "episode_count": 8},
+                ],
+            }
+        )
+        parser = FakeEpisodeParser(
+            {
+                "ok": True,
+                "season": 2,
+                "episode_start": 1,
+                "episode_end": 7,
+                "confidence": 0.5,
+                "reason": "maybe",
+                "evidence": "更新至07集",
+            }
+        )
+        directory, store, subscription, proxy, service, intake_calls = self.make_service(
+            [resource("pack", episode_key="", title="最后生还者", remark="更新至07集")],
+            [HdhiveUnlockItem("pack", True, "https://115cdn.com/s/pack?password=abcd", "", "", False)],
+            tmdb_resolver=tmdb,
+            episode_parser=parser,
+        )
+        try:
+            result = service.check(subscription.id)
+            item = store.list_items(subscription.id)[0]
+        finally:
+            directory.cleanup()
+        self.assertEqual(result.enqueued, 0)
+        self.assertEqual(item.status, "pending_confirmation")
+        self.assertEqual(item.normalized_episode_key, "S02E01-S02E07")
+        self.assertIn("LLM 识别待确认：S02E01-S02E07", item.last_error)
+        self.assertEqual(proxy.unlock_calls, [])
+        self.assertEqual(intake_calls, [])
+
+    def test_llm_is_not_called_without_clue_or_when_regex_parses(self):
+        tmdb = FakeTmdbResolver({"ok": True, "seasons": [{"season_number": 1}, {"season_number": 2}]})
+        parser = FakeEpisodeParser({"ok": True, "season": 2, "episode_start": 1, "episode_end": 1, "confidence": 0.9, "evidence": "x"})
+        directory, store, subscription, proxy, service, _intake = self.make_service(
+            [
+                resource("bare", episode_key="", title="最后生还者 第二季", remark=""),
+                # Above auto-unlock threshold so regex-parsed items stay pending and unlock is not called.
+                resource("parsed", episode_key="", title="Show", remark="S01E02", points=21),
+            ],
+            tmdb_resolver=tmdb,
+            episode_parser=parser,
+        )
+        try:
+            service.check(subscription.id)
+            items = {item.resource_slug: item for item in store.list_items(subscription.id)}
+        finally:
+            directory.cleanup()
+        self.assertEqual(parser.calls, [])
+        self.assertEqual(items["bare"].status, "unparsed")
+        self.assertEqual(items["parsed"].normalized_episode_key, "S01E02")
+        self.assertEqual(proxy.unlock_calls, [])
+
+    def test_llm_error_or_disabled_leaves_unparsed(self):
+        tmdb = FakeTmdbResolver({"ok": True, "seasons": [{"season_number": 1}, {"season_number": 2}]})
+        for parser in (
+            FakeEpisodeParser(enabled=False),
+            FakeEpisodeParser(error=TimeoutError("slow")),
+            FakeEpisodeParser({"ok": False, "reason": "nope"}),
+        ):
+            directory, store, subscription, proxy, service, _intake = self.make_service(
+                [resource("pack", episode_key="", title="剧", remark="更新至07集")],
+                tmdb_resolver=tmdb,
+                episode_parser=parser,
+            )
+            try:
+                result = service.check(subscription.id)
+                item = store.list_items(subscription.id)[0]
+            finally:
+                directory.cleanup()
+            self.assertEqual(result.enqueued, 0)
+            self.assertEqual(item.status, "unparsed")
+            self.assertEqual(proxy.unlock_calls, [])
+
+    def test_llm_call_cap_leaves_remaining_unparsed(self):
+        tmdb = FakeTmdbResolver(
+            {
+                "ok": True,
+                "seasons": [
+                    {"season_number": 1, "episode_count": 20},
+                    {"season_number": 2, "episode_count": 20},
+                ],
+            }
+        )
+        parser = FakeEpisodeParser(
+            {"ok": True, "season": 1, "episode_start": 1, "episode_end": 1, "confidence": 0.9, "evidence": "第1集"}
+        )
+        resources = [
+            resource(f"ep{index}", episode_key="", title="剧", remark="第1集", points=0)
+            for index in range(9)
+        ]
+        directory, store, subscription, proxy, service, _intake = self.make_service(
+            resources,
+            [HdhiveUnlockItem(item.slug, True, f"https://115cdn.com/s/{item.slug}?password=abcd", "", "", False) for item in resources],
+            tmdb_resolver=tmdb,
+            episode_parser=parser,
+        )
+        try:
+            service.check(subscription.id)
+            items = store.list_items(subscription.id)
+        finally:
+            directory.cleanup()
+        self.assertEqual(len(parser.calls), 8)
+        self.assertEqual(sum(1 for item in items if item.status == "unparsed"), 1)
+
+    def test_llm_special_episode_still_skipped_by_default(self):
+        tmdb = FakeTmdbResolver({"ok": True, "seasons": [{"season_number": 0}, {"season_number": 1}]})
+        parser = FakeEpisodeParser(
+            {"ok": True, "season": 0, "episode_start": 1, "episode_end": 1, "confidence": 0.9, "evidence": "第1集"}
+        )
+        directory, store, subscription, proxy, service, _intake = self.make_service(
+            [resource("special", episode_key="", title="剧 番外", remark="第1集")],
+            tmdb_resolver=tmdb,
+            episode_parser=parser,
+        )
+        try:
+            service.check(subscription.id)
+            item = store.list_items(subscription.id)[0]
+        finally:
+            directory.cleanup()
+        self.assertEqual(item.status, "filtered")
+        self.assertEqual(item.skip_reason, "特殊集默认跳过")
         self.assertEqual(proxy.unlock_calls, [])
 
     def test_resource_remark_range_is_not_skipped_when_one_emby_episode_is_missing(self):
