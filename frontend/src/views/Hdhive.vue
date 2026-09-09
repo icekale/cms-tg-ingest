@@ -184,7 +184,7 @@ onMounted(load)
   <n-card title="添加订阅" class="section-card">
     <n-form class="compact-form" label-placement="top" @submit.prevent="createSubscription">
       <n-form-item label="HDHive 剧集链接" :show-feedback="false">
-        <n-input v-model:value="createDraft.url" aria-label="HDHive 剧集链接" placeholder="https://hdhive.com/tv/..." style="min-width: min(280px, 100%)" />
+        <n-input v-model:value="createDraft.url" aria-label="HDHive 剧集链接" placeholder="https://re0.me/tv/..." style="min-width: min(280px, 100%)" />
       </n-form-item>
       <n-form-item label="或 TMDB ID" :show-feedback="false">
         <n-input v-model:value="createDraft.tmdb_id" aria-label="TMDB 剧集 ID" placeholder="255358" style="width: 120px" />

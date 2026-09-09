@@ -18,7 +18,7 @@ class HdhiveSubscriptionDocsTests(unittest.TestCase):
                 self.assertIn("HDHIVE_SUBSCRIPTION_AUTO_ENABLED", text)
                 self.assertIn("HDHIVE_SUBSCRIPTION_TIME", text)
                 self.assertIn("HDHIVE_SUBSCRIPTION_TIMEZONE", text)
-                self.assertIn("hdhive.com/tv/<slug>", text)
+                self.assertIn("re0.me/tv/<slug>", text)
                 self.assertIn("01:30", text)
                 self.assertIn("费用未知", text)
                 self.assertIn("确认解锁", text)

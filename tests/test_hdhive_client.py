@@ -85,21 +85,24 @@ class HdhiveProxyClientTests(unittest.TestCase):
         </script>
         '''
         with tempfile.TemporaryDirectory() as directory:
+            fetched = []
             client = HdhiveProxyClient(
                 "https://proxy.test",
                 self.token_file(directory),
                 http=FakeHttp([]),
-                page_fetcher=lambda _url: html,
+                page_fetcher=lambda url: fetched.append(url) or html,
             )
 
             page = client.resolve_tv_page(
                 "https://hdhive.com/tv/542a1c1fe6ac4a5aab152369079596b5"
             )
 
+            self.assertEqual(fetched, ["https://re0.me/tv/542a1c1fe6ac4a5aab152369079596b5"])
             self.assertEqual(page.slug, "542a1c1fe6ac4a5aab152369079596b5")
             self.assertEqual(page.tmdb_id, "255358")
             self.assertEqual(page.title, "攻壳机动队")
             self.assertEqual(page.year, "2026")
+            self.assertEqual(page.url, "https://re0.me/tv/542a1c1fe6ac4a5aab152369079596b5")
 
     def test_resolve_tv_page_rejects_page_without_tmdb_id(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -111,7 +114,7 @@ class HdhiveProxyClientTests(unittest.TestCase):
             )
 
             with self.assertRaises(HdhiveProxyError) as context:
-                client.resolve_tv_page("https://hdhive.com/tv/542a1c1fe6ac4a5aab152369079596b5")
+                client.resolve_tv_page("https://re0.me/tv/542a1c1fe6ac4a5aab152369079596b5")
             self.assertEqual(context.exception.error_code, "HDHIVE_PAGE_UNRESOLVED")
 
     def test_unlock_uses_slug_for_one_and_slugs_for_batch(self):

@@ -1359,7 +1359,7 @@ def render_hdhive_page(
                     )
 
     create_markup = '''<form method="post" action="/hdhive/subscriptions" class="actions">
-  <label>HDHive 链接 <input name="url" placeholder="https://hdhive.com/tv/..."></label>
+  <label>HDHive 链接 <input name="url" placeholder="https://re0.me/tv/..."></label>
   <label>或 TMDB ID <input name="tmdb_id" placeholder="255358"></label>
   <label>剧名 <input name="title" placeholder="可选"></label>
   <button class="button-primary" type="submit">添加订阅</button>

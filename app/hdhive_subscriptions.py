@@ -34,6 +34,8 @@ class HdhiveTvUrl:
 _SLUG_RE = re.compile(r"^[A-Za-z0-9]{8,96}$")
 _URL_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
 _TRAILING_PUNCT = ".,;)。），]】》>"
+_HDHIVE_TV_HOSTS = frozenset({"re0.me", "www.re0.me", "hdhive.com", "www.hdhive.com"})
+_CANONICAL_HDHIVE_HOST = "re0.me"
 
 
 def parse_hdhive_tv_url(url: str) -> HdhiveTvUrl:
@@ -41,12 +43,12 @@ def parse_hdhive_tv_url(url: str) -> HdhiveTvUrl:
     parsed = urlsplit(raw)
     if parsed.scheme.lower() not in {"http", "https"}:
         raise HdhiveUrlError("HDHive 链接必须使用 HTTP 或 HTTPS")
-    if (parsed.hostname or "").lower() not in {"hdhive.com", "www.hdhive.com"}:
+    if (parsed.hostname or "").lower() not in _HDHIVE_TV_HOSTS:
         raise HdhiveUrlError("这不是受支持的 HDHive 域名")
     parts = [part for part in parsed.path.split("/") if part]
     if len(parts) != 2 or parts[0].lower() != "tv" or not _SLUG_RE.fullmatch(parts[1]):
         raise HdhiveUrlError("HDHive 链接必须是 /tv/<slug> 剧集页面")
-    return HdhiveTvUrl(slug=parts[1], url=f"{parsed.scheme.lower()}://{parsed.netloc}{parsed.path}")
+    return HdhiveTvUrl(slug=parts[1], url=f"https://{_CANONICAL_HDHIVE_HOST}/tv/{parts[1]}")
 
 
 def extract_hdhive_tv_urls(text: str) -> list[str]:
@@ -66,16 +68,39 @@ def extract_hdhive_tv_urls(text: str) -> list[str]:
 
 _INVALID_STATUSES = {"invalid", "expired", "unavailable"}
 _VALID_STATUSES = {"valid", "ok", "success", "available", "active"}
-_EPISODE_RE = re.compile(r"s(\d{1,3})\s*e(\d{1,3})", re.IGNORECASE)
+_EPISODE_RE = re.compile(r"s(\d{1,3})\s*[.\-_]*\s*e(\d{1,3})", re.IGNORECASE)
 _EPISODE_RANGE_RE = re.compile(
-    r"(?<![A-Za-z0-9])s(?P<season>\d{1,3})\s*e(?P<start>\d{1,3})"
-    r"\s*[-~至到]\s*(?:s(?P<end_season>\d{1,3})\s*)?e?(?P<end>\d{1,3})"
+    r"(?<![A-Za-z0-9])s(?P<season>\d{1,3})\s*[.\-_]*\s*e(?P<start>\d{1,3})"
+    r"\s*[-~至到]\s*(?:s(?P<end_season>\d{1,3})\s*[.\-_]*\s*)?e?(?P<end>\d{1,3})"
     r"(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 _CHINESE_SEASON_RANGE_RE = re.compile(
     r"第(?P<season>[0-9一二三四五六七八九十百]+)季.*?"
-    r"(?:第)?(?P<start>\d{1,3})\s*[-~至到]\s*(?:第)?(?P<end>\d{1,3})集?",
+    r"(?:第)?(?P<start>\d{1,3})集?\s*[-~至到]\s*(?:第)?(?P<end>\d{1,3})集?",
+    re.IGNORECASE,
+)
+_CHINESE_EPISODE_RANGE_RE = re.compile(
+    r"(?:第)?(?P<start>\d{1,3})集?\s*[-~至到]\s*(?:第)?(?P<end>\d{1,3})集",
+    re.IGNORECASE,
+)
+_CHINESE_SINGLE_RE = re.compile(
+    r"(?:第(?P<chinese_season>[0-9一二三四五六七八九十百]+)季\s*)?"
+    r"第(?P<episode>\d{1,3})集(?![-~至到])",
+    re.IGNORECASE,
+)
+_EPISODE_ONLY_RANGE_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:EP|E)(?P<start>\d{1,3})\s*[-~至到]\s*(?:EP|E)?(?P<end>\d{1,3})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_EPISODE_ONLY_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:EP|E)(?P<episode>\d{1,3})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_SEASON_ONLY_RE = re.compile(
+    r"(?:第(?P<chinese>[0-9一二三四五六七八九十百]+)季|"
+    r"(?<![A-Za-z0-9])S(?P<sxx>\d{1,3})(?!\s*[.\-_]*\s*E\d)|"
+    r"Season\s*(?P<season_word>\d{1,3}))",
     re.IGNORECASE,
 )
 _UPDATED_THROUGH_RE = re.compile(
@@ -277,6 +302,22 @@ def _episode_range(season: int, start: int, end: int) -> tuple[EpisodeKey, ...]:
     return tuple(EpisodeKey(season, number) for number in range(start, end + 1))
 
 
+def _season_from_text(value: str) -> int | None:
+    found = None
+    for match in _SEASON_ONLY_RE.finditer(str(value or "")):
+        if match.group("chinese"):
+            number = _season_number(match.group("chinese"))
+        elif match.group("sxx"):
+            number = int(match.group("sxx"))
+        elif match.group("season_word"):
+            number = int(match.group("season_word"))
+        else:
+            number = None
+        if number is not None and number >= 0:
+            found = number
+    return found
+
+
 def _parse_episode_keys(value: str, default_season: int | None = None) -> tuple[EpisodeKey, ...]:
     text = str(value or "")
     range_match = _EPISODE_RANGE_RE.search(text)
@@ -302,15 +343,44 @@ def _parse_episode_keys(value: str, default_season: int | None = None) -> tuple[
             season = int(updated_through.group("season"))
         else:
             # A season-less "更新至第20集" note uses the resource season or a
-            # caller-supplied default (TMDB single-season). Otherwise it is
-            # skipped rather than guessed.
+            # caller-supplied default (TMDB single-season / title season).
+            # Otherwise it is skipped rather than guessed.
             season = default_season
         if season is not None:
             return _episode_range(season, 1, int(updated_through.group("end")))
     match = _EPISODE_RE.search(text)
-    if not match:
-        return ()
-    return (EpisodeKey(int(match.group(1)), int(match.group(2))),)
+    if match:
+        return (EpisodeKey(int(match.group(1)), int(match.group(2))),)
+    chinese_episode_range = _CHINESE_EPISODE_RANGE_RE.search(text)
+    if chinese_episode_range and default_season is not None:
+        return _episode_range(
+            default_season,
+            int(chinese_episode_range.group("start")),
+            int(chinese_episode_range.group("end")),
+        )
+    episode_only_range = _EPISODE_ONLY_RANGE_RE.search(text)
+    if episode_only_range and default_season is not None:
+        return _episode_range(
+            default_season,
+            int(episode_only_range.group("start")),
+            int(episode_only_range.group("end")),
+        )
+    chinese_single = _CHINESE_SINGLE_RE.search(text)
+    if chinese_single:
+        if chinese_single.group("chinese_season"):
+            season = _season_number(chinese_single.group("chinese_season"))
+        else:
+            season = default_season
+        if season is not None:
+            episode = int(chinese_single.group("episode"))
+            if episode > 0:
+                return (EpisodeKey(season, episode),)
+    episode_only = _EPISODE_ONLY_RE.search(text)
+    if episode_only and default_season is not None:
+        episode = int(episode_only.group("episode"))
+        if episode > 0:
+            return (EpisodeKey(default_season, episode),)
+    return ()
 
 
 def _resource_season_number(resource: HdhiveResource) -> int | None:
@@ -333,15 +403,18 @@ def episode_keys(resource: HdhiveResource, default_season: int | None = None) ->
         else:
             if season_number >= 0 and episode_number > 0:
                 return (EpisodeKey(season_number, episode_number),)
-    season_hint = _resource_season_number(resource)
-    if season_hint is None:
-        season_hint = default_season
-    for value in (
+    texts = (
         getattr(resource, "episode_key", ""),
         getattr(resource, "episode_code", ""),
         getattr(resource, "remark", ""),
         getattr(resource, "title", ""),
-    ):
+    )
+    season_hint = _resource_season_number(resource)
+    if season_hint is None:
+        season_hint = _season_from_text(" ".join(str(value) for value in texts if value))
+    if season_hint is None:
+        season_hint = default_season
+    for value in texts:
         if value:
             parsed = _parse_episode_keys(str(value), default_season=season_hint)
             if parsed:

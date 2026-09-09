@@ -160,11 +160,11 @@ test('hdhive create subscription posts url or tmdb payload', async () => {
   }
 
   try {
-    await api.hdhiveCreateSubscription({ url: 'https://hdhive.com/tv/slug' })
+    await api.hdhiveCreateSubscription({ url: 'https://re0.me/tv/slug' })
     await api.hdhiveCreateSubscription({ tmdb_id: '1416', title: "Grey's Anatomy" })
     assert.equal(calls[0].url, '/api/v1/hdhive/subscriptions')
     assert.equal(calls[0].options.method, 'POST')
-    assert.deepEqual(JSON.parse(calls[0].options.body), { url: 'https://hdhive.com/tv/slug' })
+    assert.deepEqual(JSON.parse(calls[0].options.body), { url: 'https://re0.me/tv/slug' })
     assert.deepEqual(JSON.parse(calls[1].options.body), { tmdb_id: '1416', title: "Grey's Anatomy" })
   } finally {
     globalThis.fetch = originalFetch

@@ -213,7 +213,7 @@ class HdhiveBridgeTests(unittest.TestCase):
                 "message": {
                     "chat": {"id": "464100862"},
                     "from": {"id": "464100862"},
-                    "text": "/订阅 https://hdhive.com/tv/" + "a" * 32,
+                    "text": "/订阅 https://re0.me/tv/" + "a" * 32,
                 }
             },
             object(),
@@ -571,7 +571,7 @@ class HdhiveBridgeTests(unittest.TestCase):
 
         self.assertEqual(
             service.created_urls,
-            [("464100862", "https://hdhive.com/tv/542a1c1fe6ac4a5aab152369079596b5")],
+            [("464100862", "https://re0.me/tv/542a1c1fe6ac4a5aab152369079596b5")],
         )
         self.assertIn("已订阅：攻壳机动队", telegram.messages[-1][1])
 

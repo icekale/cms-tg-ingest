@@ -230,7 +230,7 @@ class HdhiveProxyClient:
 
         try:
             parsed = parse_hdhive_tv_url(url)
-            html = self.page_fetcher(url) if self.page_fetcher is not None else self._fetch_page(url)
+            html = self.page_fetcher(parsed.url) if self.page_fetcher is not None else self._fetch_page(parsed.url)
         except HdhiveProxyError:
             raise
         except Exception as exc:

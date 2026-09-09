@@ -6,7 +6,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 115 分享/磁力/ED2K -> 115 接收或云下载 -> CMS 整理分类 -> 自有永久分享 -> 分享 STRM -> Emby 入库 -> 清理转存源
 ```
 
-**0.5.2** 起运行时只有一份 SQLite 任务库（`DATABASE_PATH=/data/cms-tg-ingest.db`）和唯一的 TaskRunner 写入者：观察者只入队命令，接收/建分享/同步/删除带不可变 journal，失败后接着跑而不是重做上游。当前镜像 `icekale/cms-tg-ingest:0.5.22`。
+**0.5.2** 起运行时只有一份 SQLite 任务库（`DATABASE_PATH=/data/cms-tg-ingest.db`）和唯一的 TaskRunner 写入者：观察者只入队命令，接收/建分享/同步/删除带不可变 journal，失败后接着跑而不是重做上游。当前镜像 `icekale/cms-tg-ingest:0.5.23`。
 
 它只编排你已经拥有权限的 CMS、115、HDHive 和 Emby 工作流，不提供媒体资源，也不绕过任何服务的权限或风控机制。
 
@@ -41,7 +41,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.5.22`。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.5.23`。
 4. 拉取固定版本并启动：
 
 ```sh
@@ -209,7 +209,7 @@ ed2k://|file|example.mkv|10|ED2K_HASH_PLACEHOLDER|/
 | --- | --- | --- |
 | 搜索 HDHive | `/搜索` | 通过 TMDB 搜索电影或剧集，再查询 HDHive 资源 |
 | 兼容旧命令 | `/hdhive_search` | `/搜索` 的旧命令名，继续支持 |
-| 创建订阅 | `/订阅 https://hdhive.com/tv/<slug>` | 创建 HDHive 剧集订阅，不立即解锁 |
+| 创建订阅 | `/订阅 https://re0.me/tv/<slug>` | 创建 HDHive 剧集订阅，不立即解锁 |
 | 订阅管理 | `HDHive 订阅` 或 `/hdhive_subscriptions` | 查看、暂停、恢复、删除、立即检查和确认解锁 |
 | 最近任务 | `/status` | 查看当前队列、阶段和操作按钮 |
 | 历史记录 | `/history` | 查看最近已处理任务 |
@@ -249,13 +249,13 @@ OAuth 文件建议挂载整个 CMS 配置目录，而不是只挂载单个文件
 Web 管理台 `/app/hdhive` 也可以粘贴 HDHive 剧集页面链接，或填写 TMDB 剧集 ID 创建订阅。直接发送 HDHive 剧集页面链接也可以创建订阅：
 
 ```text
-https://hdhive.com/tv/<slug>
+https://re0.me/tv/<slug>
 ```
 
 更明确的写法是：
 
 ```text
-/订阅 https://hdhive.com/tv/<slug>
+/订阅 https://re0.me/tv/<slug>
 ```
 
 订阅不会立即解锁。程序每天按配置时间检查新增资源，默认每天 `01:30`（`Asia/Shanghai`）。每一集只选择一个最佳的 115 资源；费用未知或超过阈值时进入待确认状态，点击 `确认解锁` 后才会继续。
@@ -517,7 +517,7 @@ git push origin v0.2.90
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.5.22
+docker pull icekale/cms-tg-ingest:0.5.23
 docker pull icekale/cms-tg-ingest:latest
 ```
 

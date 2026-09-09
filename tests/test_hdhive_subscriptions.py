@@ -17,6 +17,7 @@ from app.hdhive_subscriptions import (
     HdhiveUrlError,
     diagnose_subscription_check,
     episode_keys,
+    extract_hdhive_tv_urls,
     parse_hdhive_tv_url,
     select_best_resource,
 )
@@ -34,10 +35,11 @@ def resource(
     season_number=None,
     episode_number=None,
     remark="",
+    title=None,
 ):
     return HdhiveResource(
         slug=slug,
-        title=f"Title {slug}",
+        title=f"Title {slug}" if title is None else title,
         pan_type="115",
         share_size="10GB",
         video_resolution=(resolution,),
@@ -108,24 +110,40 @@ class FakeEmby:
 
 
 class HdhiveSubscriptionUrlTests(unittest.TestCase):
-    def test_parse_hdhive_tv_url_accepts_hdhive_tv_pages(self):
-        parsed = parse_hdhive_tv_url(
-            "https://hdhive.com/tv/542a1c1fe6ac4a5aab152369079596b5"
-        )
-
-        self.assertEqual(parsed.slug, "542a1c1fe6ac4a5aab152369079596b5")
-        self.assertEqual(parsed.url, "https://hdhive.com/tv/542a1c1fe6ac4a5aab152369079596b5")
+    def test_parse_hdhive_tv_url_accepts_current_and_legacy_hosts(self):
+        slug = "542a1c1fe6ac4a5aab152369079596b5"
+        canonical = f"https://re0.me/tv/{slug}"
+        for value in (
+            f"https://re0.me/tv/{slug}",
+            f"https://www.re0.me/tv/{slug}",
+            f"http://re0.me/tv/{slug}/",
+            f"https://hdhive.com/tv/{slug}",
+            f"https://www.hdhive.com/tv/{slug}",
+        ):
+            with self.subTest(value=value):
+                parsed = parse_hdhive_tv_url(value)
+                self.assertEqual(parsed.slug, slug)
+                self.assertEqual(parsed.url, canonical)
 
     def test_parse_hdhive_tv_url_rejects_other_hosts_and_paths(self):
         for value in (
             "https://evil.example/tv/542a1c1fe6ac4a5aab152369079596b5",
+            "https://re0.me/movie/542a1c1fe6ac4a5aab152369079596b5",
             "https://hdhive.com/movie/542a1c1fe6ac4a5aab152369079596b5",
-            "https://hdhive.com/tv/short",
+            "https://re0.me/tv/short",
             "https://hdhive.com/tv/not-a-valid-slug!",
         ):
             with self.subTest(value=value):
                 with self.assertRaises(HdhiveUrlError):
                     parse_hdhive_tv_url(value)
+
+    def test_extract_hdhive_tv_urls_canonicalizes_legacy_host(self):
+        urls = extract_hdhive_tv_urls(
+            "看这个 https://hdhive.com/tv/542a1c1fe6ac4a5aab152369079596b5 和 "
+            "https://re0.me/tv/542a1c1fe6ac4a5aab152369079596b5"
+        )
+
+        self.assertEqual(urls, ["https://re0.me/tv/542a1c1fe6ac4a5aab152369079596b5"])
 
     def test_subscription_schedule_defaults_and_env_overrides(self):
         required = {
@@ -715,6 +733,39 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         parsed = episode_keys(resource("bundle", episode_key="", remark="更新至第20集"))
         self.assertEqual(parsed, ())
 
+    def test_title_season_and_remark_episode_are_combined(self):
+        cases = {
+            ("最后生还者 第二季", "亚马逊 19.8M码率来源 更新至07集 杜比视界"): ("S02E01", "S02E07"),
+            ("The.Last.of.Us.S02.2160p.WEB-DL", "更新至第07集"): ("S02E01", "S02E07"),
+            ("某剧 第一季", "第12集"): ("S01E12", "S01E12"),
+            ("Show.S01.2160p", "E01-E08"): ("S01E01", "S01E08"),
+            ("第三季", "第1集-第5集 4K"): ("S03E01", "S03E05"),
+        }
+        for (title, remark), expected in cases.items():
+            with self.subTest(title=title, remark=remark):
+                parsed = episode_keys(resource("pack", episode_key="", title=title, remark=remark))
+                self.assertEqual((parsed[0].normalized, parsed[-1].normalized), expected)
+
+    def test_chinese_single_episode_and_dotted_sxxexx(self):
+        self.assertEqual(
+            tuple(key.normalized for key in episode_keys(resource("ep", episode_key="", remark="第2季第7集"))),
+            ("S02E07",),
+        )
+        self.assertEqual(
+            tuple(key.normalized for key in episode_keys(resource("ep", episode_key="", title="Show.S01.E03.2160p"))),
+            ("S01E03",),
+        )
+        self.assertEqual(
+            tuple(
+                key.normalized
+                for key in episode_keys(
+                    resource("ep", episode_key="", remark="第12集"),
+                    default_season=1,
+                )
+            ),
+            ("S01E12",),
+        )
+
     def test_seasonless_updated_through_uses_caller_default_season(self):
         parsed = episode_keys(
             resource(
@@ -761,6 +812,38 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(result.summary["unparsed"], 0)
         self.assertEqual(item.status, "enqueued")
         self.assertEqual(item.normalized_episode_key, "S01E01")
+        self.assertEqual(intake_calls, [(["https://115cdn.com/s/pack?password=abcd"], "464100862")])
+        self.assertEqual(proxy.unlock_calls, [["pack"]])
+
+    def test_multi_season_check_uses_title_season_with_remark_updated_through(self):
+        tmdb = FakeTmdbResolver(
+            {
+                "ok": True,
+                "status": "Returning Series",
+                "seasons": [
+                    {"season_number": 1, "episode_count": 10},
+                    {"season_number": 2, "episode_count": 8},
+                ],
+            }
+        )
+        unlock_items = [
+            HdhiveUnlockItem("pack", True, "https://115cdn.com/s/pack?password=abcd", "", "", False)
+        ]
+        directory, store, subscription, proxy, service, intake_calls = self.make_service(
+            [resource("pack", episode_key="", title="最后生还者 第二季", remark="更新至07集")],
+            unlock_items,
+            tmdb_resolver=tmdb,
+        )
+        try:
+            result = service.check(subscription.id)
+            item = store.list_items(subscription.id)[0]
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result.enqueued, 1)
+        self.assertEqual(result.summary["unparsed"], 0)
+        self.assertEqual(item.status, "enqueued")
+        self.assertEqual(item.normalized_episode_key, "S02E01-S02E07")
         self.assertEqual(intake_calls, [(["https://115cdn.com/s/pack?password=abcd"], "464100862")])
         self.assertEqual(proxy.unlock_calls, [["pack"]])
 

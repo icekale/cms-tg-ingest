@@ -461,7 +461,7 @@ class HdhiveWebTests(unittest.TestCase):
         self.assertNotIn("source_url", payload["subscription"])
         self.assertEqual(
             service.create_calls,
-            [("url", "464100862", "https://hdhive.com/tv/newshow01")],
+            [("url", "464100862", "https://re0.me/tv/newshow01")],
         )
 
     def test_api_creates_subscription_from_tmdb_id(self):
@@ -597,7 +597,7 @@ class HdhiveWebTests(unittest.TestCase):
         self.assertEqual(headers["Location"], "/hdhive")
         self.assertEqual(
             service.create_calls,
-            [("url", "464100862", "https://hdhive.com/tv/legacyslug")],
+            [("url", "464100862", "https://re0.me/tv/legacyslug")],
         )
 
 
