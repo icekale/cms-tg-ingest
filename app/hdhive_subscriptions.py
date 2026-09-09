@@ -867,6 +867,15 @@ class HdhiveSubscriptionService:
                 item.status == "pending_confirmation" and item.skip_reason == "unlock_outcome_unknown"
             )
 
+        def _group_is_llm_pending(group_candidates: list[HdhiveResource]) -> bool:
+            decisions = [llm_decision_by_resource.get(id(candidate)) for candidate in group_candidates]
+            if DECISION_AUTO in decisions:
+                return False
+            if any(decision is None for decision in decisions):
+                # None means regex parsed (never called LLM) or never recorded.
+                return False
+            return any(decision == DECISION_PENDING for decision in decisions)
+
         persisted_items = self.store.list_items(subscription.id)
         for item in persisted_items:
             if item.status == "unlocking":
@@ -942,7 +951,7 @@ class HdhiveSubscriptionService:
             for item in items:
                 if item.status == "filtered":
                     self.store.reset_item_for_check(item.id, "filtered")
-            if llm_decision_by_resource.get(id(candidates[0])) == DECISION_PENDING:
+            if _group_is_llm_pending(candidates):
                 for item in items:
                     if item.status != "enqueued" and not protects_unlock_outcome(item):
                         self.store.mark_item_pending(item.id, format_llm_pending_reason(parsed_keys))

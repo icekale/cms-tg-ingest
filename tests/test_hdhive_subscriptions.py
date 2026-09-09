@@ -1068,6 +1068,51 @@ class HdhiveSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual(item.skip_reason, "特殊集默认跳过")
         self.assertEqual(proxy.unlock_calls, [])
 
+    def test_llm_pending_does_not_block_regex_sibling_in_same_group(self):
+        tmdb = FakeTmdbResolver(
+            {
+                "ok": True,
+                "seasons": [
+                    {"season_number": 1, "episode_count": 10},
+                    {"season_number": 2, "episode_count": 8},
+                ],
+            }
+        )
+        parser = FakeEpisodeParser(
+            {
+                "ok": True,
+                "season": 2,
+                "episode_start": 7,
+                "episode_end": 7,
+                "confidence": 0.5,
+                "reason": "maybe",
+                "evidence": "第7集",
+            }
+        )
+        # LLM pack first so candidates[0] is pending under the buggy group rule.
+        directory, store, subscription, proxy, service, intake_calls = self.make_service(
+            [
+                resource("llm1080", episode_key="", title="剧", remark="第7集", resolution="1080P", points=0),
+                resource("regex2160", episode_key="", title="Show", remark="S02E07", resolution="2160P", points=8),
+            ],
+            [HdhiveUnlockItem("regex2160", True, "https://115cdn.com/s/regex2160?password=abcd", "", "", False)],
+            tmdb_resolver=tmdb,
+            episode_parser=parser,
+        )
+        try:
+            result = service.check(subscription.id)
+            items = {item.resource_slug: item for item in store.list_items(subscription.id)}
+        finally:
+            directory.cleanup()
+        self.assertEqual(len(parser.calls), 1)
+        self.assertEqual(parser.calls[0]["resource_slug"], "llm1080")
+        self.assertEqual(result.enqueued, 1)
+        self.assertEqual(items["regex2160"].status, "enqueued")
+        self.assertNotEqual(items["regex2160"].status, "pending_confirmation")
+        self.assertEqual(items["regex2160"].normalized_episode_key, "S02E07")
+        self.assertEqual(proxy.unlock_calls, [["regex2160"]])
+        self.assertEqual(intake_calls, [(["https://115cdn.com/s/regex2160?password=abcd"], "464100862")])
+
     def test_resource_remark_range_is_not_skipped_when_one_emby_episode_is_missing(self):
         emby = FakeEmby({"S03E01"})
         unlock_items = [
