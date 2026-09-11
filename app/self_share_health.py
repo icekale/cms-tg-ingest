@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from app.clients.p115 import P115RiskControlError, P115ShareUnavailableError
+from app.clients.p115 import P115RiskControlError, P115ShareUnavailableError, share_availability
 from app.task_store import command_key
 from app.config import DEFAULT_OWN_SHARE_RECEIVE_CODE, is_relative_to, safe_resolve
 from app.media.strm import validate_self_share_strm_destination
@@ -57,15 +57,11 @@ def probe_invalid_self_shares(
             if states is not None and share_code in states:
                 status = states[share_code]
                 share_state = str(status.get("share_state") or "").strip().lower()
-                have_vio_file = str(status.get("have_vio_file") or "").strip().lower() in {"1", "true", "yes"}
-                if not have_vio_file and share_state in {"0", "1", "true"}:
+                if share_availability(share_state, status.get("have_vio_file")) != "invalid":
                     store.update_share_probe(row_id)
                     continue
-                if not have_vio_file and not share_state:
-                    store.update_share_probe(row_id)
-                    continue
-                if have_vio_file:
-                    raise P115ShareUnavailableError("115 分享标记 have_vio_file")
+                if not share_state:
+                    raise P115ShareUnavailableError("115 标记 have_vio_file")
                 raise P115ShareUnavailableError(f"115 分享状态不可用: {share_state}")
 
             # The list endpoint is capped and can omit an older share. One precise

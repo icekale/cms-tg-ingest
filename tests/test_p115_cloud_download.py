@@ -5,6 +5,8 @@ from app.clients.p115 import (
     P115WebClient,
     lixian_rsa_encrypt,
     normalize_cloud_status,
+    share_availability,
+    share_unavailable_reason,
     validate_cloud_output,
 )
 
@@ -163,7 +165,8 @@ class P115CloudDownloadTests(unittest.TestCase):
         )
 
     def test_discover_cloud_outputs_accepts_wrapped_raw_file_record(self):
-        client = P115WebClient("UID=1", http=FakeHttp([]))
+        http = FakeHttp([])
+        client = P115WebClient("UID=1", http=http)
 
         items = client.discover_cloud_download_outputs(
             {
@@ -175,7 +178,7 @@ class P115CloudDownloadTests(unittest.TestCase):
 
         self.assertEqual(items[0]["file_id"], "video")
         self.assertEqual(items[0]["parent_id"], TARGET_CID)
-        self.assertFalse(client.http.calls)
+        self.assertFalse(http.calls)
 
     def test_ensure_cloud_outputs_moves_only_missing_items_and_preserves_flags(self):
         http = FakeHttp(
@@ -455,6 +458,37 @@ class P115CloudDownloadTests(unittest.TestCase):
         self.assertEqual(result["parent_id"], TARGET_CID)
         self.assertEqual(http.calls[3]["url"], "https://webapi.115.com/files/move")
         self.assertEqual(http.calls[3]["data"], {"fid": "media-file", "pid": TARGET_CID})
+
+
+class ShareAvailabilityTests(unittest.TestCase):
+    """have_vio_file is advisory; share_state decides.
+
+    Regression: 115 sets have_vio_file on shares it still reports as 正常.
+    Treating that flag as decisive left three live shares (tasks 618/410/432)
+    stuck at share_validated and their STRM trees empty.
+    """
+
+    def test_normal_share_with_violation_flag_is_still_valid(self):
+        self.assertEqual(share_availability("1", True), "valid")
+        self.assertEqual(share_availability(1, 1), "valid")
+        self.assertEqual(share_availability("0", "1"), "valid")
+
+    def test_dead_states_are_invalid_regardless_of_flag(self):
+        for state in ("6", "4", "7", "2"):
+            with self.subTest(state=state):
+                self.assertEqual(share_availability(state, False), "invalid")
+                self.assertEqual(share_availability(state, True), "invalid")
+
+    def test_flag_only_decides_when_state_is_missing(self):
+        self.assertEqual(share_availability("", True), "invalid")
+        self.assertEqual(share_availability(None, "1"), "invalid")
+        self.assertEqual(share_availability("", False), "unknown")
+        self.assertEqual(share_availability(None, None), "unknown")
+
+    def test_reason_prefers_the_authoritative_state(self):
+        self.assertEqual(share_unavailable_reason("6", True), "115 分享状态不可用：6")
+        self.assertEqual(share_unavailable_reason("", True), "115 标记 have_vio_file")
+        self.assertEqual(share_unavailable_reason("", False), "115 分享状态不可用：未知")
 
 
 if __name__ == "__main__":

@@ -88,6 +88,42 @@ def normalize_share_state(value: Any) -> str:
     return "" if value is None else str(value).strip().lower()
 
 
+# 115 reports "1" for 正常. "0"/"true" show up in older payloads and in stored
+# rows and mean the same thing everywhere else in this codebase, so they stay
+# usable. Anything else ("4" 已取消, "6" 违规, "7" 已过期, ...) is not.
+USABLE_SHARE_STATES = frozenset({"0", "1", "true"})
+
+
+def is_violation_flag(value: Any) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes"}
+
+
+def share_availability(share_state: Any, have_vio_file: Any = False) -> str:
+    """Classify a 115 share as "valid", "invalid" or "unknown".
+
+    ``share_state`` is authoritative whenever 115 returns one, because it is what
+    actually decides whether the share can be streamed. ``have_vio_file`` is a
+    sparse advisory flag that 115 also sets on shares it still reports as 正常 —
+    measured against the live account on 2026-08-19, 5 of 8 flagged shares were
+    ``share_state=1`` and streamed fine, while all 3 ``share_state=6`` shares were
+    flagged — so it only decides the verdict when ``share_state`` is missing.
+    """
+    state = normalize_share_state(share_state)
+    if state:
+        return "valid" if state in USABLE_SHARE_STATES else "invalid"
+    return "invalid" if is_violation_flag(have_vio_file) else "unknown"
+
+
+def share_unavailable_reason(share_state: Any, have_vio_file: Any = False) -> str:
+    """User-facing reason for a share that is not "valid"."""
+    state = normalize_share_state(share_state)
+    if state:
+        return f"115 分享状态不可用：{state}"
+    if is_violation_flag(have_vio_file):
+        return "115 标记 have_vio_file"
+    return "115 分享状态不可用：未知"
+
+
 def iter_items(data: Any) -> list[dict]:
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]
@@ -766,7 +802,9 @@ class P115WebClient:
             share_code = str(item.get("share_code") or item.get("sharecode") or "").strip()
             if not share_code:
                 continue
-            raw_vio = item.get("have_vio_file", item.get("is_collect", 0))
+            # "is_collect" is absent from every slist item (measured 2026-09-11),
+            # and where 115 does return it, it means "被转存", not "违规".
+            raw_vio = item.get("have_vio_file", 0)
             raw_state = item.get("share_state")
             if raw_state is None:
                 raw_state = item.get("state")

@@ -29,6 +29,8 @@ from app.clients.p115 import (
     p115_item_parent_id,
     p115_share_item_id,
     select_named_cloud_outputs,
+    share_availability,
+    share_unavailable_reason,
 )
 from app.config import DEFAULT_OWN_SHARE_RECEIVE_CODE, MovePlan, SelfShareConfig, default_library_roots, is_relative_to, is_under_any_root, safe_resolve
 from app.logging_system import safe_telegram_text
@@ -4329,16 +4331,14 @@ class BridgeSelfShareTaskWorkflow:
                 unknown_error = unknown_error or f"目标 {target_id} 分享状态暂时无法确认：{error}"
                 continue
             status = status if isinstance(status, dict) else {}
-            have_vio_file = self._as_bool_flag(status.get("have_vio_file"))
+            have_vio_file = status.get("have_vio_file")
             share_available = status.get("available")
             share_state = str(status.get("share_state") or "").strip().lower()
-            if share_available is False or have_vio_file or (share_state and share_state not in {"0", "1", "true"}) or not share_state:
+            if share_available is False or share_availability(share_state, have_vio_file) != "valid":
                 error = (
                     "115 分享不可用"
                     if share_available is False
-                    else "115 标记 have_vio_file"
-                    if have_vio_file
-                    else f"115 分享状态不可用：{share_state or '未知'}"
+                    else share_unavailable_reason(share_state, have_vio_file)
                 )
                 share["validation_status"] = "invalid"
                 share["validation_error"] = error
@@ -4450,11 +4450,15 @@ class BridgeSelfShareTaskWorkflow:
             metadata = self._own_share_metadata(row)
             metadata.update(self._share_review_metadata(task, row, "unknown", error=str(exc)))
             return StageResult.defer("115 分享状态暂时无法确认，源文件暂不清理", 60, metadata)
-        have_vio_file = self._as_bool_flag(status.get("have_vio_file"))
+        have_vio_file = status.get("have_vio_file")
         share_available = status.get("available")
         share_state = str(status.get("share_state") or "").strip().lower()
-        if share_available is False or have_vio_file or (share_state and share_state not in {"0", "1", "true"}):
-            reason = "115 分享不可用" if share_available is False else "115 标记 have_vio_file" if have_vio_file else f"115 分享状态不可用：{share_state or '未知'}"
+        if share_available is False or share_availability(share_state, have_vio_file) == "invalid":
+            reason = (
+                "115 分享不可用"
+                if share_available is False
+                else share_unavailable_reason(share_state, have_vio_file)
+            )
             row = self.store.update_self_share(
                 int(row["id"]),
                 share_validation_status="invalid",
@@ -5871,10 +5875,6 @@ class BridgeSelfShareTaskWorkflow:
                 checkpoints.append(checkpoint)
         return checkpoints
 
-    @staticmethod
-    def _as_bool_flag(value: Any) -> bool:
-        return str(value or "").strip().lower() in {"1", "true", "yes"}
-
     def _share_review_metadata(
         self,
         task,
@@ -5985,12 +5985,12 @@ class BridgeSelfShareTaskWorkflow:
             return "unknown", metadata, "115 分享状态暂时无法确认，等待风控冷却或网络恢复，源文件暂不清理", retry_after
 
         share_state = str(status.get("share_state") or "").strip().lower()
-        have_vio_file = self._as_bool_flag(status.get("have_vio_file"))
+        have_vio_file = status.get("have_vio_file")
         if status.get("available") is False:
             metadata = self._share_review_metadata(task, row, "invalid", error="115 分享不可用", checks=checks, next_at=0)
             return "invalid", metadata, "115 分享不可用", 0
-        if have_vio_file or (share_state and share_state not in {"0", "1", "true"}):
-            reason = "115 标记 have_vio_file" if have_vio_file else f"115 分享状态不可用：{share_state or '未知'}"
+        if share_availability(share_state, have_vio_file) == "invalid":
+            reason = share_unavailable_reason(share_state, have_vio_file)
             metadata = self._share_review_metadata(task, row, "invalid", error=reason, checks=checks, next_at=0)
             return "invalid", metadata, reason, 0
         if not share_state:

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .clients.p115 import share_availability
 from .config import DEFAULT_OWN_SHARE_RECEIVE_CODE, Config, MoveConfig, is_relative_to, is_under_any_root, safe_resolve
 from .media.strm import UnsafeMediaPathError, iter_strm_files
 from .models import TaskSnapshot, TaskStage, TaskStatus
@@ -1163,17 +1164,10 @@ class QualityAutomation:
             return "unknown"
         if not isinstance(state, dict):
             return "unknown"
-        share_state = str(state.get("share_state") or "").strip().lower()
-        have_vio = str(state.get("have_vio_file") or "").strip().lower() in {"1", "true", "yes"}
-        if have_vio:
-            return "invalid"
-        # 115 treats share_state "0"/"1"/"true" all as usable; only empty or
-        # other values mean unavailable (see P115WebClient.share_snap and
-        # workflows/self_share.py). Keeping "0" -> valid matches the rest of
-        # the codebase so an alive share is never deleted or marked invalid.
-        if share_state in {"0", "1", "true"}:
-            return "valid"
-        return "unknown"
+        # share_state wins over the sparse have_vio_file advisory flag (see
+        # share_availability), so an alive share is never deleted or marked
+        # invalid on that flag alone.
+        return share_availability(state.get("share_state"), state.get("have_vio_file"))
 
     def stale_strm_candidates(
         self,
@@ -1519,13 +1513,7 @@ class QualityAutomation:
             return False
         if not isinstance(state, dict):
             return False
-        share_state = str(state.get("share_state") or "").strip().lower()
-        have_vio_file = str(state.get("have_vio_file") or "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-        }
-        if share_state not in {"0", "1", "true"} or have_vio_file:
+        if share_availability(state.get("share_state"), state.get("have_vio_file")) != "valid":
             return False
         timestamp = time.time()
         try:

@@ -6857,7 +6857,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 ),
             ) or row
             self.p115.share_statuses = [
-                {"available": True, "share_state": "0", "have_vio_file": True},
+                {"available": True, "share_state": "6", "have_vio_file": True},
             ]
             self.p115.files_by_parent = {
                 "folder-id": [{"cid": "season-id", "n": "Season 03"}],
@@ -6892,7 +6892,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
                 share_validation_status="pending",
             ) or row
             self.p115.share_statuses = [
-                {"available": True, "share_state": "0", "have_vio_file": True},
+                {"available": True, "share_state": "6", "have_vio_file": True},
             ]
             task = self._claim_task(
                 "abc",
@@ -6937,7 +6937,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             workflow = self._workflow(tmp, cleanup_client=cleanup)
             row = self._self_share_row()
             self.p115.share_statuses = [
-                {"available": True, "share_state": "0", "have_vio_file": True},
+                {"available": True, "share_state": "6", "have_vio_file": True},
             ]
             task = self._claim_task(
                 "abc",
@@ -6951,6 +6951,34 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
 
             self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
             self.assertEqual(cleanup.deleted, [])
+            self.assertEqual(self.p115.renamed, [])
+
+    def test_share_validation_keeps_normal_share_flagged_by_vio_marker(self):
+        """Regression: have_vio_file alone must not stop a 正常 share.
+
+        Real account data (2026-08-19): 5 of 8 shares flagged have_vio_file were
+        share_state=1 and streamed fine. Task 618 (剑风传奇 2016, tmdb=66053) was
+        blocked here, so its STRM tree stayed an empty shell.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._self_share_row()
+            self.p115.share_statuses = [
+                {"available": True, "share_state": "1", "have_vio_file": True},
+            ]
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.SHARE_VALIDATED,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertNotEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertEqual(stored["share_validation_status"], "valid")
             self.assertEqual(self.p115.renamed, [])
 
     def test_cleaned_stage_waits_for_review_checkpoints_before_cleanup(self):
