@@ -1105,6 +1105,69 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(len(workflow.calls), 1)
             self.assertFalse(updated.metadata["_lock_waiting"])
 
+    def test_run_once_ignores_stale_lock_key_left_by_older_version(self):
+        """线上症状：335 的 _lock_key=115:global 是旧版本写的，它自己早已改用 cms:global，
+        却仍把等 115:global 的 430 堵了 304 秒。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            holder = store.upsert_task("holder", "", "https://115cdn.com/s/holder")
+            store.enqueue_task(holder.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            claimed = store.claim_next_runnable("worker-1", now=1.0)
+            assert claimed is not None
+            store.record_event(
+                claimed.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "等待 CMS 整理完成",
+                metadata_patch={
+                    "_lock_key": "115:global",
+                    "_lock_reason": "115/CMS 全局阶段",
+                    "_lock_waiting": False,
+                },
+                clear_claim=False,
+            )
+            waiting = store.upsert_task("waiting", "", "https://115cdn.com/s/waiting")
+            store.enqueue_task(waiting.id, TaskStage.CLEANED, next_run_at=2.0)
+            workflow = FakeWorkflow([StageResult.complete("已清理")])
+            runner = TaskRunner(store, workflow, worker_id="worker-2", interval_seconds=7, now=lambda: 2.0)
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(waiting.id)
+            assert updated is not None
+
+            self.assertEqual(len(workflow.calls), 1)
+            self.assertFalse(updated.metadata["_lock_waiting"])
+
+    def test_run_once_forwards_claim_stale_window_to_lock_conflicts(self):
+        """部署重启后旧容器的 claim 会滞留。领任务用 runner 的 300 秒窗口，
+        锁冲突却用 store 默认的 21600 秒，会让一道死 claim 把整队锁住 6 小时。"""
+
+        class RecordingLockStore(TaskStore):
+            def __init__(self, db_path):
+                super().__init__(db_path)
+                self.lock_stale_windows = []
+
+            def claim_task_lock(self, task_id, *args, **kwargs):
+                self.lock_stale_windows.append(kwargs.get("stale_after_seconds"))
+                return super().claim_task_lock(task_id, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = RecordingLockStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("window", "", "https://115cdn.com/s/window")
+            store.enqueue_task(task.id, TaskStage.CLEANED, next_run_at=1.0)
+            workflow = FakeWorkflow([StageResult.complete("已清理")])
+            runner = TaskRunner(
+                store,
+                workflow,
+                worker_id="worker-1",
+                claim_stale_after_seconds=420,
+                now=lambda: 1.0,
+            )
+
+            self.assertTrue(runner.run_once())
+
+        self.assertEqual(store.lock_stale_windows, [420])
+
     def test_run_once_does_not_execute_after_claim_changes_during_lock_prepare(self):
         class ReclaimBeforeLockStore(TaskStore):
             def __init__(self, db_path):

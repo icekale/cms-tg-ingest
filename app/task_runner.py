@@ -626,8 +626,8 @@ class TaskRunner:
         wait_message = f"等待资源锁: {lock_metadata.get('_lock_reason', '')}"
 
         def conflicts_with_holder(holder: TaskSnapshot) -> bool:
-            if str(holder.metadata.get("_lock_key") or "") == lock_key:
-                return True
+            # 只按 holder 的当前阶段推导它占的是哪把锁。metadata 里的 _lock_key 可能是旧
+            # 版本写的（锁的划分变过），信它会让一个 organizing 任务继续占住 115 锁。
             return str(_lock_metadata_for_task(holder).get("_lock_key") or "") == lock_key
 
         result = self.store.claim_task_lock(
@@ -641,6 +641,9 @@ class TaskRunner:
             expected_updated_at=task.updated_at,
             wait_message=wait_message,
             next_run_at=self.now() + self.interval_seconds,
+            # 与领任务用同一个心跳窗口：容器重启后旧容器的 claim 会滞留，窗口不一致
+            # 会让一道死掉的 claim 把整队锁住 6 小时（默认值是 21600）。
+            stale_after_seconds=self.claim_stale_after_seconds,
             now=self.now(),
         )
         if result.stale:
