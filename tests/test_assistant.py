@@ -203,6 +203,27 @@ class ContextTests(unittest.TestCase):
         self.assertNotIn("safe_url", brief)
         self.assertEqual(brief["recent_events"][0], {"stage": "organizing", "status": "failed", "message": "超时", "created_at": 1})
 
+    def test_snapshot_health_is_compact_and_reports_assistant_health(self):
+        from app.web_api import serialize_health
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("哑舍 S01", "", "https://115cdn.com/s/health")
+            store.record_event(task.id, TaskStage.NEEDS_ACTION, TaskStatus.NEEDS_ACTION, "整理超时")
+            assistant.record_assistant_run(
+                ok=False,
+                session_dir=assistant.assistant_session_dir(store),
+                error="pi 退出码 1: boom",
+            )
+            snap = assistant.build_snapshot(store, task_id=task.id)
+            full = serialize_health(store, enabled=True)
+        health = snap["health"]
+        # 快照只留诊断用得上的字段，serialize_health 的其余字段是噪音
+        self.assertTrue(set(full) - set(health))
+        self.assertEqual(health["assistant"]["consecutive_failures"], 1)
+        self.assertIn("pi 退出码 1", health["assistant"]["last_error"])
+        self.assertLessEqual(len(json.dumps(health["assistant"], ensure_ascii=False)), 400)
+
     def test_user_message_embeds_snapshot(self):
         context = assistant.build_context_payload(
             version="0.0.0-test",
@@ -248,6 +269,14 @@ class CmsToolsExtensionTests(unittest.TestCase):
         self.assertIn('pi.on("tool_call"', self.src)
         self.assertIn("block: true", self.src)
         self.assertIn("terminate", self.src)
+
+    def test_automation_sweep_and_sensitive_paths_are_guarded(self):
+        # 自动巡检会话一律拦 terminate；读工具拒读密钥/凭据/会话文件
+        self.assertIn("CMS_TOOLS_AUTOMATION", self.src)
+        self.assertIn("AUTOMATED", self.src)
+        self.assertIn("SENSITIVE_PATH_RE", self.src)
+        self.assertIn("PATH_TOOLS", self.src)
+        self.assertIn("CONFIRM_MAX_CHARS", self.src)
 
     def test_uses_pi_truncation_signal_and_enums(self):
         self.assertIn("truncateHead", self.src)
@@ -301,6 +330,35 @@ class AssistantChatEndpointTests(unittest.TestCase):
             self.assertIn("哑舍 S01", captured["question"], "快照必须包含失败任务标题")
             self.assertIn("整理超时，等待人工处理", captured["question"], "快照必须包含失败原因")
             self.assertEqual(captured["session_dir"].name, "assistant-sessions")
+
+    def test_memory_endpoints_list_and_delete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _task = self._make_app(tmp)
+            memory_dir = assistant.assistant_memory_dir(assistant.assistant_session_dir(app.store))
+            memory_dir.mkdir(parents=True, exist_ok=True)
+            (memory_dir / "MEMORY.md").write_text("- 偏好：中文回复\n- 教训：先查事件\n", encoding="utf-8")
+            status, _headers, body = app.handle_request("GET", "/api/v1/assistant/memory", {}, b"")
+            payload = json.loads(body)
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["count"], 2)
+            self.assertEqual(payload["entries"][0], {"index": 1, "text": "- 偏好：中文回复"})
+            status, _headers, body = app.handle_request(
+                "POST",
+                "/api/v1/assistant/memory/delete",
+                {"Content-Type": "application/json"},
+                json.dumps({"indexes": [1]}).encode(),
+            )
+            payload = json.loads(body)
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["deleted"], ["- 偏好：中文回复"])
+            self.assertEqual([item["text"] for item in payload["entries"]], ["- 教训：先查事件"])
+            status, _headers, body = app.handle_request(
+                "POST",
+                "/api/v1/assistant/memory/delete",
+                {"Content-Type": "application/json"},
+                json.dumps({"indexes": []}).encode(),
+            )
+            self.assertEqual(status, 400)
 
     def test_chat_rejects_empty_question(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1028,6 +1086,25 @@ class MemoryTests(unittest.TestCase):
         self.assertIn("Unraid", memory)
 
 
+    def test_memory_entries_are_listed_and_deleted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session_dir = Path(tmp) / "assistant-sessions"
+            memory_dir = assistant.assistant_memory_dir(session_dir)
+            memory_dir.mkdir(parents=True, exist_ok=True)
+            (memory_dir / "MEMORY.md").write_text("- 偏好：中文回复\n- 教训：先查事件\n", encoding="utf-8")
+            self.assertEqual(assistant.read_memory_entries(session_dir), ["- 偏好：中文回复", "- 教训：先查事件"])
+            self.assertEqual(assistant.parse_memory_indexes("1, 3 5"), [1, 3, 5])
+            self.assertEqual(assistant.delete_memory_entries([1], session_dir), ["- 偏好：中文回复"])
+            self.assertEqual(assistant.read_memory_entries(session_dir), ["- 教训：先查事件"])
+            # 越界/非法序号不报错也不删东西
+            self.assertEqual(assistant.delete_memory_entries([7], session_dir), [])
+            self.assertEqual(assistant.delete_memory_entries([0], session_dir), [])
+            self.assertEqual(assistant.read_memory_entries(session_dir), ["- 教训：先查事件"])
+
+    def test_read_memory_entries_without_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(assistant.read_memory_entries(Path(tmp) / "assistant-sessions"), [])
+
     def test_run_pi_stream_emits_updates_and_final(self):
         import io
 
@@ -1067,6 +1144,139 @@ class MemoryTests(unittest.TestCase):
         ):
             with self.assertRaises(assistant.AssistantError):
                 assistant.run_pi_stream("问题", session_id="a" * 32, session_dir=Path("/tmp/assistant-test"))
+
+
+class AssistantStatsTests(unittest.TestCase):
+    """助手自身健康：调用/token/动作统计与会话清理。"""
+
+    def _session_dir(self, tmp: str) -> Path:
+        return Path(tmp) / "assistant-sessions"
+
+    def test_run_stats_accumulate_usage_and_reset_failure_streak(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session_dir = self._session_dir(tmp)
+            assistant.record_assistant_run(ok=False, session_dir=session_dir, error="pi 退出码 1")
+            failed = assistant.read_assistant_stats(session_dir)
+            self.assertEqual((failed["runs"], failed["failures"]), (1, 1))
+            self.assertEqual(failed["consecutive_failures"], 1)
+            self.assertEqual(failed["last_error"], "pi 退出码 1")
+            assistant.record_assistant_run(
+                ok=True,
+                session_dir=session_dir,
+                usage={"input": 10, "output": 5, "totalTokens": 15, "cost": {"total": 0.25}},
+            )
+            stats = assistant.read_assistant_stats(session_dir)
+            self.assertEqual((stats["runs"], stats["failures"]), (2, 1))
+            self.assertEqual(stats["consecutive_failures"], 0)
+            self.assertEqual((stats["tokens_input"], stats["tokens_output"], stats["tokens_total"]), (10, 5, 15))
+            self.assertAlmostEqual(stats["cost_total"], 0.25)
+            status = assistant.assistant_status(session_dir)
+            self.assertEqual((status["runs"], status["tokens_total"]), (2, 15))
+            self.assertIn("model", status)
+
+    def test_corrupt_stats_file_falls_back_to_zeroes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session_dir = self._session_dir(tmp)
+            path = assistant.assistant_stats_path(session_dir)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{ 不是 json", encoding="utf-8")
+            self.assertEqual(assistant.read_assistant_stats(session_dir)["runs"], 0)
+
+    def test_run_pi_records_usage_without_leaking_it_to_callers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session_dir = self._session_dir(tmp)
+            stdout = (
+                json.dumps(
+                    {
+                        "type": "message_end",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "结论：可以重试。"}],
+                            "usage": {"input": 30, "output": 7, "totalTokens": 37, "cost": {"total": 0.02}},
+                        },
+                    }
+                )
+                + "\n"
+            )
+            with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
+                assistant.subprocess, "run", return_value=_completed_process(stdout=stdout)
+            ):
+                result = assistant.run_pi("任务 #1 怎么办？", session_id="s-usage", session_dir=session_dir)
+            self.assertEqual(result["reply"], "结论：可以重试。")
+            self.assertNotIn("_usage", result)
+            stats = assistant.read_assistant_stats(session_dir)
+            self.assertEqual(stats["tokens_total"], 37)
+            self.assertEqual(stats["runs"], 1)
+
+    def test_failed_run_is_counted_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session_dir = self._session_dir(tmp)
+            with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
+                assistant.subprocess, "run", return_value=_completed_process(stderr="boom", returncode=1)
+            ):
+                with self.assertRaises(assistant.AssistantError):
+                    assistant.run_pi("问题", session_id="s-fail", session_dir=session_dir)
+            stats = assistant.read_assistant_stats(session_dir)
+            self.assertEqual((stats["runs"], stats["failures"], stats["consecutive_failures"]), (1, 1, 1))
+
+    def test_prune_drops_stale_sessions_and_caps_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session_dir = self._session_dir(tmp)
+            session_dir.mkdir(parents=True, exist_ok=True)
+            fresh = session_dir / "fresh.jsonl"
+            fresh.write_text("{}", encoding="utf-8")
+            stale = session_dir / "old.jsonl"
+            stale.write_text("{}", encoding="utf-8")
+            long_ago = time.time() - 30 * 86400
+            os.utime(stale, (long_ago, long_ago))
+            self.assertEqual(assistant.prune_assistant_sessions(session_dir, keep_days=7.0, max_files=300), 1)
+            self.assertTrue(fresh.exists())
+            self.assertFalse(stale.exists())
+            # 数量上限：最多保留 max_files 个（新的优先）
+            for index in range(3):
+                path = session_dir / f"s{index}.jsonl"
+                path.write_text("{}", encoding="utf-8")
+                stamp = time.time() - index * 60
+                os.utime(path, (stamp, stamp))
+            self.assertEqual(assistant.prune_assistant_sessions(session_dir, keep_days=7.0, max_files=2), 2)
+            self.assertEqual(sorted(path.name for path in session_dir.glob("*.jsonl")), ["fresh.jsonl", "s0.jsonl"])
+
+    def test_prune_on_missing_dir_is_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(assistant.prune_assistant_sessions(Path(tmp) / "nope"), 0)
+
+
+class AssistantConcurrencyTests(unittest.TestCase):
+    """pi 并发闸门：全局并发位 + 同会话串行。"""
+
+    def test_same_session_second_call_is_rejected(self):
+        with assistant._assistant_run_slot("session-a"):
+            with self.assertRaises(assistant.AssistantError):
+                with assistant._assistant_run_slot("session-a"):
+                    self.fail("同一会话不应并发进入")
+
+    def test_different_sessions_run_concurrently(self):
+        with assistant._assistant_run_slot("session-b"), assistant._assistant_run_slot("session-c"):
+            pass
+
+    def test_queue_timeout_when_all_slots_taken(self):
+        holders = []
+        try:
+            with patch.dict(os.environ, {"PI_ASSISTANT_QUEUE_TIMEOUT": "0"}):
+                while True:
+                    slot = assistant._assistant_run_slot(f"holder-{len(holders)}")
+                    try:
+                        slot.__enter__()
+                    except assistant.AssistantError:
+                        break
+                    holders.append(slot)
+                self.assertTrue(holders, "至少应有一个并发位")
+                with self.assertRaises(assistant.AssistantError):
+                    with assistant._assistant_run_slot("late"):
+                        pass
+        finally:
+            for slot in holders:
+                slot.__exit__(None, None, None)
 
 
 class AssistantOpsScriptTests(unittest.TestCase):
@@ -1117,6 +1327,36 @@ class AssistantOpsScriptTests(unittest.TestCase):
         payload = json.loads(out.stdout)
         self.assertFalse(payload["applied"])
         self.assertTrue(payload["reason"])
+
+    def test_pi_action_is_written_back_to_diagnosis_metadata(self):
+        out = self._run("act", str(self.task_id), "terminate")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        store = TaskStore(self.db_path)
+        metadata = store.find_task(self.task_id).metadata or {}
+        diagnosis = metadata.get(assistant.DIAGNOSIS_META_KEY) or {}
+        self.assertEqual(diagnosis.get("auto_repair_source"), "pi")
+        self.assertEqual(diagnosis.get("auto_repair_action"), "terminate")
+        self.assertTrue(diagnosis.get("auto_repair_applied"))
+        self.assertIn("terminate", diagnosis.get("auto_repair_tried") or [])
+        stats = assistant.read_assistant_stats(assistant.assistant_session_dir(store))
+        self.assertEqual(stats["actions_applied"], 1)
+        self.assertEqual(stats["last_action"], "terminate")
+
+    def test_automation_session_cannot_terminate(self):
+        env = dict(os.environ, DATABASE_PATH=str(self.db_path), CMS_TOOLS_AUTOMATION="1")
+        out = subprocess.run(
+            [sys.executable, str(self.script), "act", str(self.task_id), "terminate"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        payload = json.loads(out.stdout)
+        self.assertFalse(payload["applied"])
+        self.assertIn("自动巡检", payload["reason"])
+        store = TaskStore(self.db_path)
+        self.assertEqual(str(store.find_task(self.task_id).status.value), "pending")
 
 
 if __name__ == "__main__":

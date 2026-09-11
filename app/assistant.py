@@ -10,6 +10,8 @@ pi 负责模型接入、凭据与会话记忆；本模块只做三件事：
 """
 from __future__ import annotations
 
+import contextlib
+import functools
 import json
 import logging
 import os
@@ -23,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .models import TaskStatus
 from .web_api import api_task_detail, api_tasks, serialize_health
 
 DEFAULT_TIMEOUT_SECONDS = 120.0
@@ -350,14 +353,284 @@ def watch_interval_seconds(default: float = 900.0) -> float:
     return max(60.0, _env_seconds("PI_ASSISTANT_WATCH_INTERVAL", default))
 
 
-def auto_repair_cooldown_seconds() -> float:
-    """同一任务两次自动修复的最小间隔，默认 6 小时。"""
-    return _env_seconds("PI_ASSISTANT_AUTO_REPAIR_COOLDOWN", 6 * 3600)
-
-
 def diagnosis_cooldown_seconds() -> float:
     """同一任务两次自动诊断的最小间隔，默认 6 小时（即使事件变了）。"""
     return _env_seconds("PI_ASSISTANT_DIAGNOSIS_COOLDOWN", 6 * 3600)
+
+
+# ---- 助手自身健康与用量：统计写在数据卷上，巡检、脚本、Web 共享一份 ----
+# ponytail: 跨进程读改写有丢计数窗口（pi 动作很稀疏），只用于观测，不参与判定。
+ASSISTANT_STATS_FILENAME = "assistant-stats.json"
+_STATS_LOCK = threading.Lock()
+_STATS_NUMERIC = (
+    "runs",
+    "failures",
+    "consecutive_failures",
+    "tokens_input",
+    "tokens_output",
+    "tokens_total",
+    "cost_total",
+    "actions_applied",
+    "actions_skipped",
+)
+
+
+def assistant_stats_path(session_dir: Path | None = None) -> Path:
+    base = Path(session_dir).parent if session_dir else assistant_session_dir(None).parent
+    return base / ASSISTANT_STATS_FILENAME
+
+
+def read_assistant_stats(session_dir: Path | None = None) -> dict[str, Any]:
+    """读助手运行统计；文件缺失或损坏时返回零值骨架。"""
+    stats: dict[str, Any] = {key: 0 for key in _STATS_NUMERIC}
+    stats.update(
+        {
+            "last_run_at": 0.0,
+            "last_error": "",
+            "last_error_at": 0.0,
+            "last_action": "",
+            "last_action_at": 0.0,
+            "updated_at": 0.0,
+        }
+    )
+    try:
+        data = json.loads(assistant_stats_path(session_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return stats
+    if not isinstance(data, dict):
+        return stats
+    for key, value in data.items():
+        if key not in stats:
+            continue
+        if key in _STATS_NUMERIC:
+            try:
+                stats[key] = float(value or 0)
+            except (TypeError, ValueError):
+                continue
+        else:
+            stats[key] = value
+    return stats
+
+
+def _write_assistant_stats(
+    *,
+    deltas: dict[str, float] | None = None,
+    sets: dict[str, Any] | None = None,
+    session_dir: Path | None = None,
+) -> None:
+    with _STATS_LOCK:
+        stats = read_assistant_stats(session_dir)
+        for key, amount in (deltas or {}).items():
+            stats[key] = float(stats.get(key) or 0) + float(amount)
+        stats.update(sets or {})
+        stats["updated_at"] = time.time()
+        path = assistant_stats_path(session_dir)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(stats, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as exc:
+            LOG.debug("Assistant stats write failed: %s", exc)
+
+
+def record_assistant_run(
+    *,
+    ok: bool,
+    session_dir: Path | None = None,
+    error: str = "",
+    usage: Any = None,
+) -> None:
+    """记一次 pi 调用：失败连击数 + token 用量（供 system_stats / 快照观测）。"""
+    deltas: dict[str, float] = {"runs": 1.0}
+    sets: dict[str, Any] = {"last_run_at": time.time()}
+    if ok:
+        sets["consecutive_failures"] = 0.0
+        if isinstance(usage, dict):
+            cost = usage.get("cost") if isinstance(usage.get("cost"), dict) else {}
+            for stat_key, source in (
+                ("tokens_input", "input"),
+                ("tokens_output", "output"),
+                ("tokens_total", "totalTokens"),
+            ):
+                try:
+                    deltas[stat_key] = float(usage.get(source) or 0)
+                except (TypeError, ValueError):
+                    deltas[stat_key] = 0.0
+            try:
+                deltas["cost_total"] = float(cost.get("total") or 0)
+            except (TypeError, ValueError):
+                deltas["cost_total"] = 0.0
+    else:
+        deltas["failures"] = 1.0
+        deltas["consecutive_failures"] = 1.0
+        sets["last_error"] = str(error or "")[:300]
+        sets["last_error_at"] = time.time()
+    _write_assistant_stats(deltas=deltas, sets=sets, session_dir=session_dir)
+
+
+def record_assistant_action(*, action: str, applied: bool, session_dir: Path | None = None) -> None:
+    """记一次 pi 发起的任务动作（成功/被拒都记）。"""
+    _write_assistant_stats(
+        deltas={"actions_applied" if applied else "actions_skipped": 1.0},
+        sets={"last_action": str(action or ""), "last_action_at": time.time()},
+        session_dir=session_dir,
+    )
+
+
+def assistant_status(session_dir: Path | None = None) -> dict[str, Any]:
+    """助手自身健康：开关、模型、最近运行/连续失败、token 与动作累计。"""
+    stats = read_assistant_stats(session_dir)
+    return {
+        "tools": tools_enabled(),
+        "memory": memory_enabled(),
+        "auto_diagnosis": auto_diagnosis_enabled(),
+        "auto_repair": auto_repair_enabled(),
+        "model": assistant_model() or "default",
+        "runs": int(stats.get("runs") or 0),
+        "failures": int(stats.get("failures") or 0),
+        "consecutive_failures": int(stats.get("consecutive_failures") or 0),
+        "last_run_at": stats.get("last_run_at") or 0.0,
+        "last_error": str(stats.get("last_error") or ""),
+        "tokens_total": int(stats.get("tokens_total") or 0),
+        "cost_total": float(stats.get("cost_total") or 0.0),
+        "actions_applied": int(stats.get("actions_applied") or 0),
+        "last_action": str(stats.get("last_action") or ""),
+    }
+
+
+# ---- 并发闸门：pi 子进程数上限 + 同一会话串行 ----
+_RUN_SLOTS: threading.BoundedSemaphore | None = None
+_RUN_SLOTS_LOCK = threading.Lock()
+_RUN_SESSION_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _run_slots() -> threading.BoundedSemaphore:
+    global _RUN_SLOTS
+    with _RUN_SLOTS_LOCK:
+        if _RUN_SLOTS is None:
+            try:
+                limit = max(1, int(os.environ.get("PI_ASSISTANT_MAX_CONCURRENCY") or 3))
+            except (TypeError, ValueError):
+                limit = 3
+            _RUN_SLOTS = threading.BoundedSemaphore(limit)
+        return _RUN_SLOTS
+
+
+@contextlib.contextmanager
+def _assistant_run_slot(session_id: str | None):
+    """占一个 pi 并发位；同一 session_id 同时只允许一次调用（pi 会话文件不并发写）。
+
+    排队超时（PI_ASSISTANT_QUEUE_TIMEOUT，默认 30 秒）或同会话重复调用直接抛
+    AssistantError，由调用方回给用户，而不是让请求无限堆积。
+    """
+    slots = _run_slots()
+    if not slots.acquire(timeout=_env_seconds("PI_ASSISTANT_QUEUE_TIMEOUT", 30.0)):
+        raise AssistantError("助手繁忙（排队超时），请稍后重试")
+    lock: threading.Lock | None = None
+    locked = False
+    try:
+        if session_id:
+            # ponytail: 会话锁不回收（诊断会话一个任务一个 id），每天几条量级，先不管。
+            with _RUN_SLOTS_LOCK:
+                lock = _RUN_SESSION_LOCKS.setdefault(str(session_id), threading.Lock())
+            locked = lock.acquire(blocking=False)
+            if not locked:
+                raise AssistantError("该会话正在处理上一条消息，请稍候再发")
+        yield
+    finally:
+        if lock is not None and locked:
+            lock.release()
+        slots.release()
+
+
+def _pi_run(fn):
+    """给 run_pi / run_pi_stream 套上并发闸门与用量统计（两处入口只写一次）。"""
+
+    @functools.wraps(fn)
+    def wrapper(question: str, *, session_id: str | None = None, **kwargs):
+        with _assistant_run_slot(session_id):
+            try:
+                result = fn(question, session_id=session_id, **kwargs)
+            except AssistantError as exc:
+                record_assistant_run(ok=False, session_dir=kwargs.get("session_dir"), error=str(exc))
+                raise
+        usage = result.pop("_usage", None) if isinstance(result, dict) else None
+        record_assistant_run(ok=True, session_dir=kwargs.get("session_dir"), usage=usage)
+        return result
+
+    return wrapper
+
+
+def prune_assistant_sessions(
+    session_dir: Path | None = None,
+    *,
+    keep_days: float = 7.0,
+    max_files: int = 300,
+) -> int:
+    """清理 pi 会话文件：保留最近 keep_days 天且不超过 max_files 个，返回删除数。"""
+    base = Path(session_dir) if session_dir else assistant_session_dir(None)
+
+    def safe_mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    try:
+        files = sorted(base.rglob("*.jsonl"), key=safe_mtime, reverse=True)
+    except OSError:
+        return 0
+    cutoff = time.time() - max(0.0, keep_days) * 86400.0
+    removed = 0
+    for index, path in enumerate(files):
+        if index < max_files and safe_mtime(path) >= cutoff:
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            continue
+    if removed:
+        LOG.info("Assistant sessions pruned: %d file(s) under %s", removed, base)
+    return removed
+
+
+# ---- 长期记忆的查看与删除（Web / Telegram 都走这两个函数）----
+def read_memory_entries(session_dir: Path | None = None) -> list[str]:
+    """按文件顺序返回记忆条目（含日期前缀）。"""
+    path = assistant_memory_dir(session_dir) / "MEMORY.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def delete_memory_entries(indexes: list[int], session_dir: Path | None = None) -> list[str]:
+    """按 1-based 序号删除记忆条目，返回被删条目（越界序号忽略）。"""
+    wanted = {int(index) for index in indexes if int(index) > 0}
+    if not wanted:
+        return []
+    entries = read_memory_entries(session_dir)
+    removed = [entry for position, entry in enumerate(entries, start=1) if position in wanted]
+    if not removed:
+        return []
+    kept = [entry for position, entry in enumerate(entries, start=1) if position not in wanted]
+    path = assistant_memory_dir(session_dir) / "MEMORY.md"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(f"{entry}\n" for entry in kept), encoding="utf-8")
+    except OSError as exc:
+        LOG.warning("Assistant memory delete failed: %s", exc)
+        return []
+    LOG.info("Assistant memory: %d entr(ies) deleted", len(removed))
+    return removed
+
+
+def parse_memory_indexes(text: str) -> list[int]:
+    """解析「1」「1,3,5」这类记忆序号。"""
+    return [int(part) for part in re.findall(r"\d+", str(text or ""))]
 
 
 def _task_text_blob(task: Any, store: Any | None = None) -> str:
@@ -380,6 +653,15 @@ def _task_text_blob(task: Any, store: Any | None = None) -> str:
 
 
 def _task_looks_share_risk(task: Any, store: Any | None = None) -> bool:
+    """分享失效判定：先看结构化字段（管线写的），文本标记只作兜底。"""
+    metadata = getattr(task, "metadata", {}) or {}
+    if isinstance(metadata, dict):
+        invalid_values = {"invalid", "unavailable"}
+        for key in ("share_validation_status", "share_review_status"):
+            if str(metadata.get(key) or "").strip().lower() in invalid_values:
+                return True
+        if str(metadata.get("invalid_share_status") or "").strip():
+            return True
     blob = _task_text_blob(task, store)
     return any(marker.lower() in blob for marker in _SHARE_RISK_MARKERS)
 
@@ -466,17 +748,67 @@ def build_task_brief(task: dict[str, Any] | None) -> dict[str, Any] | None:
     return brief
 
 
+# 快照里的 health 只留诊断用得上的字段：serialize_health 还带一串 epoch
+# 时间戳和备份明细，对模型是噪音（要细节让助手调 system_stats）。
+_SNAPSHOT_HEALTH_FIELDS = (
+    "enabled",
+    "recent_count",
+    "pending_count",
+    "running_count",
+    "needs_action_count",
+    "problem_count",
+    "lock_wait_count",
+    "p115_cooldown_active",
+    "runner_heartbeat_stale",
+    "runner_state",
+    "runner_active",
+    "runner_active_task_id",
+    "runner_active_stage",
+    "wait_details",
+    "latest_problem",
+    "latest_lock_wait",
+)
+
+
+def _compact_assistant(status: dict[str, Any]) -> dict[str, Any]:
+    """助手自身健康：只带能说明「助手是不是在连续失败」的字段。"""
+    compact = {
+        key: status[key]
+        for key in ("runs", "failures", "consecutive_failures", "tokens_total", "actions_applied")
+        if status.get(key)
+    }
+    last_error = str(status.get("last_error") or "")
+    if last_error:
+        compact["last_error"] = last_error[:200]
+    return compact
+
+
+def _snapshot_health(health: dict[str, Any] | None, session_dir: Path | None = None) -> dict[str, Any]:
+    source = health or {}
+    compact = {
+        key: source.get(key) for key in _SNAPSHOT_HEALTH_FIELDS if source.get(key) not in (None, "", [], {})
+    }
+    for key in ("latest_problem", "latest_lock_wait"):
+        if isinstance(compact.get(key), dict):
+            compact[key] = build_task_brief(compact[key])
+    backup = source.get("backup")
+    if isinstance(backup, dict) and (backup.get("error") or backup.get("status") not in (None, "", "never")):
+        compact["backup"] = {key: backup[key] for key in ("status", "error") if backup.get(key)}
+    assistant_state = _compact_assistant(assistant_status(session_dir))
+    if assistant_state:
+        compact["assistant"] = assistant_state
+    return compact
+
+
 def build_context_payload(
     *,
     version: str,
     health: dict[str, Any] | None,
     open_tasks: list[dict[str, Any]],
     task_detail: dict[str, Any] | None = None,
+    session_dir: Path | None = None,
 ) -> dict[str, Any]:
-    compact_health = dict(health or {})
-    for key in ("latest_problem", "latest_lock_wait"):
-        if isinstance(compact_health.get(key), dict):
-            compact_health[key] = build_task_brief(compact_health[key])
+    compact_health = _snapshot_health(health, session_dir)
     payload: dict[str, Any] = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "version": version,
@@ -517,14 +849,18 @@ def build_snapshot(
         lifecycle_actions_enabled=engine_enabled,
         max_retries=max_retries,
     )["items"]
-    # 列表不附事件流（默认有 task_detail/task_events），只留最后一条说明。
+    # 列表不附事件流（默认有 task_detail/task_events）；只给需要人工的条目留
+    # 最后一条说明——那就是要处理的原因，其余状态省下这段体积。
+    attention_statuses = {TaskStatus.NEEDS_ACTION.value, TaskStatus.FAILED.value}
     for item in open_items:
+        if str(item.get("status") or "") not in attention_statuses:
+            continue
         try:
             events = store.list_events(int(item["id"]))
         except (TypeError, ValueError):
             continue
         if events:
-            item["last_event"] = str((events[-1] or {}).get("message") or "")[:240]
+            item["last_event"] = str((events[-1] or {}).get("message") or "")[:160]
     detail = None
     try:
         focused_id = int(task_id)
@@ -542,6 +878,7 @@ def build_snapshot(
         health=health,
         open_tasks=open_items,
         task_detail=detail,
+        session_dir=assistant_session_dir(store),
     )
 
 
@@ -560,6 +897,25 @@ def build_user_message(question: str, context: dict[str, Any]) -> str:
         "---- 系统快照（自动采集，供诊断参考）----\n"
         f"{json.dumps(context, ensure_ascii=False, default=str)}"
     )
+
+
+def _extract_usage(stdout: str) -> dict[str, Any] | None:
+    """取最后一次 assistant 消息的 token 用量（pi NDJSON 里 message.usage）。"""
+    usage: dict[str, Any] | None = None
+    for line in str(stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = event.get("message") if isinstance(event, dict) else None
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            candidate = message.get("usage")
+            if isinstance(candidate, dict):
+                usage = candidate
+    return usage
 
 
 def _parse_reply(stdout: str) -> str:
@@ -601,6 +957,7 @@ def _build_pi_argv(
     inject_memory: bool,
     model: str,
     tools: bool | None = None,
+    automation: bool = False,
 ) -> tuple[list[str], dict[str, str]]:
     use_tools = tools_enabled() if tools is None else tools
     argv = [
@@ -640,9 +997,13 @@ def _build_pi_argv(
     config_dir = str(os.environ.get("PI_ASSISTANT_CONFIG_DIR") or "").strip()
     if config_dir:
         env["PI_CODING_AGENT_DIR"] = config_dir
+    if automation:
+        # 自动巡检（无人确认）会话：扩展据此一律拦截 terminate（见 cms-tools.ts）。
+        env["CMS_TOOLS_AUTOMATION"] = "1"
     return argv, env
 
 
+@_pi_run
 def run_pi(
     question: str,
     *,
@@ -654,6 +1015,7 @@ def run_pi(
     system_prompt: str | None = None,
     inject_memory: bool = False,
     tools: bool | None = None,
+    automation: bool = False,
 ) -> dict[str, str]:
     """非交互调用 pi，返回 {reply, session_id}。失败抛 AssistantError/TimeoutExpired。
 
@@ -680,6 +1042,7 @@ def run_pi(
         inject_memory=inject_memory,
         model=model,
         tools=tools,
+        automation=automation,
     )
     # 容器冷启动后的首次调用可能撞上 pi 自身 bootstrap 的瞬态失败：
     # 进程级失败重试一次再放弃，避免任务背上数小时的诊断退避。
@@ -699,13 +1062,18 @@ def run_pi(
         except subprocess.TimeoutExpired as exc:
             raise AssistantTimeout(f"助手响应超时（超过 {timeout:.0f} 秒），可稍后重试或调大 PI_ASSISTANT_TIMEOUT") from exc
         if proc.returncode == 0:
-            return {"reply": _parse_reply(proc.stdout or ""), "session_id": session_id or ""}
+            return {
+                "reply": _parse_reply(proc.stdout or ""),
+                "session_id": session_id or "",
+                "_usage": _extract_usage(proc.stdout or "") or {},
+            }
         stderr_tail = (proc.stderr or proc.stdout or "")[-600:].strip()
         if attempt == 1:
             LOG.warning("pi run failed (attempt 1/2), retrying: %s", stderr_tail[:200])
     raise AssistantError(f"pi 退出码 {proc.returncode}: {stderr_tail or '无输出'}")
 
 
+@_pi_run
 def run_pi_stream(
     question: str,
     *,
@@ -717,6 +1085,7 @@ def run_pi_stream(
     system_prompt: str | None = None,
     inject_memory: bool = False,
     tools: bool | None = None,
+    automation: bool = False,
     on_update=None,
 ) -> dict[str, str]:
     """流式版 run_pi：解析 stdout 的 NDJSON 事件流，把助手的阶段性文本通过
@@ -741,6 +1110,7 @@ def run_pi_stream(
         inject_memory=inject_memory,
         model=model,
         tools=tools,
+        automation=automation,
     )
     proc = subprocess.Popen(  # noqa: S603 - 固定 argv，无 shell
         argv,
@@ -752,6 +1122,7 @@ def run_pi_stream(
         cwd=str(session_dir),
     )
     latest = ""
+    usage: dict[str, Any] = {}
     deadline = time.time() + timeout
     returncode = -1
     try:
@@ -773,6 +1144,8 @@ def run_pi_stream(
             message = event.get("message") or {}
             if message.get("role") != "assistant":
                 continue
+            if isinstance(message.get("usage"), dict):
+                usage = message["usage"]
             text = "".join(
                 str(part.get("text") or "")
                 for part in message.get("content") or []
@@ -807,4 +1180,4 @@ def run_pi_stream(
         raise AssistantError(f"pi 退出码 {returncode}: {stderr_tail or '无输出'}")
     if not latest:
         raise AssistantError("pi 未返回可解析的回复")
-    return {"reply": latest, "session_id": session_id or ""}
+    return {"reply": latest, "session_id": session_id or "", "_usage": usage}

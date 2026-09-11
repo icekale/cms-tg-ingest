@@ -17,8 +17,24 @@ const OPS_SCRIPT = process.env.CMS_TOOLS_OPS_SCRIPT || "/app/scripts/assistant_o
 const TASK_ACTIONS = ["retry", "emby", "restore", "reprocess", "resume_organizing", "terminate"] as const;
 const TASK_STATUSES = ["pending", "running", "succeeded", "failed", "needs_action", "cancelled"] as const;
 const PRUNE_TOOLS = new Set(["task_detail", "query_tasks", "task_events", "system_stats"]);
-const CONFIRM_RE = /确认|好的|执行|可以|同意|yes|\bok\b/i;
+// 「执行/可以」这类词会出现在自动诊断的注入文本里，不能算确认；只认明确短确认，
+// 且带问号的消息一律当作“还在问要不要做”。
+const CONFIRM_RE = /确认|同意|批准|好的|好嘞|可以执行|执行吧|干吧|yes|\bok\b/i;
+const CONFIRM_MAX_CHARS = 40;
+// 自动巡检会话（无人可确认）：破坏性动作一律拒绝，由 app/assistant.py 注入。
+const AUTOMATED = process.env.CMS_TOOLS_AUTOMATION === "1";
+// 读工具路径黑名单：密钥/凭据/会话/数据库即使被诱导也不给读。
+const SENSITIVE_PATH_RE =
+  /(^|\/)\.env(\.|$)|(^|\/)\.netrc$|(^|\/)\.git-credentials$|(^|\/)id_(rsa|ed25519|ecdsa)$|\.pem$|\.key$|\.db(-wal|-shm)?$|\.jsonl$|(^|\/)(credentials?|secrets?|cookies?|auth)(\.[a-z0-9]+)?$|(^|\/)proc\/(self|\d+)\/environ/;
+const PATH_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const SNAPSHOT_MARK = "---- 系统快照";
+
+function looksLikeConfirmation(text: string): boolean {
+  const trimmed = String(text ?? "").trim();
+  if (!trimmed || trimmed.length > CONFIRM_MAX_CHARS) return false;
+  if (/[？?]/.test(trimmed)) return false;
+  return CONFIRM_RE.test(trimmed);
+}
 
 function run(script: string, args: string[], signal?: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -179,7 +195,7 @@ export default function (pi: ExtensionAPI) {
       "用户只是问“该怎么办”时不要调用。执行后如实报告 applied 与 reason。",
     promptGuidelines: [
       "Call task_action only after the user's latest message clearly agrees (确认/好的/执行/yes/ok). If they only asked what to do, advise first.",
-      "task_action terminate is blocked unless that latest user message contains a confirmation word.",
+      "task_action terminate is destructive: it is blocked unless that latest user message is a short confirmation (no question mark) — never in an automated sweep session.",
     ],
     parameters: Type.Object({
       task_id: Type.Integer({ description: "任务 ID" }),
@@ -192,10 +208,20 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", (event, ctx) => {
+    if (PATH_TOOLS.has(event.toolName)) {
+      const path = String((event.input as Record<string, unknown> | undefined)?.path ?? "");
+      if (path && SENSITIVE_PATH_RE.test(path)) {
+        return { block: true, reason: `拒绝读取敏感文件：${path}（密钥/凭据/会话不在助手可读范围内）` };
+      }
+      return;
+    }
     if (event.toolName !== "task_action") return;
     if (String(event.input?.action ?? "") !== "terminate") return;
-    if (CONFIRM_RE.test(lastUserQuestion(ctx))) return;
-    return { block: true, reason: "task_action terminate 需要用户本轮明确确认（确认/好的/执行/yes/ok）" };
+    if (AUTOMATED) {
+      return { block: true, reason: "自动巡检会话不允许 terminate：破坏性动作只能由人工确认" };
+    }
+    if (looksLikeConfirmation(lastUserQuestion(ctx))) return;
+    return { block: true, reason: "task_action terminate 需要用户本轮明确确认（例如“确认执行”），且不能用问句" };
   });
 
   pi.on("context", (event) => ({ messages: pruneMessages(event.messages) }));

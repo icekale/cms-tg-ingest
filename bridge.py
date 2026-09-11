@@ -260,7 +260,7 @@ _HDHIVE_PENDING_FILTERS_LOCK = threading.Lock()
 _HDHIVE_PENDING_FILTERS: dict[str, int] = {}
 _HDHIVE_FILTER_PROMPT = "请发送集数过滤，例如 S01E01-S01E10,S02；发送“清除”恢复全部正常集。"
 ED2K_HELP_EXAMPLE = "ed2k://|file|Example.mkv|10|" + "0123456789ABCDEF" * 2 + "|/"
-HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 分享、磁力或 ED2K 链接\n- 磁力/ED2K 会进入 115 云下载，再复用 CMS 整理和分享 STRM 流程\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- 新链接追更：追更 #任务号 <新115链接>\n- /搜索：通过 TMDB 匹配 HDHive 影片/剧集，筛选网盘并解锁资源（/hdhive_search 仍兼容）\n- /订阅 <HDHive剧集链接>：创建 HDHive 剧集订阅\n- 发送 HDHive 剧集页面也可直接订阅，例如 https://re0.me/tv/xxxxxxxx\n- /status 查看最近任务\n- 直接发送文字提问即可使用 AI 助手（基于 pi）：它会实时查任务库、流式回复、记住你的偏好；/助手 [任务号] <问题> 与 /诊断 仍可用\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd\n""" + ED2K_HELP_EXAMPLE
+HELP_TEXT = """直接发送 115 分享链接即可自动提交 CMS。\n\n支持：\n- 一条消息多个 115 分享、磁力或 ED2K 链接\n- 磁力/ED2K 会进入 115 云下载，再复用 CMS 整理和分享 STRM 流程\n- 自动跳过重复链接\n- 识别不确定时用按钮确认分类\n- 自动尝试确认 Emby 是否入库\n- 已完成剧集可在“最近任务”点“追更”，或发送“追更 115链接”\n- 新链接追更：追更 #任务号 <新115链接>\n- /搜索：通过 TMDB 匹配 HDHive 影片/剧集，筛选网盘并解锁资源（/hdhive_search 仍兼容）\n- /订阅 <HDHive剧集链接>：创建 HDHive 剧集订阅\n- 发送 HDHive 剧集页面也可直接订阅，例如 https://re0.me/tv/xxxxxxxx\n- /status 查看最近任务\n- 直接发送文字提问即可使用 AI 助手（基于 pi）：它会实时查任务库、流式回复、记住你的偏好；/助手 [任务号] <问题> 与 /诊断 仍可用\n- /记忆 查看 AI 助手的长期记忆，/忘记 <序号> 删掉其中一条\n- /metrics 查看任务统计\n- /clear_history 清理已结束历史\n- /help 查看帮助\n\n示例：\nhttps://115cdn.com/s/xxxx?password=abcd\n""" + ED2K_HELP_EXAMPLE
 MENU_BUTTONS = {
     "🔍 搜索": "/搜索",
     "📋 最近任务": "/status",
@@ -2661,6 +2661,43 @@ def build_assistant_guards(config: Any, self_share_config: Any) -> dict[str, Any
     }
 
 
+def handle_memory_command(
+    text: str,
+    command: str,
+    chat_id: int | str,
+    telegram: TelegramClient,
+    task_store: Any,
+) -> None:
+    """/记忆 列出长期记忆（编号）；/忘记 <序号> 删除其中几条（支持 1,3）。"""
+    if not assistant.memory_enabled():
+        telegram.send_message(chat_id, "AI 助手长期记忆已关闭（PI_ASSISTANT_MEMORY=0）。")
+        return
+    session_dir = assistant.assistant_session_dir(task_store)
+    if command in {"/忘记", "/forget"}:
+        first_token = text.split()[0] if text.split() else command
+        removed = assistant.delete_memory_entries(
+            assistant.parse_memory_indexes(text[len(first_token):]),
+            session_dir,
+        )
+        if not removed:
+            telegram.send_message(chat_id, "没有删除：用法是 /忘记 序号（先用 /记忆 看序号）。")
+            return
+        lines = "\n".join(f"- {safe_telegram_text(entry, 160)}" for entry in removed)
+        telegram.send_message(chat_id, f"已删除 {len(removed)} 条记忆：\n{lines}")
+        return
+    entries = assistant.read_memory_entries(session_dir)
+    if not entries:
+        telegram.send_message(chat_id, "还没有长期记忆；多聊几轮助手会自己记下来。")
+        return
+    shown = entries[-25:]
+    offset = len(entries) - len(shown)
+    body = "\n".join(
+        f"{offset + index}. {safe_telegram_text(entry, 160)}" for index, entry in enumerate(shown, start=1)
+    )
+    header = f"🧠 长期记忆 共 {len(entries)} 条" + (f"，显示最近 {len(shown)} 条：" if offset else "：")
+    telegram.send_message(chat_id, f"{header}\n{body}\n\n删除：/忘记 序号")
+
+
 def handle_assistant_command(
     text: str,
     command: str,
@@ -2869,6 +2906,7 @@ def run_assistant_diagnosis_sweep(
                     model=assistant.assistant_model(),
                     timeout=assistant.assistant_timeout(),
                     tools=True,
+                    automation=True,
                 )
                 merged = dict(existing) if isinstance(existing, dict) else {}
                 merged.update(
@@ -3026,6 +3064,8 @@ def start_assistant_watch_loop(
                     engine_enabled=engine_enabled,
                     max_retries=max_retries,
                 )
+                # 顺手清理过期 pi 会话文件（保留 7 天 / 最多 300 个）。
+                assistant.prune_assistant_sessions(assistant.assistant_session_dir(task_store))
             except Exception:
                 LOG.exception("Assistant watch sweep failed")
             if loop_stop_event.wait(interval):
@@ -4142,6 +4182,10 @@ def handle_update(
                 ) if task_store is not None else None,
             ),
         )
+        return
+
+    if command in {"/记忆", "/memory", "/忘记", "/forget"}:
+        handle_memory_command(text, command, chat_id, telegram, task_store)
         return
 
     if command in {"/助手", "/ai", "/诊断"}:

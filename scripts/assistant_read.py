@@ -20,6 +20,7 @@ for candidate in _REPO_CANDIDATES:
         sys.path.insert(0, str(candidate))
         break
 
+from app.assistant import assistant_session_dir, assistant_status  # noqa: E402
 from app.models import TaskStatus  # noqa: E402
 from app.task_store import TaskStore  # noqa: E402
 from app.web_api import api_task_detail, serialize_event  # noqa: E402
@@ -81,7 +82,18 @@ def cmd_stats(args) -> None:
         for t in tasks
         if str(getattr(t.status, "value", t.status)) == TaskStatus.NEEDS_ACTION.value
     ][:15]
-    print(json.dumps({"total_recent": len(tasks), "by_status": by_status, "needs_action": needs_action}, ensure_ascii=False))
+    # 助手自身健康（连续失败、token 累计、已执行动作）也在这里给出去。
+    print(
+        json.dumps(
+            {
+                "total_recent": len(tasks),
+                "by_status": by_status,
+                "needs_action": needs_action,
+                "assistant": assistant_status(assistant_session_dir(store)),
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 def main() -> None:

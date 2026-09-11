@@ -1,6 +1,6 @@
 <script setup>
 import { nextTick, onMounted, ref, watch } from 'vue'
-import { NButton, NCard, NInput, NTag, useMessage } from 'naive-ui'
+import { NButton, NCard, NInput, NModal, NPopconfirm, NTag, useMessage } from 'naive-ui'
 import { api } from '../api'
 
 const message = useMessage()
@@ -56,6 +56,32 @@ function resetChat() {
   sessionId.value = ''
   try { localStorage.removeItem(SESSION_KEY) } catch (_) { /* 同上 */ }
 }
+
+const memory = ref({ show: false, entries: [] })
+
+async function openMemory() {
+  memory.value.show = true
+  await reloadMemory()
+}
+
+async function reloadMemory() {
+  try {
+    const data = await api.assistantMemory()
+    memory.value.entries = data.entries || []
+  } catch (err) {
+    message.error(err.message)
+  }
+}
+
+async function removeMemory(entry) {
+  try {
+    const data = await api.assistantMemoryDelete([entry.index])
+    memory.value.entries = data.entries || []
+    message.success('已删除')
+  } catch (err) {
+    message.error(err.message)
+  }
+}
 </script>
 
 <template>
@@ -65,6 +91,7 @@ function resetChat() {
       <p>基于 pi 的运维诊断：回答前会自动附上当前健康状态与任务快照，只给建议不执行操作。</p>
     </div>
     <div class="page-actions">
+      <n-button secondary :disabled="busy" @click="openMemory">记忆</n-button>
       <n-button secondary :disabled="busy" @click="resetChat">新对话</n-button>
     </div>
   </div>
@@ -89,6 +116,19 @@ function resetChat() {
       <n-button type="primary" :loading="busy" @click="send()">发送</n-button>
     </div>
   </n-card>
+  <n-modal v-model:show="memory.show" preset="card" title="AI 长期记忆" class="memory-modal">
+    <p class="subtle">助手从对话里自己记下的偏好与教训，每轮对话都会带上；删掉就不再使用。</p>
+    <div v-if="!memory.entries.length" class="subtle" style="margin-top: 12px">还没有记忆。</div>
+    <div v-for="entry in memory.entries" :key="entry.index" class="memory-row">
+      <span>{{ entry.index }}. {{ entry.text }}</span>
+      <n-popconfirm @positive-click="removeMemory(entry)">
+        <template #trigger>
+          <n-button size="tiny" quaternary>删除</n-button>
+        </template>
+        删除这条记忆？
+      </n-popconfirm>
+    </div>
+  </n-modal>
 </template>
 
 <style scoped>
@@ -130,5 +170,19 @@ function resetChat() {
 }
 .assistant-input .n-button {
   flex-shrink: 0;
+}
+.memory-modal {
+  max-width: 720px;
+  width: 90%;
+}
+.memory-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-soft, rgba(128, 128, 128, 0.18));
+  line-height: 1.6;
+  word-break: break-word;
 }
 </style>

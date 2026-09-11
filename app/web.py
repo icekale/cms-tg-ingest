@@ -2704,6 +2704,47 @@ class WebApp:
                 )
             )
             return status, {**response_headers, **auth_headers}, response_body
+        if method == "GET" and path == "/api/v1/assistant/memory":
+            # 长期记忆可见即可删：Web 助手页与 /记忆 命令读同一份文件。
+            entries = assistant.read_memory_entries(assistant.assistant_session_dir(self.store))
+            status, response_headers, response_body = api_response(
+                {
+                    "enabled": assistant.memory_enabled(),
+                    "count": len(entries),
+                    "entries": [{"index": index, "text": entry} for index, entry in enumerate(entries, start=1)],
+                }
+            )
+            return status, {**response_headers, **auth_headers}, response_body
+        if method == "POST" and path == "/api/v1/assistant/memory/delete":
+            try:
+                values = self._api_body(body, headers)
+            except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError):
+                values = {}
+            raw_indexes = values.get("indexes")
+            if not isinstance(raw_indexes, list):
+                raw_indexes = [raw_indexes] if raw_indexes is not None else []
+            indexes: list[int] = []
+            for value in raw_indexes:
+                try:
+                    candidate = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if candidate > 0:
+                    indexes.append(candidate)
+            if not indexes:
+                status, response_headers, response_body = api_response({"error": "缺少要删除的序号"}, status=400)
+                return status, {**response_headers, **auth_headers}, response_body
+            session_dir = assistant.assistant_session_dir(self.store)
+            deleted = assistant.delete_memory_entries(indexes, session_dir)
+            entries = assistant.read_memory_entries(session_dir)
+            status, response_headers, response_body = api_response(
+                {
+                    "deleted": deleted,
+                    "count": len(entries),
+                    "entries": [{"index": index, "text": entry} for index, entry in enumerate(entries, start=1)],
+                }
+            )
+            return status, {**response_headers, **auth_headers}, response_body
         if method == "GET" and path == "/api/v1/emby/dashboard":
             # Refresh is requested via header: _serve_remaining_routes receives
             # a query-stripped path, so a ?refresh=1 query would never match.
