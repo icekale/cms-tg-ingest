@@ -10,9 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.clients.p115 import P115RiskControlError
-from app.models import TaskStage, TaskStatus
+from app.models import TaskSnapshot, TaskStage, TaskStatus
 from app.task_actions import available_task_actions
-from app.task_runner import StageResult, TaskRunner
+from app.task_runner import StageResult, TaskRunner, _lock_metadata_for_task
 from app.task_store import TaskStore, command_key
 from app.web import WebApp
 from tests.task_command_drain import drain_task_commands
@@ -938,7 +938,7 @@ class TaskRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
             first_task = store.upsert_task("first", "", "https://115cdn.com/s/first")
-            store.enqueue_task(first_task.id, TaskStage.ORGANIZING, next_run_at=100.0)
+            store.enqueue_task(first_task.id, TaskStage.CLEANED, next_run_at=100.0)
             first_runner = TaskRunner(
                 store,
                 RiskCountingWorkflow(CountingP115(), increment=1),
@@ -953,7 +953,7 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(float(cooldown["value"]), 160.0)
 
             second_task = store.upsert_task("second", "", "https://115cdn.com/s/second")
-            store.enqueue_task(second_task.id, TaskStage.ORGANIZING, next_run_at=101.0)
+            store.enqueue_task(second_task.id, TaskStage.CLEANED, next_run_at=101.0)
             workflow = FakeWorkflow([StageResult.complete("不应执行")])
             second_runner = TaskRunner(store, workflow, worker_id="worker-2", now=lambda: 101.0)
 
@@ -990,7 +990,7 @@ class TaskRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
             task = store.upsert_task("abc", "", "https://115cdn.com/s/abc")
-            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=5.0)
+            store.enqueue_task(task.id, TaskStage.CLEANED, next_run_at=5.0)
             workflow = InspectingWorkflow([StageResult.defer("等待 CMS 整理", delay_seconds=30)])
             runner = TaskRunner(store, workflow, worker_id="worker-1", now=lambda: 5.0)
 
@@ -1027,18 +1027,18 @@ class TaskRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
             holder = store.upsert_task("holder", "", "https://115cdn.com/s/holder")
-            store.enqueue_task(holder.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            store.enqueue_task(holder.id, TaskStage.CLEANED, next_run_at=1.0)
             claimed = store.claim_next_runnable("worker-1", now=1.0)
             store.record_event(
                 claimed.id,
-                TaskStage.ORGANIZING,
+                TaskStage.CLEANED,
                 TaskStatus.RUNNING,
                 "资源锁: 115/CMS 全局阶段",
                 metadata_patch={"_lock_key": "115:global", "_lock_reason": "115/CMS 全局阶段", "_lock_waiting": False},
                 clear_claim=False,
             )
             waiting = store.upsert_task("waiting", "", "https://115cdn.com/s/waiting")
-            store.enqueue_task(waiting.id, TaskStage.ORGANIZING, next_run_at=2.0)
+            store.enqueue_task(waiting.id, TaskStage.CLEANED, next_run_at=2.0)
             workflow = FakeWorkflow([StageResult.complete("不应执行")])
             runner = TaskRunner(store, workflow, worker_id="worker-2", interval_seconds=7, now=lambda: 2.0)
 
@@ -1057,12 +1057,12 @@ class TaskRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
             holder = store.upsert_task("holder", "", "https://115cdn.com/s/holder")
-            store.enqueue_task(holder.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            store.enqueue_task(holder.id, TaskStage.CLEANED, next_run_at=1.0)
             claimed = store.claim_next_runnable("worker-1", now=1.0)
             self.assertEqual(claimed.id, holder.id)
             self.assertEqual(claimed.claimed_by, "worker-1")
             waiting = store.upsert_task("waiting", "", "https://115cdn.com/s/waiting")
-            store.enqueue_task(waiting.id, TaskStage.ORGANIZING, next_run_at=2.0)
+            store.enqueue_task(waiting.id, TaskStage.CLEANED, next_run_at=2.0)
             workflow = FakeWorkflow([StageResult.complete("不应执行")])
             runner = TaskRunner(store, workflow, worker_id="worker-2", interval_seconds=7, now=lambda: 2.0)
 
@@ -1076,6 +1076,34 @@ class TaskRunnerTests(unittest.TestCase):
             self.assertEqual(updated.metadata["_lock_key"], "115:global")
             self.assertTrue(updated.metadata["_lock_waiting"])
             self.assertEqual(updated.metadata["_lock_owner_task_id"], holder.id)
+
+    def test_run_once_does_not_wait_for_organizing_holder(self):
+        """线上症状：335 在 organizing 占着 115 全局锁，把 5 个 115 阶段任务全堵在等待里。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            holder = store.upsert_task("holder", "", "https://115cdn.com/s/holder")
+            store.enqueue_task(holder.id, TaskStage.ORGANIZING, next_run_at=1.0)
+            claimed = store.claim_next_runnable("worker-1", now=1.0)
+            assert claimed is not None
+            store.record_event(
+                claimed.id,
+                TaskStage.ORGANIZING,
+                TaskStatus.RUNNING,
+                "资源锁: CMS 整理阶段",
+                metadata_patch={"_lock_key": "cms:global", "_lock_reason": "CMS 整理阶段", "_lock_waiting": False},
+                clear_claim=False,
+            )
+            waiting = store.upsert_task("waiting", "", "https://115cdn.com/s/waiting")
+            store.enqueue_task(waiting.id, TaskStage.CLEANED, next_run_at=2.0)
+            workflow = FakeWorkflow([StageResult.complete("已清理")])
+            runner = TaskRunner(store, workflow, worker_id="worker-2", interval_seconds=7, now=lambda: 2.0)
+
+            self.assertTrue(runner.run_once())
+            updated = store.find_task(waiting.id)
+            assert updated is not None
+
+            self.assertEqual(len(workflow.calls), 1)
+            self.assertFalse(updated.metadata["_lock_waiting"])
 
     def test_run_once_does_not_execute_after_claim_changes_during_lock_prepare(self):
         class ReclaimBeforeLockStore(TaskStore):
@@ -1660,8 +1688,8 @@ class TaskRunnerTests(unittest.TestCase):
             store = TaskStore(Path(tmp) / "tasks.db")
             first = store.upsert_task("first", "", "https://115cdn.com/s/first")
             second = store.upsert_task("second", "", "https://115cdn.com/s/second")
-            store.enqueue_task(first.id, TaskStage.ORGANIZING, next_run_at=1.0)
-            store.enqueue_task(second.id, TaskStage.ORGANIZING, next_run_at=2.0)
+            store.enqueue_task(first.id, TaskStage.CLEANED, next_run_at=1.0)
+            store.enqueue_task(second.id, TaskStage.CLEANED, next_run_at=2.0)
             workflow = RiskThenUnexpectedWorkflow()
             runner = TaskRunner(store, workflow, worker_id="worker-1", now=now, risk_cooldown_seconds=60)
 
@@ -1671,7 +1699,7 @@ class TaskRunnerTests(unittest.TestCase):
             updated = store.find_task(second.id)
 
             self.assertEqual(workflow.calls, 1)
-            self.assertEqual(updated.current_stage, TaskStage.ORGANIZING)
+            self.assertEqual(updated.current_stage, TaskStage.CLEANED)
             self.assertEqual(updated.status, TaskStatus.RUNNING)
             self.assertEqual(updated.next_run_at, 61.0)
             self.assertEqual(updated.claimed_by, "")
@@ -1773,3 +1801,50 @@ class ClaimRecoveryTests(unittest.TestCase):
             )
             self.assertFalse(runner.run_once())
             self.assertEqual(workflow.calls, [])
+
+
+def _task_snapshot(stage, metadata=None):
+    return TaskSnapshot(
+        id=1,
+        share_code="share",
+        receive_code="",
+        url="",
+        title="title",
+        tmdb_id="1",
+        category="",
+        current_stage=stage,
+        status=TaskStatus.RUNNING,
+        error_type="",
+        error_summary="",
+        retry_count=0,
+        metadata=dict(metadata or {}),
+    )
+
+
+class LockMetadataTests(unittest.TestCase):
+    """organizing 只轮询 CMS、不碰 115，占着 115 全局锁会把整条 115 流水线堵死。"""
+
+    def test_organizing_does_not_hold_the_global_115_lock(self):
+        lock = _lock_metadata_for_task(_task_snapshot(TaskStage.ORGANIZING))
+        self.assertEqual(lock["_lock_key"], "cms:global")
+
+    def test_115_stages_keep_the_global_115_lock(self):
+        for stage in (
+            TaskStage.RECEIVED,
+            TaskStage.CLOUD_DOWNLOADING,
+            TaskStage.SHARE_ALIAS_PREPARED,
+            TaskStage.OWN_SHARE_CREATED,
+            TaskStage.SHARE_VALIDATED,
+            TaskStage.SHARE_SYNC_SUBMITTED,
+            TaskStage.CLEANED,
+        ):
+            self.assertEqual(_lock_metadata_for_task(_task_snapshot(stage))["_lock_key"], "115:global")
+
+    def test_organizing_no_longer_conflicts_with_115_work(self):
+        cms = _lock_metadata_for_task(_task_snapshot(TaskStage.ORGANIZING, {"dest_path": "/media/x"}))
+        cleaned = _lock_metadata_for_task(_task_snapshot(TaskStage.CLEANED, {"dest_path": "/media/x"}))
+        self.assertNotEqual(cms["_lock_key"], cleaned["_lock_key"])
+
+    def test_destination_stages_keep_their_own_locks(self):
+        moved = _lock_metadata_for_task(_task_snapshot(TaskStage.MOVED, {"dest_path": "/media/x"}))
+        self.assertEqual(moved["_lock_key"], "dest:/media/x")

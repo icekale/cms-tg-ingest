@@ -24,12 +24,16 @@ LOG = logging.getLogger(__name__)
 _GLOBAL_115_LOCK_STAGES = {
     TaskStage.RECEIVED,
     TaskStage.CLOUD_DOWNLOADING,
-    TaskStage.ORGANIZING,
     TaskStage.SHARE_ALIAS_PREPARED,
     TaskStage.OWN_SHARE_CREATED,
     TaskStage.SHARE_VALIDATED,
     TaskStage.SHARE_SYNC_SUBMITTED,
     TaskStage.CLEANED,
+}
+# organizing 只轮询 CMS、不碰 115，但它会 defer 最多 30 次（_STAGE_MAX_DEFER_COUNT），
+# 占着 115 全局锁会把整条 115 流水线堵住。给它单独的 cms:global 锁。
+_GLOBAL_CMS_LOCK_STAGES = {
+    TaskStage.ORGANIZING,
 }
 _DESTINATION_LOCK_STAGES = {
     TaskStage.STRM_READY,
@@ -128,6 +132,13 @@ def _lock_metadata_for_task(task: TaskSnapshot) -> dict[str, object]:
         return {
             "_lock_key": "115:global",
             "_lock_reason": "115/CMS 全局阶段",
+            "_lock_waiting": False,
+            "_lock_owner_task_id": "",
+        }
+    if task.current_stage in _GLOBAL_CMS_LOCK_STAGES:
+        return {
+            "_lock_key": "cms:global",
+            "_lock_reason": "CMS 整理阶段",
             "_lock_waiting": False,
             "_lock_owner_task_id": "",
         }
