@@ -2459,6 +2459,8 @@ class TaskStore:
             conn.execute("DELETE FROM task_events WHERE task_id = ?", (int(task_id),))
             conn.execute("DELETE FROM task_operations WHERE task_id = ?", (int(task_id),))
             conn.execute("DELETE FROM task_commands WHERE task_id = ?", (int(task_id),))
+            # legacy_submission_map uses a NO ACTION foreign key, so it must go first.
+            conn.execute("DELETE FROM legacy_submission_map WHERE task_id = ?", (int(task_id),))
             cursor = conn.execute("DELETE FROM tasks WHERE id = ?", (int(task_id),))
         return int(cursor.rowcount or 0) == 1
 

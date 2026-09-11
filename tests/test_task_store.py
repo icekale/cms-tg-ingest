@@ -1160,6 +1160,42 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual([task.id for task in owners], [live.id])
             self.assertEqual(live_codes, {"own-new"})
 
+    def test_purge_archived_task_clears_legacy_submission_mapping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "tasks.db"
+            store = TaskStore(db_path)
+            task = store.upsert_task("legacy", "1212", "https://115cdn.com/s/legacy")
+            task = store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
+            with sqlite3.connect(db_path) as raw:
+                raw.execute(
+                    "INSERT INTO legacy_submission_map (legacy_submission_id, task_id, imported_at) VALUES (?, ?, ?)",
+                    (501, task.id, time.time()),
+                )
+            self.assertTrue(
+                store.archive_task(
+                    task.id,
+                    actor="test",
+                    reason="user_delete",
+                    expected_updated_at=task.updated_at,
+                )
+            )
+
+            self.assertTrue(
+                store.purge_archived_task(
+                    task.id,
+                    actor="test",
+                    confirmation=f"PURGE TASK {task.id}",
+                )
+            )
+
+            self.assertIsNone(store.find_task(task.id))
+            with sqlite3.connect(db_path) as raw:
+                orphans = raw.execute(
+                    "SELECT COUNT(*) FROM legacy_submission_map WHERE task_id = ?",
+                    (task.id,),
+                ).fetchone()[0]
+            self.assertEqual(orphans, 0)
+
     def test_share_identity_lookups_include_normalized_facts(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")
