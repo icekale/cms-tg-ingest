@@ -23,6 +23,23 @@ def command_key(kind: str, *parts: object) -> str:
     return f"{kind}:{hashlib.sha256(material).hexdigest()}"
 
 
+# 自动路径（质量巡检 / AI 自动修复）重排排期时的下限。只有这两类 actor 受约束：
+# 人工路径（Web / TG / AI助手）视为明确意图，仍可立即执行。
+AUTOMATIC_COMMAND_ACTORS = frozenset({"AI助手自动修复", "quality"})
+
+
+def automatic_schedule_floor(current_next_run_at: Any, now: float) -> float:
+    """自动路径写入 next_run_at 前先过这道闸：任务已有未到点的排期就保持不动。
+
+    排期只允许延后、绝不提前；未排期（-1/0）或已过期仍返回 0，沿用「立即可跑」语义。
+    """
+    try:
+        scheduled = float(current_next_run_at or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return scheduled if scheduled > now else 0.0
+
+
 def _row_value(row: Any, key: str, default: str | float = "") -> Any:
     if row is None:
         return default

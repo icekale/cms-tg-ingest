@@ -13,7 +13,7 @@ from app.clients.p115 import P115RiskControlError
 from app.models import TaskSnapshot, TaskStage, TaskStatus
 from app.task_actions import available_task_actions
 from app.task_runner import StageResult, TaskRunner, _lock_metadata_for_task
-from app.task_store import TaskStore, command_key
+from app.task_store import AUTOMATIC_COMMAND_ACTORS, TaskStore, automatic_schedule_floor, command_key
 from app.web import WebApp
 from tests.task_command_drain import drain_task_commands
 
@@ -1818,6 +1818,48 @@ class TaskRunnerTests(unittest.TestCase):
             updated = store.find_task(task.id)
             self.assertEqual(updated.current_stage, TaskStage.MOVED)
             self.assertEqual(updated.metadata.get("retry_stage"), TaskStage.MOVED.value)
+
+
+class AutomaticScheduleFloorTests(unittest.TestCase):
+    """排期规则：自动路径不得把已排好的时间提前，人工动作仍视为明确意图立即执行。"""
+
+    def test_floor_keeps_only_future_schedules(self):
+        self.assertEqual(automatic_schedule_floor(2000.0, 1000.0), 2000.0)
+        for value in (0, -1, None, 999.0, "bad"):
+            self.assertEqual(automatic_schedule_floor(value, 1000.0), 0.0)
+
+    def _scheduled_store(self, tmp: str) -> tuple[TaskStore, int, float]:
+        store = TaskStore(Path(tmp) / "tasks.db")
+        task = store.upsert_task("sched", "", "https://115cdn.com/s/sched")
+        future = time.time() + 3600
+        store.enqueue_task(task.id, TaskStage.RECEIVED, message="已排期稍后执行", next_run_at=future)
+        return store, task.id, future
+
+    @staticmethod
+    def _enqueue_retry(store: TaskStore, task_id: int, actor: str) -> None:
+        store.enqueue_command(
+            task_id,
+            "retry",
+            {"target_stage": TaskStage.RECEIVED.value, "message": f"{actor} 触发重试"},
+            idempotency_key=command_key("retry", task_id, actor),
+            actor=actor,
+            source="task-action",
+        )
+
+    def test_automatic_actor_does_not_advance_schedule(self):
+        for actor in sorted(AUTOMATIC_COMMAND_ACTORS):
+            with self.subTest(actor=actor), tempfile.TemporaryDirectory() as tmp:
+                store, task_id, future = self._scheduled_store(tmp)
+                self._enqueue_retry(store, task_id, actor)
+                drain_task_commands(store)
+                self.assertAlmostEqual(store.find_task(task_id).next_run_at, future, delta=1)
+
+    def test_manual_actor_still_runs_immediately(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, task_id, _ = self._scheduled_store(tmp)
+            self._enqueue_retry(store, task_id, "Web")
+            drain_task_commands(store)
+            self.assertEqual(store.find_task(task_id).next_run_at, 0)
 
 
 if __name__ == "__main__":

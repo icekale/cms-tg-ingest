@@ -16,7 +16,7 @@ from typing import Callable, Protocol
 from .clients.p115 import P115RiskControlError
 from .models import StageOutcome, StageResult, TaskSnapshot, TaskStage, TaskStatus, next_stage_after_success
 from .strm_mode import effective_task_strm_mode
-from .task_store import TaskStore
+from .task_store import AUTOMATIC_COMMAND_ACTORS, TaskStore, automatic_schedule_floor
 
 LOG = logging.getLogger(__name__)
 
@@ -866,6 +866,16 @@ class TaskRunner:
             next_run_at=-1,
         )
 
+    def _command_run_at(self, command: dict, current: TaskSnapshot | None) -> float:
+        """命令落地后任务的 next_run_at。自动路径（巡检/自动修复）不得把已有排期提前。
+
+        人工动作（Web / TG / AI助手）视为明确意图，仍按 0 = 立即执行。
+        """
+        actor = str(command.get("actor") or "").strip()
+        if current is None or actor not in AUTOMATIC_COMMAND_ACTORS:
+            return 0.0
+        return automatic_schedule_floor(current.next_run_at, self.now())
+
     def _run_command(self, command: dict) -> bool:
         command_id = int(command["id"])
         token = str(command.get("claim_token") or "")
@@ -876,6 +886,7 @@ class TaskRunner:
             if command_type != "terminate" and current is not None and str(current.claimed_by or "").strip():
                 self.store.complete_command(command_id, token, result={"applied": False, "reason": "claimed"})
                 return True
+            run_at = self._command_run_at(command, current)
             payload = {}
             raw_payload = command.get("payload_json") or command.get("payload") or {}
             if isinstance(raw_payload, str):
@@ -894,12 +905,12 @@ class TaskRunner:
                     task_id,
                     stage,
                     message=str(payload.get("message") or "等待执行"),
-                    next_run_at=0,
+                    next_run_at=run_at,
                     metadata_patch=extra_patch,
                     metadata_delete_keys=extra_delete,
                 )
             elif command_type == "reprocess":
-                self.store.reprocess_task(task_id, message=str(payload.get("message") or "从头重跑已入队"), next_run_at=0)
+                self.store.reprocess_task(task_id, message=str(payload.get("message") or "从头重跑已入队"), next_run_at=run_at)
             elif command_type == "terminate":
                 self.store.request_task_termination(task_id, str(command.get("actor") or "command"))
             elif command_type in {"emby_check", "restore", "resume_organizing"}:
@@ -920,12 +931,12 @@ class TaskRunner:
                     task_id,
                     stage,
                     message=str(payload.get("message") or "等待执行"),
-                    next_run_at=0,
+                    next_run_at=run_at,
                     metadata_patch=extra_patch,
                     metadata_delete_keys=extra_delete,
                 )
             elif command_type == "repair_move":
-                self.store.enqueue_task(task_id, TaskStage.STRM_READY, next_run_at=0)
+                self.store.enqueue_task(task_id, TaskStage.STRM_READY, next_run_at=run_at)
             elif command_type == "invalidate_share":
                 self._invalidate_share(task_id)
             elif command_type == "quality_repair":
@@ -935,7 +946,7 @@ class TaskRunner:
                     self.store.reprocess_task(
                         task_id,
                         message=message,
-                        next_run_at=0,
+                        next_run_at=run_at,
                         metadata_patch={"quality_repair_queued": True},
                     )
                 elif action == "requeue":
@@ -952,7 +963,7 @@ class TaskRunner:
                         task_id,
                         stage,
                         message=message,
-                        next_run_at=0,
+                        next_run_at=run_at,
                         metadata_patch={
                             "quality_auto_recheck_count": attempts + 1,
                             "quality_auto_recheck_last_at": now,
@@ -968,7 +979,7 @@ class TaskRunner:
                         task_id,
                         TaskStage.MOVED,
                         message=message,
-                        next_run_at=0,
+                        next_run_at=run_at,
                         metadata_patch={
                             "retry_from_stage": from_stage,
                             "retry_stage": TaskStage.MOVED.value,

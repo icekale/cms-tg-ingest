@@ -1400,6 +1400,73 @@ class PostAutoOrganizeGuardTests(unittest.TestCase):
         self.assertIn("继续整理", result.message)
         self.assertEqual(result.metadata.get("excluded_dest_folder"), "redundant-folder")
 
+    def test_stage_organizing_escalates_when_excluded_dest_missing_from_search_index(self):
+        """排除目录按 id 搜不到文件夹记录时仍需升级人工（2026-09-12 任务 335/445）。
+
+        `_folder_record_for_dest` 只在多个候选目标时才要求真实记录（require_real），
+        而线上此时 115 搜索索引按 id 返回空 → 它返回 None；旧逻辑当场按“没整理完”
+        返回 INCOMPLETE，任务空转到 organizing 超时。这里让 search_files 对文件夹
+        一律返回空，只留实时列目录能证明文件确实在排除目录里。
+        """
+        from types import SimpleNamespace
+
+        class IndexMissP115(FakeCloudP115):
+            def search_files(self, search_value, limit=20):
+                return {
+                    "Example.S01E01.mkv": [
+                        {"cid": "intake-1", "pid": "redundant-a", "n": "Example.S01E01.mkv", "fc": "1"}
+                    ],
+                    "Example.S01E02.mkv": [
+                        {"cid": "intake-2", "pid": "redundant-b", "n": "Example.S01E02.mkv", "fc": "1"}
+                    ],
+                }.get(str(search_value), [])
+
+            def list_files(self, parent_id, **kwargs):
+                return {
+                    "redundant-a": [
+                        {"cid": "intake-1", "pid": "redundant-a", "n": "Example.S01E01.mkv", "fc": "1"}
+                    ],
+                    "redundant-b": [
+                        {"cid": "intake-2", "pid": "redundant-b", "n": "Example.S01E02.mkv", "fc": "1"}
+                    ],
+                }.get(str(parent_id), [])
+
+        submissions = FakeSubmissionStore()
+        row = submissions.upsert_submission(
+            bridge.ShareKey("swhou1y3nr6", "u148"),
+            "https://115cdn.com/s/swhou1y3nr6?password=u148",
+            "organized_found",
+            title="Example.S01E01.mkv",
+        )
+        task = SimpleNamespace(
+            id=1,
+            share_code="swhou1y3nr6",
+            receive_code="u148",
+            url="https://115cdn.com/s/swhou1y3nr6?password=u148",
+            title="Example.S01E01.mkv",
+            metadata={
+                "submission_id": row["id"],
+                "operation_generation": 0,
+                "update_requested_run": 0,
+                "intake_identity": {
+                    "root_ids": ["intake-1", "intake-2"],
+                    "files": [
+                        {"id": "intake-1", "name": "Example.S01E01.mkv"},
+                        {"id": "intake-2", "name": "Example.S01E02.mkv"},
+                    ],
+                    "dest_id": "",
+                },
+            },
+        )
+        workflow = make_workflow(IndexMissP115([]), submissions)
+        workflow.self_share_config.excluded_parent_ids = {"redundant-a", "redundant-b"}
+
+        result = workflow._stage_organizing(task)
+
+        self.assertEqual(result.outcome.value, "needs_action")
+        self.assertIn("排除目录", result.message)
+        self.assertIn(result.metadata.get("excluded_dest_folder"), {"redundant-a", "redundant-b"})
+
     def test_stage_organizing_prefers_library_dest_over_excluded_hit(self):
         """同一文件同时命中媒体库目录与排除目录时（如先后两次整理），
         仍应绑定媒体库目录继续流程，不误伤。"""

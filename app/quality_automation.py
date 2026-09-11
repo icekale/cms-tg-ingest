@@ -28,6 +28,7 @@ from .quality_rules import (
 )
 from .strm_mode import effective_task_strm_mode
 from .task_actions import delete_task_record_and_submission
+from .task_store import automatic_schedule_floor
 from .task_store import TaskStore, command_key, reprocess_stage_for
 
 
@@ -1460,7 +1461,7 @@ class QualityAutomation:
                 "quality_share_recheck_last_at": timestamp,
                 "quality_share_recheck_next_at": timestamp + self.SHARE_REVALIDATE_COOLDOWN_SECONDS,
             },
-            next_run_at=0,
+            next_run_at=automatic_schedule_floor(task.next_run_at, timestamp),
             clear_claim=True,
             expected_stage=TaskStage.SHARE_VALIDATED,
             expected_status=TaskStatus.NEEDS_ACTION,

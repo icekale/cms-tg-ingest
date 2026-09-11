@@ -2238,6 +2238,54 @@ class BridgeSelfShareTaskWorkflow:
             return False
         return bool(expected & found)
 
+    def _excluded_dest_ancestor(self, dest: str, receive_cid: str) -> dict[str, str] | None:
+        """在 dest 自身及其祖先里找排除目录（实时读目录树，绕开滞后的搜索索引）。
+
+        115 搜索索引按 id 往往查不到记录，`_folder_record_for_dest` 会因此返回 None，
+        但这类候选目标通常正是被 CMS 挪进「冗余/已存在」的那批。
+        「待整理」(receive_cid) 不算：那里的文件还在等 CMS 处理。
+        """
+        dest = str(dest or "").strip()
+        if not dest:
+            return None
+        terminal = self._intake_excluded_dest_ids(receive_cid) - {str(receive_cid or "").strip()}
+        if not terminal:
+            return None
+        entries: list[tuple[str, str]] = [(dest, "")]
+        if hasattr(self.p115, "folder_path"):
+            try:
+                path = self.p115.folder_path(dest) or []
+            except Exception:
+                LOG.debug("Failed to read dest ancestors dest=%s", dest, exc_info=True)
+                path = []
+            entries.extend(
+                (p115_item_id(item), str(item.get("name") or "").strip())
+                for item in path
+                if isinstance(item, dict) and p115_item_id(item)
+            )
+        names: dict[str, str] = {}
+        for item_id, name in entries:
+            if name:
+                names[item_id] = name
+        for item_id, _ in entries:
+            if item_id in terminal:
+                return {"folder_id": item_id, "folder_name": names.get(item_id) or item_id}
+        return None
+
+    def _excluded_dest_hit(
+        self,
+        dest: str,
+        file_ids: list[str],
+        receive_cid: str,
+    ) -> dict[str, str] | None:
+        """dest 落在排除目录、且文件经实时核验确实还在那儿 → 返回该排除目录。"""
+        marker = self._excluded_dest_ancestor(dest, receive_cid)
+        if not marker:
+            return None
+        if not self._excluded_dest_confirmed(dest, file_ids):
+            return None
+        return marker
+
     def _organized_target_for_dest(
         self,
         dest: str,
@@ -2557,6 +2605,13 @@ class BridgeSelfShareTaskWorkflow:
                     require_real=require_real_folder,
                 )
                 if folder is None:
+                    # 排除目录里的候选目标往往查不到文件夹记录（搜索索引按 id 不返回），
+                    # 而这时文件已在「冗余/已存在」——必须如实上报，不能当"没整理完"空转到超时。
+                    # 2026-09-12 任务 335：一季被 CMS 拆开，重复的 4 集落进"已存在"。
+                    excluded_hit = self._excluded_dest_hit(dest, file_ids, receive_cid)
+                    if excluded_hit:
+                        excluded_hits.append(excluded_hit)
+                        continue
                     return INCOMPLETE, [], None
                 dest_name = str(folder.get("file_name") or dest).strip()
                 if is_season_folder_name(dest_name):
@@ -2566,6 +2621,12 @@ class BridgeSelfShareTaskWorkflow:
                 if not self._intake_expected_files_located(dest, file_ids, file_hits):
                     return INCOMPLETE, [], None
                 if dest == receive_cid or dest in root_ids:
+                    # 分享根被 CMS 整体移进排除目录时，它的 id 仍是登记的 root：
+                    # 别当成"还没开始整理"（2026-09-12 任务 445）。
+                    excluded_hit = self._excluded_dest_hit(dest, file_ids, receive_cid)
+                    if excluded_hit:
+                        excluded_hits.append(excluded_hit)
+                        continue
                     return INCOMPLETE, [], None
                 if dest in excluded_dest_ids:
                     # CMS 把文件整理进了排除目录（冗余/已存在等）：立即升级人工
