@@ -6,7 +6,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 115 分享/磁力/ED2K -> 115 接收或云下载 -> CMS 整理分类 -> 自有永久分享 -> 分享 STRM -> Emby 入库 -> 清理转存源
 ```
 
-**0.5.2** 起运行时只有一份 SQLite 任务库（`DATABASE_PATH=/data/cms-tg-ingest.db`）和唯一的 TaskRunner 写入者：观察者只入队命令，接收/建分享/同步/删除带不可变 journal，失败后接着跑而不是重做上游。当前镜像 `icekale/cms-tg-ingest:0.5.25`。
+**0.5.2** 起运行时只有一份 SQLite 任务库（`DATABASE_PATH=/data/cms-tg-ingest.db`）和唯一的 TaskRunner 写入者：观察者只入队命令，接收/建分享/同步/删除带不可变 journal，失败后接着跑而不是重做上游。当前镜像 `icekale/cms-tg-ingest:0.5.26`。
 
 它只编排你已经拥有权限的 CMS、115、HDHive 和 Emby 工作流，不提供媒体资源，也不绕过任何服务的权限或风控机制。
 
@@ -41,7 +41,7 @@ Cloud Media Sync（CMS）的 Telegram 自动入库外挂：把 115 分享、磁�
 
 1. 确认 CMS 已运行，并准备好 115 Cookie、待整理目录、STRM 根目录和媒体库路径。
 2. 在 Unraid 的 `/mnt/user/appdata/cms-tg-ingest/.env` 写入配置。
-3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.5.25`。
+3. 使用 Docker Hub 完整 Compose 配置，或在 Unraid Compose Manager 中创建 `cms-tg-ingest` 服务，并将镜像设置为 `icekale/cms-tg-ingest:0.5.26`。
 4. 拉取固定版本并启动：
 
 ```sh
@@ -157,7 +157,7 @@ CMS_UPDATE_IMAGE=imaliang/cloud-media-sync:latest
 2. 挂载到容器：`-v /path/to/pi/agent:/data/pi/agent`（镜像内 `PI_CODING_AGENT_DIR=/data/pi/agent`）。
 3. 重启后打开 Web 管理台「AI 助手」页面即可提问；pi 未配置时接口返回 503 并提示。
 
-可选环境变量：`PI_ASSISTANT_BIN`（pi 路径，默认 PATH）、`PI_ASSISTANT_MODEL`（默认用 pi 配置的默认模型）、`PI_ASSISTANT_TIMEOUT`（单次调用超时秒数，默认 120）、`PI_ASSISTANT_SESSION_DIR`（会话存储目录，默认 `<数据库目录>/assistant-sessions`）、`PI_ASSISTANT_AUTO_DIAGNOSIS`（设 `0` 关闭 needs_action 自动诊断，默认开启）、`PI_ASSISTANT_AUTO_REPAIR`（设 `0` 关闭诊断后的自动修复，默认开启；terminate/删除永不自动，reprocess 仅非违规且每事件一次）、`PI_ASSISTANT_WATCH_INTERVAL`（巡检间隔秒数，默认 900）、`PI_ASSISTANT_AUTO_REPAIR_COOLDOWN`（同一任务自动修复冷却秒数，默认 21600）、`PI_ASSISTANT_DIAGNOSIS_COOLDOWN`（同一任务自动诊断冷却秒数，默认 21600）、`PI_ASSISTANT_MEMORY`（设 `0` 关闭长期记忆，默认开启）、`PI_ASSISTANT_MEMORY_DIR`（记忆存储目录，默认 `<数据库目录>/assistant-memory`，MEMORY.md 与 hermes 格式兼容，可手工编辑）、`PI_ASSISTANT_TOOLS`（设 `0` 关闭只读工具，默认开启）。助手以 `--no-tools` 等隔离参数运行，只读快照做诊断建议，不执行操作；会话文件保存在数据卷中，可用「新对话」开启新会话。
+可选环境变量：`PI_ASSISTANT_BIN`（pi 路径，默认 PATH）、`PI_ASSISTANT_MODEL`（默认用 pi 配置的默认模型）、`PI_ASSISTANT_TIMEOUT`（单次调用超时秒数，默认 120）、`PI_ASSISTANT_SESSION_DIR`（会话存储目录，默认 `<数据库目录>/assistant-sessions`）、`PI_ASSISTANT_AUTO_DIAGNOSIS`（设 `0` 关闭 needs_action 自动诊断，默认开启）、`PI_ASSISTANT_AUTO_REPAIR`（设 `0` 关闭诊断后的自动修复，默认开启；terminate/删除永不自动，reprocess 仅非违规且每事件一次）、`PI_ASSISTANT_WATCH_INTERVAL`（巡检间隔秒数，默认 900）、`PI_ASSISTANT_AUTO_REPAIR_COOLDOWN`（同一任务自动修复冷却秒数，默认 21600）、`PI_ASSISTANT_DIAGNOSIS_COOLDOWN`（同一任务自动诊断冷却秒数，默认 21600）、`PI_ASSISTANT_MEMORY`（设 `0` 关闭长期记忆，默认开启）、`PI_ASSISTANT_MEMORY_DIR`（记忆存储目录，默认 `<数据库目录>/assistant-memory`，MEMORY.md 与 hermes 格式兼容，可手工编辑）、`PI_ASSISTANT_TOOLS`（设 `0` 关闭 cms-tools，默认开启）。助手隔离运行（`--no-extensions` 等）并加载 cms-tools；Web 对话和 needs_action 巡检诊断均可调 `task_action`（terminate 需本轮确认）。会话文件保存在数据卷中，可用「新对话」开启新会话。
 
 ### 首次启动检查
 
@@ -517,7 +517,7 @@ git push origin v0.2.90
 镜像：
 
 ```sh
-docker pull icekale/cms-tg-ingest:0.5.25
+docker pull icekale/cms-tg-ingest:0.5.26
 docker pull icekale/cms-tg-ingest:latest
 ```
 

@@ -210,9 +210,10 @@ def extract_memory_async(question: str, reply: str, session_dir: Path | None = N
 # event_id 记录诊断时最新事件——只有原因变化（新事件）才重新诊断。
 DIAGNOSIS_META_KEY = "assistant_diagnosis"
 AUTO_DIAGNOSIS_QUESTION = (
-    "该任务已进入 needs_action。请诊断根本原因，并在建议里明确写出最合适的 available_actions。"
-    "系统会在诊断后对安全动作自动执行（retry / resume_organizing / emby / restore；"
-    "reprocess 仅非违规且本事件未自动重跑过时执行一次）。terminate 不会自动执行。"
+    "该任务已进入 needs_action。先用 task_detail / task_events 核实，再处理。"
+    "归属歧义：直接 task_action resume_organizing（重新解析 115 目标，不要 reprocess）。"
+    "have_vio_file / 分享失效：不要改任务，只写结论。"
+    "其他安全动作可直接 task_action；terminate 不要自动执行。"
 )
 
 # 自动修复：永不自动 terminate/delete；reprocess 有额外风险门槛。
@@ -228,6 +229,8 @@ _SHARE_RISK_MARKERS = (
     "违规",
     "vio_file",
     "分享失效",
+)
+_AMBIGUOUS_OWNERSHIP_MARKERS = (
     "归属存在歧义",
     "已停止自动绑定",
 )
@@ -357,7 +360,7 @@ def diagnosis_cooldown_seconds() -> float:
     return _env_seconds("PI_ASSISTANT_DIAGNOSIS_COOLDOWN", 6 * 3600)
 
 
-def _task_looks_share_risk(task: Any, store: Any | None = None) -> bool:
+def _task_text_blob(task: Any, store: Any | None = None) -> str:
     texts: list[str] = [str(getattr(task, "error_summary", "") or "")]
     metadata = getattr(task, "metadata", {}) or {}
     if isinstance(metadata, dict):
@@ -373,8 +376,17 @@ def _task_looks_share_risk(task: Any, store: Any | None = None) -> bool:
                     texts.append(str((event or {}).get("message") or ""))
         except Exception:
             pass
-    blob = " ".join(texts).lower()
+    return " ".join(texts).lower()
+
+
+def _task_looks_share_risk(task: Any, store: Any | None = None) -> bool:
+    blob = _task_text_blob(task, store)
     return any(marker.lower() in blob for marker in _SHARE_RISK_MARKERS)
+
+
+def _task_looks_ambiguous_ownership(task: Any, store: Any | None = None) -> bool:
+    blob = _task_text_blob(task, store)
+    return any(marker.lower() in blob for marker in _AMBIGUOUS_OWNERSHIP_MARKERS)
 
 
 def tried_auto_repair_actions(diagnosis: Any) -> list[str]:
@@ -417,6 +429,7 @@ def choose_auto_repair_action(task: Any, store: Any, *, max_retries: int = 3) ->
     """选出本轮可自动执行的动作。空字符串表示仍需人工。
 
     优先级：retry > resume_organizing > emby > restore > reprocess。
+    归属歧义只试一次 resume_organizing（重新解析 115 目标），不自动 reprocess。
     同一动作不重做；terminate / delete 永不自动。
     """
     from .task_actions import available_task_actions
@@ -427,6 +440,10 @@ def choose_auto_repair_action(task: Any, store: Any, *, max_retries: int = 3) ->
     diagnosis = metadata.get(DIAGNOSIS_META_KEY) if isinstance(metadata, dict) else None
     tried = tried_auto_repair_actions(diagnosis)
     actions = available_task_actions(task, max_retries, store=store)
+    if _task_looks_ambiguous_ownership(task, store):
+        if "resume_organizing" in actions and "resume_organizing" not in tried:
+            return "resume_organizing"
+        return ""
     for action in AUTO_REPAIR_SAFE_ACTIONS:
         if action in actions and action not in tried:
             return action
@@ -502,14 +519,21 @@ def build_snapshot(
     )["items"]
     # 列表不附事件流（默认有 task_detail/task_events），只留最后一条说明。
     for item in open_items:
-        events = store.list_events(int(item["id"]))
+        try:
+            events = store.list_events(int(item["id"]))
+        except (TypeError, ValueError):
+            continue
         if events:
             item["last_event"] = str((events[-1] or {}).get("message") or "")[:240]
     detail = None
-    if int(task_id) > 0:
+    try:
+        focused_id = int(task_id)
+    except (TypeError, ValueError):
+        focused_id = 0
+    if focused_id > 0:
         detail = api_task_detail(
             store,
-            int(task_id),
+            focused_id,
             lifecycle_actions_enabled=engine_enabled,
             max_retries=max_retries,
         )
@@ -523,8 +547,11 @@ def build_snapshot(
 
 def diagnosis_event_id(store: Any, task_id: int) -> int:
     """任务最新事件的 id：用于判断 needs_action 原因是否变化（变化才重新诊断）。"""
-    events = store.list_events(int(task_id))
-    return int(events[-1].get("id") or 0) if events else 0
+    try:
+        events = store.list_events(int(task_id))
+        return int(events[-1].get("id") or 0) if events else 0
+    except (TypeError, ValueError, AttributeError):
+        return 0
 
 
 def build_user_message(question: str, context: dict[str, Any]) -> str:
@@ -672,7 +699,7 @@ def run_pi(
         except subprocess.TimeoutExpired as exc:
             raise AssistantTimeout(f"助手响应超时（超过 {timeout:.0f} 秒），可稍后重试或调大 PI_ASSISTANT_TIMEOUT") from exc
         if proc.returncode == 0:
-            return {"reply": _parse_reply(proc.stdout or ""), "session_id": session_id}
+            return {"reply": _parse_reply(proc.stdout or ""), "session_id": session_id or ""}
         stderr_tail = (proc.stderr or proc.stdout or "")[-600:].strip()
         if attempt == 1:
             LOG.warning("pi run failed (attempt 1/2), retrying: %s", stderr_tail[:200])
@@ -780,4 +807,4 @@ def run_pi_stream(
         raise AssistantError(f"pi 退出码 {returncode}: {stderr_tail or '无输出'}")
     if not latest:
         raise AssistantError("pi 未返回可解析的回复")
-    return {"reply": latest, "session_id": session_id}
+    return {"reply": latest, "session_id": session_id or ""}

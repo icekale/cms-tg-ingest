@@ -5,6 +5,7 @@ from app.media.intake_identity import (
     collect_file_ids_under_dest,
     dest_file_ids_from_hits,
     dest_id_from_file_hits,
+    is_junk_video_name,
     is_season_folder_name,
     is_video_name,
     snapshot_files,
@@ -18,6 +19,29 @@ class IntakeIdentitySnapshotTests(unittest.TestCase):
         self.assertTrue(is_season_folder_name("Season 03"))
         self.assertTrue(is_season_folder_name("第3季"))
         self.assertFalse(is_season_folder_name("C-拆弹专家-2017-[tmdb=441531]"))
+
+    def test_junk_promo_videos_are_skipped(self):
+        self.assertTrue(is_junk_video_name("更多精彩影视尽在www.DDHDTV.com.mkv"))
+        self.assertTrue(is_junk_video_name("更多影视资源请访问www.DDHDTV.com.mkv"))
+        self.assertTrue(is_junk_video_name("【更多电视剧集下载请访问 www.DDHDTV.com】【更多剧集打包下载请访问 www.DDHDTV.com】.MKV"))
+        self.assertTrue(is_junk_video_name("【更多高清剧集下载请访问 www.DDHDTV.com】【更多剧集打包下载请访问 www.DDHDTV.com】.mkv"))
+        self.assertFalse(is_junk_video_name("Berserk.S01E01.mp4"))
+        self.assertFalse(is_junk_video_name("Movie.2024.www.U3C3.com.mkv"))
+
+    def test_snapshot_skips_junk_promo_videos(self):
+        listed = {
+            "recv-folder": [
+                {"fid": "ep1", "n": "Show.S01E01.mp4", "cid": "recv-folder"},
+                {"fid": "ad1", "n": "更多精彩影视尽在www.DDHDTV.com.mkv", "cid": "recv-folder"},
+            ],
+        }
+
+        files = snapshot_files(
+            [{"file_id": "recv-folder", "file_name": "Show", "is_folder": True}],
+            lambda parent_id, limit=500: list(listed.get(str(parent_id), [])),
+        )
+
+        self.assertEqual(files, [{"id": "ep1", "name": "Show.S01E01.mp4"}])
 
     def test_snapshot_lists_videos_two_levels_for_season_roots(self):
         listed = {

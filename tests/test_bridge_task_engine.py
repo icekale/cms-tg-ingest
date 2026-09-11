@@ -1903,6 +1903,54 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(identity["dest_id"], "dest-y")
             self.assertEqual(identity["intake_skip_names"], ["ADE.mkv"])
 
+    def test_resolve_intake_dest_folders_drops_live_junk_promo_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            dest = {
+                "cid": "dest-tv",
+                "pid": "anime-parent",
+                "n": "D-剑风传奇 黄金时代篇-2012-[tmdb=211057]",
+                "fc": 1,
+            }
+            episode = {"fid": "ep1", "cid": "dest-tv", "n": "Berserk.S01E01.mp4"}
+            ad = {
+                "fid": "ad1",
+                "cid": "pending-cid",
+                "n": "更多精彩影视尽在www.DDHDTV.com.mkv",
+            }
+            workflow.p115.search_hits = {
+                "211057": [dest],
+                "Berserk.S01E01.mp4": [episode],
+                "更多精彩影视尽在www.DDHDTV.com.mkv": [ad],
+                "dest-tv": [dest],
+            }
+            workflow.p115.files_by_parent = {"dest-tv": [episode], "pending-cid": [ad]}
+            workflow.p115.file_infos = {"ad1": ad}
+            workflow.p115.folder_paths = {
+                "dest-tv": [dest, {"cid": "anime-parent", "pid": "0", "n": "番剧"}],
+            }
+            task_metadata = {
+                "tmdb_hint_id": "211057",
+                "intake_identity": {
+                    "root_ids": ["received-root"],
+                    "files": [
+                        {"id": "ep1", "name": "Berserk.S01E01.mp4"},
+                        {"id": "ad1", "name": "更多精彩影视尽在www.DDHDTV.com.mkv"},
+                    ],
+                },
+            }
+
+            status, targets, identity = workflow._resolve_intake_dest_folders(
+                task_metadata,
+                {"tmdb_id": "211057"},
+                receive_cid="pending-cid",
+            )
+
+            self.assertEqual(status, "dest-tv")
+            self.assertEqual(targets[0]["file_ids"], ["ep1"])
+            self.assertEqual(identity["files"], [{"id": "ep1", "name": "Berserk.S01E01.mp4"}])
+            self.assertEqual(identity["intake_skip_names"], ["更多精彩影视尽在www.DDHDTV.com.mkv"])
+
     def test_resolve_intake_dest_folders_keeps_waiting_for_unmoved_live_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)

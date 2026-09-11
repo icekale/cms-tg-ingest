@@ -86,7 +86,7 @@ class StageCheckpoint:
 class StageResult:
     outcome: StageOutcome
     message: str
-    metadata: dict[str, object] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     delay_seconds: float = 0
     error_type: str = ""
     error_detail: str = ""
@@ -96,7 +96,7 @@ class StageResult:
     def complete(
         cls,
         message: str,
-        metadata: dict[str, object] | None = None,
+        metadata: dict[str, Any] | None = None,
         checkpoint: StageCheckpoint | None = None,
     ) -> "StageResult":
         return cls(StageOutcome.COMPLETE, message, metadata or {}, checkpoint=checkpoint or StageCheckpoint())
@@ -106,7 +106,7 @@ class StageResult:
         cls,
         message: str,
         delay_seconds: float,
-        metadata: dict[str, object] | None = None,
+        metadata: dict[str, Any] | None = None,
         checkpoint: StageCheckpoint | None = None,
     ) -> "StageResult":
         return cls(
@@ -121,7 +121,7 @@ class StageResult:
     def needs_action(
         cls,
         message: str,
-        metadata: dict[str, object] | None = None,
+        metadata: dict[str, Any] | None = None,
         checkpoint: StageCheckpoint | None = None,
     ) -> "StageResult":
         return cls(
@@ -138,7 +138,7 @@ class StageResult:
         message: str,
         error_type: str = "stage_failed",
         error_detail: str = "",
-        metadata: dict[str, object] | None = None,
+        metadata: dict[str, Any] | None = None,
         checkpoint: StageCheckpoint | None = None,
     ) -> "StageResult":
         return cls(

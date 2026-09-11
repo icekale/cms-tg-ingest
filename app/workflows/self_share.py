@@ -54,6 +54,7 @@ from app.media.intake_identity import (
     cleanup_root_action,
     collect_file_ids_under_dest,
     dest_file_ids_from_hits,
+    is_junk_video_name,
     is_season_folder_name,
     is_video_name,
     snapshot_files,
@@ -2311,6 +2312,25 @@ class BridgeSelfShareTaskWorkflow:
         if not isinstance(identity, dict):
             return "", [], None
         files = [item for item in (identity.get("files") or []) if isinstance(item, dict)]
+        junk_names = [
+            str(item.get("name") or "").strip()
+            for item in files
+            if is_junk_video_name(str(item.get("name") or ""))
+        ]
+        if junk_names:
+            files = [
+                item
+                for item in files
+                if not is_junk_video_name(str(item.get("name") or ""))
+            ]
+            skip_names = sorted(
+                {
+                    str(name).strip()
+                    for name in list(identity.get("intake_skip_names") or []) + junk_names
+                    if str(name).strip()
+                }
+            )
+            identity = {**identity, "files": files, "intake_skip_names": skip_names}
         expected_ids = [str(item.get("id") or "").strip() for item in files if str(item.get("id") or "").strip()]
         if not expected_ids:
             return "empty_files", [], None

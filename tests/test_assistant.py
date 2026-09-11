@@ -1,3 +1,6 @@
+# pyright: reportOptionalSubscript=false
+# pyright: reportOptionalMemberAccess=false
+# pyright: reportArgumentType=false
 import json
 import os
 import subprocess
@@ -524,6 +527,7 @@ class TelegramAssistantTests(unittest.TestCase):
 
             def fake_run_pi(question, **kwargs):
                 calls["count"] += 1
+                calls["tools"] = kwargs.get("tools")
                 return {"reply": f"自动诊断 {calls['count']}", "session_id": kwargs["session_id"]}
 
             with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
@@ -533,6 +537,7 @@ class TelegramAssistantTests(unittest.TestCase):
                     store, telegram, "42", config, self_share_config
                 )
                 self.assertEqual(diagnosed, 1)
+                self.assertTrue(calls["tools"])
                 snapshot = store.find_task(task.id)
                 diagnosis = snapshot.metadata.get(assistant.DIAGNOSIS_META_KEY)
                 self.assertEqual(diagnosis["reply"], "自动诊断 1")
@@ -681,7 +686,7 @@ class TelegramAssistantTests(unittest.TestCase):
         ):
             self.assertEqual(assistant.choose_auto_repair_action(task, store=None), "")
 
-    def test_auto_repair_skips_ambiguous_ownership(self):
+    def test_auto_repair_ambiguous_ownership_resumes_once(self):
         task = SimpleNamespace(
             status=TaskStatus.NEEDS_ACTION,
             current_stage=TaskStage.ORGANIZING,
@@ -691,6 +696,13 @@ class TelegramAssistantTests(unittest.TestCase):
             error_summary="接收文件归属存在歧义，已停止自动绑定",
             id=432,
         )
+        with patch(
+            "app.task_actions.available_task_actions", return_value=frozenset({"resume_organizing", "reprocess"})
+        ):
+            self.assertEqual(assistant.choose_auto_repair_action(task, store=None), "resume_organizing")
+        task.metadata = {
+            assistant.DIAGNOSIS_META_KEY: {"auto_repair_tried": ["resume_organizing"]}
+        }
         with patch(
             "app.task_actions.available_task_actions", return_value=frozenset({"resume_organizing", "reprocess"})
         ):
@@ -706,7 +718,7 @@ class TelegramAssistantTests(unittest.TestCase):
 
             def fake_run_pi(question, **kwargs):
                 calls["count"] += 1
-                self.assertIs(kwargs.get("tools"), False)
+                self.assertTrue(kwargs.get("tools"))
                 return {"reply": "诊断", "session_id": "x"}
 
             with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(

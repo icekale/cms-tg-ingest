@@ -2868,7 +2868,7 @@ def run_assistant_diagnosis_sweep(
                     session_dir=assistant.assistant_session_dir(task_store),
                     model=assistant.assistant_model(),
                     timeout=assistant.assistant_timeout(),
-                    tools=False,
+                    tools=True,
                 )
                 merged = dict(existing) if isinstance(existing, dict) else {}
                 merged.update(
