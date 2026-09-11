@@ -536,7 +536,8 @@ class TelegramAssistantTests(unittest.TestCase):
                 snapshot = store.find_task(task.id)
                 diagnosis = snapshot.metadata.get(assistant.DIAGNOSIS_META_KEY)
                 self.assertEqual(diagnosis["reply"], "自动诊断 1")
-                self.assertTrue(telegram.wait_for(lambda sent: any("AI 诊断" in m for m in sent)))
+                self.assertTrue(telegram.wait_for(lambda sent: any("已诊断" in m for m in sent)))
+                self.assertFalse(any("自动诊断 1" in m for m in telegram.sent))
 
                 # 同一事件不重复诊断
                 bridge.run_assistant_diagnosis_sweep(store, telegram, "42", config, self_share_config)
@@ -654,7 +655,7 @@ class TelegramAssistantTests(unittest.TestCase):
             self.assertTrue(diagnosis["auto_repair_applied"])
             self.assertIn("timeout", diagnosis["error"])
 
-    def test_auto_repair_cooldown_blocks_repeat(self):
+    def test_auto_repair_does_not_repeat_same_action(self):
         task = SimpleNamespace(
             status=TaskStatus.NEEDS_ACTION,
             current_stage=TaskStage.ORGANIZING,
@@ -663,17 +664,92 @@ class TelegramAssistantTests(unittest.TestCase):
                 assistant.DIAGNOSIS_META_KEY: {
                     "auto_repair_action": "resume_organizing",
                     "auto_repair_applied": True,
-                    "auto_repair_at": time.time(),
+                    "auto_repair_at": time.time() - 7 * 3600,
+                    "auto_repair_tried": ["resume_organizing"],
                 }
             },
             retry_count=0,
             error_summary="整理超时",
             id=445,
         )
-        with patch.object(assistant, "auto_repair_cooldown_seconds", return_value=6 * 3600), patch(
+        with patch(
+            "app.task_actions.available_task_actions", return_value=frozenset({"resume_organizing", "reprocess"})
+        ):
+            self.assertEqual(assistant.choose_auto_repair_action(task, store=None), "reprocess")
+        with patch(
+            "app.task_actions.available_task_actions", return_value=frozenset({"resume_organizing"})
+        ):
+            self.assertEqual(assistant.choose_auto_repair_action(task, store=None), "")
+
+    def test_auto_repair_skips_ambiguous_ownership(self):
+        task = SimpleNamespace(
+            status=TaskStatus.NEEDS_ACTION,
+            current_stage=TaskStage.ORGANIZING,
+            claimed_by="",
+            metadata={},
+            retry_count=0,
+            error_summary="接收文件归属存在歧义，已停止自动绑定",
+            id=432,
+        )
+        with patch(
             "app.task_actions.available_task_actions", return_value=frozenset({"resume_organizing", "reprocess"})
         ):
             self.assertEqual(assistant.choose_auto_repair_action(task, store=None), "")
+
+    def test_diagnosis_quality_event_does_not_rediagnose(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = _needs_action_task(store)
+            telegram = _FakeTelegram()
+            config, self_share_config = _guards_config()
+            calls = {"count": 0}
+
+            def fake_run_pi(question, **kwargs):
+                calls["count"] += 1
+                self.assertIs(kwargs.get("tools"), False)
+                return {"reply": "诊断", "session_id": "x"}
+
+            with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
+                assistant, "run_pi", side_effect=fake_run_pi
+            ), patch.object(assistant, "diagnosis_cooldown_seconds", return_value=0), patch.object(
+                assistant, "auto_repair_enabled", return_value=False
+            ):
+                bridge.run_assistant_diagnosis_sweep(store, telegram, "42", config, self_share_config)
+                store.record_event(
+                    task.id,
+                    TaskStage.NEEDS_ACTION,
+                    TaskStatus.NEEDS_ACTION,
+                    "质量巡检记录终态时间（actor=quality-auto）",
+                )
+                bridge.run_assistant_diagnosis_sweep(store, telegram, "42", config, self_share_config)
+            self.assertEqual(calls["count"], 1)
+            self.assertTrue(any("结论写在任务详情" in m for m in telegram.sent))
+            self.assertFalse(any("AI 诊断" in m for m in telegram.sent))
+
+    def test_auto_repair_exhausted_notifies_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = _needs_action_task(store)
+            store.patch_metadata(
+                task.id,
+                {
+                    assistant.DIAGNOSIS_META_KEY: {
+                        "reply": "旧诊断",
+                        "reason": "CMS 整理超时（等待 15 分钟无进展），已停止自动重试，需要人工确认",
+                        "auto_repair_action": "reprocess",
+                        "auto_repair_applied": True,
+                        "auto_repair_tried": ["reprocess"],
+                    }
+                },
+            )
+            telegram = _FakeTelegram()
+            with patch.object(assistant, "auto_repair_enabled", return_value=True), patch(
+                "app.task_actions.available_task_actions", return_value=frozenset({"reprocess"})
+            ):
+                self.assertFalse(bridge.maybe_auto_repair_task(store, task.id, telegram, "42"))
+                self.assertEqual(sum(1 for m in telegram.sent if "仍需人工" in m), 1)
+                self.assertFalse(bridge.maybe_auto_repair_task(store, task.id, telegram, "42"))
+            self.assertEqual(sum(1 for m in telegram.sent if "仍需人工" in m), 1)
 
     def test_diagnosis_cooldown_skips_new_event(self):
         with tempfile.TemporaryDirectory() as tmp:

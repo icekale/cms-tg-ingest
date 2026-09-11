@@ -228,6 +228,17 @@ _SHARE_RISK_MARKERS = (
     "违规",
     "vio_file",
     "分享失效",
+    "归属存在歧义",
+    "已停止自动绑定",
+)
+_DIAGNOSIS_REASON_NOISE = (
+    "质量巡检记录终态时间",
+    "继续整理已入队",
+    "AI助手自动修复",
+    "触发从头重跑",
+    "STRM 恢复已入队",
+    "触发重试",
+    "触发 Emby",
 )
 
 # 传给模型的任务字段白名单：serialize_task 的完整 dict 含 metadata/URL 等
@@ -366,11 +377,47 @@ def _task_looks_share_risk(task: Any, store: Any | None = None) -> bool:
     return any(marker.lower() in blob for marker in _SHARE_RISK_MARKERS)
 
 
+def tried_auto_repair_actions(diagnosis: Any) -> list[str]:
+    if not isinstance(diagnosis, dict):
+        return []
+    tried: list[str] = []
+    for item in diagnosis.get("auto_repair_tried") or []:
+        text = str(item or "").strip()
+        if text and text not in tried:
+            tried.append(text)
+    action = str(diagnosis.get("auto_repair_action") or "").strip()
+    if action and action not in tried:
+        tried.append(action)
+    return tried
+
+
+def diagnosis_reason(task: Any, store: Any | None = None) -> str:
+    """needs_action 的稳定原因：忽略质量巡检时间戳和自动修复入队事件。"""
+    summary = str(getattr(task, "error_summary", "") or "").strip()
+    if summary:
+        return summary[:240]
+    if store is None:
+        return ""
+    try:
+        task_id = int(getattr(task, "id", 0) or 0)
+        if not task_id:
+            return ""
+        for event in reversed(list(store.list_events(task_id) or [])):
+            msg = str((event or {}).get("message") or "").strip()
+            if not msg or any(noise in msg for noise in _DIAGNOSIS_REASON_NOISE):
+                continue
+            if str((event or {}).get("status") or "") == "needs_action":
+                return msg[:240]
+    except Exception:
+        return ""
+    return ""
+
+
 def choose_auto_repair_action(task: Any, store: Any, *, max_retries: int = 3) -> str:
     """选出本轮可自动执行的动作。空字符串表示仍需人工。
 
-    优先级：retry > resume_organizing > emby > restore > reprocess（一次性、非违规）。
-    terminate / delete 永不自动。
+    优先级：retry > resume_organizing > emby > restore > reprocess。
+    同一动作不重做；terminate / delete 永不自动。
     """
     from .task_actions import available_task_actions
 
@@ -378,17 +425,12 @@ def choose_auto_repair_action(task: Any, store: Any, *, max_retries: int = 3) ->
         return ""
     metadata = getattr(task, "metadata", {}) or {}
     diagnosis = metadata.get(DIAGNOSIS_META_KEY) if isinstance(metadata, dict) else None
-    if isinstance(diagnosis, dict) and diagnosis.get("auto_repair_applied"):
-        cooldown = auto_repair_cooldown_seconds()
-        last = float(diagnosis.get("auto_repair_at") or 0)
-        if cooldown > 0 and last and time.time() < last + cooldown:
-            return ""
+    tried = tried_auto_repair_actions(diagnosis)
     actions = available_task_actions(task, max_retries, store=store)
     for action in AUTO_REPAIR_SAFE_ACTIONS:
-        if action in actions:
+        if action in actions and action not in tried:
             return action
-    already = isinstance(diagnosis, dict) and bool(diagnosis.get("auto_repair_action"))
-    if "reprocess" in actions and not already:
+    if "reprocess" in actions and "reprocess" not in tried:
         return "reprocess"
     return ""
 

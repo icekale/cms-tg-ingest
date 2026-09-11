@@ -2833,11 +2833,19 @@ def run_assistant_diagnosis_sweep(
         needs_diagnosis = True
         last_diagnosed = float((existing or {}).get("diagnosed_at") or 0) if isinstance(existing, dict) else 0.0
         cooldown = assistant.diagnosis_cooldown_seconds()
+        reason = assistant.diagnosis_reason(task, task_store)
         if assistant._task_looks_share_risk(task, task_store) and isinstance(existing, dict) and existing.get("reply"):
             needs_diagnosis = False
         elif isinstance(existing, dict) and existing.get("error"):
             if time.time() < last_diagnosed + _ASSISTANT_ERROR_RETRY_SECONDS:
                 needs_diagnosis = False
+        elif (
+            isinstance(existing, dict)
+            and existing.get("reply")
+            and reason
+            and str(existing.get("reason") or "") == reason
+        ):
+            needs_diagnosis = False
         elif isinstance(existing, dict) and int(existing.get("event_id") or 0) == latest_event:
             needs_diagnosis = False
         elif cooldown > 0 and last_diagnosed and time.time() < last_diagnosed + cooldown:
@@ -2860,11 +2868,13 @@ def run_assistant_diagnosis_sweep(
                     session_dir=assistant.assistant_session_dir(task_store),
                     model=assistant.assistant_model(),
                     timeout=assistant.assistant_timeout(),
+                    tools=False,
                 )
                 merged = dict(existing) if isinstance(existing, dict) else {}
                 merged.update(
                     {
                         "event_id": latest_event,
+                        "reason": reason,
                         "reply": result["reply"],
                         "diagnosed_at": time.time(),
                     }
@@ -2872,8 +2882,13 @@ def run_assistant_diagnosis_sweep(
                 merged.pop("error", None)
                 task_store.patch_metadata(task_id, {DIAGNOSIS_META_KEY: merged})
                 LOG.info("Assistant auto-diagnosis stored for task %s", task_id)
-                for chunk in _chunk_assistant_text(f"🤖 AI 诊断 · 任务 #{task_id}\n{result['reply']}"):
-                    telegram.send_message(allowed_chat_id, chunk)
+                try:
+                    telegram.send_message(
+                        allowed_chat_id,
+                        f"🤖 任务 #{task_id} 已诊断，结论写在任务详情。",
+                    )
+                except Exception:
+                    LOG.debug("Assistant diagnosis telegram notify failed", exc_info=True)
             except assistant.AssistantError as ex:
                 LOG.warning("Assistant auto-diagnosis failed for task %s: %s", task_id, ex)
                 try:
@@ -2924,7 +2939,22 @@ def maybe_auto_repair_task(
     if str(status_value) != str(TaskStatus.NEEDS_ACTION.value):
         return False
     action = assistant.choose_auto_repair_action(task, task_store, max_retries=max_retries)
+    diagnosis = dict(((task.metadata or {}).get(DIAGNOSIS_META_KEY) or {}) if isinstance(task.metadata, dict) else {})
     if not action:
+        tried = assistant.tried_auto_repair_actions(diagnosis)
+        if tried and not diagnosis.get("auto_repair_exhausted_at"):
+            diagnosis["auto_repair_exhausted_at"] = time.time()
+            try:
+                task_store.patch_metadata(task_id, {DIAGNOSIS_META_KEY: diagnosis})
+            except Exception:
+                LOG.debug("Assistant auto-repair exhausted metadata not stored", exc_info=True)
+            try:
+                telegram.send_message(
+                    allowed_chat_id,
+                    f"🤖 任务 #{task_id} 已自动试过 {' / '.join(tried)}，仍需人工。",
+                )
+            except Exception:
+                LOG.debug("Assistant auto-repair exhausted telegram notify failed", exc_info=True)
         return False
     result = apply_task_action(
         task_store,
@@ -2933,13 +2963,16 @@ def maybe_auto_repair_task(
         max_retries=max_retries,
         actor="AI助手自动修复",
     )
-    diagnosis = dict(((task.metadata or {}).get(DIAGNOSIS_META_KEY) or {}) if isinstance(task.metadata, dict) else {})
+    tried = assistant.tried_auto_repair_actions(diagnosis)
+    if result.applied and action not in tried:
+        tried.append(action)
     diagnosis.update(
         {
             "auto_repair_action": action,
             "auto_repair_applied": bool(result.applied),
             "auto_repair_reason": str(result.reason or "")[:300],
             "auto_repair_at": time.time(),
+            "auto_repair_tried": tried,
         }
     )
     try:
@@ -2994,7 +3027,7 @@ def start_assistant_watch_loop(
                     max_retries=max_retries,
                 )
             except Exception:
-                LOG.debug("Assistant watch sweep failed", exc_info=True)
+                LOG.exception("Assistant watch sweep failed")
             if loop_stop_event.wait(interval):
                 break
 
