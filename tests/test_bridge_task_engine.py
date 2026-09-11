@@ -246,9 +246,13 @@ class FakeEmby:
         self.items_by_tmdb = {}
         self.recent = []
         self.refreshed_paths = []
+        self.episode_paths = {}
 
     def find_item_by_tmdb(self, tmdb_id):
         return self.items_by_tmdb.get(str(tmdb_id))
+
+    def episode_paths_for_series(self, series_id):
+        return dict(self.episode_paths.get(str(series_id), {}))
 
     def recent_items(self, limit=30):
         return self.recent[:limit]
@@ -9486,6 +9490,77 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(inside.outcome, StageOutcome.COMPLETE)
             self.assertEqual(stored_after_inside["emby_status"], "confirmed")
             self.assertEqual(stored_after_inside["emby_item_id"], "new-item")
+
+    def test_emby_confirmed_stage_accepts_series_pinned_to_legacy_path_when_episodes_are_in_dest(self):
+        """同一 tmdb 已有旧目录时 Emby 会把剧集 Path 钉在旧目录上，分集路径才是真凭据。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            emby = FakeEmby()
+            workflow = self._workflow(tmp, emby=emby)
+            row = self._self_share_row()
+            dest_a = Path(tmp) / "library" / "A" / "M-末日地堡-2023-[tmdb=123456]"
+            dest_b = Path(tmp) / "library" / "B" / "羊毛战记 (2023) {tmdb-123456}"
+            self._write_strm(dest_a)
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(self.config.strm_root / row["own_share_file_name"]),
+                dest_path=str(dest_a),
+                category_final="华语电影",
+            ) or row
+            task = self._claim_task("abc", "1234", TaskStage.EMBY_CONFIRMED, {"submission_id": row["id"]}, row["id"])
+            emby.items_by_tmdb["123456"] = {
+                "Id": "legacy-item",
+                "Name": "末日地堡",
+                "Type": "Series",
+                "Path": str(dest_b),
+                "ParentId": "parent-old",
+                "LibraryName": "旧库",
+            }
+            emby.episode_paths["legacy-item"] = {
+                "S01E01": str(dest_a / "Season 01" / "ep01.strm"),
+                "S01E02": str(dest_b / "Season 01" / "ep02.strm"),
+            }
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"])) or {}
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(stored["emby_status"], "confirmed")
+            self.assertEqual(stored["emby_item_id"], "legacy-item")
+
+    def test_emby_confirmed_stage_still_defers_when_series_episodes_live_outside_dest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            emby = FakeEmby()
+            workflow = self._workflow(tmp, emby=emby)
+            row = self._self_share_row()
+            dest_a = Path(tmp) / "library" / "A" / "M-末日地堡-2023-[tmdb=123456]"
+            dest_b = Path(tmp) / "library" / "B" / "羊毛战记 (2023) {tmdb-123456}"
+            self._write_strm(dest_a)
+            row = self.submissions.update_move(
+                int(row["id"]),
+                "moved",
+                source_path=str(self.config.strm_root / row["own_share_file_name"]),
+                dest_path=str(dest_a),
+                category_final="华语电影",
+            ) or row
+            task = self._claim_task("abc", "1234", TaskStage.EMBY_CONFIRMED, {"submission_id": row["id"]}, row["id"])
+            emby.items_by_tmdb["123456"] = {
+                "Id": "legacy-item",
+                "Name": "末日地堡",
+                "Type": "Series",
+                "Path": str(dest_b),
+                "ParentId": "parent-old",
+                "LibraryName": "旧库",
+            }
+            emby.episode_paths["legacy-item"] = {
+                "S01E01": str(dest_b / "Season 01" / "ep01.strm"),
+            }
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"])) or {}
+
+            self.assertEqual(result.outcome, StageOutcome.DEFER)
+            self.assertNotEqual(stored["emby_status"], "confirmed")
 
     def test_emby_confirmed_stage_selects_in_dest_duplicate_tmdb_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:

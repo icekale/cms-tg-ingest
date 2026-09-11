@@ -1,3 +1,7 @@
+## 0.5.30 - 2026-09-11
+
+- **修掉「等 Emby 确认入库」永久等待**：同一个 tmdb 只要在 Emby 里已经有了别的目录名（如按旧命名建过的 `羊毛战记 (2023) {tmdb-125988}`），Emby 就会把剧集条目的 `Path` 钉在那个旧目录上。旧判定要求条目 `Path` 必须落在本次目标目录内，于是 432 一直 defer（实测 `_defer_count=7`）永远等不到确认。现在除了条目 `Path`，还会看该剧集的分集路径 —— 只要本任务目标目录里确实有分集被 Emby 收录（432 实测 29 集里 19 集如此），就算确认；分集全在别处时仍然继续等。
+
 ## 0.5.29 - 2026-09-11
 
 - **通知失败不再拖垮阶段**：Telegram 抖动（实测日志里 55 次 `Cannot reach api.telegram.org`）会让已经落盘的阶段整体判成失败 —— 432 因此停在 `moved`，29 个 STRM 已生成，Emby 确认和源文件清理却没跑。现在阶段内 5 处通知改走 `notify_telegram()`，发不出去只记一条 WARNING，阶段照常完成。
@@ -215,7 +219,6 @@
 - **Telegram Rich Message 运维展示**：HDHive、任务、健康、质量和入队结果使用结构化 Rich Message，保留原有权限、状态机、键盘与 callback 数据；短确认和回退路径继续使用纯文本。
 - **Telegram 展示安全加固**：统一对 URL、分享码、接收码、访问凭据、路径和上下文数字 code 做脱敏，补齐 Rich 发送/编辑失败回退及小长度限制测试。
 
-
 - **整理快照走进发布组季目录**：接收根下子目录里有视频就会记 fid，不再只认 `Season 01` / `第X季`；`D.P.S01.KOREAN.2160p...` 这类季包不会再空转「等待 CMS 整理完成」。
 - **空 files 时补拍接收根**：organizing 发现 intake 快照为空会再扫一遍接收根；仍无视频才继续等待，不会按标题误绑旧 dest。
 
@@ -223,16 +226,12 @@
 
 - **串行化多目录 CMS 同步**：每个目标等待自己的 STRM 源目录生成后才提交下一个 `share115` 同步，避免 CMS 异步任务互相覆盖。
 
-
 - **补齐继续整理入口**：Telegram callback 和旧版 Web 任务详情页都可使用安全的 `resume_organizing`；legacy intake identity 也要求每个接收根和文件 ID 有效。
-
 
 - **兼容旧整理超时 metadata**：即使旧版本的质量终态记录清除了 `_defer_stage`，只要仍有完整接收快照、成功 `receive_share` 且没有任何建分享 operation，也可安全继续整理。
 
-
 - **支持单任务多目录整理**：每个目标独立识别、创建自有分享、同步 CMS、生成和移动 STRM、确认 Emby 入库；所有目标完成后才统一清理 115 接收源，任一目标失败都保留源文件。
 - **安全继续整理**：对已有成功接收记录的整理冲突任务提供 `resume_organizing`，不重新接收、不重复创建分享或改变 operation generation。
-
 
 - **整理目录冲突不再无限等待**：整理文件被 CMS 分到多个 TMDB 目录时，继续汇总全部接收 fid 后触发现有人工处理保护，不再在第一个部分目录处反复等待。
 
@@ -347,7 +346,7 @@
 
 ## 0.3.6 - 2026-08-11
 
-- **修复升级后仍误报有新版**：CMS 上报版本带 `v` 前缀与 ` - PRO` 后缀（如 `v0.4.9.2 - PRO`），Docker Hub tag 是纯数字（`0.4.9.2`），字符串比较永不相等 → `update_available` 恒 true。新增 `_version_core()` 提取数字核心比较，升级到同核心即判定无更新。
+- **修复升级后仍误报有新版**：CMS 上报版本带 `v` 前缀与 `- PRO` 后缀（如 `v0.4.9.2 - PRO`），Docker Hub tag 是纯数字（`0.4.9.2`），字符串比较永不相等 → `update_available` 恒 true。新增 `_version_core()` 提取数字核心比较，升级到同核心即判定无更新。
 - **CMS 已升级到 0.4.9.2**：宿主机执行 `update-cms.sh`（带 `CMS_GUARD_FILE=/mnt/user/appdata/cloud-media-sync/config/patches/sitecustomize.py`），守卫验证 PASS + 自动回滚闭环正常；守卫状态 ok:true。
 - 测试：后端 1465 项全部通过（新增版本核心比较 2 项）。
 
@@ -536,6 +535,7 @@
 - 媒体分类修复：印度语 2 字符标记改为带词边界的匹配（原去空格后词边界失效可能误匹配）；`extract_tmdb_search_query` 多词优先、单字符标记仅在紧随标记时回退；`extract_year_from_name` 剥离分辨率后缀，与 115 目录匹配行为一致。
 - 备份保留修复：旧备份清理改为扫描目标目录全部 `*.db`（原按当前备份 stem 前缀匹配会漏清理历史备份）；同日失败重试设 4 次上限（保留每小时重试设计，不再整天重试）。
 - 修复 `quality_automation.py` 缺失的 `Any` 导入（ruff F821）。
+
 ## 0.2.72 - 2026-08-05
 
 - 配置健壮性：只设置 `SELF_SHARE_REVIEW_GRACE_SECONDS`（如 3600）而不同步设置检查点时会直接启动失败；现在未显式配置 `SELF_SHARE_REVIEW_CHECKPOINTS_SECONDS` 时自动以宽限期作为唯一检查点，显式配置仍严格校验末尾必须等于宽限期。

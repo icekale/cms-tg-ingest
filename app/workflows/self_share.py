@@ -6471,6 +6471,28 @@ class BridgeSelfShareTaskWorkflow:
         actual_path = safe_resolve(Path(actual))
         return actual_path == expected_path or is_relative_to(actual_path, expected_path)
 
+    def _emby_match_has_dest_episodes(self, match: dict[str, Any], expected: str) -> bool:
+        """旧目录占位时 Emby 会把剧集 Path 钉在旧目录上，分集路径才是真凭据。"""
+        series_id = str(match.get("Id") or "").strip()
+        if not series_id or not expected or not hasattr(self.emby, "episode_paths_for_series"):
+            return False
+        try:
+            paths = self.emby.episode_paths_for_series(series_id)
+        except Exception:
+            LOG.debug("Failed to query Emby episode paths for %s", series_id, exc_info=True)
+            return False
+        if not isinstance(paths, dict):
+            return False
+        expected_path = safe_resolve(Path(expected))
+        for raw in paths.values():
+            actual = str(raw or "").strip()
+            if not actual:
+                continue
+            actual_path = safe_resolve(Path(actual))
+            if actual_path == expected_path or is_relative_to(actual_path, expected_path):
+                return True
+        return False
+
     def _find_emby_match_for_moved_dest(
         self,
         recognition: dict[str, Any],
@@ -6511,6 +6533,8 @@ class BridgeSelfShareTaskWorkflow:
             elif not match_emby_item([item], recognition, row):
                 continue
             if self._emby_match_in_moved_dest(item, row, task_metadata) or already_confirmed:
+                return item
+            if self._emby_match_has_dest_episodes(item, expected):
                 return item
         return None
 
