@@ -2238,6 +2238,26 @@ class BridgeSelfShareTaskWorkflow:
             return False
         return bool(expected & found)
 
+    def _dest_path_parts(self, dest: str) -> list[dict[str, Any]]:
+        """实时读 dest 的祖先路径（含 dest 自身），读不到返回空列表。"""
+        dest = str(dest or "").strip()
+        if not dest or not hasattr(self.p115, "folder_path"):
+            return []
+        try:
+            path = self.p115.folder_path(dest) or []
+        except Exception:
+            LOG.debug("Failed to read dest path dest=%s", dest, exc_info=True)
+            return []
+        return [item for item in path if isinstance(item, dict)]
+
+    def _dest_path_text(self, path: list[dict[str, Any]]) -> str:
+        """把祖先路径渲染成「冗余/剧名」形式，去掉根目录前缀。"""
+        parts = [p115_file_name(item) for item in path]
+        parts = [name for name in parts if name]
+        while parts and parts[0] in {"根目录", "全部文件"}:
+            parts.pop(0)
+        return "/".join(parts)
+
     def _excluded_dest_ancestor(self, dest: str, receive_cid: str) -> dict[str, str] | None:
         """在 dest 自身及其祖先里找排除目录（实时读目录树，绕开滞后的搜索索引）。
 
@@ -2252,39 +2272,69 @@ class BridgeSelfShareTaskWorkflow:
         if not terminal:
             return None
         entries: list[tuple[str, str]] = [(dest, "")]
-        if hasattr(self.p115, "folder_path"):
-            try:
-                path = self.p115.folder_path(dest) or []
-            except Exception:
-                LOG.debug("Failed to read dest ancestors dest=%s", dest, exc_info=True)
-                path = []
-            entries.extend(
-                (p115_item_id(item), str(item.get("name") or "").strip())
-                for item in path
-                if isinstance(item, dict) and p115_item_id(item)
-            )
+        path = self._dest_path_parts(dest)
+        dest_path = self._dest_path_text(path)
+        entries.extend(
+            (p115_item_id(item), p115_file_name(item))
+            for item in path
+            if p115_item_id(item)
+        )
         names: dict[str, str] = {}
         for item_id, name in entries:
             if name:
                 names[item_id] = name
         for item_id, _ in entries:
             if item_id in terminal:
-                return {"folder_id": item_id, "folder_name": names.get(item_id) or item_id}
+                return {
+                    "folder_id": item_id,
+                    "folder_name": names.get(item_id) or item_id,
+                    "dest_path": dest_path,
+                }
         return None
+
+    def _excluded_dest_file_names(
+        self,
+        file_ids: list[str],
+        file_hits: list[dict[str, Any]],
+    ) -> list[str]:
+        """落在排除目录里的文件名（让人工处理文案能定位到具体文件）。"""
+        wanted = {str(value) for value in file_ids if str(value)}
+        names: set[str] = set()
+        for item in file_hits:
+            if not isinstance(item, dict) or p115_item_id(item) not in wanted:
+                continue
+            name = p115_file_name(item)
+            if name:
+                names.add(name)
+        return sorted(names)
+
+    def _excluded_dest_detail_text(self, folder_name: str, marker: dict[str, Any]) -> str:
+        """排除目录升级文案的补充句（具体位置 + 涉及文件），读不到就返回空串。"""
+        dest_path = str(marker.get("dest_path") or "").strip()
+        names = [str(value) for value in (marker.get("file_names") or []) if str(value).strip()]
+        text = ""
+        if dest_path and dest_path != folder_name:
+            text += f"具体位置：{dest_path}。"
+        if names:
+            shown = "、".join(names[:5])
+            more = f" 等 {len(names)} 个文件" if len(names) > 5 else ""
+            text += f"涉及文件：{shown}{more}。"
+        return text
 
     def _excluded_dest_hit(
         self,
         dest: str,
         file_ids: list[str],
         receive_cid: str,
-    ) -> dict[str, str] | None:
+        file_hits: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
         """dest 落在排除目录、且文件经实时核验确实还在那儿 → 返回该排除目录。"""
         marker = self._excluded_dest_ancestor(dest, receive_cid)
         if not marker:
             return None
         if not self._excluded_dest_confirmed(dest, file_ids):
             return None
-        return marker
+        return {**marker, "file_names": self._excluded_dest_file_names(file_ids, file_hits or [])}
 
     def _organized_target_for_dest(
         self,
@@ -2596,7 +2646,7 @@ class BridgeSelfShareTaskWorkflow:
             return INCOMPLETE, [], None
         if grouped:
             targets: list[dict[str, Any]] = []
-            excluded_hits: list[dict[str, str]] = []
+            excluded_hits: list[dict[str, Any]] = []
             require_real_folder = len(grouped) > 1
             for dest, file_ids in grouped.items():
                 folder = self._folder_record_for_dest(
@@ -2608,7 +2658,7 @@ class BridgeSelfShareTaskWorkflow:
                     # 排除目录里的候选目标往往查不到文件夹记录（搜索索引按 id 不返回），
                     # 而这时文件已在「冗余/已存在」——必须如实上报，不能当"没整理完"空转到超时。
                     # 2026-09-12 任务 335：一季被 CMS 拆开，重复的 4 集落进"已存在"。
-                    excluded_hit = self._excluded_dest_hit(dest, file_ids, receive_cid)
+                    excluded_hit = self._excluded_dest_hit(dest, file_ids, receive_cid, file_hits)
                     if excluded_hit:
                         excluded_hits.append(excluded_hit)
                         continue
@@ -2623,7 +2673,7 @@ class BridgeSelfShareTaskWorkflow:
                 if dest == receive_cid or dest in root_ids:
                     # 分享根被 CMS 整体移进排除目录时，它的 id 仍是登记的 root：
                     # 别当成"还没开始整理"（2026-09-12 任务 445）。
-                    excluded_hit = self._excluded_dest_hit(dest, file_ids, receive_cid)
+                    excluded_hit = self._excluded_dest_hit(dest, file_ids, receive_cid, file_hits)
                     if excluded_hit:
                         excluded_hits.append(excluded_hit)
                         continue
@@ -2633,7 +2683,14 @@ class BridgeSelfShareTaskWorkflow:
                     # 处理，不再按"未整理完"空转等待到超时（2026-09-05 任务 595）。
                     # 搜索索引可能滞后：升级前用实时列目录核验文件确实还在这里。
                     if self._excluded_dest_confirmed(dest, file_ids):
-                        excluded_hits.append({"folder_id": dest, "folder_name": dest_name})
+                        excluded_hits.append(
+                            {
+                                "folder_id": dest,
+                                "folder_name": dest_name,
+                                "dest_path": self._dest_path_text(self._dest_path_parts(dest)),
+                                "file_names": self._excluded_dest_file_names(file_ids, file_hits),
+                            }
+                        )
                         continue
                     return INCOMPLETE, [], None
                 if self._dest_is_receive_child(dest, receive_cid) is not False:
@@ -2945,13 +3002,15 @@ class BridgeSelfShareTaskWorkflow:
             )
         if dest_status == EXCLUDED_DEST:
             marker = (dest_identity or {}).get("_excluded_dest") if isinstance(dest_identity, dict) else None
-            folder_name = str((marker or {}).get("folder_name") or "").strip() or "排除目录"
+            marker = marker if isinstance(marker, dict) else {}
+            folder_name = str(marker.get("folder_name") or "").strip() or "排除目录"
             return StageResult.needs_action(
                 f"CMS 把接收文件整理到了排除目录「{folder_name}」——通常是库内已存在同版本，被判定冗余或已存在。"
+                f"{self._excluded_dest_detail_text(folder_name, marker)}"
                 "若是想要的新版本：手动把文件移入媒体库对应目录后点「继续整理」；若不需要：直接删除本任务即可。",
                 {
                     "submission_id": int(row["id"]),
-                    "excluded_dest_folder": str((marker or {}).get("folder_id") or ""),
+                    "excluded_dest_folder": str(marker.get("folder_id") or ""),
                 },
             )
         if dest_targets:
@@ -4499,14 +4558,18 @@ class BridgeSelfShareTaskWorkflow:
         try:
             status = self.p115.inspect_share(own_code, own_pwd)
         except P115ShareUnavailableError as exc:
+            reason = str(exc)[:200]
             row = self.store.update_self_share(
                 int(row["id"]),
                 share_validation_status="invalid",
-                share_validation_error=str(exc)[:200],
+                share_validation_error=reason,
             ) or row
             metadata = self._own_share_metadata(row)
-            metadata.update(self._share_review_metadata(task, row, "invalid", error=str(exc)))
-            return StageResult.needs_action("自有分享已被 115 判定为不可用，源文件已保留，停止自动改名和重建", metadata)
+            metadata.update(self._share_review_metadata(task, row, "invalid", error=reason))
+            return StageResult.needs_action(
+                f"自有分享已被 115 判定为不可用，源文件已保留，停止自动改名和重建；原因：{reason}",
+                metadata,
+            )
         except RuntimeError as exc:
             metadata = self._own_share_metadata(row)
             metadata.update(self._share_review_metadata(task, row, "unknown", error=str(exc)))
@@ -4527,7 +4590,10 @@ class BridgeSelfShareTaskWorkflow:
             ) or row
             metadata = self._own_share_metadata(row)
             metadata.update(self._share_review_metadata(task, row, "invalid", error=reason))
-            return StageResult.needs_action("自有分享存在 115 风险标记或不可用状态，源文件已保留，停止自动改名和重建", metadata)
+            return StageResult.needs_action(
+                f"自有分享存在 115 风险标记或不可用状态，源文件已保留，停止自动改名和重建；原因：{reason}",
+                metadata,
+            )
         if not share_state:
             metadata = self._own_share_metadata(row)
             metadata.update(self._share_review_metadata(task, row, "unknown", error="115 未返回明确分享状态"))
@@ -6051,7 +6117,12 @@ class BridgeSelfShareTaskWorkflow:
             metadata = self._share_review_metadata(task, row, "invalid", error="115 分享不可用", checks=checks, next_at=0)
             return "invalid", metadata, "115 分享不可用", 0
         if share_availability(share_state, have_vio_file) == "invalid":
-            reason = share_unavailable_reason(share_state, have_vio_file)
+            reason = share_unavailable_reason(
+                share_state,
+                have_vio_file,
+                status.get("reason_text"),
+                status.get("can_appeal"),
+            )
             metadata = self._share_review_metadata(task, row, "invalid", error=reason, checks=checks, next_at=0)
             return "invalid", metadata, reason, 0
         if not share_state:

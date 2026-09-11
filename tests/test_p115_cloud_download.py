@@ -2,6 +2,7 @@ import unittest
 
 from app.clients.p115 import (
     P115CloudOutputPendingError,
+    P115ShareUnavailableError,
     P115WebClient,
     lixian_rsa_encrypt,
     normalize_cloud_status,
@@ -489,6 +490,31 @@ class ShareAvailabilityTests(unittest.TestCase):
         self.assertEqual(share_unavailable_reason("6", True), "115 分享状态不可用：6")
         self.assertEqual(share_unavailable_reason("", True), "115 标记 have_vio_file")
         self.assertEqual(share_unavailable_reason("", False), "115 分享状态不可用：未知")
+
+    def test_reason_carries_115_own_wording_and_the_appeal_hint(self):
+        self.assertEqual(
+            share_unavailable_reason("6", True, "暴恐涉政", 1),
+            "115 分享状态不可用：6（暴恐涉政），可在 115 申诉",
+        )
+        self.assertEqual(share_unavailable_reason("6", False, "违规", 0), "115 分享状态不可用：6（违规）")
+        self.assertEqual(share_unavailable_reason("6", False, "", True), "115 分享状态不可用：6，可在 115 申诉")
+
+    def test_share_snap_raises_with_the_ban_reason_and_appeal_hint(self):
+        http = FakeHttp(
+            [
+                {
+                    "state": True,
+                    "data": {
+                        "shareinfo": {"share_state": 6, "have_vio_file": 1, "forbid_reason": "暴恐涉政"},
+                        "user_appeal": {"can_appeal": 1},
+                    },
+                }
+            ]
+        )
+        client = P115WebClient("UID=1", http=http, timeout=3)
+        with self.assertRaises(P115ShareUnavailableError) as ctx:
+            client.share_snap("share-b", "1212")
+        self.assertEqual(str(ctx.exception), "115 分享状态不可用：6（暴恐涉政），可在 115 申诉")
 
 
 if __name__ == "__main__":

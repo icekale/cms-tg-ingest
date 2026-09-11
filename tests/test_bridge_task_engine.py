@@ -195,7 +195,10 @@ class FakeP115:
     def inspect_share(self, share_code, receive_code):
         self.inspect_calls.append((share_code, receive_code))
         if self.share_statuses:
-            return self.share_statuses.pop(0)
+            status = self.share_statuses.pop(0)
+            if isinstance(status, Exception):
+                raise status
+            return status
         return {"available": True, "share_state": "0", "have_vio_file": False}
 
     def list_own_share_states(self, limit=100):
@@ -6846,6 +6849,32 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.outcome, StageOutcome.COMPLETE)
             self.assertNotIn("direct_file_share_fallback", result.metadata)
             self.assertFalse(stored["share_alias_name"])
+
+    def test_share_validation_surfaces_115_ban_reason_to_the_user(self):
+        from app.clients.p115 import P115ShareUnavailableError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._self_share_row()
+            self.p115.share_statuses = [
+                P115ShareUnavailableError("115 分享状态不可用：6（暴恐涉政），可在 115 申诉"),
+            ]
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.SHARE_VALIDATED,
+                {"submission_id": row["id"]},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+            stored = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.NEEDS_ACTION)
+            self.assertIn("115 分享状态不可用：6（暴恐涉政），可在 115 申诉", result.message)
+            self.assertIn("源文件已保留", result.message)
+            self.assertEqual(stored["share_validation_status"], "invalid")
+            self.assertIn("暴恐涉政", stored["share_validation_error"])
 
     def test_share_validation_violation_keeps_existing_neutral_alias_without_rebuilding(self):
         with tempfile.TemporaryDirectory() as tmp:

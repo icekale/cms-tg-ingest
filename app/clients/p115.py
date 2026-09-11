@@ -84,6 +84,11 @@ def as_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _as_mapping(value: Any) -> dict[str, Any]:
+    """Narrow a possibly-missing JSON object to a dict."""
+    return value if isinstance(value, dict) else {}
+
+
 def normalize_share_state(value: Any) -> str:
     return "" if value is None else str(value).strip().lower()
 
@@ -94,7 +99,7 @@ def normalize_share_state(value: Any) -> str:
 USABLE_SHARE_STATES = frozenset({"0", "1", "true"})
 
 
-def is_violation_flag(value: Any) -> bool:
+def is_yes_flag(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes"}
 
 
@@ -111,17 +116,37 @@ def share_availability(share_state: Any, have_vio_file: Any = False) -> str:
     state = normalize_share_state(share_state)
     if state:
         return "valid" if state in USABLE_SHARE_STATES else "invalid"
-    return "invalid" if is_violation_flag(have_vio_file) else "unknown"
+    return "invalid" if is_yes_flag(have_vio_file) else "unknown"
 
 
-def share_unavailable_reason(share_state: Any, have_vio_file: Any = False) -> str:
-    """User-facing reason for a share that is not "valid"."""
+def share_unavailable_reason(
+    share_state: Any,
+    have_vio_file: Any = False,
+    reason_text: Any = "",
+    can_appeal: Any = False,
+) -> str:
+    """User-facing reason for a share that is not "valid".
+
+    ``reason_text`` is 115's own wording — ``shareinfo.forbid_reason`` from
+    share/snap or ``share_state_text`` from share/slist — and ``can_appeal``
+    comes from ``user_appeal.can_appeal`` on share/snap or ``can_appeal`` on
+    share/slist. Without them a dead share reads as a bare status code
+    ("115 分享状态不可用：6"); measured live on 2026-09-12, banned shares
+    reported "违规"/"暴恐涉政" and only some were appealable.
+    """
     state = normalize_share_state(share_state)
     if state:
-        return f"115 分享状态不可用：{state}"
-    if is_violation_flag(have_vio_file):
-        return "115 标记 have_vio_file"
-    return "115 分享状态不可用：未知"
+        text = f"115 分享状态不可用：{state}"
+    elif is_yes_flag(have_vio_file):
+        text = "115 标记 have_vio_file"
+    else:
+        text = "115 分享状态不可用：未知"
+    reason = str(reason_text or "").strip()
+    if reason:
+        text += f"（{reason}）"
+    if is_yes_flag(can_appeal):
+        text += "，可在 115 申诉"
+    return text
 
 
 def iter_items(data: Any) -> list[dict]:
@@ -713,11 +738,21 @@ class P115WebClient:
             if is_p115_share_unavailable_message(str(exc)):
                 raise P115ShareUnavailableError(str(exc)) from exc
             raise
-        data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
-        share_info = data.get("shareinfo") if isinstance(data.get("shareinfo"), dict) else {}
+        data = _as_mapping(resp.get("data"))
+        share_info = _as_mapping(data.get("shareinfo"))
         share_state = normalize_share_state(share_info.get("share_state"))
-        if share_state and share_state not in {"0", "1", "true"}:
-            raise P115ShareUnavailableError(f"115 分享状态不可用: {share_state}")
+        if share_state and share_state not in USABLE_SHARE_STATES:
+            # 115 states why it banned the share in shareinfo.forbid_reason and
+            # whether it can be appealed in data.user_appeal, so carry both into
+            # the error the task stores instead of a bare state code (task 335).
+            raise P115ShareUnavailableError(
+                share_unavailable_reason(
+                    share_state,
+                    share_info.get("have_vio_file", 0),
+                    share_info.get("forbid_reason"),
+                    _as_mapping(data.get("user_appeal")).get("can_appeal"),
+                )
+            )
         return resp
 
     def share_root_items(
@@ -768,11 +803,11 @@ class P115WebClient:
 
     def inspect_share(self, share_code: str, receive_code: str) -> dict[str, Any]:
         snap = self.share_snap(share_code, receive_code, cid="0", limit=1)
-        data = snap.get("data") if isinstance(snap.get("data"), dict) else {}
-        share_info = data.get("shareinfo") if isinstance(data.get("shareinfo"), dict) else {}
+        data = _as_mapping(snap.get("data"))
+        share_info = _as_mapping(data.get("shareinfo"))
         share_state = normalize_share_state(share_info.get("share_state"))
         raw_vio = share_info.get("have_vio_file", data.get("have_vio_file", 0))
-        have_vio_file = str(raw_vio).strip().lower() in {"1", "true", "yes"}
+        have_vio_file = is_yes_flag(raw_vio)
         return {
             "available": True,
             "share_state": share_state,
@@ -810,8 +845,13 @@ class P115WebClient:
                 raw_state = item.get("state")
             states[share_code] = {
                 "share_state": normalize_share_state(raw_state),
-                "have_vio_file": str(raw_vio).strip().lower() in {"1", "true", "yes"},
+                "have_vio_file": is_yes_flag(raw_vio),
                 "create_time": item.get("create_time") or item.get("share_time") or 0,
+                # 115's own wording ("违规"/"已取消"/"已过期") and whether the
+                # share can be appealed: the review stage surfaces both so the
+                # user sees more than "115 分享状态不可用：6" (task 335).
+                "reason_text": str(item.get("share_state_text") or "").strip(),
+                "can_appeal": is_yes_flag(item.get("can_appeal")),
             }
         self._share_list_cache = (now + self.share_list_cache_ttl_seconds, deepcopy(states))
         return states

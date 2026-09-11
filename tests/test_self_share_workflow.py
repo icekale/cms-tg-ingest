@@ -594,7 +594,14 @@ class CmsPlaybackProbeTests(unittest.TestCase):
                         "list": [
                             {"share_code": "share-zero", "share_state": 0, "have_vio_file": 0, "create_time": 9},
                             {"share_code": "share-a", "share_state": 1, "have_vio_file": 0, "create_time": 10},
-                            {"share_code": "share-b", "share_state": 6, "have_vio_file": 1, "create_time": 11},
+                            {
+                                "share_code": "share-b",
+                                "share_state": 6,
+                                "have_vio_file": 1,
+                                "create_time": 11,
+                                "share_state_text": "违规",
+                                "can_appeal": 1,
+                            },
                         ]
                     },
                 }
@@ -605,9 +612,18 @@ class CmsPlaybackProbeTests(unittest.TestCase):
         first = client.list_own_share_states()
         second = client.list_own_share_states()
 
-        self.assertEqual(first["share-zero"], {"share_state": "0", "have_vio_file": False, "create_time": 9})
-        self.assertEqual(first["share-a"], {"share_state": "1", "have_vio_file": False, "create_time": 10})
-        self.assertEqual(first["share-b"], {"share_state": "6", "have_vio_file": True, "create_time": 11})
+        self.assertEqual(
+            first["share-zero"],
+            {"share_state": "0", "have_vio_file": False, "create_time": 9, "reason_text": "", "can_appeal": False},
+        )
+        self.assertEqual(
+            first["share-a"],
+            {"share_state": "1", "have_vio_file": False, "create_time": 10, "reason_text": "", "can_appeal": False},
+        )
+        self.assertEqual(
+            first["share-b"],
+            {"share_state": "6", "have_vio_file": True, "create_time": 11, "reason_text": "违规", "can_appeal": True},
+        )
         self.assertEqual(first, second)
         self.assertEqual(http.calls, 1)
 

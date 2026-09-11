@@ -1,3 +1,8 @@
+## 0.5.36 - 2026-09-12
+
+- **分享升级提示不再只说一个状态码**：死分享的 `share_unavailable_reason` 现在带上 115 自己的用词与能否申诉——`share/snap` 的 `forbid_reason` / `user_appeal.can_appeal`，`share/slist` 的 `share_state_text` / `can_appeal`（线上实测有分享报“违规”“暴恐涉政”，且只有部分可申诉）。原先文案只显示裸状态码（`115 分享状态不可用：6`），人工看不出是违规、过期还是被取消。同时删掉两处永远不会命中的 `forbid_reason`/`can_appeal` 取值：真正不可用的分享在 `share_snap` 内部就抛 `P115ShareUnavailableError`，消费方读到的 `status` 里根本没有这两个字段；`share/slist` 也不返回 `forbid_reason`，只有 `share_state_text`。
+- **排除目录升级提示能定位到具体文件**：整理时文件落进「冗余/已存在」的人工提示原先只有目录名（`整理到了排除目录「redundant-a」`），人工无从下手。现在补上「具体位置：冗余/剧名」与「涉及文件：…」（超过 5 个显示总数），取自同一轮实时目录树的祖先路径与文件命中。顺带修掉读错键名的缺陷：`folder_path` 返回的是 115 原始项（名称在 `n`），旧代码读 `name`，导致目录名退化成裸目录 id、路径永远为空——改用 `p115_file_name` 统一取值。
+
 ## 0.5.35 - 2026-09-12
 
 - **整理阶段不再空转到超时（线上任务 335、445）**：候选目标落在排除目录（冗余/已存在）时，115 搜索索引按 id 往往查不到文件夹记录，`_folder_record_for_dest` 于是在多目标场景下返回 None，旧逻辑当场按“没整理完”返回 INCOMPLETE，任务就此空等到 organizing 超时。现在用实时目录树兑底（`_excluded_dest_ancestor` 走 `folder_path` 向上找排除目录、`_excluded_dest_hit` 再用实时列目录核验文件确实在那儿），认出排除目录就立即升级人工处理并在提示里说明是哪个目录，与 2026-09-05 任务 595 的口径一致。

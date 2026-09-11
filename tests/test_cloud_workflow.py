@@ -1431,6 +1431,15 @@ class PostAutoOrganizeGuardTests(unittest.TestCase):
                     ],
                 }.get(str(parent_id), [])
 
+            def folder_path(self, folder_id):
+                if str(folder_id) not in {"redundant-a", "redundant-b"}:
+                    return []
+                return [
+                    {"cid": "0", "n": "根目录"},
+                    {"cid": "library-parent", "n": "冗余"},
+                    {"cid": folder_id, "n": "Example (2020)"},
+                ]
+
         submissions = FakeSubmissionStore()
         row = submissions.upsert_submission(
             bridge.ShareKey("swhou1y3nr6", "u148"),
@@ -1466,6 +1475,9 @@ class PostAutoOrganizeGuardTests(unittest.TestCase):
         self.assertEqual(result.outcome.value, "needs_action")
         self.assertIn("排除目录", result.message)
         self.assertIn(result.metadata.get("excluded_dest_folder"), {"redundant-a", "redundant-b"})
+        # 人工处理只看目录名无从下手：带上完整位置与涉及文件（2026-09-12 任务 335/445）。
+        self.assertIn("具体位置：冗余/Example (2020)", result.message)
+        self.assertIn("涉及文件：Example.S01E0", result.message)
 
     def test_stage_organizing_prefers_library_dest_over_excluded_hit(self):
         """同一文件同时命中媒体库目录与排除目录时（如先后两次整理），
