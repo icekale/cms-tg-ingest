@@ -691,6 +691,62 @@ class TelegramAssistantTests(unittest.TestCase):
         with patch("app.task_actions.available_task_actions", return_value=frozenset({"emby", "reprocess", "restore"})):
             self.assertEqual(assistant.choose_auto_repair_action(task, store), "")
 
+    def test_auto_repair_ignores_stale_event_marker_when_share_field_is_valid(self):
+        """管线已写下 valid 结论时，历史事件里的风险词不再阻断自愈（#410 实测受阻原因）。"""
+        task = SimpleNamespace(
+            status=TaskStatus.FAILED,
+            current_stage=TaskStage.MOVED,
+            claimed_by="",
+            metadata={"share_validation_status": "valid", "share_review_status": "pending"},
+            retry_count=0,
+            error_summary="",
+            id=432,
+        )
+        store = SimpleNamespace(
+            list_events=lambda _tid: [
+                {"message": "自有分享存在 115 风险标记或不可用状态，源文件已保留，停止自动改名和重建"}
+            ]
+        )
+        self.assertFalse(assistant._task_looks_share_risk(task, store))
+
+    def test_auto_repair_continues_when_stale_marker_only_lives_in_events(self):
+        """同样的事件文案，多了结构化 valid 结论后应继续自愈，而不是像旧行为那样永久挡死。"""
+        task = SimpleNamespace(
+            status=TaskStatus.FAILED,
+            current_stage=TaskStage.MOVED,
+            claimed_by="",
+            metadata={"share_validation_status": "valid"},
+            retry_count=0,
+            error_summary="",
+            id=432,
+        )
+        store = SimpleNamespace(
+            list_events=lambda _tid: [
+                {"message": "自有分享在异步审核中已变为不可用，源文件已保留，停止自动改名和重建"}
+            ]
+        )
+        with patch("app.task_actions.available_task_actions", return_value=frozenset({"retry", "reprocess"})):
+            self.assertEqual(assistant.choose_auto_repair_action(task, store), "retry")
+
+    def test_task_risk_scan_ignores_its_own_diagnosis_text(self):
+        """助手自己的诊断文本必然会复述风险词，不能当作本轮风险的证据（否则自我投毒）。"""
+        task = SimpleNamespace(
+            status=TaskStatus.FAILED,
+            current_stage=TaskStage.MOVED,
+            claimed_by="",
+            metadata={
+                assistant.DIAGNOSIS_META_KEY: {
+                    "reply": "归属存在歧义，已停止自动绑定；分享不可用状态，存在风险标记，源文件已保留。"
+                }
+            },
+            retry_count=0,
+            error_summary="",
+            id=432,
+        )
+        store = SimpleNamespace(list_events=lambda _tid: [])
+        self.assertFalse(assistant._task_looks_share_risk(task, store))
+        self.assertFalse(assistant._task_looks_ambiguous_ownership(task, store))
+
     def test_diagnosis_failure_keeps_previous_auto_repair(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

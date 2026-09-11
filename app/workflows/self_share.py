@@ -33,7 +33,7 @@ from app.clients.p115 import (
     share_unavailable_reason,
 )
 from app.config import DEFAULT_OWN_SHARE_RECEIVE_CODE, MovePlan, SelfShareConfig, default_library_roots, is_relative_to, is_under_any_root, safe_resolve
-from app.logging_system import safe_telegram_text
+from app.logging_system import notify_telegram, safe_telegram_text
 from app.media.classify import (
     apply_tmdb_hint_resolution,
     apply_tmdb_search_resolution,
@@ -606,14 +606,14 @@ def send_move_result(telegram: Any, chat_id: int | str, move_plan: MovePlan, mov
         if str(moved_row.get(field) or "").strip()
     }
     if str(moved_row.get("move_status") or "").lower() == "moved":
-        telegram.send_message(chat_id, safe_telegram_text(f"STRM 已移动：{moved_row.get('dest_path')}", 240, blocked_values=blocked))
+        notify_telegram(telegram, chat_id, safe_telegram_text(f"STRM 已移动：{moved_row.get('dest_path')}", 240, blocked_values=blocked))
     elif move_plan.status in {"conflict", "error"}:
         message = (
             f"STRM 未移动：{safe_telegram_text(move_plan.reason, 160, blocked_values=blocked)}\n"
             f"源：{safe_telegram_text(move_plan.source_path or '-', 240, blocked_values=blocked)}\n"
             f"目标：{safe_telegram_text(move_plan.dest_path or '-', 240, blocked_values=blocked)}"
         )
-        telegram.send_message(chat_id, safe_telegram_text(message, 600, blocked_values=blocked))
+        notify_telegram(telegram, chat_id, safe_telegram_text(message, 600, blocked_values=blocked))
 
 
 def match_emby_item(items: list[dict], recognition: dict[str, Any], row: dict[str, Any] | None = None) -> dict | None:
@@ -6288,7 +6288,8 @@ class BridgeSelfShareTaskWorkflow:
         if reason:
             message += safe_telegram_text(f"理由：{reason[:80]}\n", 160, blocked_values=blocked)
         message += "请选择分类："
-        self.telegram.send_message(
+        notify_telegram(
+            self.telegram,
             self.chat_id,
             safe_telegram_text(message, 320, blocked_values=blocked),
             reply_markup=category_keyboard(int(row["id"])),
@@ -6658,7 +6659,8 @@ def send_emby_confirmed(
                 f"路径：{safe_telegram_text(updated.get('emby_path') or item.get('Path') or '-', 240, blocked_values=blocked)}",
             ]
         )
-    telegram.send_message(
+    notify_telegram(
+        telegram,
         chat_id,
         safe_telegram_text("\n".join(lines), 600, blocked_values=blocked),
     )

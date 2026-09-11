@@ -637,10 +637,9 @@ def _task_text_blob(task: Any, store: Any | None = None) -> str:
     texts: list[str] = [str(getattr(task, "error_summary", "") or "")]
     metadata = getattr(task, "metadata", {}) or {}
     if isinstance(metadata, dict):
-        texts.append(json.dumps(metadata, ensure_ascii=False, default=str)[:4000])
-        diagnosis = metadata.get(DIAGNOSIS_META_KEY)
-        if isinstance(diagnosis, dict):
-            texts.append(str(diagnosis.get("reply") or ""))
+        # 助手自己的诊断文本必然会复述风险词，拿它当「当前风险」的证据会自我投毒（#432 实测），故排除。
+        scannable = {key: value for key, value in metadata.items() if key != DIAGNOSIS_META_KEY}
+        texts.append(json.dumps(scannable, ensure_ascii=False, default=str)[:4000])
     if store is not None:
         try:
             task_id = int(getattr(task, "id", 0) or 0)
@@ -653,7 +652,7 @@ def _task_text_blob(task: Any, store: Any | None = None) -> str:
 
 
 def _task_looks_share_risk(task: Any, store: Any | None = None) -> bool:
-    """分享失效判定：先看结构化字段（管线写的），文本标记只作兜底。"""
+    """分享失效判定：管线写下的结论是权威的，文本标记只在没有任何结论时兜底。"""
     metadata = getattr(task, "metadata", {}) or {}
     if isinstance(metadata, dict):
         invalid_values = {"invalid", "unavailable"}
@@ -662,6 +661,11 @@ def _task_looks_share_risk(task: Any, store: Any | None = None) -> bool:
                 return True
         if str(metadata.get("invalid_share_status") or "").strip():
             return True
+        # 复验成功后管线会写回结论；此时历史事件里的旧风险词只说明过去，
+        # 不当它永久挡死自愈（#410/#432 实测因此卡在 needs_action）。
+        # 只认结论性成功值：pending/unknown 仍走文本兜底，不确定就不放行。
+        if {str(metadata.get(key) or "").strip().lower() for key in ("share_validation_status", "share_review_status")} & {"valid", "passed"}:
+            return False
     blob = _task_text_blob(task, store)
     return any(marker.lower() in blob for marker in _SHARE_RISK_MARKERS)
 

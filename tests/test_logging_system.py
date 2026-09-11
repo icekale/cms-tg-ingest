@@ -11,6 +11,7 @@ from app.logging_system import (
     LogFilter,
     LogHub,
     configure_logging,
+    notify_telegram,
     parse_log_filter,
     redact_text,
 )
@@ -550,3 +551,34 @@ class LoggingSystemTests(unittest.TestCase):
                 runtime.hub.snapshot(LogFilter("all", 1000, ""))[0].text,
             )
             runtime.close()
+
+
+class NotifyTelegramTests(unittest.TestCase):
+    def test_notify_telegram_reports_failure_without_raising(self):
+        attempts = []
+
+        class Flaky:
+            def send_message(self, chat_id, text, reply_markup=None):
+                attempts.append((chat_id, text, reply_markup))
+                raise RuntimeError(
+                    "Cannot reach https://api.telegram.org/bot123/sendMessage: "
+                    "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol"
+                )
+
+        with self.assertLogs("cms-tg-ingest", level="WARNING") as captured:
+            notify_telegram(Flaky(), 11, "STRM 已移动", reply_markup={"inline_keyboard": []})
+
+        self.assertEqual(attempts, [(11, "STRM 已移动", {"inline_keyboard": []})])
+        self.assertTrue(any("notification failed" in line for line in captured.output))
+
+    def test_notify_telegram_forwards_reply_markup_to_telegram(self):
+        sent = []
+
+        class Ok:
+            def send_message(self, chat_id, text, reply_markup=None):
+                sent.append((chat_id, text, reply_markup))
+
+        keyboard = {"inline_keyboard": [[{"text": "华语电影", "callback_data": "cat:1"}]]}
+        notify_telegram(Ok(), 11, "请选择分类：", reply_markup=keyboard)
+
+        self.assertEqual(sent, [(11, "请选择分类：", keyboard)])

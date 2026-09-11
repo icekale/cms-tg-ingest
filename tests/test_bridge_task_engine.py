@@ -223,8 +223,16 @@ class FakeP115:
 class FakeTelegram:
     def __init__(self):
         self.messages = []
+        self.send_attempts = 0
+        self.fail_send = False
 
     def send_message(self, chat_id, text, reply_markup=None):
+        self.send_attempts += 1
+        if self.fail_send:
+            raise RuntimeError(
+                "Cannot reach https://api.telegram.org/bot123/sendMessage: "
+                "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1010)"
+            )
         self.messages.append((chat_id, text, reply_markup))
 
     def send_rich_message(self, chat_id, document, reply_markup=None):
@@ -8763,6 +8771,30 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(result.metadata["source_path"], str(bridge.safe_resolve(source)))
             self.assertEqual(result.metadata["category"], "华语电影")
             self.assertEqual(len(self.telegram.messages), 1)
+
+    def test_moved_stage_survives_transient_notification_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            library_root = Path(tmp) / "library" / "movies"
+            workflow = self._workflow(
+                tmp,
+                move_config=bridge.MoveConfig(source_roots=[], library_roots={"华语电影": library_root}),
+            )
+            row = self._self_share_row()
+            source = self.config.strm_root / row["own_share_file_name"]
+            dest = library_root / row["own_share_file_name"]
+            self._write_strm(source)
+            task = self._claim_task("abc", "1234", TaskStage.MOVED, {"submission_id": row["id"]}, row["id"])
+            self.telegram.fail_send = True
+
+            result = workflow.run_stage(task)
+            moved = self.submissions.find_by_id(int(row["id"]))
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata["dest_path"], str(bridge.safe_resolve(dest)))
+            self.assertEqual(moved["move_status"], "moved")
+            self.assertTrue((dest / "movie.strm").exists())
+            self.assertEqual(self.telegram.send_attempts, 1)
+            self.assertEqual(self.telegram.messages, [])
 
     def test_cms_delete_settled_stage_waits_before_move_stage(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -11,9 +11,11 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import BinaryIO, Iterator, Literal, TextIO
+from typing import Any, BinaryIO, Iterator, Literal, TextIO
 
 from .clients.http import _redact_url
+
+_NOTIFY_LOG = logging.getLogger("cms-tg-ingest")
 
 
 DEFAULT_LOG_PATH = Path("/data/logs/cms-tg-ingest.log")
@@ -316,6 +318,20 @@ def safe_telegram_text(value: object, limit: int = 200, *, blocked_values: objec
     tail_len = min(80, limit // 3)
     head_len = limit - tail_len - 3
     return f"{text[:head_len]}...{text[-tail_len:]}"
+
+
+def notify_telegram(telegram: Any, chat_id: int | str, text: str, *, reply_markup: Any = None) -> None:
+    """Send a Telegram notification, tolerating transient network failures.
+
+    A notification is a side effect: losing one must never turn a finished task
+    stage into a failed one. Telegram reachability is the only transient source
+    here, so any send failure is logged and swallowed (bridge.py send_chat_action
+    follows the same best-effort contract).
+    """
+    try:
+        telegram.send_message(chat_id, text, reply_markup=reply_markup)
+    except Exception:  # noqa: BLE001 - best-effort notification, never fatal
+        _NOTIFY_LOG.warning("telegram notification failed for chat %s", chat_id, exc_info=True)
 
 
 def _utf8_size(text: str) -> int:
