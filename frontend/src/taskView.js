@@ -5,6 +5,9 @@ const ACTION_LABELS = {
   reprocess: '从头重跑',
 }
 
+// 删除只归档（archive_task），不真删数据：勾不到「永久删除」这种不实承诺。
+export const DELETE_TASK_CONFIRM = '该任务将从列表移除，记录和时间线仍保留在数据库中；不会删除网盘或媒体内容。确认删除？'
+
 export function taskActionLabel(action) {
   return ACTION_LABELS[action] || action
 }

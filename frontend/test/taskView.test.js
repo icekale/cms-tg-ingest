@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { displayTaskTitle, taskActionLabel, taskLifecycleState, taskStatusLabel } from '../src/taskView.js'
+import { DELETE_TASK_CONFIRM, displayTaskTitle, taskActionLabel, taskLifecycleState, taskStatusLabel } from '../src/taskView.js'
+
+test('delete confirmation does not promise permanent deletion', () => {
+  // 删除只走 archive_task，数据仍在库里；文案不能承诺「永久删除」。
+  assert.equal(DELETE_TASK_CONFIRM.includes('永久删除'), false)
+  assert.match(DELETE_TASK_CONFIRM, /保留在数据库中/)
+  assert.match(DELETE_TASK_CONFIRM, /不会删除网盘或媒体内容/)
+})
 
 test('prefers backend display title and falls back to legacy title', () => {
   assert.equal(

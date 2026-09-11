@@ -3,7 +3,7 @@ import { h, onMounted, ref } from 'vue'
 import { NButton, NCard, NDataTable, NPopconfirm, NSpace, NTag, useMessage } from 'naive-ui'
 import { RouterLink } from 'vue-router'
 import { api } from '../api'
-import { displayTaskTitle, taskLifecycleState, taskStatusLabel } from '../taskView'
+import { DELETE_TASK_CONFIRM, displayTaskTitle, taskLifecycleState, taskStatusLabel } from '../taskView'
 
 const message = useMessage()
 const tasks = ref([])
@@ -42,7 +42,7 @@ const columns = [
         onPositiveClick: () => runLifecycleAction(row, 'delete'),
       }, {
         trigger: () => h(NButton, { type: 'error', ghost: true, size: 'small', loading: isActionBusy(row, 'delete') }, { default: () => '删除' }),
-        default: () => '将永久删除本地任务、时间线和操作记录，不会删除网盘或媒体内容。确认删除？',
+        default: () => DELETE_TASK_CONFIRM,
       }))
       if (terminationRequested) actions.push(h(NTag, { type: 'warning', size: 'small' }, { default: () => '终止处理中' }))
       return actions.length ? h(NSpace, { size: 'small' }, { default: () => actions }) : h('span', { class: 'muted' }, '-')
@@ -96,7 +96,7 @@ onMounted(load)
             <template #trigger>
               <n-button type="error" ghost size="small" :loading="isActionBusy(row, 'delete')">删除</n-button>
             </template>
-            将永久删除本地任务、时间线和操作记录，不会删除网盘或媒体内容。确认删除？
+            该任务将从列表移除，记录和时间线仍保留在数据库中；不会删除网盘或媒体内容。确认删除？
           </n-popconfirm>
         </div>
       </article>
