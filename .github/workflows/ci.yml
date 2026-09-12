@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 类型检查要与基准提交算 merge-base
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -21,6 +23,8 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Compile
         run: python -m py_compile bridge.py doctor.py
+      - name: Type check (changed lines)
+        run: python scripts/typecheck_diff.py "${{ github.event.pull_request.base.sha || github.event.before }}"
       - name: Unit tests
         run: python -W error::ResourceWarning -m unittest discover -s tests -v
       - name: Install frontend dependencies
