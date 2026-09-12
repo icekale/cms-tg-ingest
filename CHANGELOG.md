@@ -1,3 +1,9 @@
+## 0.5.37 - 2026-09-12
+
+- **关停时收掉后台循环，CI 不再偶发 `Errno 39`**：`bridge.py` 的 `run_forever` 原先不收回三个后台循环（自有分享维护、AI 自动巡检、CMS 版本检查）的线程句柄就走了，线程会拖到测试临时目录被删之后才首次访问数据库——SQLite 于是在原位置重建一个空库文件，清理时报 `Directory not empty`，CI 的 Unit tests 因此随机变红。现在三个循环统一收回句柄并各最多等待 5 秒；`app/cms_updater.py` 的版本检查循环也从「起线程就查库」改为「先等再查库」（否则同样会拖到调用方收掉数据库之后）。
+- **测试里 29 处 sqlite 连接不再泄漏**：`with sqlite3.connect(...)` 只提交/回滚事务、并不关闭连接，测试跑完会累积大量未关连接；改为显式关闭（也是 CI 偶发红色的成因之一）。
+- 改动行的类型门禁：CI 新增一步只对本次改动的新增/修改行跑 pyright，存量类型债不拦，避免新代码继续累债（`scripts/typecheck_diff.py`）。
+
 ## 0.5.36 - 2026-09-12
 
 - **分享升级提示不再只说一个状态码**：死分享的 `share_unavailable_reason` 现在带上 115 自己的用词与能否申诉——`share/snap` 的 `forbid_reason` / `user_appeal.can_appeal`，`share/slist` 的 `share_state_text` / `can_appeal`（线上实测有分享报“违规”“暴恐涉政”，且只有部分可申诉）。原先文案只显示裸状态码（`115 分享状态不可用：6`），人工看不出是违规、过期还是被取消。同时删掉两处永远不会命中的 `forbid_reason`/`can_appeal` 取值：真正不可用的分享在 `share_snap` 内部就抛 `P115ShareUnavailableError`，消费方读到的 `status` 里根本没有这两个字段；`share/slist` 也不返回 `forbid_reason`，只有 `share_state_text`。
