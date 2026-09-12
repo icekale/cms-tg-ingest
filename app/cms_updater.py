@@ -700,8 +700,12 @@ def start_cms_version_check_loop(
     import threading
 
     def loop() -> None:
-        while not stop_event.wait(checker.effective_interval()):
+        # 先按传入间隔等待、再读库：起线程就查库会在「库刚被删」的时序里让 SQLite
+        # 又建出一个空库文件，也让已经置位的关停信号来得及直接退出。
+        interval = max(1, int(interval_seconds))
+        while not stop_event.wait(interval):
             try:
+                interval = checker.effective_interval()
                 checker.check(
                     notify=lambda version, pull_result: telegram.send_message(
                         chat_id,

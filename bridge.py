@@ -4477,6 +4477,11 @@ def run_forever(
     backup_thread = None
     quality_automation = None
     quality_thread = None
+    # 后台循环句柄：关停要 join，否则线程会拖到调用方（测试）把库/临时目录收掉之后再碰库，
+    # SQLite 会凭空再建一个空库文件。
+    self_share_maintenance_thread = None
+    assistant_watch_thread = None
+    cms_version_check_thread = None
     hdhive_subscription_service = None
     hdhive_subscription_scheduler = None
     web_server = None
@@ -4602,7 +4607,7 @@ def run_forever(
             config.tg_allowed_chat_id,
             stop_event,
         )
-        start_self_share_maintenance_loop(
+        self_share_maintenance_thread = start_self_share_maintenance_loop(
             store,
             cms,
             self_share_config,
@@ -4612,7 +4617,7 @@ def run_forever(
             stop_event=stop_event,
             emby=emby,
         )
-        start_assistant_watch_loop(
+        assistant_watch_thread = start_assistant_watch_loop(
             task_store,
             telegram,
             config.tg_allowed_chat_id,
@@ -4766,7 +4771,7 @@ def run_forever(
             auto_pull=bool(getattr(config, "cms_auto_pull_enabled", False)),
             workflow_mode=str(getattr(config, "workflow_mode", "direct") or "direct"),
         )
-        start_cms_version_check_loop(
+        cms_version_check_thread = start_cms_version_check_loop(
             cms_version_checker,
             telegram,
             config.tg_allowed_chat_id,
@@ -4855,6 +4860,14 @@ def run_forever(
             quality_thread.join(timeout=5)
         if backup_thread is not None:
             backup_thread.join(timeout=5)
+        # 这三个循环在收到关停信号后还可能再碰一次库，join 让它们真正停下来
+        for loop_thread in (
+            self_share_maintenance_thread,
+            assistant_watch_thread,
+            cms_version_check_thread,
+        ):
+            if loop_thread is not None:
+                loop_thread.join(timeout=5)
         if hdhive_subscription_scheduler is not None:
             hdhive_subscription_scheduler.stop(join_timeout=5)
         stop_web_server(web_server)

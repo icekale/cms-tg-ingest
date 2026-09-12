@@ -1,5 +1,7 @@
 import json
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -11,6 +13,7 @@ from app.cms_updater import (
     docker_create_container,
     docker_pull_image,
     fetch_remote_latest_tag,
+    start_cms_version_check_loop,
 )
 from app.clients.cms import CmsClient
 from app.task_store import TaskStore
@@ -710,6 +713,58 @@ class VersionCoreTests(unittest.TestCase):
             self.assertEqual(payload["current_version"], "v0.4.9.2 - PRO")
             self.assertEqual(payload["remote_version"], "0.4.9.2")
             self.assertFalse(payload["update_available"])
+
+
+class CmsVersionCheckLoopTests(unittest.TestCase):
+    """起线程不得先查库：否则会拖到调用方（测试）把数据库收掉之后，
+    SQLite 又在原地建出一个空库文件，导致清理报 “Directory not empty”。
+    """
+
+    class CountingChecker:
+        def __init__(self, interval: int = 3600):
+            self.interval = interval
+            self.interval_calls = 0
+            self.checks = 0
+
+        def effective_interval(self) -> int:
+            self.interval_calls += 1
+            return self.interval
+
+        def check(self, *, notify=None):
+            self.checks += 1
+            return {}
+
+    def test_already_stopped_loop_never_touches_the_checker(self):
+        checker = self.CountingChecker()
+        stop = threading.Event()
+        stop.set()
+        thread = start_cms_version_check_loop(checker, Mock(), "42", stop, interval_seconds=3600)
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(checker.interval_calls, 0)
+        self.assertEqual(checker.checks, 0)
+
+    def test_stop_interrupts_the_first_wait_without_a_store_read(self):
+        checker = self.CountingChecker()
+        stop = threading.Event()
+        thread = start_cms_version_check_loop(checker, Mock(), "42", stop, interval_seconds=3600)
+        stop.set()
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(checker.interval_calls, 0)
+
+    def test_settings_are_reread_after_the_first_cycle(self):
+        checker = self.CountingChecker(interval=3600)
+        stop = threading.Event()
+        thread = start_cms_version_check_loop(checker, Mock(), "42", stop, interval_seconds=1)
+        deadline = time.time() + 5
+        while checker.checks == 0 and time.time() < deadline:
+            time.sleep(0.01)
+        stop.set()
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(checker.checks, 1)
+        self.assertEqual(checker.interval_calls, 1)
 
 
 if __name__ == "__main__":

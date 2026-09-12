@@ -465,6 +465,71 @@ class BridgeV02IntegrationTests(unittest.TestCase):
                 self.assertEqual(seen[0]["kwargs"]["risk_cooldown_seconds"], 1200)
                 self.assertTrue(seen[0]["started"])
 
+    def test_run_forever_joins_background_loops_before_returning(self):
+        # 不收线程的话，它们会遗到临时目录被删之后才首次访问数据库：SQLite 在原地再建一个
+        # 空库文件，清理时报 “Directory not empty”。所以这里故意不用 ignore_cleanup_errors。
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.required_env(tmp)
+            env.update({
+                "WORKFLOW_MODE": "self_share_sync",
+                "TASK_ENGINE_ENABLED": "true",
+                "SELF_SHARE_RECEIVE_CID": "pending-cid",
+            })
+            with patch.dict(os.environ, env, clear=True):
+                cfg = bridge.Config.from_env()
+                loops = []
+
+                class FakeLoopThread:
+                    def __init__(self, name):
+                        self.name = name
+                        self.joined = []
+
+                    def join(self, timeout=None):
+                        self.joined.append(timeout)
+
+                def fake_loop(name):
+                    def start(*args, **kwargs):
+                        thread = FakeLoopThread(name)
+                        loops.append(thread)
+                        return thread
+
+                    return start
+
+                class OneUpdateTelegram:
+                    def __init__(self, token, timeout=60):
+                        self.calls = 0
+
+                    def get_updates(self, offset=None, timeout=30):
+                        if self.calls:
+                            raise KeyboardInterrupt()
+                        self.calls += 1
+                        return []
+
+                    def send_message(self, *args, **kwargs):
+                        return {"ok": True}
+
+                with patch.object(bridge, "TelegramClient", OneUpdateTelegram), \
+                     patch.object(bridge, "CmsClient", lambda config: object()), \
+                     patch.object(bridge, "EmbyClient", lambda *args, **kwargs: object()), \
+                     patch.object(bridge, "OpenAIClassifier", lambda config: object()), \
+                     patch.object(bridge, "TmdbWebResolver", lambda timeout=20: object()), \
+                     patch.object(bridge, "P115WebClient", lambda *args, **kwargs: object()), \
+                     patch.object(bridge, "maybe_start_web_server", lambda config, task_store: None), \
+                     patch.object(bridge, "write_metrics_snapshot", lambda *args, **kwargs: None), \
+                     patch.object(bridge, "normalize_emby_parents", lambda *args, **kwargs: 0), \
+                     patch.object(bridge, "start_self_share_maintenance_loop", fake_loop("self-share-maintenance")), \
+                     patch.object(bridge, "start_assistant_watch_loop", fake_loop("assistant-watch")), \
+                     patch.object(bridge, "start_cms_version_check_loop", fake_loop("cms-version-check")):
+                    with self.assertRaises(KeyboardInterrupt):
+                        bridge.run_forever(cfg)
+
+                self.assertEqual(
+                    sorted(thread.name for thread in loops),
+                    ["assistant-watch", "cms-version-check", "self-share-maintenance"],
+                )
+                for thread in loops:
+                    self.assertEqual(thread.joined, [5], thread.name)
+
     def test_run_forever_passes_cleanup_client_to_task_workflow_when_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = self.required_env(tmp)
