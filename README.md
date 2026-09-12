@@ -500,7 +500,11 @@ docker compose up -d
 ```sh
 python3 -m py_compile bridge.py doctor.py
 python3 -m unittest discover -s tests -q
+python3 scripts/typecheck_diff.py origin/main   # 类型检查：只报本次改动行上的问题，需 npx
 ```
+
+CI 除了跑上面这些，还会在改动行上跑一次 pyright（存量类型债不拦），所以新增代码
+带上类型错误会被拦下；想复现就用上面第三条命令。
 
 发布版本通过 GitHub Actions 构建并推送 GHCR 和 Docker Hub：
 
