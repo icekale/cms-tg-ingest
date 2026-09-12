@@ -2561,6 +2561,32 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(row["title"], "老笠")
             self.assertEqual(task.id, int(row["id"]))
 
+    def test_share_task_upsert_does_not_duplicate_cloud_row_for_same_share_code(self):
+        url = "ed2k://|file|Example.mkv|10|HASH|/"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            adapter = WorkflowRowAdapter(store)
+            cloud = store.upsert_cloud_task("ed2k:hash:10", url)
+
+            row = adapter.upsert_submission(
+                type("Key", (), {"share_code": cloud.share_code, "receive_code": ""})(),
+                url,
+                "received",
+            )
+            direct = store.get_or_create_share_task(cloud.share_code, "", url)
+
+            with sqlite_connection(store.db_path) as conn:
+                rows = conn.execute(
+                    "SELECT id, source_type FROM tasks WHERE share_code = ?",
+                    (cloud.share_code,),
+                ).fetchall()
+            self.assertEqual(
+                [(int(r[0]), r[1]) for r in rows],
+                [(cloud.id, "cloud_download")],
+            )
+            self.assertEqual(int(row["id"]), cloud.id)
+            self.assertEqual(direct.id, cloud.id)
+
     def test_adapter_enqueues_missing_library_restore_without_moving(self):
         from app.media.strm import enqueue_missing_self_share_restores, enqueue_stranded_self_share_repairs
         from app.config import MoveConfig

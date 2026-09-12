@@ -1,3 +1,7 @@
+## 0.5.38 - 2026-09-12
+
+- **不再产生永不调度的幽灵任务（线上 624）**：云任务的 `share_code` 是内部形式 `cloud:ed2k:…`，而它那一行的 `source_key` 是 `ed2k:…`；`TaskStore.upsert_task` 和 `get_or_create_share_task` 靠 `ON CONFLICT(source_type, source_key)` 去重，键不同就命不中既有云行，于是同一个分享又被插了一条 `received` 的新行（`next_run_at` 保持 -1，永远不会被调度，健康检查一直报「不在自动调度队列」）。工作流随后按 `share_code` 查回的仍是先建的那条云行，所以云任务本身照常跑完（线上 623 正常 `cleaned`，624 是空等到人工处理的副本）。现在两处入口在插入前先看同一个 `share_code` 是否已有非 `share` 来源的行：有就直接复用，不再插新行；`ON CONFLICT DO UPDATE` 刷新 url/chat_id 的行为不变，因为那条分支只在既存行本身就是 `share` 行时才会走到。
+
 ## 0.5.37 - 2026-09-12
 
 - **关停时收掉后台循环，CI 不再偶发 `Errno 39`**：`bridge.py` 的 `run_forever` 原先不收回三个后台循环（自有分享维护、AI 自动巡检、CMS 版本检查）的线程句柄就走了，线程会拖到测试临时目录被删之后才首次访问数据库——SQLite 于是在原位置重建一个空库文件，清理时报 `Directory not empty`，CI 的 Unit tests 因此随机变红。现在三个循环统一收回句柄并各最多等待 5 秒；`app/cms_updater.py` 的版本检查循环也从「起线程就查库」改为「先等再查库」（否则同样会拖到调用方收掉数据库之后）。

@@ -1382,34 +1382,44 @@ class TaskStore:
         effective_mode = normalize_strm_mode(strm_mode) if explicit_mode else self.get_default_strm_mode()
         initial_metadata = json.dumps({"strm_mode": effective_mode}, ensure_ascii=False, sort_keys=True)
         with self._lock, self._connection() as conn:
-            conn.execute(
+            # ponytail: 同 share_code 的云下载行 source_key 不同，ON CONFLICT 命中不到它，
+            # 盲目 INSERT 会留下永不调度的幽灵行（线上 #623/#624），故非 share 来源的既有行直接复用。
+            existing = conn.execute(
                 """
-                INSERT INTO tasks (
-                    share_code, receive_code, source_type, source_key, url, chat_id,
-                    current_stage, status, metadata_json, created_at, updated_at
-                )
-                VALUES (?, ?, 'share', ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(source_type, source_key) DO UPDATE SET
-                    url = CASE WHEN tasks.claimed_by = '' THEN excluded.url ELSE tasks.url END,
-                    chat_id = CASE
-                        WHEN tasks.claimed_by = '' THEN COALESCE(NULLIF(excluded.chat_id, ''), tasks.chat_id)
-                        ELSE tasks.chat_id
-                    END,
-                    updated_at = CASE WHEN tasks.claimed_by = '' THEN excluded.updated_at ELSE tasks.updated_at END
+                SELECT source_type FROM tasks
+                WHERE share_code = ? AND receive_code = ? AND COALESCE(archived_at, 0) = 0
                 """,
-                (
-                    share_code,
-                    receive_code,
-                    f"share:{share_code}:{receive_code}",
-                    url,
-                    chat_id,
-                    TaskStage.RECEIVED.value,
-                    TaskStatus.PENDING.value,
-                    initial_metadata,
-                    now,
-                    now,
-                ),
-            )
+                (share_code, receive_code),
+            ).fetchone()
+            if existing is None or str(existing["source_type"] or "") == "share":
+                conn.execute(
+                    """
+                    INSERT INTO tasks (
+                        share_code, receive_code, source_type, source_key, url, chat_id,
+                        current_stage, status, metadata_json, created_at, updated_at
+                    )
+                    VALUES (?, ?, 'share', ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_type, source_key) DO UPDATE SET
+                        url = CASE WHEN tasks.claimed_by = '' THEN excluded.url ELSE tasks.url END,
+                        chat_id = CASE
+                            WHEN tasks.claimed_by = '' THEN COALESCE(NULLIF(excluded.chat_id, ''), tasks.chat_id)
+                            ELSE tasks.chat_id
+                        END,
+                        updated_at = CASE WHEN tasks.claimed_by = '' THEN excluded.updated_at ELSE tasks.updated_at END
+                    """,
+                    (
+                        share_code,
+                        receive_code,
+                        f"share:{share_code}:{receive_code}",
+                        url,
+                        chat_id,
+                        TaskStage.RECEIVED.value,
+                        TaskStatus.PENDING.value,
+                        initial_metadata,
+                        now,
+                        now,
+                    ),
+                )
             if explicit_mode:
                 current = conn.execute(
                     """
@@ -1461,28 +1471,38 @@ class TaskStore:
                 default_mode_row["value"] if default_mode_row else self.default_strm_mode
             )
             now = time.time()
-            conn.execute(
+            # ponytail: 同 share_code 的云下载行 source_key 不同，ON CONFLICT 命中不到它，
+            # 盲目 INSERT 会留下永不调度的幽灵行（线上 #623/#624），故非 share 来源的既有行直接复用。
+            existing = conn.execute(
                 """
-                INSERT INTO tasks (
-                    share_code, receive_code, source_type, source_key, url, chat_id,
-                    current_stage, status, metadata_json, created_at, updated_at
-                )
-                VALUES (?, ?, 'share', ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(source_type, source_key) DO NOTHING
+                SELECT source_type FROM tasks
+                WHERE share_code = ? AND receive_code = ? AND COALESCE(archived_at, 0) = 0
                 """,
-                (
-                    share_code,
-                    receive_code,
-                    f"share:{share_code}:{receive_code}",
-                    url,
-                    chat_id,
-                    TaskStage.RECEIVED.value,
-                    TaskStatus.PENDING.value,
-                    json.dumps({"strm_mode": effective_mode}, ensure_ascii=False, sort_keys=True),
-                    now,
-                    now,
-                ),
-            )
+                (share_code, receive_code),
+            ).fetchone()
+            if existing is None or str(existing["source_type"] or "") == "share":
+                conn.execute(
+                    """
+                    INSERT INTO tasks (
+                        share_code, receive_code, source_type, source_key, url, chat_id,
+                        current_stage, status, metadata_json, created_at, updated_at
+                    )
+                    VALUES (?, ?, 'share', ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_type, source_key) DO NOTHING
+                    """,
+                    (
+                        share_code,
+                        receive_code,
+                        f"share:{share_code}:{receive_code}",
+                        url,
+                        chat_id,
+                        TaskStage.RECEIVED.value,
+                        TaskStatus.PENDING.value,
+                        json.dumps({"strm_mode": effective_mode}, ensure_ascii=False, sort_keys=True),
+                        now,
+                        now,
+                    ),
+                )
             row = conn.execute(
                 """
                 SELECT * FROM tasks
