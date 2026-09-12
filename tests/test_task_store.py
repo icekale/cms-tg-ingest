@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.models import StageCheckpoint, StageResult, TaskStage, TaskStatus
+from app.sqlite_utils import sqlite_connection
 from app.strm_mode import effective_task_strm_mode
 from app.task_store import TaskStore, WorkflowRowAdapter, operation_scope
 
@@ -1166,7 +1167,7 @@ class TaskStoreTests(unittest.TestCase):
             store = TaskStore(db_path)
             task = store.upsert_task("legacy", "1212", "https://115cdn.com/s/legacy")
             task = store.record_event(task.id, TaskStage.CLEANED, TaskStatus.SUCCEEDED, "done")
-            with sqlite3.connect(db_path) as raw:
+            with sqlite_connection(db_path) as raw:
                 raw.execute(
                     "INSERT INTO legacy_submission_map (legacy_submission_id, task_id, imported_at) VALUES (?, ?, ?)",
                     (501, task.id, time.time()),
@@ -1189,7 +1190,7 @@ class TaskStoreTests(unittest.TestCase):
             )
 
             self.assertIsNone(store.find_task(task.id))
-            with sqlite3.connect(db_path) as raw:
+            with sqlite_connection(db_path) as raw:
                 orphans = raw.execute(
                     "SELECT COUNT(*) FROM legacy_submission_map WHERE task_id = ?",
                     (task.id,),
@@ -2385,7 +2386,7 @@ class TaskStoreTests(unittest.TestCase):
                 next_run_at=2.0,
             )
             self.assertEqual(updated.current_stage, TaskStage.EMBY_CONFIRMED)
-            with sqlite3.connect(store.db_path) as conn:
+            with sqlite_connection(store.db_path) as conn:
                 row = conn.execute("SELECT dest_path, move_status FROM task_moves WHERE task_id = ?", (claimed.id,)).fetchone()
             self.assertEqual(row[0], "/library/movie")
             self.assertEqual(row[1], "moved")
@@ -2409,7 +2410,7 @@ class TaskStoreTests(unittest.TestCase):
             current = store.find_task(claimed.id)
             self.assertEqual(current.status, TaskStatus.RUNNING)
             self.assertEqual(current.current_stage, TaskStage.MOVED)
-            with sqlite3.connect(store.db_path) as conn:
+            with sqlite_connection(store.db_path) as conn:
                 self.assertIsNone(conn.execute("SELECT 1 FROM task_moves WHERE task_id = ?", (claimed.id,)).fetchone())
 
     def test_commit_claimed_result_discards_stale_claim(self):
@@ -2439,7 +2440,7 @@ class TaskStoreTests(unittest.TestCase):
                     next_run_at=2.0,
                 )
             )
-            with sqlite3.connect(store.db_path) as conn:
+            with sqlite_connection(store.db_path) as conn:
                 self.assertIsNone(conn.execute("SELECT 1 FROM task_moves WHERE task_id = ?", (claimed.id,)).fetchone())
 
     def test_workflow_facts_projects_joined_rows_without_creating_records(self):
@@ -2447,7 +2448,7 @@ class TaskStoreTests(unittest.TestCase):
             store = TaskStore(Path(tmp) / "tasks.db")
             missing = store.workflow_facts(99)
             self.assertEqual(missing, {})
-            with sqlite3.connect(store.db_path) as conn:
+            with sqlite_connection(store.db_path) as conn:
                 before = conn.execute("SELECT COUNT(*) FROM task_media").fetchone()[0]
 
             claimed = self._claim_running(store, "facts-ok")
@@ -2479,7 +2480,7 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(facts["own_share_code"], "own")
             self.assertEqual(facts["dest_path"], "/library/movie")
             self.assertEqual(facts["move_status"], "moved")
-            with sqlite3.connect(store.db_path) as conn:
+            with sqlite_connection(store.db_path) as conn:
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM task_media").fetchone()[0], before + 1)
 
     def test_reprocess_clears_share_and_move_facts(self):

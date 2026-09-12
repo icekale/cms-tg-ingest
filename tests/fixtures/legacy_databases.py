@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
+from app.sqlite_utils import sqlite_connection
 from app.task_store import TaskStore
 from tests.legacy_submission_store import SubmissionStore
 
@@ -24,7 +24,7 @@ def build_legacy_databases(root: str | Path) -> LegacyFixture:
     TaskStore(tasks_db)
     SubmissionStore(submissions_db)
     HdhiveSubscriptionStore(tasks_db)
-    with sqlite3.connect(tasks_db) as tasks, sqlite3.connect(submissions_db) as submissions:
+    with sqlite_connection(tasks_db) as tasks, sqlite_connection(submissions_db) as submissions:
         tasks.execute(
             """
             INSERT INTO tasks (

@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.sqlite_utils import sqlite_connection
 from app.unified_migration import MigrationError, migrate_legacy_databases
 from tests.fixtures.legacy_databases import build_legacy_databases
 
@@ -17,19 +18,19 @@ CLI = REPO_ROOT / "scripts" / "migrate_unified_db.py"
 
 
 def load_task_ids(path: Path) -> set[int]:
-    with sqlite3.connect(path) as conn:
+    with sqlite_connection(path) as conn:
         return {int(row[0]) for row in conn.execute("SELECT id FROM tasks")}
 
 
 def load_task(path: Path, task_id: int) -> dict:
-    with sqlite3.connect(path) as conn:
+    with sqlite_connection(path) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return dict(row)
 
 
 def load_legacy_map(path: Path, legacy_submission_id: int) -> int:
-    with sqlite3.connect(path) as conn:
+    with sqlite_connection(path) as conn:
         row = conn.execute(
             "SELECT task_id FROM legacy_submission_map WHERE legacy_submission_id = ?",
             (legacy_submission_id,),
@@ -57,7 +58,7 @@ class UnifiedMigrationTests(unittest.TestCase):
             self.assertEqual(synthetic["category"], "华语电影")
             self.assertEqual(synthetic["title"], "History Only")
             self.assertEqual(load_legacy_map(output, legacy_submission_id=9), 31)
-            with sqlite3.connect(output) as conn:
+            with sqlite_connection(output) as conn:
                 conn.row_factory = sqlite3.Row
                 archive = conn.execute(
                     "SELECT payload_json, checksum FROM legacy_submission_archive WHERE legacy_submission_id = 9"
@@ -82,7 +83,7 @@ class UnifiedMigrationTests(unittest.TestCase):
 
     def test_aborts_duplicate_source_identity(self):
         def mutate(fixture):
-            with sqlite3.connect(fixture.tasks_db) as conn:
+            with sqlite_connection(fixture.tasks_db) as conn:
                 conn.execute("CREATE TABLE tasks_copy AS SELECT * FROM tasks")
                 conn.execute("DROP TABLE tasks")
                 conn.execute("ALTER TABLE tasks_copy RENAME TO tasks")
@@ -92,28 +93,28 @@ class UnifiedMigrationTests(unittest.TestCase):
 
     def test_aborts_conflicting_typed_and_json_links(self):
         def mutate(fixture):
-            with sqlite3.connect(fixture.tasks_db) as conn:
+            with sqlite_connection(fixture.tasks_db) as conn:
                 conn.execute("UPDATE tasks SET submission_id = 2, metadata_json = '{\"submission_id\": 1}' WHERE id = 10")
 
         self._migrate_expecting_abort(mutate)
 
     def test_aborts_two_tasks_claiming_one_submission(self):
         def mutate(fixture):
-            with sqlite3.connect(fixture.tasks_db) as conn:
+            with sqlite_connection(fixture.tasks_db) as conn:
                 conn.execute("UPDATE tasks SET submission_id = 1 WHERE id IN (10, 20)")
 
         self._migrate_expecting_abort(mutate)
 
     def test_aborts_linked_identity_mismatch(self):
         def mutate(fixture):
-            with sqlite3.connect(fixture.submissions_db) as conn:
+            with sqlite_connection(fixture.submissions_db) as conn:
                 conn.execute("UPDATE submissions SET share_code = 'nope' WHERE id = 1")
 
         self._migrate_expecting_abort(mutate)
 
     def test_aborts_orphan_event(self):
         def mutate(fixture):
-            with sqlite3.connect(fixture.tasks_db) as conn:
+            with sqlite_connection(fixture.tasks_db) as conn:
                 conn.execute(
                     "INSERT INTO task_events (id, task_id, stage, status, message, created_at) VALUES (101, 999, 'received', 'pending', 'x', 1)"
                 )
@@ -122,14 +123,14 @@ class UnifiedMigrationTests(unittest.TestCase):
 
     def test_aborts_malformed_source_identity(self):
         def mutate(fixture):
-            with sqlite3.connect(fixture.tasks_db) as conn:
+            with sqlite_connection(fixture.tasks_db) as conn:
                 conn.execute("UPDATE tasks SET source_key = '' WHERE id = 30")
 
         self._migrate_expecting_abort(mutate)
 
     def test_aborts_duplicate_operation_key_with_different_request(self):
         def mutate(fixture):
-            with sqlite3.connect(fixture.tasks_db) as conn:
+            with sqlite_connection(fixture.tasks_db) as conn:
                 conn.execute("ALTER TABLE task_operations RENAME TO task_operations_old")
                 conn.execute(
                     """
@@ -163,7 +164,7 @@ class UnifiedMigrationTests(unittest.TestCase):
 
     def test_aborts_unmapped_legacy_submission_column(self):
         def mutate(fixture):
-            with sqlite3.connect(fixture.submissions_db) as conn:
+            with sqlite_connection(fixture.submissions_db) as conn:
                 conn.execute("ALTER TABLE submissions ADD COLUMN mystery_flag TEXT")
 
         self._migrate_expecting_abort(mutate)
@@ -239,7 +240,7 @@ class UnifiedMigrationCliTests(unittest.TestCase):
     def test_cli_exits_nonzero_on_ambiguous_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = build_legacy_databases(tmp)
-            with sqlite3.connect(fixture.submissions_db) as conn:
+            with sqlite_connection(fixture.submissions_db) as conn:
                 conn.execute("ALTER TABLE submissions ADD COLUMN mystery_flag TEXT")
             output = Path(tmp) / "cms-tg-ingest.db"
             result = self._run(

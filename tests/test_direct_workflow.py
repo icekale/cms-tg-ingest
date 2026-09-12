@@ -1,6 +1,5 @@
 import json
 import os
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +9,7 @@ from app.config import MoveConfig
 from app.media.classify import media_type_for_category
 from app.media.strm import find_recent_direct_library_strm_source_dir
 from app.models import TaskStage, TaskStatus
+from app.sqlite_utils import sqlite_connection
 from app.task_runner import StageOutcome, TaskRunner
 from app.task_store import TaskStore, operation_scope
 from app.workflows.direct import DirectTaskWorkflow
@@ -661,7 +661,7 @@ class DirectWorkflowTests(unittest.TestCase):
                 next_stage=TaskStage.EMBY_CONFIRMED,
                 next_run_at=2.0,
             )
-            with sqlite3.connect(tasks.db_path) as conn:
+            with sqlite_connection(tasks.db_path) as conn:
                 move_row = conn.execute("SELECT move_status FROM task_moves WHERE task_id = ?", (claimed.id,)).fetchone()
 
         self.assertEqual(result.outcome, StageOutcome.COMPLETE)

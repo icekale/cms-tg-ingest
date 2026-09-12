@@ -1,7 +1,6 @@
 import ast
 import os
 import re
-import sqlite3
 import tempfile
 import threading
 import unittest
@@ -11,6 +10,7 @@ from unittest.mock import patch
 import bridge
 from app.config import Config
 from app.database import SCHEMA_VERSION, Database, SchemaVersionError
+from app.sqlite_utils import sqlite_connection
 from app.task_store import TaskStore
 
 
@@ -104,7 +104,7 @@ class UnifiedRuntimeGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "cms-tg-ingest.db"
             TaskStore(database)
-            with sqlite3.connect(database) as connection:
+            with sqlite_connection(database) as connection:
                 connection.execute(
                     "UPDATE schema_meta SET version = ?, compatible_from = ?, compatible_to = ? WHERE id = 1",
                     (SCHEMA_VERSION + 9, SCHEMA_VERSION + 9, SCHEMA_VERSION + 9),

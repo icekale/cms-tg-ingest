@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 import bridge
 from app.clients import cms as cms_client
 from app.models import StageCheckpoint, StageResult, TaskStage, TaskStatus
+from app.sqlite_utils import sqlite_connection
 from app.task_runner import StageOutcome, TaskRunner
 from app.task_store import TaskStore, operation_scope
 from tests.legacy_submission_store import SubmissionStore
@@ -7865,7 +7866,7 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual([item["task_id"] for item in found], [task.id])
             self.assertTrue(source.exists())
             self.assertFalse(dest.exists())
-            with sqlite3.connect(self.tasks.db_path) as conn:
+            with sqlite_connection(self.tasks.db_path) as conn:
                 commands = list(conn.execute("SELECT command_type, idempotency_key FROM task_commands"))
             self.assertEqual(len(commands), 1)
             self.assertEqual(commands[0][0], "repair_move")

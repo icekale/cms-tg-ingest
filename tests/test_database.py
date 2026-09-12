@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from app.database import SCHEMA_VERSION, Database, SchemaVersionError
@@ -45,7 +46,8 @@ class DatabaseSchemaTests(unittest.TestCase):
     def test_initialize_creates_canonical_tables_with_foreign_keys(self):
         with tempfile.TemporaryDirectory() as tmp:
             database = self._db(tmp)
-            with database.connect() as conn:
+            # body 只读：closing 只关连接不提交，写操作会被回滚
+            with closing(database.connect()) as conn:
                 tables = {
                     row[0]
                     for row in conn.execute(
@@ -152,7 +154,8 @@ class DatabaseSchemaTests(unittest.TestCase):
                 conn.execute("UPDATE schema_meta SET version = ?", (SCHEMA_VERSION + 1,))
             with self.assertRaises(SchemaVersionError):
                 database.verify()
-            with database.connect(read_only=True) as conn:
+            # body 只读：closing 只关连接不提交
+            with closing(database.connect(read_only=True)) as conn:
                 version = conn.execute("SELECT version FROM schema_meta").fetchone()[0]
             self.assertEqual(version, SCHEMA_VERSION + 1)
 

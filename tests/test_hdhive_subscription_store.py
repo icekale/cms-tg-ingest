@@ -8,6 +8,7 @@ from contextlib import closing
 from pathlib import Path
 
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
+from app.sqlite_utils import sqlite_connection
 from app.task_store import TaskStore
 
 
@@ -287,7 +288,7 @@ class HdhiveSubscriptionStoreTests(unittest.TestCase):
             TaskStore(path)
             store = HdhiveSubscriptionStore(path)
             subscription = store.create_subscription("1", "tmdb_tv", "1416", "剧集", "1416")
-            with sqlite3.connect(path) as conn:
+            with sqlite_connection(path) as conn:
                 tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 count = conn.execute("SELECT COUNT(*) FROM hdhive_subscriptions").fetchone()[0]
             self.assertIn("schema_meta", tables)

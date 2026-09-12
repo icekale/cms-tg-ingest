@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.hdhive_cards import TmdbDetailCache, build_hdhive_unlock_card, format_hdhive_subscription_completed
+from app.sqlite_utils import sqlite_connection
 from app.task_store import TaskStore
 
 
@@ -127,7 +128,7 @@ class HdhiveCardTests(unittest.TestCase):
             TaskStore(path)
             cache = TmdbDetailCache(path)
             cache.get("tv", "1416", lambda: {"title": "Grey"})
-            with sqlite3.connect(path) as conn:
+            with sqlite_connection(path) as conn:
                 tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 count = conn.execute("SELECT COUNT(*) FROM tmdb_details").fetchone()[0]
             self.assertIn("schema_meta", tables)

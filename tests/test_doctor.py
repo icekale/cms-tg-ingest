@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import doctor
 from app.hdhive_subscription_store import HdhiveSubscriptionStore
+from app.sqlite_utils import sqlite_connection
 
 
 class DoctorConfigTests(unittest.TestCase):
@@ -610,7 +611,7 @@ class CmsStrmGuardCheckTests(unittest.TestCase):
             migrate_legacy_databases(fixture.tasks_db, fixture.submissions_db, unified)
             import sqlite3
 
-            with sqlite3.connect(unified) as connection:
+            with sqlite_connection(unified) as connection:
                 connection.execute(
                     "INSERT OR REPLACE INTO runtime_state (key, value, updated_at) VALUES ('task_runner', '{}', 1)"
                 )
