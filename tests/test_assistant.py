@@ -70,6 +70,7 @@ class RunPiTests(unittest.TestCase):
         self.assertNotIn("--no-tools", argv)
         self.assertIn("-e", argv)
         self.assertEqual(argv[argv.index("--tools") + 1], assistant.ASSISTANT_TOOL_NAMES)
+        self.assertIn("library_action", assistant.ASSISTANT_TOOL_NAMES)
         self.assertEqual(argv[argv.index("--session-id") + 1], "11111111-2222-3333-4444-555555555555")
         self.assertEqual(argv[argv.index("--model") + 1], "glm/*")
         self.assertEqual(argv[argv.index("--system-prompt") + 1], assistant.ASSISTANT_SYSTEM_PROMPT)
@@ -122,14 +123,20 @@ class RunPiTests(unittest.TestCase):
             "DATABASE_PATH": "/data/cms-tg-ingest.db",
             "CMS_TOOLS_SCRIPT": "/app/scripts/assistant_read.py",
             "CMS_TOOLS_OPS_SCRIPT": "/app/scripts/assistant_ops.py",
+            "STRM_LIBRARY_MAP": "国产电视=/tmp/tvcn",
+            "STRM_SOURCE_ROOTS": "/tmp/strm",
             "CMS_PASSWORD": "secret-cms",
+            "EMBY_API_KEY": "secret-emby",
         }
         with patch.dict(os.environ, extra, clear=False):
             env = assistant.sanitized_env()
         self.assertEqual(env["DATABASE_PATH"], extra["DATABASE_PATH"])
         self.assertEqual(env["CMS_TOOLS_SCRIPT"], extra["CMS_TOOLS_SCRIPT"])
         self.assertEqual(env["CMS_TOOLS_OPS_SCRIPT"], extra["CMS_TOOLS_OPS_SCRIPT"])
+        self.assertEqual(env["STRM_LIBRARY_MAP"], extra["STRM_LIBRARY_MAP"])
+        self.assertEqual(env["STRM_SOURCE_ROOTS"], extra["STRM_SOURCE_ROOTS"])
         self.assertNotIn("CMS_PASSWORD", env)
+        self.assertNotIn("EMBY_API_KEY", env)
 
     def test_timeout_wrapped_as_assistant_timeout(self):
         def fake_run(argv, **kwargs):
@@ -277,6 +284,8 @@ class CmsToolsExtensionTests(unittest.TestCase):
         self.assertIn("SENSITIVE_PATH_RE", self.src)
         self.assertIn("PATH_TOOLS", self.src)
         self.assertIn("CONFIRM_MAX_CHARS", self.src)
+        self.assertIn("library_action", self.src)
+        self.assertIn("帮我执行", self.src)
 
     def test_uses_pi_truncation_signal_and_enums(self):
         self.assertIn("truncateHead", self.src)

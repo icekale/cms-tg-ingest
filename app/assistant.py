@@ -5,7 +5,7 @@ pi 负责模型接入、凭据与会话记忆；本模块只做三件事：
 2. 以非交互模式（``pi -p --mode json``）调用 pi 子进程并解析回复；
 3. 通过 ``--session-id`` 让同一对话跨请求延续（多轮记忆由 pi 会话文件承载）。
 
-助手默认带只读查证工具，以及白名单任务动作（``task_action``，与 Web 按钮同源）。
+助手默认带只读查证工具、白名单任务动作（``task_action``），以及媒体库白名单动作（``library_action``）。
 自动巡检诊断后会对安全动作直接入队；terminate/delete 永不自动。
 """
 from __future__ import annotations
@@ -55,11 +55,13 @@ _SECRET_LINE_RE = re.compile(r"sk-[A-Za-z0-9]{10,}|(?:api[_-]?key|token|password
 # ---- 工具（只读）：助手可实时查任务库，而不是只看静态快照 ----
 # 内置只读文件工具 + 自定义只读查询工具（见 pi-extensions/cms-tools.ts）。
 # 不给 bash/edit/write：助手不能改代码、改库、执行任意命令。
-ASSISTANT_TOOL_NAMES = "read,grep,find,ls,task_detail,query_tasks,task_events,system_stats,task_action"
+ASSISTANT_TOOL_NAMES = "read,grep,find,ls,task_detail,query_tasks,task_events,system_stats,task_action,library_action"
 TOOL_ENV_PATTERN = re.compile(
     r"^(TG_|CMS_|EMBY_|P115_|OPENAI_|WEB_|HDHIVE_|SELF_SHARE|BACKUP_|DATABASE_PATH|STRM_|HF_|GH_|GITHUB)"
 )
-TOOL_ENV_KEEP = frozenset({"DATABASE_PATH", "CMS_TOOLS_SCRIPT", "CMS_TOOLS_OPS_SCRIPT"})
+TOOL_ENV_KEEP = frozenset(
+    {"DATABASE_PATH", "CMS_TOOLS_SCRIPT", "CMS_TOOLS_OPS_SCRIPT", "STRM_LIBRARY_MAP", "STRM_SOURCE_ROOTS"}
+)
 
 
 def tools_enabled() -> bool:
@@ -279,9 +281,11 @@ ASSISTANT_SYSTEM_PROMPT = (
     "可以实时查任务库与文件——主动用它们核实后再下结论，查不到就如实说。\n"
     "3. 诊断问题时给出：结论 → 依据 → 具体处理建议（可结合任务的 available_actions，说明在 Web 管理台或 "
     "Telegram 里如何操作）。\n"
-    "4. 你可以调用 task_action（retry/reprocess/resume_organizing/emby/restore/terminate），"
-    "与 Web 按钮同源、自带资格校验。terminate 必须用户本轮确认，由工具拦截；其他动作也要先说明再执行。"
-    "执行后如实报告 applied 与 reason。除该工具外不能改库、改配置、改文件内容。\n"
+    "4. 你可以调用 task_action（retry/reprocess/resume_organizing/emby/restore/terminate）"
+    "和 library_action（delete=删除媒体库内多余目录，emby_scan=触发 Emby 扫库）。"
+    "任务动作与 Web 按钮同源、自带资格校验。terminate 与 library_action delete 必须用户本轮确认"
+    "（例如“帮我执行”），由工具拦截；其他动作也要先说明再执行。执行后如实报告 applied 与 reason。"
+    "除这两个工具外不能改库、改配置、改宿主机文件。\n"
     "5. 绝不读取或输出密钥、密码、token、cookie（包括环境变量和 .env）。\n"
     "6. 你既能处理运维诊断，也可以正常陪聊、回答通用问题；不确定是不是系统问题时，按普通问题自然回答。\n"
     "7. 用简体中文回答，简洁分点，先结论后依据；信息不足时直接说明还缺什么。\n"

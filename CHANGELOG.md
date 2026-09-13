@@ -1,3 +1,7 @@
+## 0.5.39 - 2026-09-13
+
+- **助手可以安全地删媒体库多余目录、扫 Emby**：新增白名单工具 `library_action`（`delete` / `emby_scan`），仍不给 bash。路径必须落在 `STRM_LIBRARY_MAP` 媒体库根之内；不能删库根、不能删库外、不能删文件、symlink 逃逸拒绝。`delete` 必须用户本轮明确确认（例如「帮我执行」），自动巡检禁止删除。Emby 密钥仍不进 pi 环境，动作脚本需要时从 PID 1 补回。
+
 ## 0.5.38 - 2026-09-12
 
 - **不再产生永不调度的幽灵任务（线上 624）**：云任务的 `share_code` 是内部形式 `cloud:ed2k:…`，而它那一行的 `source_key` 是 `ed2k:…`；`TaskStore.upsert_task` 和 `get_or_create_share_task` 靠 `ON CONFLICT(source_type, source_key)` 去重，键不同就命不中既有云行，于是同一个分享又被插了一条 `received` 的新行（`next_run_at` 保持 -1，永远不会被调度，健康检查一直报「不在自动调度队列」）。工作流随后按 `share_code` 查回的仍是先建的那条云行，所以云任务本身照常跑完（线上 623 正常 `cleaned`，624 是空等到人工处理的副本）。现在两处入口在插入前先看同一个 `share_code` 是否已有非 `share` 来源的行：有就直接复用，不再插新行；`ON CONFLICT DO UPDATE` 刷新 url/chat_id 的行为不变，因为那条分支只在既存行本身就是 `share` 行时才会走到。

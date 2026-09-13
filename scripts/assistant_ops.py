@@ -24,6 +24,7 @@ for candidate in _REPO_CANDIDATES:
         break
 
 from app.assistant import DIAGNOSIS_META_KEY, assistant_session_dir, record_assistant_action  # noqa: E402
+from app.assistant_library import LIBRARY_ACTIONS, apply_library_action  # noqa: E402
 from app.task_actions import TASK_ACTIONS, apply_task_action  # noqa: E402
 from app.task_store import TaskStore  # noqa: E402
 
@@ -109,13 +110,36 @@ def cmd_act(args) -> None:
     raise SystemExit(0)
 
 
+def cmd_library(args) -> None:
+    automated = os.environ.get("CMS_TOOLS_AUTOMATION") == "1"
+    result = apply_library_action(args.action, args.path, automated=automated)
+    db_path = os.environ.get("DATABASE_PATH") or "/data/cms-tg-ingest.db"
+    try:
+        session_dir = assistant_session_dir(TaskStore(db_path)) if Path(db_path).exists() else None
+        record_assistant_action(
+            action=f"library:{args.action}",
+            applied=bool(result.get("applied")),
+            session_dir=session_dir,
+        )
+    except Exception as exc:
+        print(json.dumps({"warning": f"assistant action log failed: {exc}"}, ensure_ascii=False), file=sys.stderr)
+    print(json.dumps(result, ensure_ascii=False))
+    raise SystemExit(0)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="cms-tg-ingest assistant action executor")
     sub = parser.add_subparsers(dest="command", required=True)
     p_act = sub.add_parser("act")
     p_act.add_argument("task_id", type=int)
     p_act.add_argument("action", choices=sorted(TASK_ACTIONS))
+    p_lib = sub.add_parser("library")
+    p_lib.add_argument("action", choices=sorted(LIBRARY_ACTIONS))
+    p_lib.add_argument("path")
     args = parser.parse_args()
+    if args.command == "library":
+        cmd_library(args)
+        return
     cmd_act(args)
 
 

@@ -1,5 +1,6 @@
 // cms-tg-ingest 助手工具：只读查询走 assistant_read.py（SELECT），
-// 动作走 assistant_ops.py → apply_task_action。随镜像发布。
+// 任务动作走 assistant_ops.py act → apply_task_action，
+// 媒体库动作走 assistant_ops.py library → apply_library_action。随镜像发布。
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_MAX_BYTES,
@@ -15,12 +16,14 @@ import { execFile } from "node:child_process";
 const READ_SCRIPT = process.env.CMS_TOOLS_SCRIPT || "/app/scripts/assistant_read.py";
 const OPS_SCRIPT = process.env.CMS_TOOLS_OPS_SCRIPT || "/app/scripts/assistant_ops.py";
 const TASK_ACTIONS = ["retry", "emby", "restore", "reprocess", "resume_organizing", "terminate"] as const;
+const LIBRARY_ACTIONS = ["delete", "emby_scan"] as const;
 const TASK_STATUSES = ["pending", "running", "succeeded", "failed", "needs_action", "cancelled"] as const;
 const PRUNE_TOOLS = new Set(["task_detail", "query_tasks", "task_events", "system_stats"]);
 // 「执行/可以」这类词会出现在自动诊断的注入文本里，不能算确认；只认明确短确认，
 // 且带问号的消息一律当作“还在问要不要做”。
-const CONFIRM_RE = /确认|同意|批准|好的|好嘞|可以执行|执行吧|干吧|yes|\bok\b/i;
+const CONFIRM_RE = /确认|同意|批准|好的|好嘞|可以执行|执行吧|干吧|帮我执行|请执行|去执行|yes|\bok\b/i;
 const CONFIRM_MAX_CHARS = 40;
+const CONFIRM_PREFIX_RE = /^(帮我执行|请执行|去执行|执行吧|确认执行)/;
 // 自动巡检会话（无人可确认）：破坏性动作一律拒绝，由 app/assistant.py 注入。
 const AUTOMATED = process.env.CMS_TOOLS_AUTOMATION === "1";
 // 读工具路径黑名单：密钥/凭据/会话/数据库即使被诱导也不给读。
@@ -31,9 +34,10 @@ const SNAPSHOT_MARK = "---- 系统快照";
 
 function looksLikeConfirmation(text: string): boolean {
   const trimmed = String(text ?? "").trim();
-  if (!trimmed || trimmed.length > CONFIRM_MAX_CHARS) return false;
-  if (/[？?]/.test(trimmed)) return false;
-  return CONFIRM_RE.test(trimmed);
+  if (!trimmed || /[？?]/.test(trimmed)) return false;
+  if (trimmed.length <= CONFIRM_MAX_CHARS && CONFIRM_RE.test(trimmed)) return true;
+  // 「帮我执行，把多余目录删掉」：以确认词开头的祈使句也算本轮确认。
+  return CONFIRM_PREFIX_RE.test(trimmed) && trimmed.length <= 200;
 }
 
 function run(script: string, args: string[], signal?: AbortSignal): Promise<string> {
@@ -194,8 +198,8 @@ export default function (pi: ExtensionAPI) {
       "emby=重新确认 Emby 入库；restore=恢复 STRM；terminate=终止任务（破坏性）。" +
       "用户只是问“该怎么办”时不要调用。执行后如实报告 applied 与 reason。",
     promptGuidelines: [
-      "Call task_action only after the user's latest message clearly agrees (确认/好的/执行/yes/ok). If they only asked what to do, advise first.",
-      "task_action terminate is destructive: it is blocked unless that latest user message is a short confirmation (no question mark) — never in an automated sweep session.",
+      "Call task_action only after the user's latest message clearly agrees (帮我执行/确认/好的/yes/ok). If they only asked what to do, advise first.",
+      "task_action terminate is destructive: it is blocked unless that latest user message is a confirmation (no question mark) — never in an automated sweep session.",
     ],
     parameters: Type.Object({
       task_id: Type.Integer({ description: "任务 ID" }),
@@ -207,6 +211,29 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerTool({
+    name: "library_action",
+    label: "媒体库操作",
+    description:
+      "在配置的媒体库根目录内执行白名单操作：delete=删除多余目录（不能删库根）；" +
+      "emby_scan=对路径所在库触发 Emby 扫描。路径可用中文库名（如 国产电视）或绝对路径。" +
+      "delete 需用户本轮明确确认。自动巡检禁止 delete。",
+    promptGuidelines: [
+      "library_action delete is destructive: only after the user's latest message clearly agrees (帮我执行/确认/执行吧).",
+      "Never delete a library root. Only extra directories inside it.",
+      "library_action emby_scan is safe when the user asked to scan or refresh Emby.",
+    ],
+    parameters: Type.Object({
+      action: StringEnum(LIBRARY_ACTIONS),
+      path: Type.String({ description: "媒体库路径或库名，例如 国产电视 或 /mnt/user/Unraid/strm/转存/TVCN/某剧" }),
+    }),
+    async execute(_toolCallId, params, signal) {
+      return textToolResult(
+        await run(OPS_SCRIPT, ["library", String(params.action), String(params.path)], signal),
+      );
+    },
+  });
+
   pi.on("tool_call", (event, ctx) => {
     if (PATH_TOOLS.has(event.toolName)) {
       const path = String((event.input as Record<string, unknown> | undefined)?.path ?? "");
@@ -215,13 +242,19 @@ export default function (pi: ExtensionAPI) {
       }
       return;
     }
-    if (event.toolName !== "task_action") return;
-    if (String(event.input?.action ?? "") !== "terminate") return;
+    const action = String(event.input?.action ?? "");
+    const destructive =
+      (event.toolName === "task_action" && action === "terminate") ||
+      (event.toolName === "library_action" && action === "delete");
+    if (!destructive) return;
     if (AUTOMATED) {
-      return { block: true, reason: "自动巡检会话不允许 terminate：破坏性动作只能由人工确认" };
+      return { block: true, reason: "自动巡检会话不允许破坏性动作，只能由人工确认" };
     }
     if (looksLikeConfirmation(lastUserQuestion(ctx))) return;
-    return { block: true, reason: "task_action terminate 需要用户本轮明确确认（例如“确认执行”），且不能用问句" };
+    return {
+      block: true,
+      reason: `${event.toolName} ${action} 需要用户本轮明确确认（例如“帮我执行”），且不能用问句`,
+    };
   });
 
   pi.on("context", (event) => ({ messages: pruneMessages(event.messages) }));
