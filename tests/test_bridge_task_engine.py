@@ -3196,6 +3196,48 @@ class BridgeSelfShareTaskWorkflowTests(unittest.TestCase):
             self.assertEqual(stored["own_share_receive_code"], "1212")
             self.assertEqual(result.metadata["own_share_code"], "keep-code")
 
+    def test_own_share_stage_reuse_carries_sibling_share_created_at(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = self._workflow(tmp)
+            row = self._row()
+            row = self.submissions.update_self_share(
+                int(row["id"]),
+                workflow_mode="self_share_sync",
+                workflow_phase="share_alias_prepared",
+                own_share_file_id="dest-silo",
+                own_share_file_name="M-末日地堡-2023-[tmdb=125988]",
+            ) or row
+            sibling = self.tasks.upsert_task("sibling", "", "https://115cdn.com/s/sibling")
+            self.tasks.record_event(
+                sibling.id,
+                TaskStage.CLEANED,
+                TaskStatus.SUCCEEDED,
+                "sibling already shared dest",
+                metadata_patch={
+                    "own_share_file_id": "dest-silo",
+                    "own_share_code": "keep-code",
+                    "own_share_receive_code": "1212",
+                    "share_created_at": 1788975109.0,
+                    "own_share_child_ids": ["season-3"],
+                    "tmdb_id": "125988",
+                },
+            )
+            self.p115.files_by_parent["dest-silo"] = [
+                {"cid": "season-3", "n": "Season 03", "pid": "dest-silo"},
+            ]
+            task = self._claim_task(
+                "abc",
+                "1234",
+                TaskStage.OWN_SHARE_CREATED,
+                {"submission_id": row["id"], "own_share_file_id": "dest-silo"},
+                row["id"],
+            )
+
+            result = workflow.run_stage(task)
+
+            self.assertEqual(result.outcome, StageOutcome.COMPLETE)
+            self.assertEqual(result.metadata.get("share_created_at"), 1788975109.0)
+
     def test_share_sync_skips_cms_when_sibling_already_synced_same_share(self):
         with tempfile.TemporaryDirectory() as tmp:
             workflow = self._workflow(tmp)

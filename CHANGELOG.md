@@ -1,3 +1,8 @@
+## 0.5.41 - 2026-09-19
+
+- **复用已有自有分享不再卡死在清理阶段（线上任务 627、630、631）**：同剧新任务走 `_reusable_dest_own_share` 复用路径时（事件文案「已存在自有 115 分享」），只抄分享码/接收码/链接，不把原任务的 `share_created_at` 带过来；而该字段只有真正创建分享才写入，于是 `cleaned` 阶段 `_advance_share_review` 缺少观察期起点，保守判 invalid 转 needs_action，重新提交/重跑永远在同一位置撞墙（AI 助手 emby→restore→reprocess 三连也修不掉）。现在复用时把 owner 的 `share_created_at` 一并写入新任务 metadata（owner 缺失时维持原有保守拦截）。存量 3 个任务已于 2026-09-19 直接回填 metadata 解卡（回填后全部 succeeded）。
+- **审核失败的 needs_action 文案带上真实原因**：单目标「自有分享在异步审核中已变为不可用…」与多目标「自有分享审核失败…」原先一律掩盖 `_advance_share_review` 的具体失败原因（真实原因只埋在 metadata 的 `share_review_error`），人和 AI 助手都会把「缺少 share_created_at」这类本地保守拦截误读成 115 风控。现在文案统一为「自有分享审核未通过（具体原因）…」，TG 推送、Web、助手、人工看到的是同一句真话。
+
 ## 0.5.40 - 2026-09-19
 
 - **助手不再被 `grep /` 撑爆会话后连续超时**：读工具加路径笼子（禁止 `/`、`/data`、整个 `/mnt/user`，只许 `/app` 与具体剧目路径）；去掉镜像里没有 `fd` 的 `find`；流式调用用 timer + `killpg` 杀掉挂住的 grep 子进程；jsonl 超过 256KB 自动换新会话。线上一次全盘 grep 把会话喂到 72 万字 / 22 万 token，随后每句都 120 秒超时。

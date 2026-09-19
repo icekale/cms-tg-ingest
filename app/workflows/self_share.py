@@ -3848,6 +3848,7 @@ class BridgeSelfShareTaskWorkflow:
         direct_file_share = False
         direct_relative_path = ""
         recovered_share_created_at = 0.0
+        reusable_share_created_at = 0.0
         share_creation_pending = str(task.metadata.get("share_create_status") or "").strip().lower() == "pending"
         create_operation_key = f"{operation_scope(task)}:create_share:{file_id}"
         create_operation = self.task_store.find_operation(int(task.id), create_operation_key)
@@ -3893,6 +3894,7 @@ class BridgeSelfShareTaskWorkflow:
         if not row.get("own_share_code") and create_operation is None:
             reusable = self._reusable_dest_own_share(task, file_id, child_ids)
             if reusable:
+                reusable_share_created_at = self._positive_timestamp(reusable.get("share_created_at"))
                 row = self.store.update_self_share(
                     int(row["id"]),
                     workflow_phase="own_share_created",
@@ -3982,7 +3984,7 @@ class BridgeSelfShareTaskWorkflow:
             f"{operation_scope(task)}:create_share:{durable_file_id}",
         )
         metadata.update(self._create_share_operation_metadata(durable_operation))
-        share_created_at = self._positive_timestamp(task.metadata.get("share_created_at")) or recovered_share_created_at
+        share_created_at = self._positive_timestamp(task.metadata.get("share_created_at")) or reusable_share_created_at or recovered_share_created_at
         share_created_at = self._positive_timestamp(metadata.get("share_created_at")) or share_created_at
         if created and not share_created_at:
             share_created_at = float(int(max(0.0, self._now())))
@@ -4908,6 +4910,7 @@ class BridgeSelfShareTaskWorkflow:
                 "share_code": share_code,
                 "receive_code": receive_code,
                 "share_url": str(metadata.get("own_share_url") or "").strip(),
+                "share_created_at": self._positive_timestamp(metadata.get("share_created_at")),
             }
         return None
 
@@ -5656,7 +5659,7 @@ class BridgeSelfShareTaskWorkflow:
             if review_status != "passed":
                 review_status, review_message, review_delay = self._advance_target_review(task, row, target)
                 if review_status == "invalid":
-                    return StageResult.needs_action(f"目标 {target_id} 自有分享审核失败，源文件已保留", self._multi_target_metadata(row, targets))
+                    return StageResult.needs_action(f"目标 {target_id} 自有分享审核失败（{review_message}），源文件已保留", self._multi_target_metadata(row, targets))
                 if review_status != "passed":
                     return StageResult.defer(review_message, review_delay, self._multi_target_metadata(row, targets))
             if str(strm.get("source_path") or "").strip() == "":
@@ -5741,7 +5744,7 @@ class BridgeSelfShareTaskWorkflow:
                 metadata = self._cleanup_metadata(updated)
                 metadata.update(review_metadata)
                 return StageResult.needs_action(
-                    "自有分享在异步审核中已变为不可用，源文件已保留，停止自动改名和重建",
+                    f"自有分享审核未通过（{review_message}），源文件已保留，停止自动改名和重建",
                     metadata,
                 )
             if review_status != "passed":
