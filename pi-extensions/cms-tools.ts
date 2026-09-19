@@ -29,8 +29,31 @@ const AUTOMATED = process.env.CMS_TOOLS_AUTOMATION === "1";
 // 读工具路径黑名单：密钥/凭据/会话/数据库即使被诱导也不给读。
 const SENSITIVE_PATH_RE =
   /(^|\/)\.env(\.|$)|(^|\/)\.netrc$|(^|\/)\.git-credentials$|(^|\/)id_(rsa|ed25519|ecdsa)$|\.pem$|\.key$|\.db(-wal|-shm)?$|\.jsonl$|(^|\/)(credentials?|secrets?|cookies?|auth)(\.[a-z0-9]+)?$|(^|\/)proc\/(self|\d+)\/environ/;
-const PATH_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const PATH_TOOLS = new Set(["read", "grep", "ls"]);
 const SNAPSHOT_MARK = "---- 系统快照";
+
+function pathJailReason(raw: string): string | null {
+  const path = String(raw ?? "").trim();
+  if (
+    !path ||
+    path === "/" ||
+    path === "." ||
+    path === ".." ||
+    path === "*" ||
+    path === "/data" ||
+    path.startsWith("/data/")
+  ) {
+    return `禁止扫描整个文件系统：${path || "(空)"}（请给出 /app 或 /mnt/user 下的具体路径）`;
+  }
+  if (path === "/mnt/user" || path === "/mnt/user/") {
+    return "禁止扫描整个 /mnt/user，请给出具体剧目或库路径";
+  }
+  if (!path.startsWith("/")) {
+    return path.split("/").includes("..") ? `拒绝该路径：${path}` : null;
+  }
+  if (path === "/app" || path.startsWith("/app/") || path.startsWith("/mnt/user/")) return null;
+  return `拒绝读取 ${path}（只允许 /app 与 /mnt/user 下的路径，不能扫 /data）`;
+}
 
 function looksLikeConfirmation(text: string): boolean {
   const trimmed = String(text ?? "").trim();
@@ -240,6 +263,8 @@ export default function (pi: ExtensionAPI) {
       if (path && SENSITIVE_PATH_RE.test(path)) {
         return { block: true, reason: `拒绝读取敏感文件：${path}（密钥/凭据/会话不在助手可读范围内）` };
       }
+      const jail = pathJailReason(path);
+      if (jail) return { block: true, reason: jail };
       return;
     }
     const action = String(event.input?.action ?? "");

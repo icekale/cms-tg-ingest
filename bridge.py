@@ -2632,14 +2632,17 @@ def _chunk_assistant_text(text: str, limit: int = 3800) -> list[str]:
     return chunks or [""]
 
 
-def _assistant_session_id(chat_id: int | str) -> str:
-    """同一 TG 会话的 /助手 复用同一个 pi 会话（多轮追问记得上文）。"""
+def _assistant_session_id(chat_id: int | str, session_dir: Path | None = None) -> str:
+    """同一 TG 会话的 /助手 复用同一个 pi 会话（多轮追问记得上文）。jsonl 过大则换新会话。"""
     key = str(chat_id)
     with _TG_ASSISTANT_SESSION_LOCK:
-        session_id = _TG_ASSISTANT_SESSIONS.get(key)
-        if not session_id:
-            session_id = assistant.new_session_id()
-            _TG_ASSISTANT_SESSIONS[key] = session_id
+        current = _TG_ASSISTANT_SESSIONS.get(key)
+        session_id = (
+            assistant.resolve_chat_session_id(current, session_dir)
+            if session_dir is not None
+            else (current or assistant.new_session_id())
+        )
+        _TG_ASSISTANT_SESSIONS[key] = session_id
         return session_id
 
 
@@ -2788,7 +2791,7 @@ def handle_assistant_command(
             try:
                 result = assistant.run_pi_stream(
                     assistant.build_user_message(question, snapshot),
-                    session_id=_assistant_session_id(chat_id),
+                    session_id=_assistant_session_id(chat_id, session_dir),
                     session_dir=session_dir,
                     model=assistant.assistant_model(),
                     timeout=assistant.assistant_timeout(),

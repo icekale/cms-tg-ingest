@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -30,6 +31,8 @@ from .web_api import api_task_detail, api_tasks, serialize_health
 
 DEFAULT_TIMEOUT_SECONDS = 120.0
 MAX_QUESTION_CHARS = 8000
+# ponytail: jsonl 超过这个体积再喂给模型会直接超时；轮换会话比截断历史更简单。
+SESSION_MAX_BYTES = 256 * 1024
 LOG = logging.getLogger(__name__)
 
 # ---- hermes 式长期记忆：跨会话记住用户偏好/纠正/事实/教训 ----
@@ -55,7 +58,7 @@ _SECRET_LINE_RE = re.compile(r"sk-[A-Za-z0-9]{10,}|(?:api[_-]?key|token|password
 # ---- 工具（只读）：助手可实时查任务库，而不是只看静态快照 ----
 # 内置只读文件工具 + 自定义只读查询工具（见 pi-extensions/cms-tools.ts）。
 # 不给 bash/edit/write：助手不能改代码、改库、执行任意命令。
-ASSISTANT_TOOL_NAMES = "read,grep,find,ls,task_detail,query_tasks,task_events,system_stats,task_action,library_action"
+ASSISTANT_TOOL_NAMES = "read,grep,ls,task_detail,query_tasks,task_events,system_stats,task_action,library_action"
 TOOL_ENV_PATTERN = re.compile(
     r"^(TG_|CMS_|EMBY_|P115_|OPENAI_|WEB_|HDHIVE_|SELF_SHARE|BACKUP_|DATABASE_PATH|STRM_|HF_|GH_|GITHUB)"
 )
@@ -278,7 +281,8 @@ ASSISTANT_SYSTEM_PROMPT = (
     "用户消息末尾可能附有「系统快照」JSON（健康状态、任务列表、指定任务详情）。回答规则：\n"
     "1. 优先基于快照和工具查证回答；涉及具体任务/数值时先用工具核实，不要编造快照里没有的状态、ID 或数值。\n"
     "2. 你有只读查询工具（task_detail / query_tasks / task_events / system_stats）和文件读取工具，"
-    "可以实时查任务库与文件——主动用它们核实后再下结论，查不到就如实说。\n"
+    "可以实时查任务库与文件——主动用它们核实后再下结论，查不到就如实说。"
+    "不要对 /、/data 或整个 /mnt/user 做 grep/ls，只查 /app 或具体剧目路径。\n"
     "3. 诊断问题时给出：结论 → 依据 → 具体处理建议（可结合任务的 available_actions，说明在 Web 管理台或 "
     "Telegram 里如何操作）。\n"
     "4. 你可以调用 task_action（retry/reprocess/resume_organizing/emby/restore/terminate）"
@@ -955,6 +959,58 @@ def new_session_id() -> str:
     return str(uuid.uuid4())
 
 
+def session_jsonl_paths(session_dir: Path, session_id: str) -> list[Path]:
+    sid = str(session_id or "").strip()
+    if not sid:
+        return []
+    try:
+        return [path for path in Path(session_dir).glob(f"*_{sid}.jsonl") if path.is_file()]
+    except OSError:
+        return []
+
+
+def session_is_bloated(session_dir: Path, session_id: str) -> bool:
+    for path in session_jsonl_paths(session_dir, session_id):
+        try:
+            if path.stat().st_size > SESSION_MAX_BYTES:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def resolve_chat_session_id(session_id: str | None, session_dir: Path) -> str:
+    """同一对话复用 session_id；jsonl 过大则换新会话，避免把旧工具结果再喂给模型。"""
+    sid = str(session_id or "").strip()
+    if not sid or session_is_bloated(session_dir, sid):
+        return new_session_id()
+    return sid
+
+
+def _kill_pi(proc: subprocess.Popen | None) -> None:
+    if proc is None:
+        return
+    poll = getattr(proc, "poll", None)
+    try:
+        if callable(poll) and proc.poll() is not None:
+            return
+    except Exception:
+        pass
+    pid = getattr(proc, "pid", None)
+    if pid:
+        try:
+            os.killpg(int(pid), signal.SIGKILL)
+            return
+        except (OSError, ProcessLookupError, TypeError):
+            pass
+    killer = getattr(proc, "kill", None)
+    if callable(killer):
+        try:
+            killer()
+        except Exception:
+            pass
+
+
 def _build_pi_argv(
     question: str,
     *,
@@ -1128,18 +1184,29 @@ def run_pi_stream(
         text=True,
         env=env,
         cwd=str(session_dir),
+        start_new_session=True,
     )
     latest = ""
     usage: dict[str, Any] = {}
     deadline = time.time() + timeout
     returncode = -1
+    timed_out = False
+
+    def on_timeout() -> None:
+        nonlocal timed_out
+        timed_out = True
+        _kill_pi(proc)
+
+    timer = threading.Timer(max(0.05, timeout), on_timeout)
+    timer.daemon = True
+    timer.start()
     try:
         assert proc.stdin is not None and proc.stdout is not None
         proc.stdin.write(question)
         proc.stdin.close()
         for line in proc.stdout:
-            if time.time() > deadline:
-                raise AssistantTimeout(f"助手响应超时（超过 {timeout:.0f} 秒），可稍后重试或调大 PI_ASSISTANT_TIMEOUT")
+            if timed_out:
+                break
             line = line.strip()
             if not line.startswith("{"):
                 continue
@@ -1166,13 +1233,20 @@ def run_pi_stream(
                         on_update(text)
                     except Exception:
                         LOG.debug("assistant on_update callback failed", exc_info=True)
+        if timed_out:
+            raise AssistantTimeout(f"助手响应超时（超过 {timeout:.0f} 秒），可稍后重试或调大 PI_ASSISTANT_TIMEOUT")
         returncode = proc.wait(timeout=max(5.0, deadline - time.time()))
     except AssistantTimeout:
-        proc.kill()
+        _kill_pi(proc)
+        raise
+    except Exception:
+        if timed_out:
+            raise AssistantTimeout(f"助手响应超时（超过 {timeout:.0f} 秒），可稍后重试或调大 PI_ASSISTANT_TIMEOUT")
         raise
     finally:
-        if returncode == -1 and proc.poll() is None:
-            proc.kill()
+        timer.cancel()
+        if returncode == -1 and getattr(proc, "poll", lambda: 0)() is None:
+            _kill_pi(proc)
         for stream in (proc.stdout, proc.stderr, proc.stdin):
             try:
                 if stream:

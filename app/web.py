@@ -2199,6 +2199,9 @@ class WebApp:
                 session_id = raw_session
             else:
                 session_id = assistant.new_session_id()
+            session_id = assistant.resolve_chat_session_id(
+                session_id, assistant.assistant_session_dir(self.store)
+            )
             try:
                 task_id = int(values.get("task_id") or 0)
             except (TypeError, ValueError):

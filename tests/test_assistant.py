@@ -71,6 +71,7 @@ class RunPiTests(unittest.TestCase):
         self.assertIn("-e", argv)
         self.assertEqual(argv[argv.index("--tools") + 1], assistant.ASSISTANT_TOOL_NAMES)
         self.assertIn("library_action", assistant.ASSISTANT_TOOL_NAMES)
+        self.assertNotIn("find", assistant.ASSISTANT_TOOL_NAMES.split(","))
         self.assertEqual(argv[argv.index("--session-id") + 1], "11111111-2222-3333-4444-555555555555")
         self.assertEqual(argv[argv.index("--model") + 1], "glm/*")
         self.assertEqual(argv[argv.index("--system-prompt") + 1], assistant.ASSISTANT_SYSTEM_PROMPT)
@@ -286,6 +287,9 @@ class CmsToolsExtensionTests(unittest.TestCase):
         self.assertIn("CONFIRM_MAX_CHARS", self.src)
         self.assertIn("library_action", self.src)
         self.assertIn("帮我执行", self.src)
+        self.assertIn("禁止扫描整个文件系统", self.src)
+        self.assertIn("/mnt/user", self.src)
+        self.assertIn("/data", self.src)
 
     def test_uses_pi_truncation_signal_and_enums(self):
         self.assertIn("truncateHead", self.src)
@@ -1209,6 +1213,28 @@ class MemoryTests(unittest.TestCase):
         ):
             with self.assertRaises(assistant.AssistantError):
                 assistant.run_pi_stream("问题", session_id="a" * 32, session_dir=Path("/tmp/assistant-test"))
+
+    def test_run_pi_stream_timeout_kills_hung_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(assistant, "resolve_pi_binary", return_value="/bin/sleep"), patch.object(
+                assistant, "_build_pi_argv", return_value=(["/bin/sleep", "30"], os.environ.copy())
+            ):
+                started = time.time()
+                with self.assertRaises(assistant.AssistantTimeout):
+                    assistant.run_pi_stream("问题", session_id="a" * 32, session_dir=Path(tmp), timeout=0.4)
+                self.assertLess(time.time() - started, 5)
+
+    def test_session_is_bloated_when_jsonl_exceeds_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session_dir = Path(tmp)
+            sid = "abcd1234ef"
+            path = session_dir / f"2026-09-19T00-00-00Z_{sid}.jsonl"
+            path.write_bytes(b"x" * (assistant.SESSION_MAX_BYTES + 1))
+            self.assertTrue(assistant.session_is_bloated(session_dir, sid))
+            self.assertNotEqual(assistant.resolve_chat_session_id(sid, session_dir), sid)
+            path.write_bytes(b"small")
+            self.assertFalse(assistant.session_is_bloated(session_dir, sid))
+            self.assertEqual(assistant.resolve_chat_session_id(sid, session_dir), sid)
 
 
 class AssistantStatsTests(unittest.TestCase):
