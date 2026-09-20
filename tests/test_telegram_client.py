@@ -67,6 +67,49 @@ class TelegramClientTests(unittest.TestCase):
 
         self.assertEqual(len(http.calls), 1)
 
+    def test_send_message_retries_transient_eof(self):
+        http = SequenceHttp(
+            [
+                RuntimeError(
+                    "Cannot reach https://api.telegram.org/botsecret/sendMessage: "
+                    "UNEXPECTED_EOF_WHILE_READING EOF occurred"
+                ),
+                {"ok": True, "result": {"message_id": 7}},
+            ]
+        )
+
+        with patch("bridge.time.sleep") as sleep:
+            response = TelegramClient("secret", http=http).send_message("1", "在")
+
+        self.assertEqual(len(http.calls), 2)
+        self.assertTrue(response["ok"])
+        sleep.assert_called_once_with(0.5)
+
+    def test_send_message_gives_up_after_three_attempts(self):
+        eof = RuntimeError(
+            "Cannot reach https://api.telegram.org/botsecret/sendMessage: "
+            "UNEXPECTED_EOF_WHILE_READING EOF occurred"
+        )
+        http = SequenceHttp([eof, eof, eof])
+
+        with patch("bridge.time.sleep"):
+            with self.assertRaises(RuntimeError):
+                TelegramClient("secret", http=http).send_message("1", "在")
+
+        self.assertEqual(len(http.calls), 3)
+
+    def test_send_message_does_not_retry_non_transient_error(self):
+        http = SequenceHttp(
+            [RuntimeError("Cannot reach https://api.telegram.org/botsecret/sendMessage: Bad Request: chat not found")]
+        )
+
+        with patch("bridge.time.sleep") as sleep:
+            with self.assertRaises(RuntimeError):
+                TelegramClient("secret", http=http).send_message("1", "在")
+
+        self.assertEqual(len(http.calls), 1)
+        sleep.assert_not_called()
+
     def test_redact_url_hides_telegram_bot_token(self):
         url = "https://api.telegram.org/bot123456:secret-token/answerCallbackQuery"
 

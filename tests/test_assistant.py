@@ -479,6 +479,19 @@ class _FakeTelegram:
         return False
 
 
+class _PlaceholderSendFailsTelegram(_FakeTelegram):
+    """流式编辑的占位消息发不出去（api.telegram.org 拖代理时就是这样）：
+    助手必须继续跑完并把回复另发一条，而不是整个线程死在发送上。"""
+
+    def send_message(self, chat_id, text, reply_markup=None):
+        if str(text).endswith("正在分析系统快照…"):
+            raise RuntimeError(
+                "Cannot reach https://api.telegram.org/botsecret/sendMessage: "
+                "UNEXPECTED_EOF_WHILE_READING EOF occurred"
+            )
+        return super().send_message(chat_id, text, reply_markup)
+
+
 def _guards_config():
     # workflow_mode="direct" 让 CMS 守卫检查走 not_applicable 快路径（不碰 docker）。
     return (
@@ -550,6 +563,27 @@ class TelegramAssistantTests(unittest.TestCase):
             # 同一 TG 会话复用同一个 pi session（多轮记忆）
             self.assertEqual(len(captured), 2)
             self.assertEqual(captured[0], captured[1])
+
+    def test_assistant_replies_even_when_placeholder_send_fails(self):
+        """线上回归：占位消息发不出去，助手仍要跑完并送达回复。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            _needs_action_task(store)
+            telegram = _PlaceholderSendFailsTelegram()
+            ran = []
+
+            def fake_run_pi(question, *, session_id, **kwargs):
+                ran.append(session_id)
+                return {"reply": "结论：整理超时，建议 reprocess。", "session_id": session_id}
+
+            with patch.object(assistant, "resolve_pi_binary", return_value="pi"), patch.object(
+                assistant, "run_pi_stream", side_effect=fake_run_pi
+            ):
+                bridge.handle_assistant_command("/助手 系统现在有什么问题？", "/助手", 42, telegram, store)
+                self.assertTrue(telegram.wait_for(lambda sent: any("结论" in m for m in sent)))
+
+            self.assertEqual(len(ran), 1)
+            self.assertTrue(any("结论：整理超时" in m for m in telegram.sent))
 
     def test_assistant_command_includes_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:

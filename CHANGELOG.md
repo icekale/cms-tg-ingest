@@ -1,3 +1,9 @@
+## 0.5.42 - 2026-09-20
+
+- **助手不再因发送失败而“无法工作”**：容器日志里能看到 pi 已经算出回复，却死在回程 — `sendMessage` 抛 `Remote end closed connection without response`，占位消息那一步把整个 try 拽进兜底分支，而兜底分支自己也要 `send_message`，同样断，异常穿到工作线程外面，回复就此丢掉，用户只看到一条“正在分析”再无下文。两层修复：
+  - `TelegramClient.send_message` 对可重试的抖动错误（EOF / 连接被关 / 5xx / 超时）最多试 3 次，退避 0.5s、1.0s。HTTP 层刻意不对 POST 重试（`test_post_does_not_retry_transient_network_error`），但发出去的消息丢了就找不回来，所以发送这一层自己补。非可重试错误（如 `chat not found`）仍立即上抛，不放大重试风暴。
+  - 确认语与占位消息只是安抚和流式编辑的锚点，不再是硬依赖：发不出去就退化成“最后另发一条”，分析照跑；`work()` 里新增 `deliver()` 兜底，送达失败只记日志（连同回复正文），绝不让发送失败结束助手线程。
+
 ## 0.5.41 - 2026-09-19
 
 - **复用已有自有分享不再卡死在清理阶段（线上任务 627、630、631）**：同剧新任务走 `_reusable_dest_own_share` 复用路径时（事件文案「已存在自有 115 分享」），只抄分享码/接收码/链接，不把原任务的 `share_created_at` 带过来；而该字段只有真正创建分享才写入，于是 `cleaned` 阶段 `_advance_share_review` 缺少观察期起点，保守判 invalid 转 needs_action，重新提交/重跑永远在同一位置撞墙（AI 助手 emby→restore→reprocess 三连也修不掉）。现在复用时把 owner 的 `share_created_at` 一并写入新任务 metadata（owner 缺失时维持原有保守拦截）。存量 3 个任务已于 2026-09-19 直接回填 metadata 解卡（回填后全部 succeeded）。

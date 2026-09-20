@@ -1310,6 +1310,11 @@ def _redact_telegram_error(exc: Exception) -> str:
     return re.sub(r"(https?://api\.telegram\.org/bot)[^/\s]+", r"\1<redacted>", str(exc))
 
 
+# 发送类 POST 的重试次数：HTTP 层刻意不对 POST 重试（见 test_post_does_not_retry_transient_network_error），
+# 但发出去的消息丢了就找不回来，所以在 Telegram 发送这一层自己补。
+_TELEGRAM_SEND_ATTEMPTS = 3
+
+
 class TelegramClient:
     def __init__(self, token: str, http: HttpJson | None = None, timeout: int = 60):
         self.base_url = f"https://api.telegram.org/bot{token}"
@@ -1394,15 +1399,29 @@ class TelegramClient:
             return False
         return bool(resp.get("ok"))
 
-    def send_message(self, chat_id: int | str, text: str, reply_markup: dict | None = None) -> None:
+    def send_message(self, chat_id: int | str, text: str, reply_markup: dict | None = None) -> dict:
         payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
-        return self.http.request(
-            self.base_url + "/sendMessage",
-            method="POST",
-            payload=payload,
-        )
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return self.http.request(
+                    self.base_url + "/sendMessage",
+                    method="POST",
+                    payload=payload,
+                )
+            except Exception as exc:
+                if attempt >= _TELEGRAM_SEND_ATTEMPTS or not self._is_transient_telegram_error(exc):
+                    raise
+                LOG.warning(
+                    "Telegram sendMessage transient error (attempt %s/%s), retrying: %s",
+                    attempt,
+                    _TELEGRAM_SEND_ATTEMPTS,
+                    _redact_telegram_error(exc),
+                )
+                time.sleep(0.5 * attempt)
 
     def send_chat_action(self, chat_id: int | str, action: str = "typing") -> None:
         try:
@@ -2746,17 +2765,31 @@ def handle_assistant_command(
             "请在容器内安装 pi 并挂载凭据到 /data/pi/agent，或通过 PI_ASSISTANT_BIN 指定路径。",
         )
         return
-    telegram.send_message(chat_id, "🤖 正在分析系统快照，请稍候（约 10-40 秒）…")
+    try:
+        telegram.send_message(chat_id, "🤖 正在分析系统快照，请稍候（约 10-40 秒）…")
+    except Exception:
+        # 确认语只是安抚；发不出去也要继续回答（api.telegram.org 拖代理时就会走到这）。
+        LOG.warning("Assistant acknowledgement send failed; continuing", exc_info=True)
 
     def work() -> None:
         placeholder_id = None
         sent_first = False
         header = f"🤖 关于任务 #{task_id}：\n"
-        try:
-            resp = telegram.send_message(chat_id, "🤖 正在分析系统快照…")
+
+        def deliver(text: str) -> None:
+            """尽力送达：Telegram 抖动时只记日志，绝不让发送失败结束助手线程。"""
             try:
+                telegram.send_message(chat_id, text)
+            except Exception:
+                LOG.warning("Assistant reply delivery failed, content kept in this log:\n%s", text, exc_info=True)
+
+        try:
+            # 占位消息只是流式编辑的锚点：发不出去就退化成“最后另发一条”，不该中断分析。
+            try:
+                resp = telegram.send_message(chat_id, "🤖 正在分析系统快照…")
                 placeholder_id = int(((resp or {}).get("result") or {}).get("message_id") or 0) or None
-            except (TypeError, ValueError, AttributeError):
+            except Exception:
+                LOG.debug("Assistant placeholder send failed; replying without streaming anchor", exc_info=True)
                 placeholder_id = None
             telegram.send_chat_action(chat_id)
             snapshot = assistant.build_snapshot(
@@ -2809,9 +2842,9 @@ def handle_assistant_command(
                 except Exception:
                     LOG.debug("assistant final edit failed", exc_info=True)
             if not sent_first:
-                telegram.send_message(chat_id, chunks[0])
+                deliver(chunks[0])
             for chunk in chunks[1:]:
-                telegram.send_message(chat_id, chunk)
+                deliver(chunk)
             assistant.extract_memory_async(question, reply, session_dir)
         except assistant.AssistantError as exc:
             message = f"AI 助手调用失败：{safe_telegram_text(str(exc), 360)}"
@@ -2821,7 +2854,7 @@ def handle_assistant_command(
                     return
                 except Exception:
                     LOG.debug("assistant error edit failed", exc_info=True)
-            telegram.send_message(chat_id, message)
+            deliver(message)
         except Exception as exc:
             LOG.debug("Assistant command failed", exc_info=True)
             message = f"AI 助手调用失败：{safe_telegram_text(str(exc), 360)}"
@@ -2831,7 +2864,7 @@ def handle_assistant_command(
                     return
                 except Exception:
                     LOG.debug("assistant error edit failed", exc_info=True)
-            telegram.send_message(chat_id, message)
+            deliver(message)
 
     threading.Thread(target=work, name="tg-assistant", daemon=True).start()
 
