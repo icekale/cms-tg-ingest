@@ -401,6 +401,48 @@ class BridgeV02IntegrationTests(unittest.TestCase):
             self.assertIsNotNone(seen[0]["task_store"])
             self.assertTrue(seen[0]["task_engine_enabled"])
 
+    def test_run_forever_redelivers_update_when_handler_fails(self):
+        """handler 抛异常时不许推进 offset，否则 Telegram 永久丢弃这条消息（0.5.46）。"""
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.required_env(tmp), clear=True):
+            cfg = bridge.Config.from_env()
+            offsets = []
+            attempts = []
+
+            class FlakyTelegram:
+                def __init__(self, token, timeout=60):
+                    pass
+
+                def get_updates(self, offset=None, timeout=30):
+                    offsets.append(offset)
+                    if len(offsets) >= 3:
+                        raise KeyboardInterrupt()
+                    return [{"update_id": 7, "message": {"chat": {"id": 464100862}, "from": {"id": 464100862}, "text": "/搜索 沙丘"}}]
+
+                def send_message(self, *args, **kwargs):
+                    return {"ok": True}
+
+            def flaky_handle_update(*args, **kwargs):
+                attempts.append(1)
+                if len(attempts) == 1:
+                    raise RuntimeError("boom")
+
+            with patch.object(bridge, "TelegramClient", FlakyTelegram), \
+                 patch.object(bridge, "CmsClient", lambda config: object()), \
+                 patch.object(bridge, "EmbyClient", lambda *args, **kwargs: None), \
+                 patch.object(bridge, "OpenAIClassifier", lambda config: None), \
+                 patch.object(bridge, "TmdbWebResolver", lambda timeout=20: None), \
+                 patch.object(bridge, "maybe_start_web_server", lambda config, task_store: None), \
+                 patch.object(bridge, "write_metrics_snapshot", lambda *args, **kwargs: None), \
+                 patch.object(bridge, "normalize_emby_parents", lambda *args, **kwargs: 0), \
+                 patch.object(bridge, "handle_update", flaky_handle_update):
+                with self.assertLogs("cms-tg-ingest", level="ERROR"):
+                    with self.assertRaises(KeyboardInterrupt):
+                        bridge.run_forever(cfg)
+
+            # 第一次失败 → offset 不推进 → 同一 offset(None) 再取一次 → 第二次成功后才到 8
+            self.assertEqual(offsets, [None, None, 8])
+            self.assertEqual(len(attempts), 2)
+
     def test_run_forever_starts_task_runner_when_task_engine_and_self_share_enabled(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             env = self.required_env(tmp)

@@ -1,3 +1,10 @@
+## 0.5.46 - 2026-09-20
+
+- **消息不再无声消失（线上事故）**：用户报“20:59 搜索无反应”，取证没有找到任何报错——因为老轮询循环是「先确认、后处理」：`offset = update_id + 1` 在 `handle_update` 之前就赋值，handler 一旦抛异常（发送抖动、SQLite 瞬时锁、115/CMS 异常都算），Telegram 认为该 update 已被消费，消息永久消失且日志里连一行都没有。改为 `dispatch_updates()`：整轮先算出 `next_offset`，失败的消息**不确认**（下一轮原地重投，不再是旧逻辑的“最多等 10 分钟”），同一条 update 连续失败 3 轮才记 `Dropped update payload`（带 update_id / 类型 / 用户文本 / chat_id）后跳过，批次里后续消息照常处理——队列不会被一条毒消息堵死。
+- **发送失败不再被误记成无害抖动**：`log_polling_error` 曾把 handler 内部的发送失败（`Cannot reach .../sendRichMessage ... SSL EOF`）当成轮询抖动降级成 WARNING 噪声，因为它与 getUpdates 失败文本一模一样。现在只对 getUpdates 自身的抖动降级，其余一律 `LOG.exception("Polling loop failed")`。
+- **搜索异常不再静默吞掉**：`/搜索` 候选查询只捕 `HdhiveSelectionError` / `HdhiveProxyError`，其它异常穿透后同样无声。现在兜底 `except Exception` 记 traceback 并回一条 `HDHive 搜索失败：…`。
+- 回归：新增 `tests/test_poll_update_dispatch.py`（7 用例：成功推进、失败不确认、3 轮后跳过并保留 payload、批次继续、抖动分级）与端到端 `test_run_forever_redelivers_update_when_handler_fails`（断言 `get_updates` 收到的 offset 序列是 `None, None, 8`）。
+
 ## 0.5.45 - 2026-09-20
 
 - **超长编辑不再把正文丢光**：0.5.44 的 `_telegram_bounded_text` 取的是按行装箱后的第一片，遇到「短标题 + 超长正文」时第一片只有标题——线上 PROBE 实测 9000 字符的正文只剩 `超长编辑…（内容过长已截断）` 15 字符。现在改为按整段文本裁前缀（保留标题与正文，最多 3800 字符 + 截断标注），并新增 `test_edit_message_text_keeps_body_when_heading_is_short` 钉住这个形状。

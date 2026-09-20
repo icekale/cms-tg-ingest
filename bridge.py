@@ -1585,8 +1585,78 @@ def send_menu_message(telegram: TelegramClient, chat_id: int | str, text: str) -
         telegram.send_message(chat_id, text)
 
 
+_MAX_UPDATE_HANDLING_ATTEMPTS = 3
+
+
+def describe_update(update: dict) -> str:
+    """日志用的一句话摘要：这是哪类 update、用户发了什么。"""
+    for kind in ("callback_query", "message", "edited_message"):
+        payload = update.get(kind)
+        if not isinstance(payload, dict):
+            continue
+        if kind == "callback_query":
+            detail = str(payload.get("data") or "")
+            chat = ((payload.get("message") or {}).get("chat") or {})
+        else:
+            detail = str(payload.get("text") or payload.get("caption") or "")
+            chat = payload.get("chat") or {}
+        return f"{kind} chat={chat.get('id')} text={safe_telegram_text(detail, 120)!r}"
+    return "unknown"
+
+
+def dispatch_updates(updates: list[dict], handler: Any, *, offset: int | None, failure_state: dict[str, Any]) -> int | None:
+    """逐条处理一批 update，返回新的 offset。
+
+    offset 只在 handler **成功返回后** 才前进。先前进再处理的话，一旦 handler 抛异常，
+    Telegram 会在下一次拉取时把这条 update 当成已确认而永久丢弃——用户看到的就是
+    “发了消息毫无反应，日志里还什么都没有”（0.5.46 线上事故的形态）。
+
+    失败的那条不推进 offset，下一轮长轮询会重投（最多 _MAX_UPDATE_HANDLING_ATTEMPTS
+    次）；超过上限才跳过，并把完整 payload 写进日志，保证消息不会无声消失。
+    """
+    for update in updates:
+        update_id = int(update["update_id"])
+        if failure_state.get("update_id") == update_id:
+            failure_state["attempts"] = int(failure_state.get("attempts", 0)) + 1
+        else:
+            failure_state["update_id"] = update_id
+            failure_state["attempts"] = 1
+        try:
+            handler(update)
+        except Exception:
+            if failure_state["attempts"] >= _MAX_UPDATE_HANDLING_ATTEMPTS:
+                LOG.exception(
+                    "Giving up on update_id=%s (%s) after %s attempts; skipping it. Full payload logged below.",
+                    update_id,
+                    describe_update(update),
+                    failure_state["attempts"],
+                )
+                LOG.error("Dropped update payload (update_id=%s): %s", update_id, update)
+                failure_state["update_id"] = None
+                failure_state["attempts"] = 0
+                offset = update_id + 1
+                continue
+            LOG.exception(
+                "Failed to handle update_id=%s (%s, attempt %s/%s); keeping offset at %s so Telegram redelivers it. Payload: %s",
+                update_id,
+                describe_update(update),
+                failure_state["attempts"],
+                _MAX_UPDATE_HANDLING_ATTEMPTS,
+                offset,
+                update,
+            )
+            return offset
+        failure_state["update_id"] = None
+        failure_state["attempts"] = 0
+        offset = update_id + 1
+    return offset
+
+
 def log_polling_error(telegram: TelegramClient, exc: Exception) -> None:
-    if telegram._is_transient_get_updates_error(exc):
+    # 分类要看端点，不能只看文本：handler 里的发送失败
+    # （Cannot reach .../sendMessage: UNEXPECTED_EOF）与轮询失败长得一模一样，
+    # 只按文本判断就会把一条 traceback 降级成温警告，把真正的 bug 藏起来。
+    if "/getUpdates" in str(exc) and telegram._is_transient_get_updates_error(exc):
         LOG.warning("Telegram polling transient error; retrying soon: %s", exc)
         return
     LOG.exception("Polling loop failed; retrying soon")
@@ -4282,6 +4352,15 @@ def handle_update(
                 )
             except (HdhiveSelectionError, HdhiveProxyError) as exc:
                 telegram.send_message(chat_id, f"HDHive 搜索失败：{safe_telegram_text(getattr(exc, 'message', str(exc)), 160)}")
+            except Exception as exc:
+                # 意料外的异常（比如网络风暴里连回复都发不出去）绝不允许静默吞掉：
+                # 它以前会直接冲出 handle_update，配合“offset 先前进”的旧逻辑，
+                # 就变成一次毫无痕迹的消息丢失（见 dispatch_updates 注释）。
+                LOG.exception("HDHive search failed query=%s", safe_telegram_text(text, 80))
+                try:
+                    telegram.send_message(chat_id, f"HDHive 搜索失败：{safe_telegram_text(str(exc), 160)}")
+                except Exception:
+                    LOG.exception("Failed to notify HDHive search failure chat_id=%s", chat_id)
             return
 
     explicit_series_update, explicit_target_task_id, series_update_payload = parse_explicit_series_update_command(text)
@@ -4840,15 +4919,17 @@ def run_forever(
     )
 
     try:
+        # 跨轮次记住“哪条 update 正在失败、失败了几次”（见 dispatch_updates）。
+        update_failure_state: dict[str, Any] = {"update_id": None, "attempts": 0}
         while not stop_event.is_set():
             if not start_intake:
                 stop_event.wait(max(1, int(config.poll_timeout)))
                 continue
             try:
                 updates = telegram.get_updates(offset=offset, timeout=config.poll_timeout)
-                for update in updates:
-                    offset = int(update["update_id"]) + 1
-                    handle_update(
+                offset = dispatch_updates(
+                    updates,
+                    lambda update: handle_update(
                         update,
                         cms,
                         telegram,
@@ -4873,7 +4954,10 @@ def run_forever(
                         max_retries=config.task_max_retries,
                         background_jobs=background_jobs,
                         assistant_guards=lambda: build_assistant_guards(config, self_share_config),
-                    )
+                    ),
+                    offset=offset,
+                    failure_state=update_failure_state,
+                )
             except Exception as exc:
                 if stop_event.is_set():
                     break
