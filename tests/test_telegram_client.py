@@ -405,6 +405,18 @@ class TelegramRichClientTests(unittest.TestCase):
         self.assertLessEqual(len(text), 4096)
         self.assertTrue(text.endswith("…（内容过长已截断）"))
 
+    def test_edit_message_text_keeps_body_when_heading_is_short(self):
+        """截断必须保留正文：按行装箱的第一片只有标题，正文不能整段消失（0.5.44 实测只留 15 字符）。"""
+        http = SequenceHttp([{"ok": True}])
+        doc = RichDocument((heading("超长编辑"), paragraph("长" * 9000)))
+
+        TelegramClient("secret", http=http).edit_message_text(3, 50, doc.to_plain())
+
+        text = http.calls[0][1]["payload"]["text"]
+        self.assertLessEqual(len(text), 4096)
+        self.assertTrue(text.startswith("超长编辑"))
+        self.assertGreater(len(text), 3700)
+
 
 if __name__ == "__main__":
     unittest.main()

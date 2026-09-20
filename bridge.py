@@ -2648,11 +2648,15 @@ def _chunk_assistant_text(text: str, limit: int = 3800) -> list[str]:
 
 
 def _telegram_bounded_text(text: str, limit: int = 3800) -> str:
-    """编辑消息 / 图注只能塞一条（不能分片）：超长就截断并标注，别让整条因过长被拒。"""
-    chunks = _chunk_assistant_text(text, limit)
-    if len(chunks) == 1:
-        return chunks[0]
-    return f"{chunks[0]}\n…（内容过长已截断）"
+    """编辑消息 / 图注只能塞一条（不能分片）：超长就截断并标注，别让整条因过长被拒。
+
+    必须按整段文本裁前缀，不能拿 `_chunk_assistant_text` 的第一片：那是按行装箱的结果，
+    「短标题 + 超长正文」时第一片只有标题，正文会被整段丢掉（0.5.44 实测只留 15 字符）。
+    """
+    text = str(text or "").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}\n…（内容过长已截断）"
 
 
 def _assistant_session_id(chat_id: int | str, session_dir: Path | None = None) -> str:
