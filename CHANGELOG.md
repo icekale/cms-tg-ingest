@@ -1,3 +1,8 @@
+## 0.5.43 - 2026-09-20
+
+- **检索结果不再整条消失**：线上用户搜一下就“没反应”，日志里是 `sendRichMessage` 撞上 `[SSL: UNEXPECTED_EOF_WHILE_READING]`。0.5.42 只给 `/sendMessage` 补了重试，漏了兄弟端点：富文本发送遇到抖动既不重试、也不降级（`_is_rich_format_failure` 明写「抖动不算格式问题 → 上抛」），异常直接穿透到轮询循环，回复就没了。现在所有发送类 POST 共用一个重试外壳 `TelegramClient._post_send`（`sendRichMessage` / `sendMessage` / `editMessageText` / `sendPhoto`），抖动最多试 3 次（退避 0.5s、1.0s）；重试仍失败时富文本**降级为纯文本再发**：排版可以让步，送达不让步。旧断言 `test_network_error_does_not_fall_back` 把「网络错误就别降级」当成了契约，但线上断的是单次抖动（0.5.42 自检时第 1/3 次失败、第 2 次就成功），已改为「重试后仍失败才降级」。
+- **删掉一个被同名方法遮蔽的死代码**：`TelegramClient.edit_message_text` 定义了两次，只有 4 参（带 `reply_markup`）的版本生效，3 参那份改它不会有任何效果。新增 `test_edit_message_text_retries_transient_eof` 用 `reply_markup` 钉住 4 参版本，防它复发。
+
 ## 0.5.42 - 2026-09-20
 
 - **助手不再因发送失败而“无法工作”**：容器日志里能看到 pi 已经算出回复，却死在回程 — `sendMessage` 抛 `Remote end closed connection without response`，占位消息那一步把整个 try 拽进兜底分支，而兜底分支自己也要 `send_message`，同样断，异常穿到工作线程外面，回复就此丢掉，用户只看到一条“正在分析”再无下文。两层修复：

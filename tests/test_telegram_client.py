@@ -262,15 +262,40 @@ class TelegramRichClientTests(unittest.TestCase):
         self.assertEqual(http.calls[1][1]["payload"]["text"], doc.to_plain())
         self.assertEqual(http.calls[1][1]["payload"]["reply_markup"], keyboard)
 
-    def test_network_error_does_not_fall_back(self):
+    def test_rich_message_retries_transient_eof(self):
         http = SequenceHttp(
-            [RuntimeError("Cannot reach https://api.telegram.org/bot<redacted>/sendRichMessage: Remote end closed")]
+            [
+                RuntimeError(
+                    "Cannot reach https://api.telegram.org/bot<redacted>/sendRichMessage: "
+                    "UNEXPECTED_EOF_WHILE_READING EOF occurred"
+                ),
+                {"ok": True},
+            ]
         )
-        with self.assertRaises(RuntimeError):
+
+        with patch("bridge.time.sleep") as sleep:
             TelegramClient("secret", http=http).send_rich_message(1, RichDocument((heading("健康检查"),)))
-        self.assertEqual(len(http.calls), 1)
-        self.assertTrue(http.calls[0][0].endswith("/sendRichMessage"))
-        self.assertFalse(any(url.endswith("/sendMessage") for url, _kwargs in http.calls))
+
+        self.assertEqual(len(http.calls), 2)
+        self.assertTrue(all(url.endswith("/sendRichMessage") for url, _kwargs in http.calls))
+        sleep.assert_called_once_with(0.5)
+
+    def test_rich_message_falls_back_to_plain_text_when_transient_persists(self):
+        eof = RuntimeError(
+            "Cannot reach https://api.telegram.org/bot<redacted>/sendRichMessage: "
+            "UNEXPECTED_EOF_WHILE_READING EOF occurred"
+        )
+        http = SequenceHttp([eof, eof, eof, {"ok": True}])
+        doc = RichDocument((heading("检索结果"), table(("标题", "状态"), (("x", "OK"),))))
+
+        with patch("bridge.time.sleep"):
+            TelegramClient("secret", http=http).send_rich_message(9, doc)
+
+        self.assertEqual(len(http.calls), 4)
+        self.assertEqual(sum(url.endswith("/sendRichMessage") for url, _kwargs in http.calls), 3)
+        self.assertEqual(sum(url.endswith("/sendMessage") for url, _kwargs in http.calls), 1)
+        self.assertEqual(http.calls[3][1]["payload"]["chat_id"], 9)
+        self.assertEqual(http.calls[3][1]["payload"]["text"], doc.to_plain())
 
     def test_edit_rich_message_posts_rich_message(self):
         http = SequenceHttp([{"ok": True}])
@@ -312,6 +337,27 @@ class TelegramRichClientTests(unittest.TestCase):
         self.assertEqual(fallback_payload["reply_markup"], keyboard)
         self.assertNotIn("rich_message", fallback_payload)
         self.assertFalse(any(url.endswith("/sendMessage") for url, _kwargs in http.calls))
+
+    def test_edit_message_text_retries_transient_eof(self):
+        """reply_markup 只有 4 参版本认，顺便钉死“同名方法被后者遮蔽”不会复发。"""
+        http = SequenceHttp(
+            [
+                RuntimeError(
+                    "Cannot reach https://api.telegram.org/bot<redacted>/editMessageText: "
+                    "UNEXPECTED_EOF_WHILE_READING EOF occurred"
+                ),
+                {"ok": True},
+            ]
+        )
+        keyboard = {"inline_keyboard": []}
+
+        with patch("bridge.time.sleep") as sleep:
+            TelegramClient("secret", http=http).edit_message_text(1, 17, "正在检索…", reply_markup=keyboard)
+
+        self.assertEqual(len(http.calls), 2)
+        self.assertTrue(all(url.endswith("/editMessageText") for url, _kwargs in http.calls))
+        self.assertEqual(http.calls[0][1]["payload"]["reply_markup"], keyboard)
+        sleep.assert_called_once_with(0.5)
 
 
 if __name__ == "__main__":

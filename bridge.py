@@ -1399,29 +1399,34 @@ class TelegramClient:
             return False
         return bool(resp.get("ok"))
 
-    def send_message(self, chat_id: int | str, text: str, reply_markup: dict | None = None) -> dict:
-        payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
-        if reply_markup is not None:
-            payload["reply_markup"] = reply_markup
+    def _post_send(self, path: str, payload: dict) -> dict:
+        """发送类 POST 的重试外壳。
+
+        HTTP 层刻意不对 POST 重试（见 test_post_does_not_retry_transient_network_error），
+        但发出去的消息丢了就找不回来：代理抖动（EOF / 连接被关 / SSL 断连）在这里补最多 3 次。
+        """
         attempt = 0
         while True:
             attempt += 1
             try:
-                return self.http.request(
-                    self.base_url + "/sendMessage",
-                    method="POST",
-                    payload=payload,
-                )
+                return self.http.request(self.base_url + path, method="POST", payload=payload)
             except Exception as exc:
                 if attempt >= _TELEGRAM_SEND_ATTEMPTS or not self._is_transient_telegram_error(exc):
                     raise
                 LOG.warning(
-                    "Telegram sendMessage transient error (attempt %s/%s), retrying: %s",
+                    "Telegram %s transient error (attempt %s/%s), retrying: %s",
+                    path.lstrip("/"),
                     attempt,
                     _TELEGRAM_SEND_ATTEMPTS,
                     _redact_telegram_error(exc),
                 )
                 time.sleep(0.5 * attempt)
+
+    def send_message(self, chat_id: int | str, text: str, reply_markup: dict | None = None) -> dict:
+        payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        return self._post_send("/sendMessage", payload)
 
     def send_chat_action(self, chat_id: int | str, action: str = "typing") -> None:
         try:
@@ -1433,24 +1438,10 @@ class TelegramClient:
         except Exception:
             LOG.debug("send_chat_action failed", exc_info=True)
 
-    def edit_message_text(self, chat_id: int | str, message_id: int, text: str) -> None:
-        self.http.request(
-            self.base_url + "/editMessageText",
-            method="POST",
-            payload={
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": text[:4000],
-                "disable_web_page_preview": True,
-            },
-        )
-
     @staticmethod
-    def _is_rich_format_failure(exc: Exception | None = None, resp: dict | None = None) -> bool:
-        if exc is not None and TelegramClient._is_transient_telegram_error(exc):
-            return False
-        status = int(getattr(exc, "status_code", 0) or 0) if exc is not None else int((resp or {}).get("error_code") or 0)
-        text = str(exc if exc is not None else (resp or {}).get("description") or "").lower()
+    def _is_rich_format_failure(resp: dict | None = None) -> bool:
+        status = int((resp or {}).get("error_code") or 0)
+        text = str((resp or {}).get("description") or "").lower()
         if status in {400, 404}:
             return True
         if "unknown method" in text or "method not found" in text:
@@ -1470,13 +1461,14 @@ class TelegramClient:
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         try:
-            resp = self.http.request(self.base_url + "/sendRichMessage", method="POST", payload=payload)
+            resp = self._post_send("/sendRichMessage", payload)
         except Exception as exc:
-            if self._is_rich_format_failure(exc=exc):
-                LOG.warning("Telegram sendRichMessage rejected, falling back to sendMessage: %s", exc)
-                self.send_message(chat_id, document.to_plain(), reply_markup=reply_markup)
-                return
-            raise
+            # 富文本只是排版，不是送达的前提：抖动重试仍失败时退化成纯文本，别让这条消息消失。
+            LOG.warning(
+                "Telegram sendRichMessage failed, falling back to sendMessage: %s", _redact_telegram_error(exc)
+            )
+            self.send_message(chat_id, document.to_plain(), reply_markup=reply_markup)
+            return
         if resp.get("ok"):
             return
         if self._is_rich_format_failure(resp=resp):
@@ -1508,15 +1500,15 @@ class TelegramClient:
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         try:
-            resp = self.http.request(self.base_url + "/editMessageText", method="POST", payload=payload)
+            resp = self._post_send("/editMessageText", payload)
         except Exception as exc:
             if "message is not modified" in str(exc).lower():
                 return
-            if self._is_rich_format_failure(exc=exc):
-                LOG.warning("Telegram edit rich message rejected, falling back to text: %s", exc)
-                self.edit_message_text(chat_id, message_id, document.to_plain(), reply_markup=reply_markup)
-                return
-            raise
+            LOG.warning(
+                "Telegram edit rich message failed, falling back to text: %s", _redact_telegram_error(exc)
+            )
+            self.edit_message_text(chat_id, message_id, document.to_plain(), reply_markup=reply_markup)
+            return
         description = str(resp.get("description") or "")
         if resp.get("ok") or "message is not modified" in description.lower():
             return
@@ -1536,21 +1528,13 @@ class TelegramClient:
         payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "disable_web_page_preview": True}
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
-        self.http.request(
-            self.base_url + "/editMessageText",
-            method="POST",
-            payload=payload,
-        )
+        self._post_send("/editMessageText", payload)
 
     def send_photo(self, chat_id: int | str, photo: str, caption: str, reply_markup: dict | None = None) -> None:
         payload = {"chat_id": chat_id, "photo": photo, "caption": caption}
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
-        self.http.request(
-            self.base_url + "/sendPhoto",
-            method="POST",
-            payload=payload,
-        )
+        self._post_send("/sendPhoto", payload)
 
     def answer_callback_query(self, callback_query_id: str, text: str = "", show_alert: bool = False) -> None:
         url = self.base_url + "/answerCallbackQuery"
