@@ -5,7 +5,7 @@ from bridge import TelegramClient
 from app.clients.http import _redact_url
 from app.clients.http import HttpJson
 from app.clients.http import HttpRequestError
-from app.telegram_rich import RichDocument, heading, table
+from app.telegram_rich import RichDocument, heading, paragraph, table
 
 
 class FakeResponse:
@@ -358,6 +358,52 @@ class TelegramRichClientTests(unittest.TestCase):
         self.assertTrue(all(url.endswith("/editMessageText") for url, _kwargs in http.calls))
         self.assertEqual(http.calls[0][1]["payload"]["reply_markup"], keyboard)
         sleep.assert_called_once_with(0.5)
+
+    def test_send_message_splits_overlong_text(self):
+        """超长文本必须分片：整条发会被 Telegram 400 "message is too long" 丢掉。"""
+        http = SequenceHttp([{"ok": True}] * 8)
+        keyboard = {"inline_keyboard": []}
+
+        TelegramClient("secret", http=http).send_message(4, "行\n" * 4000, reply_markup=keyboard)
+
+        self.assertGreaterEqual(len(http.calls), 2)
+        texts = [kwargs["payload"]["text"] for _url, kwargs in http.calls]
+        self.assertTrue(all(len(text) <= 4096 for text in texts))
+        self.assertEqual("".join(texts).replace("\n", ""), "行" * 4000)
+        # 键盘只挂在最后一片，否则点一次会触发两条后续
+        self.assertNotIn("reply_markup", http.calls[0][1]["payload"])
+        self.assertEqual(http.calls[-1][1]["payload"]["reply_markup"], keyboard)
+
+    def test_rich_fallback_chunks_overlong_plain_text(self):
+        """0.5.43 线上 PROBE：降级后的纯文本超过 4096 会被 400 拒掉，消息照样消失。"""
+        http = SequenceHttp(
+            [
+                {"ok": False, "error_code": 400, "description": "Bad Request: can't parse rich blocks"},
+                {"ok": True},
+                {"ok": True},
+                {"ok": True},
+                {"ok": True},
+            ]
+        )
+        doc = RichDocument((heading("检索结果"), paragraph("长" * 5000)))
+
+        TelegramClient("secret", http=http).send_rich_message(7, doc)
+
+        send_texts = [kwargs["payload"]["text"] for url, kwargs in http.calls if url.endswith("/sendMessage")]
+        self.assertGreaterEqual(len(send_texts), 2)
+        self.assertTrue(all(len(text) <= 4096 for text in send_texts))
+        self.assertEqual("".join(send_texts).replace("\n", ""), doc.to_plain().replace("\n", ""))
+
+    def test_edit_message_text_truncates_overlong_text(self):
+        """编辑不能分片（只有一条消息），超长只能截断并标注，不能整条被拒。"""
+        http = SequenceHttp([{"ok": True}])
+
+        TelegramClient("secret", http=http).edit_message_text(3, 50, "长" * 9000)
+
+        self.assertEqual(len(http.calls), 1)
+        text = http.calls[0][1]["payload"]["text"]
+        self.assertLessEqual(len(text), 4096)
+        self.assertTrue(text.endswith("…（内容过长已截断）"))
 
 
 if __name__ == "__main__":

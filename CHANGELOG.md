@@ -1,3 +1,7 @@
+## 0.5.44 - 2026-09-20
+
+- **超长消息不再整条丢失**：0.5.43 上线后的线上 PROBE 实测到更深的坑——富文本降级成纯文本时，若 `to_plain()` 超过 4096 字符，`sendMessage` 自己会吃 `400 Bad Request: message is too long`（实测 4840 字符必现），异常照旧穿透、消息照旧消失。分片下沉到 `TelegramClient.send_message`：超过上限（按 3800 留余量）自动按行装箱分片，键盘只挂最后一片；所有降级路径最后都走 `send_message`，所以一处修覆盖全部发送方（富文本降级、任务通知、助手回复）。编辑消息和图注只有一条、不能分片，改为截断并标注「…（内容过长已截断）」（图注上限是 1024，单独收口）——宁可少一段，不能整条被拒。
+
 ## 0.5.43 - 2026-09-20
 
 - **检索结果不再整条消失**：线上用户搜一下就“没反应”，日志里是 `sendRichMessage` 撞上 `[SSL: UNEXPECTED_EOF_WHILE_READING]`。0.5.42 只给 `/sendMessage` 补了重试，漏了兄弟端点：富文本发送遇到抖动既不重试、也不降级（`_is_rich_format_failure` 明写「抖动不算格式问题 → 上抛」），异常直接穿透到轮询循环，回复就没了。现在所有发送类 POST 共用一个重试外壳 `TelegramClient._post_send`（`sendRichMessage` / `sendMessage` / `editMessageText` / `sendPhoto`），抖动最多试 3 次（退避 0.5s、1.0s）；重试仍失败时富文本**降级为纯文本再发**：排版可以让步，送达不让步。旧断言 `test_network_error_does_not_fall_back` 把「网络错误就别降级」当成了契约，但线上断的是单次抖动（0.5.42 自检时第 1/3 次失败、第 2 次就成功），已改为「重试后仍失败才降级」。

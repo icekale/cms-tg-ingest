@@ -1423,10 +1423,16 @@ class TelegramClient:
                 time.sleep(0.5 * attempt)
 
     def send_message(self, chat_id: int | str, text: str, reply_markup: dict | None = None) -> dict:
-        payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
-        if reply_markup is not None:
-            payload["reply_markup"] = reply_markup
-        return self._post_send("/sendMessage", payload)
+        # 4096 是单条上限，超长直接 400 "message is too long"，整条消息丢失。
+        # 富文本降级（send_rich_message）也走这里，所以分片必须在这一层做，一处修全部。
+        chunks = _chunk_assistant_text(text)
+        resp: dict = {}
+        for index, chunk in enumerate(chunks):
+            payload = {"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True}
+            if reply_markup is not None and index == len(chunks) - 1:
+                payload["reply_markup"] = reply_markup
+            resp = self._post_send("/sendMessage", payload)
+        return resp
 
     def send_chat_action(self, chat_id: int | str, action: str = "typing") -> None:
         try:
@@ -1525,13 +1531,19 @@ class TelegramClient:
         text: str,
         reply_markup: dict | None = None,
     ) -> None:
-        payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "disable_web_page_preview": True}
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": _telegram_bounded_text(text),
+            "disable_web_page_preview": True,
+        }
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         self._post_send("/editMessageText", payload)
 
     def send_photo(self, chat_id: int | str, photo: str, caption: str, reply_markup: dict | None = None) -> None:
-        payload = {"chat_id": chat_id, "photo": photo, "caption": caption}
+        # 图注上限是 1024（不是 4096），超了整张图都发不出去。
+        payload = {"chat_id": chat_id, "photo": photo, "caption": _telegram_bounded_text(caption, 1000)}
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         self._post_send("/sendPhoto", payload)
@@ -2633,6 +2645,14 @@ def _chunk_assistant_text(text: str, limit: int = 3800) -> list[str]:
     if current.strip():
         chunks.append(current)
     return chunks or [""]
+
+
+def _telegram_bounded_text(text: str, limit: int = 3800) -> str:
+    """编辑消息 / 图注只能塞一条（不能分片）：超长就截断并标注，别让整条因过长被拒。"""
+    chunks = _chunk_assistant_text(text, limit)
+    if len(chunks) == 1:
+        return chunks[0]
+    return f"{chunks[0]}\n…（内容过长已截断）"
 
 
 def _assistant_session_id(chat_id: int | str, session_dir: Path | None = None) -> str:
