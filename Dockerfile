@@ -1,4 +1,9 @@
-FROM node:22-alpine AS frontend-build
+# 运行期 Node 必须跟目标平台一致（node 二进制会被复制进最终镜像）。
+FROM node:22-alpine AS node-runtime
+
+# 前端产物与平台无关：固定用构建机平台跑，避免 npm ci + vite 在 qemu 下跑两遍
+# （QEMU 下 V8 还会随机 SIGILL，见下方 NODE_OPTIONS 注释）。
+FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend-build
 
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json ./
@@ -14,8 +19,8 @@ ENV PYTHONUNBUFFERED=1 \
 # AI 助手以 pi coding agent 为基座：从前端构建阶段复用 Node 运行时（同为
 # alpine/musl），并固定 pi 版本保证发布可复现。凭据放在数据卷：
 # /data/pi/agent/auth.json（PI_CODING_AGENT_DIR 即 agent 目录本身）。
-COPY --from=frontend-build /usr/local/bin/node /usr/local/bin/node
-COPY --from=frontend-build /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 ENV PI_CODING_AGENT_DIR=/data/pi/agent
 # git：pi 启动/会话路径会 spawn git，alpine 运行时必须提供。
 # NODE_OPTIONS=--jitless：CI 的 qemu 仿真下 V8 JIT 随机 SIGILL（连 node --version 都会崩），
