@@ -5,6 +5,7 @@
   assistant_read.py task <id>
   assistant_read.py events <task_id> [--limit N]
   assistant_read.py stats
+  assistant_read.py holes [--limit N]
 """
 from __future__ import annotations
 
@@ -21,9 +22,22 @@ for candidate in _REPO_CANDIDATES:
         break
 
 from app.assistant import assistant_session_dir, assistant_status  # noqa: E402
+from app.cms_cloud_index import CmsCloudDataIndex  # noqa: E402
 from app.models import TaskStatus  # noqa: E402
 from app.task_store import TaskStore  # noqa: E402
 from app.web_api import api_task_detail, serialize_event  # noqa: E402
+
+
+def _host_media_root() -> str:
+    explicit = os.environ.get("CMS_HOST_MEDIA_ROOT", "").strip()
+    if explicit:
+        return explicit
+    raw = os.environ.get("STRM_SOURCE_ROOTS", "/mnt/user/Unraid/strm/转存")
+    first = raw.split(",")[0].strip()
+    parts = Path(first).parts
+    if "转存" in parts:
+        return str(Path(*parts[: parts.index("转存")]))
+    return ""
 
 
 def _open_store() -> TaskStore:
@@ -96,6 +110,28 @@ def cmd_stats(args) -> None:
     )
 
 
+def cmd_holes(args) -> None:
+    root = _host_media_root()
+    db_path = os.environ.get("CMS_STATE_DB_PATH") or "/cms/cms-online.db"
+    if not root or not Path(db_path).is_file():
+        print(json.dumps({"count": 0, "error": "strm index unavailable", "host_root": root}, ensure_ascii=False))
+        return
+    holes = CmsCloudDataIndex(db_path).missing_share_strm_holes(root, limit=min(max(args.limit, 1), 50))
+    dirs: dict[str, list[str]] = {}
+    for hole in holes:
+        dirs.setdefault(str(Path(hole["expected_path"]).parent), []).append(hole["name"])
+    print(
+        json.dumps(
+            {
+                "count": len(holes),
+                "host_root": root,
+                "dirs": [{"path": path, "missing": names} for path, names in dirs.items()],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="cms-tg-ingest assistant read-only queries")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -113,8 +149,11 @@ def main() -> None:
 
     sub.add_parser("stats")
 
+    p_holes = sub.add_parser("holes")
+    p_holes.add_argument("--limit", type=int, default=30)
+
     args = parser.parse_args()
-    {"tasks": cmd_tasks, "task": cmd_task, "events": cmd_events, "stats": cmd_stats}[args.command](args)
+    {"tasks": cmd_tasks, "task": cmd_task, "events": cmd_events, "stats": cmd_stats, "holes": cmd_holes}[args.command](args)
 
 
 if __name__ == "__main__":

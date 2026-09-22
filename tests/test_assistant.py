@@ -71,7 +71,11 @@ class RunPiTests(unittest.TestCase):
         self.assertIn("-e", argv)
         self.assertEqual(argv[argv.index("--tools") + 1], assistant.ASSISTANT_TOOL_NAMES)
         self.assertIn("library_action", assistant.ASSISTANT_TOOL_NAMES)
+        self.assertIn("strm_holes", assistant.ASSISTANT_TOOL_NAMES)
         self.assertNotIn("find", assistant.ASSISTANT_TOOL_NAMES.split(","))
+        self.assertNotIn("read", assistant.ASSISTANT_TOOL_NAMES.split(","))
+        self.assertNotIn("grep", assistant.ASSISTANT_TOOL_NAMES.split(","))
+        self.assertNotIn("也可以正常陪聊", assistant.ASSISTANT_SYSTEM_PROMPT)
         self.assertEqual(argv[argv.index("--session-id") + 1], "11111111-2222-3333-4444-555555555555")
         self.assertEqual(argv[argv.index("--model") + 1], "glm/*")
         self.assertEqual(argv[argv.index("--system-prompt") + 1], assistant.ASSISTANT_SYSTEM_PROMPT)
@@ -703,6 +707,54 @@ class TelegramAssistantTests(unittest.TestCase):
             with patch.object(assistant, "run_pi", side_effect=AssertionError("should not diagnose again")):
                 bridge.run_assistant_diagnosis_sweep(store, telegram, "42", config, self_share_config)
             self.assertFalse(any("自动执行" in m for m in telegram.sent))
+
+    def test_rule_diagnosis_skips_model_and_auto_repair(self):
+        task = SimpleNamespace(
+            status=TaskStatus.NEEDS_ACTION,
+            current_stage=TaskStage.ORGANIZING,
+            claimed_by="",
+            metadata={"excluded_dest_folder": "冗余"},
+            retry_count=0,
+            error_summary="整理超时",
+            id=445,
+        )
+        self.assertIn("排除目录", assistant.rule_diagnosis(task))
+        with patch("app.task_actions.available_task_actions", return_value=frozenset({"resume_organizing", "reprocess"})):
+            self.assertEqual(assistant.choose_auto_repair_action(task, store=None), "")
+
+        limited = SimpleNamespace(
+            status=TaskStatus.NEEDS_ACTION,
+            current_stage=TaskStage.OWN_SHARE_CREATED,
+            claimed_by="",
+            metadata={},
+            retry_count=0,
+            error_summary="你已被限制分享",
+            id=446,
+        )
+        self.assertIn("不要 retry", assistant.rule_diagnosis(limited))
+        with patch("app.task_actions.available_task_actions", return_value=frozenset({"retry", "reprocess"})):
+            self.assertEqual(assistant.choose_auto_repair_action(limited, store=None), "")
+
+    def test_rule_diagnosis_does_not_call_pi(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("违规分享", "", "https://115cdn.com/s/vio")
+            store.record_event(
+                task.id,
+                TaskStage.NEEDS_ACTION,
+                TaskStatus.NEEDS_ACTION,
+                "115 标记 have_vio_file，分享不可用",
+            )
+            telegram = _FakeTelegram()
+            config, self_share_config = _guards_config()
+            with patch.object(assistant, "run_pi", side_effect=AssertionError("should not call pi")), patch.object(
+                assistant, "auto_repair_enabled", return_value=True
+            ):
+                diagnosed = bridge.run_assistant_diagnosis_sweep(store, telegram, "42", config, self_share_config)
+            self.assertEqual(diagnosed, 0)
+            reply = store.find_task(task.id).metadata[assistant.DIAGNOSIS_META_KEY]["reply"]
+            self.assertIn("不要重跑", reply)
+            self.assertTrue(any("规则结案" in m for m in telegram.sent))
 
     def test_auto_repair_skips_share_risk_reprocess(self):
         with tempfile.TemporaryDirectory() as tmp:

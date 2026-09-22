@@ -2649,6 +2649,19 @@ def start_media_strm_repair_loop(
     return thread
 
 
+def _host_media_root(move_config: Any | None) -> str:
+    """Map CMS `/media/...` onto the host strm tree (parent of `转存`)."""
+    if move_config is None:
+        return ""
+    paths = list(getattr(move_config, "library_roots", {}).values())
+    paths.extend(getattr(move_config, "source_roots", []) or [])
+    for path in paths:
+        parts = Path(path).parts
+        if "转存" in parts:
+            return str(Path(*parts[: parts.index("转存")]))
+    return ""
+
+
 def start_self_share_maintenance_loop(
     store: Any,
     cms: Any,
@@ -2658,12 +2671,24 @@ def start_self_share_maintenance_loop(
     limit: int = 50,
     stop_event: threading.Event | None = None,
     emby: Any | None = None,
+    p115: Any | None = None,
+    cms_state_db_path: str | Path = "",
+    host_strm_root: str | Path = "",
+    share_repair_interval_seconds: int = 21600,
+    share_repair_limit: int = 200,
 ) -> threading.Thread | None:
     if interval_seconds <= 0:
         return None
     loop_stop_event = stop_event or threading.Event()
+    share_index = CmsCloudDataIndex(cms_state_db_path) if cms_state_db_path else None
+    try:
+        share_repair_every = max(60, int(share_repair_interval_seconds))
+    except (TypeError, ValueError):
+        share_repair_every = 21600
+    next_share_repair = 0.0
 
     def loop() -> None:
+        nonlocal next_share_repair
         while not loop_stop_event.is_set():
             try:
                 moved = _observe_stranded_self_share_moves(store, move_config, limit)
@@ -2672,6 +2697,27 @@ def start_self_share_maintenance_loop(
                     LOG.info("Self-share maintenance queued %s stranded STRM repairs", moved)
                 if restored:
                     LOG.info("Self-share maintenance queued %s missing library restores", restored)
+                now = time.time()
+                if (
+                    share_index is not None
+                    and p115 is not None
+                    and host_strm_root
+                    and now >= next_share_repair
+                ):
+                    next_share_repair = now + share_repair_every
+                    domain = ""
+                    try:
+                        domain = share_index.direct_302_domain()
+                    except Exception:
+                        LOG.debug("Share STRM repair could not read CMS domain", exc_info=True)
+                    repaired = share_index.repair_missing_share_strms(
+                        host_strm_root,
+                        p115.create_long_share,
+                        domain=domain,
+                        limit=share_repair_limit,
+                    )
+                    if repaired:
+                        LOG.info("Share STRM repair wrote %s missing library files", repaired)
             except Exception:
                 LOG.debug("Self-share maintenance loop failed", exc_info=True)
             if loop_stop_event.wait(interval_seconds):
@@ -2985,7 +3031,27 @@ def run_assistant_diagnosis_sweep(
         last_diagnosed = float((existing or {}).get("diagnosed_at") or 0) if isinstance(existing, dict) else 0.0
         cooldown = assistant.diagnosis_cooldown_seconds()
         reason = assistant.diagnosis_reason(task, task_store)
-        if assistant._task_looks_share_risk(task, task_store) and isinstance(existing, dict) and existing.get("reply"):
+        ruled = assistant.rule_diagnosis(task, task_store)
+        if ruled:
+            needs_diagnosis = False
+            if not (isinstance(existing, dict) and existing.get("reply") == ruled):
+                merged = dict(existing) if isinstance(existing, dict) else {}
+                merged.update(
+                    {
+                        "event_id": latest_event,
+                        "reason": reason,
+                        "reply": ruled,
+                        "diagnosed_at": time.time(),
+                        "rule": True,
+                    }
+                )
+                merged.pop("error", None)
+                try:
+                    task_store.patch_metadata(task_id, {DIAGNOSIS_META_KEY: merged})
+                    telegram.send_message(allowed_chat_id, f"🤖 任务 #{task_id} 已按规则结案，结论写在任务详情。")
+                except Exception:
+                    LOG.debug("Assistant rule diagnosis not stored", exc_info=True)
+        elif assistant._task_looks_share_risk(task, task_store) and isinstance(existing, dict) and existing.get("reply"):
             needs_diagnosis = False
         elif isinstance(existing, dict) and existing.get("error"):
             if time.time() < last_diagnosed + _ASSISTANT_ERROR_RETRY_SECONDS:
@@ -3676,7 +3742,7 @@ def _start_series_update_from_link_locked(
     source: str,
 ) -> tuple[Any | None, str]:
     target_identity = _series_update_target_identity(target_task, store)
-    if target_identity is None:
+    if target_identity is None or target_task is None:
         return None, "not_eligible"
     target_row, recognition, title, tmdb_id, category = target_identity
 
@@ -4739,6 +4805,11 @@ def run_forever(
             limit=50,
             stop_event=stop_event,
             emby=emby,
+            p115=p115,
+            cms_state_db_path=config.cms_state_db_path if p115 is not None else "",
+            host_strm_root=_host_media_root(move_config) if p115 is not None else "",
+            share_repair_interval_seconds=config.media_strm_repair_interval_seconds,
+            share_repair_limit=config.media_strm_repair_limit,
         )
         assistant_watch_thread = start_assistant_watch_loop(
             task_store,

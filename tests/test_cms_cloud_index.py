@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.cms_cloud_index import CmsCloudDataIndex
+from bridge import _host_media_root
 
 
 class _TrackingConnection:
@@ -124,6 +125,8 @@ class CmsCloudDataIndexTests(unittest.TestCase):
                 started_at=1000,
             )
 
+            self.assertIsNotNone(folder)
+            assert folder is not None
             self.assertEqual(folder["file_id"], "series")
             self.assertEqual(folder["direct_file_id"], "episode")
 
@@ -233,6 +236,8 @@ class CmsCloudDataIndexTests(unittest.TestCase):
 
             folder = CmsCloudDataIndex(db_path).folder_for_direct_strm(source, "94997")
 
+            self.assertIsNotNone(folder)
+            assert folder is not None
             self.assertEqual(folder["direct_file_id"], "new-episode")
             self.assertEqual(folder["direct_relative_path"], "S03E03.strm")
 
@@ -372,3 +377,102 @@ class MediaStrmRepairTests(unittest.TestCase):
             self.assertEqual(repaired, 1)
             written = Path(tmp) / "strm" / "转存" / "TV" / "Q-龙族-2022-[tmdb=94997]" / "Season 03" / "龙族 (2022) - S03E06 - 第 6 集 - 2160p.strm"
             self.assertFalse(written.exists())
+
+    def test_share_holes_skip_existing_episode_and_missing_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._db(tmp)
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.execute(
+                    "INSERT INTO cloud_data (fid, pid, name, pick_code, is_dir, f_modify_time, action, status, local_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("fid-nodir", "s", "Gone S01E01.mkv", "pickgone", 0, 0, "STRM", 1, "/media/转存/TV/missing/Season 01"),
+                )
+                conn.commit()
+            host_root = Path(tmp) / "strm"
+            season = host_root / "转存" / "TV" / "Q-龙族-2022-[tmdb=94997]" / "Season 03"
+            season.mkdir(parents=True)
+            (season / "龙族 (2022) - S03E05 - 第 5 集 - 2160p.strm").write_text("x", encoding="utf-8")
+            (season / "别名 S03E06.strm").write_text("already", encoding="utf-8")
+            index = CmsCloudDataIndex(db_path)
+
+            holes = index.missing_share_strm_holes(host_root, limit=50)
+
+            self.assertEqual(holes, [])
+
+    def test_share_repair_writes_share_link_and_dry_run_does_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._db(tmp)
+            host_root = Path(tmp) / "strm"
+            season = host_root / "转存" / "TV" / "Q-龙族-2022-[tmdb=94997]" / "Season 03"
+            season.mkdir(parents=True)
+            (season / "龙族 (2022) - S03E05 - 第 5 集 - 2160p.strm").write_text(
+                "http://strm.example:9527/s/OLD_1212_1.mkv?/old.mkv",
+                encoding="utf-8",
+            )
+            index = CmsCloudDataIndex(db_path)
+            calls: list[str] = []
+
+            def factory(fid: str) -> dict[str, str]:
+                calls.append(fid)
+                return {"share_code": "NEWCODE", "receive_code": "1212"}
+
+            preview = index.repair_missing_share_strms(host_root, factory, domain="http://unused", dry_run=True)
+            self.assertEqual(preview, 1)
+            self.assertEqual(calls, [])
+
+            repaired = index.repair_missing_share_strms(host_root, factory, domain="http://unused")
+            written = season / "龙族 (2022) - S03E06 - 第 6 集 - 2160p.strm"
+            self.assertEqual(repaired, 1)
+            self.assertEqual(calls, ["fid-missing"])
+            self.assertEqual(
+                written.read_text(encoding="utf-8"),
+                "http://strm.example:9527/s/NEWCODE_1212_fid-missing.mkv?/龙族 (2022) - S03E06 - 第 6 集 - 2160p.mkv",
+            )
+
+    def test_share_repair_uses_one_share_per_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._db(tmp)
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.execute(
+                    "INSERT INTO cloud_data (fid, pid, name, pick_code, is_dir, f_modify_time, action, status, local_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "fid-missing-2",
+                        "season",
+                        "龙族 (2022) - S03E07 - 第 7 集 - 2160p.mkv",
+                        "pick7",
+                        0,
+                        0,
+                        "STRM",
+                        1,
+                        "/media/转存/TV/Q-龙族-2022-[tmdb=94997]/Season 03",
+                    ),
+                )
+                conn.commit()
+            host_root = Path(tmp) / "strm"
+            season = host_root / "转存" / "TV" / "Q-龙族-2022-[tmdb=94997]" / "Season 03"
+            season.mkdir(parents=True)
+            (season / "龙族 (2022) - S03E05 - 第 5 集 - 2160p.strm").write_text(
+                "http://strm.example:9527/s/OLD_1212_1.mkv?/old.mkv",
+                encoding="utf-8",
+            )
+            calls: list[str] = []
+
+            def factory(file_ids: str) -> dict[str, str]:
+                calls.append(file_ids)
+                return {"share_code": "SEASON", "receive_code": "1212"}
+
+            repaired = CmsCloudDataIndex(db_path).repair_missing_share_strms(
+                host_root,
+                factory,
+                domain="http://unused",
+            )
+
+            self.assertEqual(repaired, 2)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(set(calls[0].split(",")), {"fid-missing", "fid-missing-2"})
+
+    def test_host_media_root_stops_at_transfer_dir(self):
+        class Roots:
+            library_roots = {"国产电视": Path("/mnt/user/Unraid/strm/转存/TVCN")}
+            source_roots: list[Path] = []
+
+        self.assertEqual(_host_media_root(Roots()), "/mnt/user/Unraid/strm")

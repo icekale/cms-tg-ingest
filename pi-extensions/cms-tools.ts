@@ -18,7 +18,7 @@ const OPS_SCRIPT = process.env.CMS_TOOLS_OPS_SCRIPT || "/app/scripts/assistant_o
 const TASK_ACTIONS = ["retry", "emby", "restore", "reprocess", "resume_organizing", "terminate"] as const;
 const LIBRARY_ACTIONS = ["delete", "emby_scan"] as const;
 const TASK_STATUSES = ["pending", "running", "succeeded", "failed", "needs_action", "cancelled"] as const;
-const PRUNE_TOOLS = new Set(["task_detail", "query_tasks", "task_events", "system_stats"]);
+const PRUNE_TOOLS = new Set(["task_detail", "query_tasks", "task_events", "system_stats", "strm_holes"]);
 // 「执行/可以」这类词会出现在自动诊断的注入文本里，不能算确认；只认明确短确认，
 // 且带问号的消息一律当作“还在问要不要做”。
 const CONFIRM_RE = /确认|同意|批准|好的|好嘞|可以执行|执行吧|干吧|帮我执行|请执行|去执行|yes|\bok\b/i;
@@ -209,6 +209,20 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, signal) {
       return textToolResult(await read(["stats"], signal));
+    },
+  });
+
+  pi.registerTool({
+    name: "strm_holes",
+    label: "缺失的分享 STRM",
+    description:
+      "现查媒体库里缺少的 /s/ 分享 STRM（目录还在、同一集还没有 strm）。用户问某剧漏集或库里缺文件时使用，不要把结果写进记忆。",
+    parameters: Type.Object({
+      limit: Type.Optional(Type.Integer({ description: "最多返回几个洞，默认 30，最大 50" })),
+    }),
+    prepareArguments: coerceIds,
+    async execute(_toolCallId, params, signal) {
+      return textToolResult(await read(["holes", "--limit", String(params.limit ?? 30)], signal));
     },
   });
 

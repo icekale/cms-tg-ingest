@@ -5,7 +5,7 @@ pi 负责模型接入、凭据与会话记忆；本模块只做三件事：
 2. 以非交互模式（``pi -p --mode json``）调用 pi 子进程并解析回复；
 3. 通过 ``--session-id`` 让同一对话跨请求延续（多轮记忆由 pi 会话文件承载）。
 
-助手默认带只读查证工具、白名单任务动作（``task_action``），以及媒体库白名单动作（``library_action``）。
+助手默认只带任务查询、strm 缺洞查询、白名单任务动作（``task_action``）和媒体库动作（``library_action``）。
 自动巡检诊断后会对安全动作直接入队；terminate/delete 永不自动。
 """
 from __future__ import annotations
@@ -58,12 +58,19 @@ _SECRET_LINE_RE = re.compile(r"sk-[A-Za-z0-9]{10,}|(?:api[_-]?key|token|password
 # ---- 工具（只读）：助手可实时查任务库，而不是只看静态快照 ----
 # 内置只读文件工具 + 自定义只读查询工具（见 pi-extensions/cms-tools.ts）。
 # 不给 bash/edit/write：助手不能改代码、改库、执行任意命令。
-ASSISTANT_TOOL_NAMES = "read,grep,ls,task_detail,query_tasks,task_events,system_stats,task_action,library_action"
+ASSISTANT_TOOL_NAMES = "task_detail,query_tasks,task_events,system_stats,strm_holes,task_action,library_action"
 TOOL_ENV_PATTERN = re.compile(
     r"^(TG_|CMS_|EMBY_|P115_|OPENAI_|WEB_|HDHIVE_|SELF_SHARE|BACKUP_|DATABASE_PATH|STRM_|HF_|GH_|GITHUB)"
 )
 TOOL_ENV_KEEP = frozenset(
-    {"DATABASE_PATH", "CMS_TOOLS_SCRIPT", "CMS_TOOLS_OPS_SCRIPT", "STRM_LIBRARY_MAP", "STRM_SOURCE_ROOTS"}
+    {
+        "DATABASE_PATH",
+        "CMS_TOOLS_SCRIPT",
+        "CMS_TOOLS_OPS_SCRIPT",
+        "CMS_STATE_DB_PATH",
+        "STRM_LIBRARY_MAP",
+        "STRM_SOURCE_ROOTS",
+    }
 )
 
 
@@ -242,6 +249,13 @@ _AMBIGUOUS_OWNERSHIP_MARKERS = (
     "归属存在歧义",
     "已停止自动绑定",
 )
+_EXCLUDED_DEST_MARKERS = (
+    "排除目录",
+    "判定冗余",
+)
+_SHARE_LIMIT_MARKERS = (
+    "限制分享",
+)
 _DIAGNOSIS_REASON_NOISE = (
     "质量巡检记录终态时间",
     "继续整理已入队",
@@ -274,28 +288,19 @@ _TASK_FIELDS = (
 )
 
 ASSISTANT_SYSTEM_PROMPT = (
-    "你是 cms-tg-ingest 的内置智能助手，也是用户长期共事的运维搭档。cms-tg-ingest 是 Cloud Media Sync（CMS）"
-    "的 Telegram 自动入库外挂：把 115 分享/磁力/ED2K/HDHive 资源交给 Bot，经 CMS 整理分类 → 生成 STRM → "
-    "Emby 入库确认 → 清理转存源。任务状态机大致为 pending → receiving → organizing → sharing → syncing → "
-    "moving → checking → succeeded；失败会自动重试，超过重试次数或需要人工判断时进入 needs_action。\n"
-    "用户消息末尾可能附有「系统快照」JSON（健康状态、任务列表、指定任务详情）。回答规则：\n"
-    "1. 优先基于快照和工具查证回答；涉及具体任务/数值时先用工具核实，不要编造快照里没有的状态、ID 或数值。\n"
-    "2. 你有只读查询工具（task_detail / query_tasks / task_events / system_stats）和文件读取工具，"
-    "可以实时查任务库与文件——主动用它们核实后再下结论，查不到就如实说。"
-    "不要对 /、/data 或整个 /mnt/user 做 grep/ls，只查 /app 或具体剧目路径。\n"
-    "3. 诊断问题时给出：结论 → 依据 → 具体处理建议（可结合任务的 available_actions，说明在 Web 管理台或 "
-    "Telegram 里如何操作）。\n"
-    "4. 你可以调用 task_action（retry/reprocess/resume_organizing/emby/restore/terminate）"
-    "和 library_action（delete=删除媒体库内多余目录，emby_scan=触发 Emby 扫库）。"
-    "任务动作与 Web 按钮同源、自带资格校验。terminate 与 library_action delete 必须用户本轮确认"
-    "（例如“帮我执行”），由工具拦截；其他动作也要先说明再执行。执行后如实报告 applied 与 reason。"
-    "除这两个工具外不能改库、改配置、改宿主机文件。\n"
-    "5. 绝不读取或输出密钥、密码、token、cookie（包括环境变量和 .env）。\n"
-    "6. 你既能处理运维诊断，也可以正常陪聊、回答通用问题；不确定是不是系统问题时，按普通问题自然回答。\n"
-    "7. 用简体中文回答，简洁分点，先结论后依据；信息不足时直接说明还缺什么。\n"
-    "8. 旧快照和过期工具结果可能被省略，以最新快照和最新工具结果为准。\n"
-    "9. 你与用户是长期共事的同事：直接、简洁、口语一点，可以引用记忆里的偏好和历史；"
-    "用户纠正你的地方要接受并调整，不要重复犯错。"
+    "你是 cms-tg-ingest 的运维助手，只处理入库任务、STRM、115 分享和 Emby。不陪聊。\n"
+    "任务状态在任务库；115 文件索引在 CMS 云盘库（默认 /cms/cms-online.db）。"
+    "缺 strm 用 strm_holes 现查，不要把库内容或当天的洞数写进记忆。\n"
+    "用户消息末尾可能附有「系统快照」JSON。回答规则：\n"
+    "1. 先用工具核实再下结论，不要编造快照里没有的状态、ID 或数值。\n"
+    "2. 只有 task_detail / query_tasks / task_events / system_stats / strm_holes，"
+    "以及需确认的 task_action / library_action。没有文件搜索。\n"
+    "3. 结论 → 依据 → 下一步。\n"
+    "4. task_action（retry/reprocess/resume_organizing/emby/restore/terminate）"
+    "和 library_action（delete/emby_scan）与 Web 按钮同源。terminate 和 delete 必须用户本轮明确确认。"
+    "分享风控、排除目录、115 限制分享都不要重跑；限制分享不是任务失败。\n"
+    "5. 绝不读取或输出密钥、密码、token、cookie。\n"
+    "6. 简体中文，先结论。信息不足就说缺什么。旧快照以最新一次为准。"
 )
 
 
@@ -683,6 +688,30 @@ def _task_looks_ambiguous_ownership(task: Any, store: Any | None = None) -> bool
     return any(marker.lower() in blob for marker in _AMBIGUOUS_OWNERSHIP_MARKERS)
 
 
+def _task_looks_excluded_dest(task: Any, store: Any | None = None) -> bool:
+    metadata = getattr(task, "metadata", {}) or {}
+    if isinstance(metadata, dict) and str(metadata.get("excluded_dest_folder") or "").strip():
+        return True
+    blob = _task_text_blob(task, store)
+    return any(marker.lower() in blob for marker in _EXCLUDED_DEST_MARKERS)
+
+
+def _task_looks_share_limited(task: Any, store: Any | None = None) -> bool:
+    blob = _task_text_blob(task, store)
+    return any(marker.lower() in blob for marker in _SHARE_LIMIT_MARKERS)
+
+
+def rule_diagnosis(task: Any, store: Any | None = None) -> str:
+    """规则已经能下的结论。非空则不调模型，也不自动重跑。"""
+    if _task_looks_share_risk(task, store):
+        return "分享被 115 风控或已失效。不要重跑，不要重建分享。源文件保留，等人在 115 申诉或删除任务。"
+    if _task_looks_excluded_dest(task, store):
+        return "文件在排除目录。不要继续整理或重跑。想要的版本手动移入库后再继续；不要就删除任务。"
+    if _task_looks_share_limited(task, store):
+        return "115 限制了分享。这不是任务失败，不要 retry 或 reprocess。等限制解除后再补分享。"
+    return ""
+
+
 def tried_auto_repair_actions(diagnosis: Any) -> list[str]:
     if not isinstance(diagnosis, dict):
         return []
@@ -724,12 +753,11 @@ def choose_auto_repair_action(task: Any, store: Any, *, max_retries: int = 3) ->
 
     优先级：retry > resume_organizing > emby > restore > reprocess。
     归属歧义只试一次 resume_organizing（重新解析 115 目标），不自动 reprocess。
-    同一动作不重做；terminate / delete 永不自动。
+    分享风控、排除目录、115 限制分享不自动重跑。terminate / delete 永不自动。
     """
-    from .task_actions import available_task_actions
-
-    if _task_looks_share_risk(task, store):
+    if rule_diagnosis(task, store):
         return ""
+    from .task_actions import available_task_actions
     metadata = getattr(task, "metadata", {}) or {}
     diagnosis = metadata.get(DIAGNOSIS_META_KEY) if isinstance(metadata, dict) else None
     tried = tried_auto_repair_actions(diagnosis)

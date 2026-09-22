@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 from app.media.classify import extract_tmdb_id_from_name
 
@@ -25,6 +27,47 @@ def _media_strm_name(name: str) -> str:
     if not value:
         return ""
     return f"{Path(value).stem}.strm"
+
+
+def _episode_key(name: str) -> str:
+    match = _SEASON_EPISODE_RE.search(str(name or ""))
+    return match.group(0).lower() if match else ""
+
+
+def _dir_has_episode(parent: Path, episode: str) -> bool:
+    try:
+        paths = list(parent.glob("*.strm"))
+    except OSError:
+        return False
+    return any(_episode_key(path.name) == episode for path in paths)
+
+
+def _share_domain_from_dir(parent: Path) -> str:
+    try:
+        paths = list(parent.glob("*.strm"))
+    except OSError:
+        return ""
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        match = re.match(r"(https?://[^/\s]+)/s/", text.strip())
+        if match:
+            return match.group(1)
+    return ""
+
+
+def share_strm_line(domain: str, share_code: str, receive_code: str, fid: str, name: str) -> str:
+    """Playback URL used by existing self-share library STRM files."""
+    suffix = Path(name).suffix or ".mkv"
+    return f"{domain.rstrip('/')}/s/{share_code}_{receive_code}_{fid}{suffix}?/{name}"
+
+
+def _share_create_blocked(exc: BaseException) -> bool:
+    if exc.__class__.__name__ == "P115RiskControlError":
+        return True
+    return "限制分享" in str(exc)
 
 
 class CmsCloudDataIndex:
@@ -52,7 +95,10 @@ class CmsCloudDataIndex:
 
         Only action='STRM' AND status=1 rows under /media/ are considered.
         """
-        limit = max(1, int(limit))
+        try:
+            limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            limit = 200
         host_root = Path(host_media_root)
         if not self.db_path.is_file():
             return []
@@ -100,6 +146,10 @@ class CmsCloudDataIndex:
         domain = str(direct_domain or "").strip().rstrip("/")
         if not domain or not self.db_path.is_file():
             return 0
+        try:
+            limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            limit = 200
         repaired = 0
         for candidate in self.missing_media_strm_candidates(host_media_root, limit=limit):
             pick_code = str(candidate.get("pick_code") or "").strip()
@@ -117,6 +167,108 @@ class CmsCloudDataIndex:
                 repaired += 1
             except OSError:
                 continue
+        return repaired
+
+    def missing_share_strm_holes(self, host_media_root: str | Path, limit: int = 200) -> list[dict[str, str]]:
+        """STRM rows whose library file is gone and no same-episode STRM remains.
+
+        Skips a missing directory (CMS path drift) and a season that already has
+        another filename for the same SxxExx. Does not create directories.
+        """
+        try:
+            limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            limit = 200
+        host_root = Path(host_media_root)
+        if not self.db_path.is_file():
+            return []
+        try:
+            with sqlite_connection(
+                f"{self.db_path.resolve().as_uri()}?mode=ro", uri=True, read_only=True, row_factory=sqlite3.Row
+            ) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT fid, name, pick_code, local_path
+                    FROM cloud_data
+                    WHERE action = 'STRM' AND status = 1 AND local_path LIKE ?
+                    """,
+                    (_MEDIA_LOCAL_PATH_PREFIX + "%",),
+                ).fetchall()
+        except (OSError, sqlite3.Error):
+            return []
+        holes: list[dict[str, str]] = []
+        for row in rows:
+            expected = self._expected_media_strm_path(row, host_root)
+            if expected is None or expected.exists() or not expected.parent.is_dir():
+                continue
+            name = str(row["name"] or "")
+            episode = _episode_key(name)
+            if episode and _dir_has_episode(expected.parent, episode):
+                continue
+            holes.append(
+                {
+                    "fid": str(row["fid"] or ""),
+                    "name": name,
+                    "pick_code": str(row["pick_code"] or ""),
+                    "expected_path": str(expected),
+                }
+            )
+            if len(holes) >= limit:
+                break
+        return holes
+
+    def repair_missing_share_strms(
+        self,
+        host_media_root: str | Path,
+        share_factory,
+        domain: str = "",
+        limit: int = 200,
+        dry_run: bool = False,
+    ) -> int:
+        """Create a permanent 115 share and write a /s/ STRM for each hole.
+
+        share_factory(fid) must return share_code and receive_code. Direct /d/
+        files are not written: the CMS guard deletes those.
+        """
+        fallback = str(domain or "").strip().rstrip("/")
+        repaired = 0
+        grouped: dict[str, list[tuple[Path, str, str]]] = defaultdict(list)
+        for hole in self.missing_share_strm_holes(host_media_root, limit=limit):
+            expected = Path(hole["expected_path"])
+            fid = str(hole.get("fid") or "").strip()
+            name = str(hole.get("name") or "").strip()
+            if not fid or not name or not expected.parent.is_dir():
+                continue
+            grouped[str(expected.parent)].append((expected, fid, name))
+        for items in grouped.values():
+            used_domain = _share_domain_from_dir(items[0][0].parent) or fallback
+            if not used_domain:
+                continue
+            if dry_run:
+                repaired += len(items)
+                continue
+            # ponytail: one share per season directory. Per-file shares trip 115's share limit.
+            try:
+                share = share_factory(",".join(fid for _path, fid, _name in items)) or {}
+            except Exception as exc:
+                if _share_create_blocked(exc):
+                    raise
+                continue
+            code = str(share.get("share_code") or "").strip()
+            receive = str(share.get("receive_code") or "").strip()
+            if not code or not receive:
+                continue
+            for expected, fid, name in items:
+                try:
+                    if not expected.parent.is_dir():
+                        continue
+                    expected.write_text(
+                        share_strm_line(used_domain, code, receive, fid, name),
+                        encoding="utf-8",
+                    )
+                except OSError:
+                    continue
+                repaired += 1
         return repaired
 
     @staticmethod
@@ -312,7 +464,10 @@ class CmsCloudDataIndex:
 
     @staticmethod
     def _folder_for_row(conn: sqlite3.Connection, row: sqlite3.Row, tmdb_id: str = "") -> dict[str, str] | None:
-        is_direct_file = not int(row["is_dir"] or 0)
+        try:
+            is_direct_file = not int(row["is_dir"] or 0)
+        except (TypeError, ValueError):
+            is_direct_file = False
         direct_file_id = str(row["fid"] or "").strip() if is_direct_file else ""
         direct_file_name = str(row["name"] or "").strip() if is_direct_file else ""
         direct_parent_id = str(row["pid"] or "").strip() if is_direct_file else ""
@@ -324,7 +479,11 @@ class CmsCloudDataIndex:
             seen.add(fid)
             name = str(row["name"] or "").strip()
             row_tmdb = extract_tmdb_id_from_name(name)
-            if int(row["is_dir"] or 0) and row_tmdb and (not tmdb_id or row_tmdb == tmdb_id):
+            try:
+                is_dir = int(row["is_dir"] or 0)
+            except (TypeError, ValueError):
+                is_dir = 0
+            if is_dir and row_tmdb and (not tmdb_id or row_tmdb == tmdb_id):
                 return {
                     "file_id": fid,
                     "file_name": name,
