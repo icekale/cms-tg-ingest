@@ -356,6 +356,30 @@ class TaskStoreTests(unittest.TestCase):
             self.assertIsNone(stale)
             self.assertEqual(store.find_task(claimed.id).metadata["receive_target_cid"], "111")
 
+    def test_patch_metadata_does_not_invalidate_a_running_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "tasks.db")
+            task = store.upsert_task("claim-version", "", "https://115cdn.com/s/claim-version")
+            store.enqueue_task(task.id, TaskStage.ORGANIZING, next_run_at=0)
+            claimed = store.claim_next_runnable("worker-a", now=100)
+
+            patched = store.patch_metadata(claimed.id, {"ai_diagnosis": {"reply": "ok"}})
+
+            self.assertEqual(patched.updated_at, claimed.updated_at)
+            self.assertEqual(patched.claimed_by, "worker-a")
+            self.assertEqual(patched.metadata["ai_diagnosis"]["reply"], "ok")
+            committed = store.commit_claimed_result(
+                claimed,
+                "worker-a",
+                StageResult.complete("organized", {"dest": "library"}),
+                next_stage=TaskStage.RECOGNIZING,
+                next_run_at=101,
+            )
+            self.assertIsNotNone(committed)
+            self.assertEqual(committed.current_stage, TaskStage.RECOGNIZING)
+            self.assertEqual(committed.metadata["ai_diagnosis"]["reply"], "ok")
+            self.assertEqual(committed.metadata["dest"], "library")
+
     def test_unguarded_event_does_not_rewrite_claimed_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(Path(tmp) / "tasks.db")

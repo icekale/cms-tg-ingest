@@ -2004,14 +2004,28 @@ class TaskStore:
         now = time.time()
         with self._lock, self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            current = conn.execute("SELECT metadata_json FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            current = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if current is None:
                 raise KeyError(f"task not found: {task_id}")
             merged_metadata = self._merge_metadata(current["metadata_json"], metadata_patch)
-            conn.execute(
-                "UPDATE tasks SET metadata_json = ?, updated_at = ? WHERE id = ?",
-                (merged_metadata, now, task_id),
+            # A live claim's updated_at is the stage CAS token. Bumping it here
+            # (AI diagnosis writing while resume_organizing is in flight) makes
+            # commit_claimed_result discard a finished stage and leave the task
+            # running with a dead claim. Metadata still merges; the version stays.
+            live_claim = (
+                str(current["status"] or "") == TaskStatus.RUNNING.value
+                and str(current["claimed_by"] or "").strip() != ""
             )
+            if live_claim:
+                conn.execute(
+                    "UPDATE tasks SET metadata_json = ? WHERE id = ?",
+                    (merged_metadata, task_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE tasks SET metadata_json = ?, updated_at = ? WHERE id = ?",
+                    (merged_metadata, now, task_id),
+                )
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return self._snapshot(row)
 
